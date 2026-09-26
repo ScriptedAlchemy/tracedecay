@@ -35,11 +35,11 @@ pub use self::builder::build_published_code_graph_manifest_checked;
 use self::builder::{ProductionCodeGraphInputs, build_projection};
 use self::interactive::InteractiveCatalogCache;
 pub use self::interactive::{
-    CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
-    CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
-    CodeGraphRankedSymbolV1, CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1,
-    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1,
-    INTERACTIVE_CATALOG_ARTIFACT_NAME, write_interactive_catalog_artifact,
+    CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
+    CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1,
+    CodeGraphInteractiveReader, CodeGraphPathSearchV1, CodeGraphRankedSymbolV1,
+    CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
+    CodeGraphSymbolPredicate, CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1,
 };
 use self::schema::{
     SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, record_property,
@@ -653,28 +653,6 @@ pub fn code_graph_projection_identity(
     namespace: GraphNamespace,
 ) -> Result<GraphProjectionIdentity, CodeGraphProjectionError> {
     Ok(GraphProjectionIdentity::new(namespace, projection()?))
-}
-
-/// The code-graph generation's manifest identity, the metadata half a
-/// sealed-read-bundle binding digest hashes, reconstructed without touching
-/// any bulk row. Every field is a pure function of the namespace, the sealed
-/// code generation, and the projector revision, exactly as
-/// [`build_code_graph_manifest_checked`] would set them.
-pub fn code_graph_manifest_identity(
-    namespace: GraphNamespace,
-    generation: &CodeGenerationId,
-    projector_revision: &GraphProjectorRevision,
-) -> Result<tracedecay_graph_db::GraphGenerationManifestIdentity, CodeGraphProjectionError> {
-    Ok(tracedecay_graph_db::GraphGenerationManifestIdentity::new(
-        code_graph_projection_identity(namespace)?,
-        code_graph_generation_id(generation, projector_revision)?,
-        source_generation(generation)?,
-        tracedecay_graph_db::GraphWatermark::new(stable_identity(
-            "watermark",
-            generation.as_str(),
-        ))?,
-        vec![],
-    ))
 }
 
 pub fn build_code_graph_manifest(

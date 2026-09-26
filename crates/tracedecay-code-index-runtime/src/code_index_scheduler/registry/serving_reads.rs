@@ -502,8 +502,9 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// The deterministic contract violation currently parking background
     /// convergence for one mounted worktree, when the worker has observed one.
-    /// A status read for doctor/status projections, never an admission
-    /// boundary: it takes no scheduler lock and runs no probe.
+    /// A status read for doctor/status projections and for explaining a
+    /// refused query, never an admission boundary: it takes no scheduler lock
+    /// and runs no probe.
     pub async fn convergence_park(
         &self,
         project_root: &Path,
@@ -1551,5 +1552,20 @@ impl CodeIndexSchedulerRegistryV1 {
         );
         wake_claim.settle();
         CodeIndexReconcileAdmissionV1::Accepted
+    }
+}
+
+impl tracedecay_application::primitives::CodeIndexConvergenceParkPortV1
+    for CodeIndexSchedulerRegistryV1
+{
+    fn terminal_convergence_park<'a>(
+        &'a self,
+        project_root: &'a Path,
+    ) -> tracedecay_application::primitives::CodeIndexConvergenceParkFuture<'a> {
+        Box::pin(async move {
+            self.convergence_park(project_root)
+                .await
+                .filter(|parked| !parked.retries_on_wake)
+        })
     }
 }

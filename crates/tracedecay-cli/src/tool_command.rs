@@ -67,6 +67,7 @@ use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
     render_tool_cli_help, short_tool_name,
 };
+use tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::cli::dispatch::resolve_cli_application_surface;
@@ -622,8 +623,9 @@ async fn dispatch_cli_retained(
         }
         tokio::time::sleep(delay).await;
     };
+    let response_handle_root = cli_response_handle_root(dispatch.project_path.as_deref())?;
     let mut result = tracedecay::mcp::tools::render_retained_execution(
-        dispatch.project_path.as_deref(),
+        response_handle_root.as_deref(),
         &execution,
     )?;
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
@@ -679,8 +681,9 @@ async fn dispatch_cli_source_edit(
         }
         tokio::time::sleep(delay).await;
     };
+    let response_handle_root = cli_response_handle_root(project.as_deref())?;
     let mut result = tracedecay_mcp::handlers::edit::render_source_edit_outcome(
-        project.as_deref(),
+        response_handle_root.as_deref(),
         operation,
         &tool_args,
         outcome,
@@ -735,8 +738,9 @@ async fn dispatch_cli_graph_tool(
         }
         tokio::time::sleep(OWNER_MOUNT_RESEND_DELAY).await;
     };
+    let response_handle_root = cli_response_handle_root(project.as_deref())?;
     let mut result = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-        project.as_deref(),
+        response_handle_root.as_deref(),
         &tool_args,
         completion,
     )?;
@@ -744,6 +748,15 @@ async fn dispatch_cli_graph_tool(
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
     print_tool_output(&result.value, raw_json);
     tool_result_process_outcome(&result.value, tool_name)
+}
+
+/// Enrolled project's handle root, or none when that path has no store.
+fn cli_response_handle_root(project: Option<&Path>) -> Result<Option<PathBuf>> {
+    let Some(project) = project else {
+        return Ok(None);
+    };
+    Ok(resolve_enrolled_layout_for_current_profile(project)?
+        .map(|layout| layout.response_handle_root))
 }
 
 const OWNER_MOUNT_RESEND_DELAY: Duration = Duration::from_millis(250);
@@ -898,7 +911,7 @@ fn targets_profile(tool_name: &str, tool_args: &Value) -> bool {
 }
 
 fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
-    tracedecay_project::config::discover_project_root(cwd)
+    tracedecay_runtime_core::config::discover_project_root(cwd)
 }
 
 /// `project_context` with an explicit uninitialised `--project` and no

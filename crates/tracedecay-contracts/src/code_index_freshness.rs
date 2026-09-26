@@ -540,6 +540,129 @@ pub type CodeIndexFreshnessReadFuture = Pin<
 pub type CodeIndexFreshnessReader =
     Arc<dyn Fn(PathBuf) -> CodeIndexFreshnessReadFuture + Send + Sync + 'static>;
 
+/// The readiness a status caller can wait for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexReadinessTargetV1 {
+    /// A sealed complete generation serves exact and lexical reads for the
+    /// current source: `code_index_freshness.status` is `current`.
+    Fresh,
+    /// `fresh`, and the generation's native code graph also serves.
+    Ready,
+}
+
+/// `tracedecay_status` `wait_for`: hold the status read until the worktree
+/// reaches `state`, for at most the caller's `timeout_ms`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexReadinessWaitV1 {
+    pub state: CodeIndexReadinessTargetV1,
+    pub timeout_ms: u64,
+}
+
+/// How a `wait_for` status read ended. The status payload beside it is read
+/// after the wait ends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CodeIndexReadinessWaitOutcomeV1 {
+    Reached,
+    /// The caller's budget elapsed; `last_state` is the last observed
+    /// `code_index_freshness.status`.
+    TimedOut {
+        last_state: String,
+    },
+    /// Waiting cannot reach the target: no scheduler is mounted, graph
+    /// serving was refused, convergence is parked, or the request ended.
+    Unavailable {
+        reason: String,
+    },
+}
+
+/// Whether one freshness reading satisfies a readiness target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexReadinessV1 {
+    Reached,
+    Pending,
+    /// Waiting cannot change the answer.
+    Unreachable {
+        reason: String,
+    },
+}
+
+impl CodeIndexWorktreeFreshnessV1 {
+    /// A sealed complete generation verified against the current source.
+    #[must_use]
+    pub fn is_authoritative(&self) -> bool {
+        self.latest_generation_id.is_some()
+            && self.coverage == CodeIndexFreshnessCoverageV1::Complete
+            && self.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+    }
+
+    #[must_use]
+    pub fn readiness(&self, target: CodeIndexReadinessTargetV1) -> CodeIndexReadinessV1 {
+        if self.staleness_state == Some(CodeIndexStalenessStateV1::Parked) {
+            return CodeIndexReadinessV1::Unreachable {
+                reason: "code_index_convergence_parked".to_owned(),
+            };
+        }
+        if target == CodeIndexReadinessTargetV1::Ready {
+            match &self.code_graph_serving {
+                Some(CodeGraphServingReadinessV1::Refused { reason }) => {
+                    return CodeIndexReadinessV1::Unreachable {
+                        reason: format!("code_graph_refused: {reason}"),
+                    };
+                }
+                Some(CodeGraphServingReadinessV1::Unavailable { reason })
+                    if reason == "graph_activation_disabled" =>
+                {
+                    return CodeIndexReadinessV1::Unreachable {
+                        reason: reason.clone(),
+                    };
+                }
+                _ => {}
+            }
+        }
+        let graph_ready = target == CodeIndexReadinessTargetV1::Fresh
+            || self.code_graph_serving == Some(CodeGraphServingReadinessV1::Ready);
+        if self.is_authoritative() && graph_ready {
+            CodeIndexReadinessV1::Reached
+        } else {
+            CodeIndexReadinessV1::Pending
+        }
+    }
+}
+
+/// What a readiness wait observed when it ended.
+#[derive(Clone, Debug)]
+pub enum CodeIndexReadinessWaitReadV1 {
+    Reached,
+    /// The budget elapsed; `last` is the last reading, `None` while the root
+    /// was never mounted.
+    TimedOut {
+        last: Option<Box<CodeIndexWorktreeFreshnessV1>>,
+    },
+    Unreachable {
+        reason: String,
+    },
+}
+
+pub type CodeIndexReadinessWaitFuture = Pin<
+    Box<
+        dyn Future<Output = Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1>>
+            + Send
+            + 'static,
+    >,
+>;
+/// Waits on the scheduler registry's own change signals until a project
+/// root reaches a readiness target or the budget elapses. Dropping the
+/// future abandons the wait without side effects.
+pub type CodeIndexReadinessWaiter = Arc<
+    dyn Fn(PathBuf, CodeIndexReadinessTargetV1, std::time::Duration) -> CodeIndexReadinessWaitFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct CodeIndexFreshnessPayloadV1 {
     pub worktrees: Vec<CodeIndexWorktreeFreshnessV1>,

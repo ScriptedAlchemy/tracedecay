@@ -33,6 +33,16 @@ pub(super) fn def_status() -> ToolDefinition {
                     "type": "boolean",
                     "default": false,
                     "description": "Git staleness object. Default false."
+                },
+                "wait_for": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["state", "timeout_ms"],
+                    "description": "Hold the status read until the code index reaches `state` (`fresh`: status `current`; `ready`: also native graph serving), for at most `timeout_ms`. The payload's `wait` reports `reached`, `timed_out` with `last_state`, or `unavailable` with `reason`.",
+                    "properties": {
+                        "state": { "type": "string", "enum": ["fresh", "ready"] },
+                        "timeout_ms": { "type": "integer", "minimum": 0 }
+                    }
                 }
             }
         }),

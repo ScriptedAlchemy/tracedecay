@@ -32,9 +32,7 @@ use tracedecay_contracts::remote::protocol::{
 };
 use tracedecay_contracts::remote::protocol_owner::RemoteOperationProtocolPortsV1;
 use tracedecay_contracts::remote::query::RemoteQueryRequestV1;
-use tracedecay_contracts::remote::recovery::{
-    BackupRequestV1, PromotionConfirmationV1, StagedRestoreConfirmationV1,
-};
+use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
 use tracedecay_contracts::remote::replay::RemoteReplayRequestV1;
 use tracedecay_contracts::remote::transfer::RemoteFrameTransferRequestV1;
 use tracedecay_contracts::{
@@ -288,8 +286,6 @@ pub fn remote_protocol_router(
         "/replay" => RemoteReplayRequestV1, operations.replay;
         "/frames/transfer" => RemoteFrameTransferRequestV1, operations.frame_transfer;
         "/query" => RemoteQueryRequestV1, operations.query;
-        "/backup" => BackupRequestV1, operations.backup;
-        "/restore" => StagedRestoreConfirmationV1, operations.restore;
         "/failover" => PromotionConfirmationV1, operations.promotion;
     }
     .layer(DefaultBodyLimit::max(MAX_REMOTE_HTTP_BODY_BYTES))

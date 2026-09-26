@@ -13,7 +13,8 @@ use tracedecay_mcp::jsonrpc::JsonRpcResponse;
 
 use crate::support::{
     ProductionSourceEditFixture, TestTempDir, close_production_source_edit_fixture, extract_json,
-    extract_text, init_production_source_edit_project, test_temp_dir, warm_code_index_search,
+    harness_wait_for_readiness, init_production_source_edit_project, test_temp_dir,
+    warm_code_index_search,
 };
 
 const AFTER_SOURCE: &str = "\
@@ -154,37 +155,25 @@ async fn settle(fixture: &ProductionSourceEditFixture) {
     warm_code_index_search(&server, "total").await;
 }
 
-fn response_text(response: &JsonRpcResponse) -> String {
-    if let Some(result) = &response.result {
-        return extract_text(result).to_owned();
-    }
-    response
-        .error
-        .as_ref()
-        .map(|error| error.message.clone())
-        .unwrap_or_default()
-}
-
-/// Symbol edits refuse a seated generation while the first rebuild is in
-/// flight. The refusal is retryable; wait until the call is no longer that
-/// typed stale state before asserting the edit itself.
+/// Symbol edits refuse a seated generation while a rebuild is in flight, so
+/// each call first waits for the ready generation it edits against.
 async fn call_insert(fixture: &ProductionSourceEditFixture, arguments: Value) -> JsonRpcResponse {
-    for _ in 0..80 {
-        let response = fixture
-            .harness
-            .call_tool(
-                &fixture.project_root,
-                "tracedecay_insert_at_symbol",
-                arguments.clone(),
-            )
-            .await
-            .expect("tracedecay_insert_at_symbol production MCP call");
-        if !response_text(&response).contains("code-graph-stale") {
-            return response;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    panic!("code graph stayed stale for tracedecay_insert_at_symbol");
+    harness_wait_for_readiness(
+        &fixture.harness,
+        &fixture.project_root,
+        "ready",
+        Duration::from_secs(20),
+    )
+    .await;
+    fixture
+        .harness
+        .call_tool(
+            &fixture.project_root,
+            "tracedecay_insert_at_symbol",
+            arguments,
+        )
+        .await
+        .expect("tracedecay_insert_at_symbol production MCP call")
 }
 
 fn success_body(response: &JsonRpcResponse) -> Value {

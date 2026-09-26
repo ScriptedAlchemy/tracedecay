@@ -3306,7 +3306,15 @@ fn clear_text_artifact_staging_sidecars(staging_path: &Path) -> std::io::Result<
             "text-artifact staging path has no file name",
         ));
     };
-    for suffix in ["-journal", "-wal", "-shm", "-compacting"] {
+    // The compacted rewrite's own rollback journal goes before the rewrite,
+    // for the same reason the staging journal goes before the staging file.
+    for suffix in [
+        "-journal",
+        "-wal",
+        "-shm",
+        "-compacting-journal",
+        "-compacting",
+    ] {
         let mut sidecar_name = name.to_os_string();
         sidecar_name.push(suffix);
         let sidecar = staging_path.with_file_name(sidecar_name);
@@ -3365,10 +3373,16 @@ mod staging_sidecar_tests {
         std::fs::write(&journal, b"rollback").expect("replant journal");
         let compacting = root.path().join(".text-artifact-ab.staging-compacting");
         std::fs::write(&compacting, b"compacted").expect("plant compacted rewrite");
+        let compacting_journal = root
+            .path()
+            .join(".text-artifact-ab.staging-compacting-journal");
+        std::fs::write(&compacting_journal, b"rewrite rollback")
+            .expect("plant compacted rewrite journal");
         retire_text_artifact_staging_family(&staging).expect("retire family");
         assert!(!staging.exists());
         assert!(!journal.exists());
         assert!(!compacting.exists());
+        assert!(!compacting_journal.exists());
 
         std::fs::write(root.path().join(".text-artifact-ab.staging-wal"), b"wal")
             .expect("plant wal");

@@ -91,6 +91,13 @@ impl RuntimeFixture {
         self._environment.home()
     }
 
+    fn response_handle_root(&self) -> PathBuf {
+        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(&self.project)
+            .expect("resolve admitted project store")
+            .expect("admitted project is enrolled")
+            .response_handle_root
+    }
+
     /// The path an LSP client addresses the admitted project through.
     ///
     /// Daemon admission canonicalizes the root, while a client spells it the
@@ -575,43 +582,35 @@ fn run_storage_status(home: &Path, project: &Path, json_output: bool) -> Output 
 /// therefore races the daemon: graph primitives answer `termination: failed`
 /// and `initialize` negotiates none of the routed analyzer's methods.
 ///
-/// The wait polls the product's own readiness evidence rather than sleeping,
-/// the same `code_index_freshness` boundary `mcp_suite::support::\
-/// wait_for_current_graph` observes.
+/// One status read held by `wait_for` until the index serves its native
+/// graph: the `ready` boundary `mcp_suite::support::wait_for_current_graph`
+/// also waits on.
 fn await_published_code_index(home: &Path, project: &Path) {
     let project_arg = project.to_string_lossy().into_owned();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    let mut last = String::new();
-    while std::time::Instant::now() < deadline {
-        let output = common::tracedecay_command_with_home(home)
-            .current_dir(project)
-            .args([
-                "tool",
-                "--project",
-                project_arg.as_str(),
-                "status",
-                "--args",
-                r#"{"format":"json"}"#,
-            ])
-            .stdin(Stdio::null())
-            .output()
-            .expect("run status");
-        if output.status.success()
-            && let Ok(status) = serde_json::from_slice::<Value>(&output.stdout)
-        {
-            let freshness = &status["code_index_freshness"];
-            if freshness["status"] == "current"
-                && freshness["worktree"]["code_graph_serving"]["state"] == "ready"
-            {
-                return;
-            }
-            last = freshness.to_string();
-        } else {
-            last = String::from_utf8_lossy(&output.stderr).into_owned();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    panic!("daemon never published a serving code-index generation; last status: {last}");
+    let output = common::tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "status",
+            "--args",
+            r#"{"format":"json","wait_for":{"state":"ready","timeout_ms":110000}}"#,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run status");
+    assert!(
+        output.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+    assert_eq!(
+        status["wait"],
+        serde_json::json!({ "outcome": "reached" }),
+        "daemon never published a serving code-index generation: {status}"
+    );
 }
 
 fn run_feedback_diagnostics(home: &Path, project: &Path, request_handle: &str) -> Output {
@@ -1473,53 +1472,30 @@ async fn project_open_application_boundary() {
 #[tokio::test(flavor = "multi_thread")]
 async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
     let fixture = lsp_runtime_fixture().await;
-    let generation = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            let result = call_default_tool(
-                &fixture.handshake,
-                "tracedecay_status",
-                serde_json::json!({
-                    "format": "json", "include_branch_diagnostics": false,
-                    "include_storage_health": false, "include_session_ingest": false,
-                    "include_staleness": false,
-                }),
-            )
-            .await
-            .expect("read exact project graph readiness");
-            let status = tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
-                .expect("canonical project status");
-            let freshness = &status["code_index_freshness"];
-            let serving = &freshness["worktree"]["code_graph_serving"];
-            match (
-                freshness["status"].as_str(),
-                serving["state"].as_str(),
-                serving["reason"].as_str(),
-            ) {
-                (Some("current"), Some("ready"), _) => {
-                    break freshness["worktree"]["latest_generation_id"]
-                        .as_str()
-                        .expect("current code-index generation")
-                        .to_owned();
-                }
-                (_, Some("refused"), _) | (_, _, Some("activation_disabled")) => {
-                    panic!("graph readiness refused: {status}")
-                }
-                (Some("warming"), _, _)
-                | (_, Some("pending"), _)
-                | (_, Some("unavailable"), Some("generation_unavailable")) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                actual => panic!("unexpected graph readiness {actual:?}: {status}"),
-            }
-        }
-    })
+    let result = call_default_tool(
+        &fixture.handshake,
+        "tracedecay_status",
+        serde_json::json!({
+            "format": "json", "include_branch_diagnostics": false,
+            "include_storage_health": false, "include_session_ingest": false,
+            "include_staleness": false,
+            "wait_for": { "state": "ready", "timeout_ms": 20_000 },
+        }),
+    )
     .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "graph did not become current within publication budget\n{}",
-            fixture.daemon_log_tail()
-        )
-    });
+    .expect("read exact project graph readiness");
+    let status = tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
+        .expect("canonical project status");
+    assert_eq!(
+        status["wait"],
+        serde_json::json!({ "outcome": "reached" }),
+        "graph did not become current within publication budget: {status}\n{}",
+        fixture.daemon_log_tail()
+    );
+    let generation = status["code_index_freshness"]["worktree"]["latest_generation_id"]
+        .as_str()
+        .expect("current code-index generation")
+        .to_owned();
     let page = serde_json::json!({ "page_size": 10, "cursor": null });
     let authenticate = assert_application_transport_parity(
         &fixture,
@@ -2699,7 +2675,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             "cycle-backed related projections must expose retrieval handles"
         );
         let handle_record = match retrieve_response_handle(
-            &fixture.project,
+            &fixture.response_handle_root(),
             lsp_handle,
             wall_clock_micros().0.div_euclid(1_000_000),
         )
@@ -2741,7 +2717,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
 
         for lsp_handle in related_lsp_handles {
             let record = match retrieve_response_handle(
-                &fixture.project,
+                &fixture.response_handle_root(),
                 &lsp_handle,
                 wall_clock_micros().0.div_euclid(1_000_000),
             )
@@ -3077,9 +3053,15 @@ async fn feedback_handle_bootstrap_reads() {
     let scope = resolved_scope("feedback");
     let observed_at = wall_clock_micros();
     let access = feedback_access(&scope, observed_at);
-    let runtime = open_feedback_runtime(database, project.path(), scope, access)
-        .await
-        .expect("feedback runtime");
+    let runtime = open_feedback_runtime(
+        database,
+        project.path(),
+        project.path().join("response-handles"),
+        scope,
+        access,
+    )
+    .await
+    .expect("feedback runtime");
     let owner = runtime.owner();
 
     let list_handle = runtime

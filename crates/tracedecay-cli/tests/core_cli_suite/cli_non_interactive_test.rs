@@ -591,7 +591,7 @@ async fn register_profile_sharded_store(
 }
 
 fn write_branch_meta(shard_root: &std::path::Path, tracked_branches: &[&str]) {
-    let mut meta = BranchMeta::new_for_dir(shard_root, "main");
+    let mut meta = BranchMeta::new("main");
     for name in tracked_branches {
         meta.add_branch(name, "main");
     }

@@ -74,10 +74,11 @@ async fn run_foreground_loopback(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    let profile_root =
-        tracedecay_project::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
+    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
+        TraceDecayError::Config {
             message: "could not determine TraceDecay user data directory".to_string(),
-        })?;
+        }
+    })?;
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
     let _lifecycle_lease = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
@@ -99,10 +100,7 @@ async fn run_foreground_loopback(
     let invocation =
         DaemonInvocationState::with_progress_producer_incarnation(authority.record().epoch);
     invocation.configure_github_read_only_credentials(authority.profile_identity());
-    store_administration.install_remote_recovery_project_lifecycle(
-        invocation.clone(),
-        Arc::clone(&project_open_gates),
-    )?;
+    store_administration.install_remote_recovery_project_lifecycle()?;
     let deletion_owners = remote_deletion::RemoteDeletionRuntimeOwners {
         administration: store_administration.clone(),
         invocation: invocation.clone(),
@@ -509,10 +507,11 @@ async fn run_foreground_unix(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    let profile_root =
-        tracedecay_project::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
+    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
+        TraceDecayError::Config {
             message: "could not determine TraceDecay user data directory".to_string(),
-        })?;
+        }
+    })?;
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);
     let _lifecycle = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
@@ -535,10 +534,7 @@ async fn run_foreground_unix(
         .with_http_application_registry(http_application_registry.clone());
     engine
         .store_administration
-        .install_remote_recovery_project_lifecycle(
-            engine.invocation.clone(),
-            Arc::clone(&engine.project_open_gates),
-        )?;
+        .install_remote_recovery_project_lifecycle()?;
     let deletion_owners = remote_deletion::RemoteDeletionRuntimeOwners {
         administration: engine.store_administration.clone(),
         invocation: engine.invocation.clone(),

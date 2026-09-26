@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
 #[derive(Clone)]
 struct FixtureCodeGraphProjection {
@@ -264,7 +264,7 @@ pub(super) async fn dispatch_on_graph_authority(
                 super::compute_graph_tool_for_owner(cg, operation, args.clone(), None, options)
                     .await?;
             tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                Some(cg.project_root()),
+                Some(&cg.store_layout().response_handle_root),
                 &args,
                 completion,
             )

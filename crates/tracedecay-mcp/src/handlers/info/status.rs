@@ -5,10 +5,11 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
+    CodeIndexFreshnessCoverageV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
+    CodeIndexReadinessWaitV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
@@ -18,6 +19,45 @@ use crate::{McpToolContext, ToolResult, generic_tool_result, rendered_tool_resul
 
 fn display_path(path: &Path) -> String {
     path.display().to_string()
+}
+
+/// The `wait_for` argument, when present.
+pub fn status_readiness_wait(args: &Value) -> Result<Option<CodeIndexReadinessWaitV1>> {
+    match args.get("wait_for") {
+        None | Some(Value::Null) => Ok(None),
+        Some(wait_for) => serde_json::from_value(wait_for.clone())
+            .map(Some)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "tracedecay_status wait_for must be {{\"state\": \"fresh\"|\"ready\", \"timeout_ms\": <u64>}}: {error}"
+                ),
+            }),
+    }
+}
+
+/// Project what a readiness wait observed onto the caller-facing outcome.
+/// `last_state` is the `code_index_freshness.status` label of the last
+/// reading, or `not_mounted` when no scheduler was mounted for the root.
+#[must_use]
+pub fn readiness_wait_outcome(
+    read: CodeIndexReadinessWaitReadV1,
+) -> CodeIndexReadinessWaitOutcomeV1 {
+    match read {
+        CodeIndexReadinessWaitReadV1::Reached => CodeIndexReadinessWaitOutcomeV1::Reached,
+        CodeIndexReadinessWaitReadV1::TimedOut { last } => {
+            CodeIndexReadinessWaitOutcomeV1::TimedOut {
+                last_state: last
+                    .as_ref()
+                    .map_or("not_mounted", |freshness| {
+                        code_index_freshness_projection(freshness).0
+                    })
+                    .to_owned(),
+            }
+        }
+        CodeIndexReadinessWaitReadV1::Unreachable { reason } => {
+            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason }
+        }
+    }
 }
 
 fn status_arg_flag(args: &Value, key: &str, default: bool) -> bool {
@@ -226,6 +266,7 @@ pub async fn handle_status(
     args: Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
+    wait: Option<CodeIndexReadinessWaitOutcomeV1>,
 ) -> Result<ToolResult> {
     if status_arg_flag(&args, "admission_only", false) {
         let mut output = json!({
@@ -239,7 +280,7 @@ pub async fn handle_status(
             output["scope_prefix"] = json!(prefix);
         }
         return Ok(generic_tool_result(
-            Some(ctx.project_root()),
+            Some(&ctx.store_layout().response_handle_root),
             &args,
             &output,
             vec![],
@@ -446,9 +487,12 @@ pub async fn handle_status(
     if let Some(prefix) = scope_prefix {
         output["scope_prefix"] = json!(prefix);
     }
+    if let Some(wait) = wait {
+        output["wait"] = serde_json::to_value(wait)?;
+    }
 
     Ok(rendered_tool_result(
-        Some(ctx.project_root()),
+        Some(&ctx.store_layout().response_handle_root),
         &args,
         &output,
         vec![],
@@ -467,9 +511,7 @@ pub async fn handle_status(
 fn code_index_freshness_projection(
     freshness: &tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1,
 ) -> (&'static str, Option<String>) {
-    let authoritative = freshness.latest_generation_id.is_some()
-        && freshness.coverage == CodeIndexFreshnessCoverageV1::Complete
-        && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh);
+    let authoritative = freshness.is_authoritative();
     if let Some(parked) = freshness.parked.as_ref() {
         let warning = format!(
             "code-index background convergence is parked: {}; {}",
@@ -725,7 +767,7 @@ pub async fn handle_active_project(
     );
     let output = active_project_context(ctx, &branch, server_stats, scope_prefix);
     Ok(generic_tool_result(
-        Some(ctx.project_root()),
+        Some(&ctx.store_layout().response_handle_root),
         args,
         &output,
         vec![],
@@ -743,8 +785,9 @@ mod tests {
     };
 
     use super::{
-        code_index_freshness_projection, graph_statistics_value, historical_session_catch_up_state,
-        render_status_md, schema_convergence_status,
+        CodeIndexReadinessWaitReadV1, CodeIndexReadinessWaitV1, code_index_freshness_projection,
+        graph_statistics_value, historical_session_catch_up_state, readiness_wait_outcome,
+        render_status_md, schema_convergence_status, status_readiness_wait,
     };
     use tracedecay_contracts::code_index_freshness::{
         CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
@@ -839,6 +882,70 @@ mod tests {
         let decoded: GenerationCensusSnapshot =
             serde_json::from_value(value).expect("CLI decodes observed census");
         assert_eq!(decoded, observed);
+    }
+
+    #[test]
+    fn a_timed_out_wait_names_the_last_status_label() {
+        let seated_graph_pending =
+            tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/project".to_owned(),
+                latest_generation_id: Some("generation.fixture".to_owned()),
+                staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+                coverage: CodeIndexFreshnessCoverageV1::Complete,
+                code_graph_serving: Some(
+                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Pending,
+                ),
+                ..Default::default()
+            };
+        let rebuilding = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
+            coverage: CodeIndexFreshnessCoverageV1::PartialRefreshInProgress,
+            ..Default::default()
+        };
+        for (last, expected) in [
+            (Some(Box::new(seated_graph_pending)), "current"),
+            (Some(Box::new(rebuilding)), "warming"),
+            (None, "not_mounted"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(readiness_wait_outcome(
+                    CodeIndexReadinessWaitReadV1::TimedOut { last }
+                ))
+                .expect("outcome serializes"),
+                serde_json::json!({ "outcome": "timed_out", "last_state": expected })
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(readiness_wait_outcome(
+                CodeIndexReadinessWaitReadV1::Reached
+            ))
+            .expect("outcome serializes"),
+            serde_json::json!({ "outcome": "reached" })
+        );
+    }
+
+    #[test]
+    fn wait_for_rejects_an_unknown_state() {
+        let refused = status_readiness_wait(
+            &serde_json::json!({ "wait_for": { "state": "sealed", "timeout_ms": 5 } }),
+        )
+        .expect_err("unknown state is refused");
+        assert!(
+            refused.to_string().contains("wait_for must be"),
+            "{refused}"
+        );
+        assert_eq!(
+            status_readiness_wait(
+                &serde_json::json!({ "wait_for": { "state": "ready", "timeout_ms": 5 } })
+            )
+            .expect("valid wait"),
+            Some(CodeIndexReadinessWaitV1 {
+                state:
+                    tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+                timeout_ms: 5,
+            })
+        );
     }
 
     #[test]

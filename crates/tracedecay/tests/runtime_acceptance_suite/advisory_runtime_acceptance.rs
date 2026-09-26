@@ -2006,9 +2006,15 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         effective_capabilities: BTreeSet::from([operation.capability_id().clone()]),
         grant_expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
     };
-    let feedback = open_feedback_runtime(database, &project, resolved.clone(), access)
-        .await
-        .expect("production feedback runtime");
+    let feedback = open_feedback_runtime(
+        database,
+        &project,
+        project.join("response-handles"),
+        resolved.clone(),
+        access,
+    )
+    .await
+    .expect("production feedback runtime");
 
     let generation = ci_generation.generation_id.clone();
     let file_digest = four_pillar_digest('4');

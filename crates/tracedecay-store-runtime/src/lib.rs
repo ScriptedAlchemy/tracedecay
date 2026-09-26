@@ -48,9 +48,8 @@ pub use session_registry::maintenance::{
 };
 pub use session_registry::{
     DaemonSessionRuntimeRegistryV1, MAX_RETAINED_GRAPH_DB_OWNERS, RemoteRecoveryAdmission,
-    RemoteRecoveryProjectLifecycle, RemoteRecoveryQuiescence,
-    mark_process_long_lived_for_session_maintenance, process_runtime_generation,
-    registry_open_error, release_process_allocator_memory,
+    RemoteRecoveryProjectLifecycle, mark_process_long_lived_for_session_maintenance,
+    process_runtime_generation, registry_open_error, release_process_allocator_memory,
 };
 pub use standalone_session::join_standalone_session_registry;
 pub use store_shutdown::{

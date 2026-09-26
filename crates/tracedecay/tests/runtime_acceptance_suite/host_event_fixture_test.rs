@@ -85,7 +85,10 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
     }
     let _home = EnvVarGuard::set("HOME", &home);
     let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
-    let _data_dir = EnvVarGuard::set(tracedecay_project::config::USER_DATA_DIR_ENV, &data_root);
+    let _data_dir = EnvVarGuard::set(
+        tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
+        &data_root,
+    );
     let boundary_project = initialize_boundary_project(&home);
     let _daemon = spawn_tracedecay_daemon(&home);
     crate::common::initialize_tracedecay_cli_project(&home, &boundary_project);

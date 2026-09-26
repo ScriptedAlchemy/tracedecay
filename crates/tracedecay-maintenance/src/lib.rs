@@ -1,4 +1,4 @@
-//! Offline retention, complete-profile backups, and storage reports.
+//! Offline retention and storage reports.
 //!
 //! This crate owns maintenance that consumes explicit global-db and
 //! runtime-core storage ports. It never names daemon types. The code-index
@@ -15,7 +15,7 @@
 #![allow(clippy::missing_errors_doc)]
 // Pedantic `#[must_use]` on every bool/query helper across the kernel.
 #![allow(clippy::must_use_candidate)]
-// Extracted retention/orphan/backup passes are still long, ordered journeys.
+// Extracted retention/orphan passes are still long, ordered journeys.
 #![allow(clippy::too_many_lines)]
 // Existing if-let / match style in those journeys.
 #![allow(clippy::manual_let_else)]
@@ -40,7 +40,6 @@ pub mod compaction_receipt;
 pub mod generation;
 pub mod lease;
 pub mod loop_run;
-pub mod profile_backup;
 pub mod retention;
 pub mod store_maintenance;
 pub mod telemetry;

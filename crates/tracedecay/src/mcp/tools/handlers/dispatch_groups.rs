@@ -7,7 +7,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_project::project::TraceDecay;
 
-use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
+};
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::git;
@@ -202,15 +204,23 @@ fn dispatch_info_tools_inner<'a>(
         // dispatch through the portable table.
         match tool_name {
             "tracedecay_remote_status" => portable_info::handle_remote_status(
-                cg.project_root(),
+                &cg.store_layout().response_handle_root,
                 &args,
                 options.remote_operational_status.as_ref(),
             ),
             "tracedecay_status" => {
+                // Wait before admitting snapshots, so the payload describes
+                // the worktree the wait ended on.
+                let wait = match portable_info::status_readiness_wait(&args)? {
+                    Some(request) => {
+                        Some(status_readiness_wait(&options, cg.project_root(), request).await?)
+                    }
+                    None => None,
+                };
                 let project = admitted_project_authorities(cg, &options)?;
                 let snapshots = admitted_status_snapshots(&options).await;
                 let ctx = admitted_tool_context_for(&options, &project, &snapshots)?;
-                portable_info::handle_status(&ctx, args, server_stats, scope_prefix).await
+                portable_info::handle_status(&ctx, args, server_stats, scope_prefix, wait).await
             }
             "tracedecay_active_project" => {
                 let project = admitted_project_authorities(cg, &options)?;
@@ -237,6 +247,7 @@ fn dispatch_info_tools_inner<'a>(
             "tracedecay_project_context" => {
                 portable_info::handle_project_context(
                     Some(cg.project_root()),
+                    Some(&cg.store_layout().response_handle_root),
                     args,
                     options.project_registry_reads,
                 )
@@ -248,6 +259,7 @@ fn dispatch_info_tools_inner<'a>(
             _ => {
                 portable_info::dispatch_tool(
                     cg.project_root(),
+                    &cg.store_layout().response_handle_root,
                     &verified_graph_open(&options),
                     tool_name,
                     args,
@@ -370,7 +382,7 @@ fn dispatch_application_surface_tools_inner<'a>(
         }
         if retained {
             return application_surface::run_retained_surface_tool(
-                Some(cg.project_root()),
+                Some(&cg.store_layout().response_handle_root),
                 BindingSurface::Mcp,
                 operation,
                 args,
@@ -393,14 +405,14 @@ fn dispatch_application_surface_tools_inner<'a>(
             )
             .await?;
             return tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                Some(cg.project_root()),
+                Some(&cg.store_layout().response_handle_root),
                 &args,
                 execution,
             );
         }
         if source_edit {
             return edit::source_edit_tool(
-                Some(cg.project_root()),
+                Some(&cg.store_layout().response_handle_root),
                 BindingSurface::Mcp,
                 operation,
                 args,
@@ -516,13 +528,14 @@ fn dispatch_analysis_tools_inner<'a>(
     // Erase the portable dispatch future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        portable_analysis::dispatch_tool(
+        Box::pin(portable_analysis::dispatch_tool(
             cg.project_root(),
+            &cg.store_layout().response_handle_root,
             &verified_graph_open(&options),
             tool_name,
             args,
             scope_prefix,
-        )
+        ))
         .await
     })
 }
@@ -662,6 +675,54 @@ async fn admitted_runtime_snapshots(
             DoctorReportSnapshotV1::NotAttached
         },
     }
+}
+
+/// Hold a status read until the project reaches the requested readiness,
+/// for at most the caller's `timeout_ms`.
+///
+/// The budget is the caller's; a budget this call cannot live out is refused
+/// rather than shortened. Cancellation ends the wait with a typed outcome and
+/// dropping it leaves no state behind.
+async fn status_readiness_wait(
+    options: &ToolCallRegistryOptions<'_>,
+    project_root: &std::path::Path,
+    request: CodeIndexReadinessWaitV1,
+) -> Result<CodeIndexReadinessWaitOutcomeV1> {
+    let budget = std::time::Duration::from_millis(request.timeout_ms);
+    let dispatch_budget =
+        tool_dispatch_budget("tracedecay_status", options.application_deadline.as_ref())
+            .unwrap_or_default();
+    if budget > dispatch_budget {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "tracedecay_status wait_for.timeout_ms {} exceeds this call's {} ms dispatch budget",
+                request.timeout_ms,
+                dispatch_budget.as_millis()
+            ),
+        });
+    }
+    let Some(waiter) = options.code_index_readiness_waiter.as_ref() else {
+        return Ok(CodeIndexReadinessWaitOutcomeV1::Unavailable {
+            reason: "code_index_scheduler_authority_not_attached".to_owned(),
+        });
+    };
+    let wait = waiter(project_root.to_path_buf(), request.state, budget);
+    let cancelled = async {
+        match options.application_cancellation.as_ref() {
+            Some(cancellation) => cancellation.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    Ok(tokio::select! {
+        biased;
+        () = cancelled => CodeIndexReadinessWaitOutcomeV1::Unavailable { reason: "request_cancelled".to_owned() },
+        read = wait => match read {
+            Ok(read) => portable_info::readiness_wait_outcome(read),
+            Err(_) => CodeIndexReadinessWaitOutcomeV1::Unavailable {
+                reason: "code_index_freshness_read_failed".to_owned(),
+            },
+        },
+    })
 }
 
 fn graph_freshness_reader<'a>(

@@ -39,8 +39,7 @@ pub use fingerprints::{
 };
 pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,
-    CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
-    code_lexical_artifact_content_key,
+    VerifiedCodeLexicalArtifactV1, code_lexical_artifact_content_key,
 };
 pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{
@@ -104,8 +103,7 @@ pub enum CodeLexicalArtifactBatchLimitV1 {
 /// Page-cache authority granted to artifact connections; charged in full
 /// against the memory ledgers because SQLite may use all of it. Sized to
 /// the top of the kernel SQLite window ([2, 64] MiB page cache). Staging
-/// builder connections never grant an mmap window (rollback-journal
-/// durability + WAL-coherence). Sealed read-only readers mmap the
+/// builder connections never grant an mmap window. Sealed read-only readers mmap the
 /// content-addressed file so serving does not re-pread the same pages.
 pub const CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1: usize = 64 * 1024 * 1024;
 const ARTIFACT_SQLITE_CACHE_BYTES: usize = CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1;
@@ -172,12 +170,25 @@ fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
     }
 }
 
+/// How a builder connection's commits reach the disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BuilderDurabilityV1 {
+    /// A private sibling that becomes visible only after its caller fsyncs
+    /// and renames it. A crash before then discards it, so no commit syncs.
+    Unpublished,
+    /// The visible, resumable staging file.
+    Resumable,
+}
+
 /// Open one artifact staging connection inside the kernel SQLite window:
 /// no mmap grant, page cache at the kernel's 64 MiB ceiling, and
-/// `synchronous = NORMAL`. The single deliberate exception is
-/// `journal_mode = DELETE`: a sealed artifact is one content-addressed file,
-/// and a WAL sidecar would fall outside its digest; bounded finalization
-/// persists its own verified progress, so rollback-journal durability suffices.
+/// `synchronous = NORMAL` for the resumable staging file. Appends and
+/// finalization wakes commit into a WAL ([`enter_resumable_journal`]) that is
+/// never checkpointed on its own: a crash replays exactly the committed
+/// prefix, so every commit stays a consistent resume point without an fsync.
+/// The sealed artifact is one content-addressed file, so the WAL is folded
+/// back into it ([`leave_resumable_journal`]) before the canonical rewrite
+/// and before the seal, which are the build's only sync points.
 /// SQLite's auxiliary sorter width reuses the canonical code-index worker
 /// authority: the connection thread occupies one admitted worker and SQLite
 /// may use only the memory-backed remainder. Corpus-wide CREATE INDEX runs use
@@ -188,15 +199,28 @@ fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
 /// cache or a second memory authority.
 fn open_builder_connection(
     path: &Path,
+    durability: BuilderDurabilityV1,
     memory_budget_bytes: usize,
 ) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {
     let connection = rusqlite::Connection::open(path).map_err(sqlite_error)?;
-    connection
-        .pragma_update(None, "journal_mode", "DELETE")
-        .map_err(sqlite_error)?;
-    connection
-        .pragma_update(None, "synchronous", "NORMAL")
-        .map_err(sqlite_error)?;
+    match durability {
+        BuilderDurabilityV1::Unpublished => {
+            connection
+                .pragma_update(None, "journal_mode", "DELETE")
+                .map_err(sqlite_error)?;
+            connection
+                .pragma_update(None, "synchronous", "OFF")
+                .map_err(sqlite_error)?;
+        }
+        BuilderDurabilityV1::Resumable => {
+            connection
+                .pragma_update(None, "synchronous", "NORMAL")
+                .map_err(sqlite_error)?;
+            connection
+                .pragma_update(None, "wal_autocheckpoint", 0i64)
+                .map_err(sqlite_error)?;
+        }
+    }
     connection
         .pragma_update(None, "mmap_size", 0i64)
         .map_err(sqlite_error)?;
@@ -255,6 +279,40 @@ fn open_builder_connection(
     Ok(connection)
 }
 
+/// Commit the staging file's following writes into its WAL. Idempotent.
+fn enter_resumable_journal(
+    connection: &rusqlite::Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    set_journal_mode(connection, "wal")
+}
+
+/// Fold the WAL into the staging file and return it to a rollback journal,
+/// syncing both. Idempotent; a no-op outside WAL.
+fn leave_resumable_journal(
+    connection: &rusqlite::Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    hotpath::measure_block!(
+        "query.artifact.staging.journal_fold",
+        set_journal_mode(connection, "delete")
+    )
+}
+
+fn set_journal_mode(
+    connection: &rusqlite::Connection,
+    mode: &str,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let granted: String = connection
+        .pragma_update_and_check(None, "journal_mode", mode, |row| row.get(0))
+        .map_err(sqlite_error)?;
+    if granted.eq_ignore_ascii_case(mode) {
+        Ok(())
+    } else {
+        Err(CodeLexicalArtifactErrorV1::Io(format!(
+            "lexical artifact staging kept journal mode {granted} instead of {mode}"
+        )))
+    }
+}
+
 /// Run one batch append with memory-backed statement journals.
 ///
 /// Every staged insert fires a builder-gate trigger that may abort it, so
@@ -269,14 +327,23 @@ fn with_memory_statement_journals<T>(
     connection: &mut rusqlite::Connection,
     append: impl FnOnce(&mut rusqlite::Connection) -> Result<T, CodeLexicalArtifactErrorV1>,
 ) -> Result<T, CodeLexicalArtifactErrorV1> {
-    connection
-        .pragma_update(None, "temp_store", "MEMORY")
-        .map_err(sqlite_error)?;
+    select_temp_store(connection, true)?;
     let appended = append(connection);
-    connection
-        .pragma_update(None, "temp_store", "FILE")
-        .map_err(sqlite_error)?;
+    select_temp_store(connection, false)?;
     appended
+}
+
+/// SQLite latches in-memory statement journals when a write transaction
+/// begins and in-memory sorting when a statement starts, so this runs before
+/// the transaction it governs. Memory storage also disables the sorter's
+/// spill and helper threads: an `ORDER BY` then holds its whole input.
+fn select_temp_store(
+    connection: &rusqlite::Connection,
+    memory: bool,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    connection
+        .pragma_update(None, "temp_store", if memory { "MEMORY" } else { "FILE" })
+        .map_err(sqlite_error)
 }
 
 /// CPU units one builder statement occupies: the builder thread plus every
@@ -317,10 +384,10 @@ mod tests {
     use tracedecay_code_index::parallelism::ProcessBackgroundCpuV1;
 
     use super::{
-        ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        CodeLexicalArtifactErrorV1, builder_sorter_cpu_units,
-        code_lexical_artifact_build_memory_budget_for, open_builder_connection,
-        with_memory_statement_journals,
+        ARTIFACT_SQLITE_CACHE_BYTES, BuilderDurabilityV1,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1,
+        builder_sorter_cpu_units, code_lexical_artifact_build_memory_budget_for,
+        open_builder_connection, with_memory_statement_journals,
     };
 
     fn temp_store(connection: &rusqlite::Connection) -> i64 {
@@ -337,6 +404,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("artifact tempdir");
         let mut connection = open_builder_connection(
             &directory.path().join("journals.sqlite"),
+            BuilderDurabilityV1::Resumable,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )
         .expect("builder connection");
@@ -368,6 +436,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("artifact tempdir");
         let connection = open_builder_connection(
             &directory.path().join("window.sqlite"),
+            BuilderDurabilityV1::Resumable,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )
         .expect("builder connection");
@@ -411,6 +480,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("artifact tempdir");
         let connection = open_builder_connection(
             &directory.path().join("workers.sqlite"),
+            BuilderDurabilityV1::Resumable,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )
         .expect("builder connection");
@@ -461,6 +531,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("artifact tempdir");
         let connection = open_builder_connection(
             &directory.path().join("weighted.sqlite"),
+            BuilderDurabilityV1::Resumable,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )
         .expect("builder connection");
@@ -518,12 +589,18 @@ mod sorter_identity_tests {
 
     use sha2::{Digest, Sha256};
 
-    use super::{CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, open_builder_connection};
+    use super::{
+        BuilderDurabilityV1, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        open_builder_connection,
+    };
 
     fn build_ngram_index(path: &Path, workers: i64) -> Vec<u8> {
-        let mut connection =
-            open_builder_connection(path, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
-                .expect("open ngram identity fixture");
+        let mut connection = open_builder_connection(
+            path,
+            BuilderDurabilityV1::Resumable,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )
+        .expect("open ngram identity fixture");
         connection
             .pragma_update(None, "threads", workers)
             .expect("set fixture sorter width");

@@ -3,8 +3,12 @@ use std::fs;
 use std::os::unix::fs::symlink;
 
 use rusqlite::Connection;
+use serde::Deserialize;
 use serde_json::json;
-use tracedecay_domain::ObservationScopeV1;
+use tracedecay_domain::{
+    CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalWorkflowEvidenceKindV1,
+    ObservationScopeV1,
+};
 
 use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
 use crate::observation::ObservationCancellation;
@@ -22,6 +26,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         .execute_batch(
             "CREATE TABLE session (
                 id TEXT PRIMARY KEY,
+                parent_id TEXT,
                 directory TEXT NOT NULL
              );
              CREATE TABLE message (
@@ -129,6 +134,109 @@ async fn steady_state_restart_keeps_high_water_without_per_row_durability_reads(
         admission.session_message_read_count(),
         reads_after_first_sweep,
         "a quiet restart must not repeat per-row durability lookups"
+    );
+}
+
+#[tokio::test]
+async fn task_spawn_and_child_parent_reach_the_canonical_envelopes() {
+    let (_temp, project, database) = fixture();
+    let writer = Connection::open(&database).unwrap();
+    writer
+        .execute(
+            "INSERT INTO session(id, parent_id, directory) VALUES ('ses_child', 'ses_project', ?1)",
+            [project.to_string_lossy()],
+        )
+        .unwrap();
+    for (message, session, part) in [
+        (
+            "msg_task",
+            "ses_project",
+            json!({
+                "type": "tool", "tool": "task", "callID": "call_649e87f9",
+                "state": {
+                    "status": "completed", "input": {"description": "Survey the loom"},
+                    "metadata": {"parentSessionId": "ses_project", "sessionId": "ses_child"},
+                    "output": "done"
+                }
+            }),
+        ),
+        (
+            "msg_child",
+            "ses_child",
+            json!({"type": "text", "text": "Survey the loom"}),
+        ),
+    ] {
+        writer
+            .execute(
+                "INSERT INTO message(id, session_id, time_created, data) VALUES (?1, ?2, 2, ?3)",
+                rusqlite::params![
+                    message,
+                    session,
+                    json!({"role": "assistant", "time": {"created": 2}}).to_string()
+                ],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    format!("part_{message}"),
+                    message,
+                    session,
+                    part.to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(writer);
+    let admission = MemoryHostAdmission::default();
+
+    capture_opencode_observations(
+        &admission,
+        &OpenCodeSource::with_database_for_project(database, project),
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    let envelopes: Vec<CanonicalObservationEnvelopeV1> = admission
+        .observations()
+        .iter()
+        .map(|stored| {
+            CanonicalObservationEnvelopeV1::deserialize(stored.observation().payload()).unwrap()
+        })
+        .collect();
+    let child = envelopes
+        .iter()
+        .find(|envelope| envelope.relations().session_id().as_str() == "ses_child")
+        .expect("child message captured");
+    assert_eq!(
+        child
+            .relations()
+            .parent_session_id()
+            .map(|parent| parent.as_str()),
+        Some("ses_project")
+    );
+    let spawn = CanonicalObservationFactV1::Workflow {
+        evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+        reference: Some("ses_child".to_owned()),
+        content: Some(json!({"tool_use_id": "call_649e87f9", "text": "Survey the loom"})),
+    };
+    assert!(
+        envelopes.iter().any(|envelope| {
+            envelope.relations().session_id().as_str() == "ses_project"
+                && envelope.facts().contains(&spawn)
+        }),
+        "the parent's task part records the spawn edge"
+    );
+    assert!(
+        envelopes
+            .iter()
+            .filter(|envelope| envelope.relations().session_id().as_str() == "ses_project")
+            .all(|envelope| envelope.relations().parent_session_id().is_none()),
+        "a root session records no parent"
     );
 }
 

@@ -47,7 +47,6 @@ use tracedecay_lsp::{
     LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
 };
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_runtime_core::storage::resolve_response_handle_root;
 use tracedecay_tool_catalog::CapabilityId;
 
 use super::{
@@ -610,7 +609,6 @@ async fn seed_github_diagnostic(database: &Database, observed_at: UtcMicros) {
 
 #[tokio::test]
 async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_finding() {
-    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let root = tempfile::tempdir().expect("root");
     std::fs::create_dir_all(root.path().join("src")).expect("source directory");
     std::fs::write(root.path().join("src/lib.rs"), SOURCE).expect("source");
@@ -625,6 +623,7 @@ async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_fin
         open_feedback_runtime(
             database,
             root.path(),
+            root.path().join("response-handles"),
             scope.clone(),
             source_access(&scope, &operation, observed_at),
         )
@@ -758,7 +757,6 @@ async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_fin
 
 #[tokio::test]
 async fn incomplete_publication_remains_readable_without_consuming_completed_dedupe() {
-    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let root = tempfile::tempdir().expect("root");
     std::fs::create_dir_all(root.path().join("src")).expect("source directory");
     std::fs::write(root.path().join("src/lib.rs"), SOURCE).expect("source");
@@ -780,9 +778,15 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
         );
     }
     let runtime = Arc::new(
-        open_feedback_runtime(database, root.path(), resolved, access)
-            .await
-            .expect("feedback runtime"),
+        open_feedback_runtime(
+            database,
+            root.path(),
+            root.path().join("response-handles"),
+            resolved,
+            access,
+        )
+        .await
+        .expect("feedback runtime"),
     );
     let request = cycle_request(digest('a'), observed_at);
     let service = feedback_service(runtime.clone(), &request);
@@ -1005,7 +1009,6 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
 
 #[tokio::test]
 async fn held_handle_store_lock_surfaces_the_typed_deadline_miss() {
-    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let root = tempfile::tempdir().expect("root");
     std::fs::create_dir_all(root.path().join("src")).expect("source directory");
     std::fs::write(root.path().join("src/lib.rs"), SOURCE).expect("source");
@@ -1017,9 +1020,15 @@ async fn held_handle_store_lock_surfaces_the_typed_deadline_miss() {
     let context = context(&resolved, &operation, observed_at);
     let access = source_access(&resolved, &operation, observed_at);
     let runtime = Arc::new(
-        open_feedback_runtime(database, root.path(), resolved, access)
-            .await
-            .expect("feedback runtime"),
+        open_feedback_runtime(
+            database,
+            root.path(),
+            root.path().join("response-handles"),
+            resolved,
+            access,
+        )
+        .await
+        .expect("feedback runtime"),
     );
     let request = cycle_request(digest('a'), observed_at);
     let service = feedback_service(runtime.clone(), &request);
@@ -1034,7 +1043,7 @@ async fn held_handle_store_lock_surfaces_the_typed_deadline_miss() {
         )
         .await
         .expect("durable cycle");
-    let handle_root = resolve_response_handle_root(root.path()).expect("handle root");
+    let handle_root = root.path().join("response-handles");
     let lock_parent = handle_root.parent().expect("handle root parent");
     std::fs::create_dir_all(lock_parent).expect("handle lock parent");
     let lock_path = lock_parent.join(format!(

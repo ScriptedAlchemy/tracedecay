@@ -1,6 +1,6 @@
 //! Local response-handle cache for reversible MCP truncation.
 //!
-//! Handles are stored in the resolved project store's `response-handles` root.
+//! Handles are stored in the owning store's `response-handles` root.
 //! They are only references to local files, never external URLs or remote
 //! identifiers.
 
@@ -121,7 +121,7 @@ pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
     }
 }
 
-pub fn response_handle_stats_json(project_root: Option<&Path>) -> Value {
+pub fn response_handle_stats_json(response_handle_root: Option<&Path>) -> Value {
     let telemetry = telemetry();
     let counter = |value: &AtomicU64| value.load(Ordering::Relaxed);
     let timestamp = |value: &AtomicI64| value.load(Ordering::Relaxed);
@@ -154,46 +154,38 @@ pub fn response_handle_stats_json(project_root: Option<&Path>) -> Value {
         "last_expired_at": timestamp_json(timestamp(&telemetry.last_expired_at)),
         "last_cleanup_at": timestamp_json(timestamp(&telemetry.last_cleanup_at)),
     });
-    if let (Some(project_root), Some(object)) = (project_root, stats.as_object_mut()) {
-        let on_disk = match tracedecay_session_memory::response_handles::inventory_response_handles(
-            project_root,
-        ) {
-            Ok(inventory) => json!({
-                "available": true,
-                "file_count": inventory.file_count,
-                "total_bytes": inventory.total_bytes,
-                "oldest_expires_at": inventory.oldest_expires_at,
-                "newest_expires_at": inventory.newest_expires_at,
-            }),
-            Err(error) => {
-                let (reason_code, detail) = public_inventory_problem(&error);
-                json!({
-                    "available": false,
-                    "reason_code": reason_code,
-                    "detail": detail,
-                })
-            }
-        };
+    if let (Some(root), Some(object)) = (response_handle_root, stats.as_object_mut()) {
+        let on_disk =
+            match tracedecay_session_memory::response_handles::inventory_response_handles(root) {
+                Ok(inventory) => json!({
+                    "available": true,
+                    "file_count": inventory.file_count,
+                    "total_bytes": inventory.total_bytes,
+                    "oldest_expires_at": inventory.oldest_expires_at,
+                    "newest_expires_at": inventory.newest_expires_at,
+                }),
+                Err(error) => {
+                    let (reason_code, detail) = public_inventory_problem(&error);
+                    json!({
+                        "available": false,
+                        "reason_code": reason_code,
+                        "detail": detail,
+                    })
+                }
+            };
         object.insert("on_disk".to_string(), on_disk);
     }
     stats
 }
 
 #[track_caller]
-pub fn store_response_handle(
-    project_root: &Path,
-    content: &str,
-    now: i64,
-) -> Result<ResponseHandleRecord> {
+pub fn store_response_handle(root: &Path, content: &str, now: i64) -> Result<ResponseHandleRecord> {
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     telemetry.store_attempts.fetch_add(1, Ordering::Relaxed);
-    let result = tracedecay_session_memory::response_handles::store_response_handle(
-        project_root,
-        content,
-        now,
-    );
+    let result =
+        tracedecay_session_memory::response_handles::store_response_handle(root, content, now);
     telemetry
         .store_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -222,18 +214,15 @@ pub fn store_response_handle(
 #[track_caller]
 #[hotpath::measure(label = "mcp.server.response.handle_retrieve")]
 pub fn retrieve_response_handle(
-    project_root: &Path,
+    root: &Path,
     handle: &str,
     now: i64,
 ) -> Result<ResponseHandleLookup> {
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
-    let result = tracedecay_session_memory::response_handles::retrieve_response_handle(
-        project_root,
-        handle,
-        now,
-    );
+    let result =
+        tracedecay_session_memory::response_handles::retrieve_response_handle(root, handle, now);
     telemetry
         .retrieve_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -284,15 +273,13 @@ pub fn retrieve_response_handle(
 
 #[track_caller]
 #[hotpath::measure(label = "mcp.server.response.handle_cleanup")]
-pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result<usize> {
+pub fn cleanup_expired_response_handles(root: &Path, now: i64) -> Result<usize> {
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     telemetry.cleanup_runs.fetch_add(1, Ordering::Relaxed);
-    let result = tracedecay_session_memory::response_handles::cleanup_expired_response_handles(
-        project_root,
-        now,
-    );
+    let result =
+        tracedecay_session_memory::response_handles::cleanup_expired_response_handles(root, now);
     telemetry
         .cleanup_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -422,14 +409,6 @@ fn clipped_handle_for_log(handle: &str) -> String {
     } else {
         clipped
     }
-}
-
-/// Serializes lib unit tests that store response handles under the
-/// process-global profile root (`TRACEDECAY_DATA_DIR`). Uses the shared
-/// user-data-dir test lock so env mutation cannot race profile resolution.
-#[cfg(test)]
-pub(crate) fn lock_response_handle_store() -> std::sync::MutexGuard<'static, ()> {
-    tracedecay_runtime_core::config::lock_user_data_dir_test_env()
 }
 
 #[cfg(test)]

@@ -450,8 +450,9 @@ function TemporalBody({
                 : !hierarchy?.available || hierarchy.error
                   ? 'unavailable'
                   : `${hierarchy.truncated ? 'partial' : 'loaded'} · ${hierarchy.missing_parent_count} missing parents · ${hierarchy.cycle_count} cycles`}
-              . Forks leave the parent at the child session&apos;s recorded start, graded
-              inferred because the loaded transcript carries no tool-use identity; a
+              . A fork leaves the parent on its spawning tool call, graded exact, when the
+              host recorded that call and the parent&apos;s transcript is selected; otherwise
+              it leaves at the child session&apos;s recorded start, graded inferred. A
               session row and the subagent tree that disagree are both drawn, ambiguous.
               A join is inferred only where a child ends inside its parent&apos;s measured
               extent; no handoff or result authority serves one. Only this temporal page

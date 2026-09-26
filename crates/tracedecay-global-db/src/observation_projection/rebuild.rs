@@ -16,7 +16,7 @@ use tracedecay_store::{
 };
 
 use super::apply::{
-    apply_effect, apply_skip_disposition, derive_projection_for_rebuild,
+    SPAWN_CALL_FOR_CHILD_SQL, apply_effect, apply_skip_disposition, derive_projection_for_rebuild,
     derive_projection_with_alias, stage_provider_usage_effects, verify_effect,
 };
 use super::state::{
@@ -2183,8 +2183,21 @@ async fn activate_rebuild_sessions(
         params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
     )
     .await
+    .map_err(|error| storage("activate rebuilt projection sessions", error))?;
+    // Staged rows are derived per record, so a child whose spawning call is
+    // recorded only in its parent's rollup is bound here, as live apply does.
+    conn.execute(
+        &format!(
+            "UPDATE sessions AS child SET parent_tool_use_id = {SPAWN_CALL_FOR_CHILD_SQL}
+             WHERE child.parent_session_id IS NOT NULL
+               AND child.parent_tool_use_id IS NULL
+               AND {SPAWN_CALL_FOR_CHILD_SQL} IS NOT NULL"
+        ),
+        (),
+    )
+    .await
     .map(|_| ())
-    .map_err(|error| storage("activate rebuilt projection sessions", error))
+    .map_err(|error| storage("bind rebuilt child session spawn calls", error))
 }
 
 async fn prepare_rebuild_output_activation(

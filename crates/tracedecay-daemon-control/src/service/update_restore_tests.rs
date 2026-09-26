@@ -241,10 +241,11 @@ fn maintenance_window_waits_out_the_lease_of_the_daemon_it_just_stopped() {
     let fixture = DrainingDaemonFixture::new();
     let holder = fixture.hold_daemon_lease(Some(std::time::Duration::from_millis(400)));
 
-    let guard = QuiescedDaemonLifecycle::acquire_with_runner(
+    let guard = QuiescedDaemonLifecycle::acquire_with_runner_and_timeout(
         "update",
         super::tests::TEST_BUILD_VERSION,
         fixture.runner.clone(),
+        super::QUIESCED_LEASE_RELEASE_TIMEOUT,
     )
     .expect("the draining daemon's lease must be waited out, not reported as contention");
     holder.thread.join().expect("daemon holder");

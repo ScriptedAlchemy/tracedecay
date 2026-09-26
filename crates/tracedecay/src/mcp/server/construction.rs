@@ -145,6 +145,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
+    pub(crate) code_index_readiness_waiter:
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter>,
     pub(crate) dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     pub(crate) dashboard_pr_autotrack_reader:
@@ -278,6 +280,7 @@ impl McpServerConstructionContext {
             remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
+            code_index_readiness_waiter: None,
             dashboard_feedback_status_reader: None,
             dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
@@ -381,6 +384,7 @@ impl McpServerConstructionContext {
             remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
+            code_index_readiness_waiter: None,
             dashboard_feedback_status_reader: None,
             dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
@@ -448,6 +452,7 @@ impl McpServerConstructionContext {
             remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
+            code_index_readiness_waiter: None,
             dashboard_feedback_status_reader: None,
             dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
@@ -655,6 +660,14 @@ impl McpServerConstructionContext {
         reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
     ) -> Self {
         self.dashboard_code_index_freshness_reader = Some(reader);
+        self
+    }
+
+    pub(crate) fn with_code_index_readiness_waiter(
+        mut self,
+        waiter: tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter,
+    ) -> Self {
+        self.code_index_readiness_waiter = Some(waiter);
         self
     }
 

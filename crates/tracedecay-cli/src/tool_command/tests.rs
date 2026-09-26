@@ -428,10 +428,10 @@ fn registry_read_dispatch_honours_an_explicit_ambient_root_verbatim() {
     // process-wide profile discovery variables, and HOME is restored below.
     unsafe { std::env::set_var("HOME", home.path()) };
     assert!(
-        tracedecay_project::config::is_ambient_project_root(home.path()),
+        tracedecay_runtime_core::config::is_ambient_project_root(home.path()),
         "fixture HOME must be an ambient root"
     );
-    let discovered = tracedecay_project::config::discover_project_root(home.path());
+    let discovered = tracedecay_runtime_core::config::discover_project_root(home.path());
     let explicit =
         DaemonToolDispatch::for_tool(Some(home_arg), "tracedecay_project_list", &mut json!({}));
     match previous_home {

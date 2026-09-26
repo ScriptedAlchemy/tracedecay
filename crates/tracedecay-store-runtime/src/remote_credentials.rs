@@ -182,7 +182,6 @@ impl DaemonRemoteCredentialAuthorityV1 {
         let mut has_sequence_gap = false;
         let mut coverage_complete = true;
         let mut authorities = Vec::new();
-        let mut current_backup_verified = !state.nodes.is_empty();
         let mut failover_in_progress = false;
         let mut recovery_required = false;
         for node in state.nodes.values() {
@@ -198,14 +197,10 @@ impl DaemonRemoteCredentialAuthorityV1 {
             }
             match node.storage.recovery_operational_snapshot() {
                 Ok(snapshot) => {
-                    current_backup_verified &= snapshot.current_backup_verified;
                     failover_in_progress |= snapshot.failover_in_progress;
                     recovery_required |= snapshot.recovery_required;
                 }
-                Err(_) => {
-                    coverage_complete = false;
-                    current_backup_verified = false;
-                }
+                Err(_) => coverage_complete = false,
             }
         }
         drop(state);
@@ -221,7 +216,6 @@ impl DaemonRemoteCredentialAuthorityV1 {
             authority,
             spool,
             replay_coverage_complete,
-            current_backup_verified,
             failover_in_progress,
             recovery_required,
             now,

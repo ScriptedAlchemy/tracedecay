@@ -4,88 +4,42 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_store::StoreShardScopeV1;
-use tracedecay_store_runtime::{
-    RemoteRecoveryAdmission, RemoteRecoveryProjectLifecycle, RemoteRecoveryQuiescence,
-};
+use tracedecay_domain::{ProjectId, UserProfileId};
+use tracedecay_store_runtime::{RemoteRecoveryAdmission, RemoteRecoveryProjectLifecycle};
 
 use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
-use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
 use tracedecay_store_runtime::WriterAdmissionGuard;
 
 pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
-    brain_id: BrainId,
     profile_id: UserProfileId,
     profile_root: PathBuf,
     gate: Arc<StoreWriterGates>,
-    project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
     session_runtime_registries: super::SharedSessionRuntimeRegistries,
-    invocation: super::super::DaemonInvocationState,
-    project_open_gates: Arc<tokio::sync::Mutex<super::super::ProjectOpenGates>>,
-    session_temporal_refresh_schedulers: Arc<
-        tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
-    >,
-    git_index_transaction_services: Arc<
-        tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry,
-    >,
-    native_integration_services: Arc<DaemonNativeIntegrationServiceRegistry>,
-    session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
-    store_telemetry_sampling: StoreTelemetrySamplingRegistry,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<super::project_retirement::ProjectServerRetirement>>>,
-    #[cfg(unix)]
-    automation_schedulers: Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<
-                super::super::ProjectServerKey,
-                super::super::scheduler::AutomationSchedulerHandle,
-            >,
-        >,
-    >,
-}
-
-#[derive(Clone)]
-struct RemoteRecoveryProjectLifecycleFactoryV1 {
-    invocation: super::super::DaemonInvocationState,
-    project_open_gates: Arc<tokio::sync::Mutex<super::super::ProjectOpenGates>>,
 }
 
 #[derive(Default)]
 pub(super) struct RemoteRecoveryProjectLifecyclesV1 {
-    factory: Option<RemoteRecoveryProjectLifecycleFactoryV1>,
+    installed: bool,
     profiles: HashMap<PathBuf, Arc<RemoteRecoveryProjectLifecycleV1>>,
 }
 
 pub(super) type SharedRemoteRecoveryProjectLifecyclesV1 =
     Arc<std::sync::RwLock<RemoteRecoveryProjectLifecyclesV1>>;
 
-pub(in crate::daemon) type RemoteRecoveryProjectQuiescenceV1 =
-    Arc<super::project_retirement::ProjectRetirementFenceV1>;
-
 impl StoreAdministration {
-    pub(in crate::daemon) fn install_remote_recovery_project_lifecycle(
-        &self,
-        invocation: super::super::DaemonInvocationState,
-        project_open_gates: Arc<tokio::sync::Mutex<super::super::ProjectOpenGates>>,
-    ) -> Result<()> {
+    pub(in crate::daemon) fn install_remote_recovery_project_lifecycle(&self) -> Result<()> {
         let mut lifecycles = self
             .remote_recovery_project_lifecycles
             .write()
             .map_err(|_| lifecycle_registry_unavailable())?;
-        lifecycles
-            .factory
-            .get_or_insert(RemoteRecoveryProjectLifecycleFactoryV1 {
-                invocation,
-                project_open_gates,
-            });
+        lifecycles.installed = true;
         ensure_profile_lifecycle(self, &mut lifecycles).map(|_| ())
     }
 
@@ -96,7 +50,7 @@ impl StoreAdministration {
             .remote_recovery_project_lifecycles
             .write()
             .map_err(|_| lifecycle_registry_unavailable())?;
-        if lifecycles.factory.is_none() {
+        if !lifecycles.installed {
             return Ok(None);
         }
         ensure_profile_lifecycle(self, &mut lifecycles).map(Some)
@@ -112,16 +66,7 @@ fn ensure_profile_lifecycle(
     if let Some(lifecycle) = lifecycles.profiles.get(&profile_root) {
         return Ok(Arc::clone(lifecycle));
     }
-    let factory = lifecycles
-        .factory
-        .as_ref()
-        .ok_or_else(lifecycle_registry_unavailable)?
-        .clone();
-    let lifecycle = Arc::new(RemoteRecoveryProjectLifecycleV1::new(
-        administration,
-        factory.invocation,
-        factory.project_open_gates,
-    )?);
+    let lifecycle = Arc::new(RemoteRecoveryProjectLifecycleV1::new(administration)?);
     lifecycles
         .profiles
         .insert(profile_root, Arc::clone(&lifecycle));
@@ -135,185 +80,15 @@ fn lifecycle_registry_unavailable() -> TraceDecayError {
 }
 
 impl RemoteRecoveryProjectLifecycleV1 {
-    pub(super) fn new(
-        administration: &super::StoreAdministration,
-        invocation: super::super::DaemonInvocationState,
-        project_open_gates: Arc<tokio::sync::Mutex<super::super::ProjectOpenGates>>,
-    ) -> Result<Self> {
+    pub(super) fn new(administration: &super::StoreAdministration) -> Result<Self> {
         let identity = administration.profile_identity()?.clone();
         Ok(Self {
-            brain_id: identity.brain_id().clone(),
             profile_id: identity.profile_id().clone(),
             profile_root: authority::canonical_identity_path(identity.profile_root())?,
             gate: Arc::clone(&administration.gate),
-            project_servers: Arc::clone(&administration.project_servers),
             session_runtime_registries: Arc::clone(&administration.session_runtime_registries),
-            invocation,
-            project_open_gates,
-            session_temporal_refresh_schedulers: Arc::clone(
-                &administration.session_temporal_refresh_schedulers,
-            ),
-            git_index_transaction_services: Arc::clone(
-                &administration.git_index_transaction_services,
-            ),
-            native_integration_services: Arc::clone(&administration.native_integration_services),
-            session_sync_service: Arc::clone(&administration.session_sync_service),
-            store_telemetry_sampling: administration.store_telemetry_sampling(),
             project_server_retirements: Arc::clone(&administration.project_server_retirements),
-            #[cfg(unix)]
-            automation_schedulers: Arc::clone(&administration.automation_schedulers),
         })
-    }
-
-    #[hotpath::measure(label = "daemon.branch_admin.remote_recovery_quiesce", future = true)]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "Recovery quiesce drains one project's live owners before the recovered store is remounted."
-        )
-    )]
-    pub(in crate::daemon) async fn quiesce(
-        &self,
-        project_id: &ProjectId,
-        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    ) -> Result<RemoteRecoveryProjectQuiescenceV1> {
-        let shard = &database.binding().shard_id;
-        if shard.brain_id != self.brain_id
-            || shard.profile_id != self.profile_id
-            || !matches!(
-                &shard.scope,
-                StoreShardScopeV1::ProjectSessions { project_id: bound }
-                    if bound == project_id
-            )
-        {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "remote recovery project '{}' does not match the mounted ProjectSessions owner",
-                    project_id.as_str()
-                ),
-            });
-        }
-        let data_root = database
-            .db_path()
-            .parent()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "remote recovery ProjectSessions database has no store root".to_owned(),
-            })?;
-        self.settle_retained_runtime_retirement(project_id).await?;
-        let writer = self
-            .gate
-            .acquire(&WriterScope::store(data_root, StoreWriterClass::Owner))
-            .await;
-        self.ensure_project_recovery_active(project_id).await?;
-        let roots = project_roots(
-            database,
-            &self.project_servers,
-            &self.profile_root,
-            project_id.as_str(),
-        )
-        .await?;
-        let open_tasks = super::super::project_open_tasks(self.project_open_gates.as_ref()).await;
-        let project_open = open_tasks
-            .quiesce_project_identity(&self.profile_root, project_id.as_str(), &roots)
-            .await
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "remote recovery project '{}' open admission did not quiesce",
-                    project_id.as_str()
-                ),
-            })?;
-        // Remote recovery drains the same invocation runtime owners every
-        // other project drain does. Calling `service.quiesce_project` alone
-        // left the code-index scheduler root and the query authority mounted,
-        // and the code-index observability lane keeps a counted client on the project-session store, so the
-        // store retirement this quiescence exists to admit was refused.
-        let invocation = self
-            .invocation
-            .quiesce_project_runtime_owners(&self.profile_id, project_id, &roots)
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "remote recovery project '{}' invocation owners did not drain: {error}",
-                    project_id.as_str()
-                ),
-            })?;
-        // Project open registers a sampling telemetry port per route store
-        // (`register_route_store_telemetry`), and that port retains a counted
-        // database client. Capacity retirement releases those handles before it
-        // retires the store; remote recovery did not, so the parked telemetry
-        // client alone refused the ProjectSessions retirement this quiescence
-        // exists to admit.
-        self.release_store_telemetry(database.db_path(), project_id.as_str())
-            .await;
-        let fence = Arc::new(super::project_retirement::ProjectRetirementFenceV1::new(
-            invocation,
-            project_open,
-            writer,
-        ));
-        retire_runtime_work(
-            &self.project_servers,
-            &self.session_temporal_refresh_schedulers,
-            #[cfg(unix)]
-            &self.automation_schedulers,
-            &self.project_server_retirements,
-            &self.profile_root,
-            project_id.as_str(),
-            Some(Arc::clone(&fence)),
-        )
-        .await?;
-        super::retire_registered_context_scout_owner(
-            project_id,
-            &data_root.join(tracedecay_project::config::db_filename(data_root)),
-        );
-        self.git_index_transaction_services
-            .retire_project_database(project_id, database.db_path())
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "could not retire recovery project Git transaction actors: {error}"
-                ),
-            })?;
-        self.native_integration_services
-            .retire_project_database(project_id, database.db_path())
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "could not retire recovery project native integration actors: {error}"
-                ),
-            })?;
-        self.session_sync_service
-            .retire_project(&self.profile_id, project_id)
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("could not retire recovery project session sync: {error}"),
-            })?;
-        Ok(fence)
-    }
-
-    /// Release the sampling telemetry clients this project's stores retain.
-    /// Both the project-session store and every mounted route's graph store
-    /// are released; sibling projects and the profile stores stay sampled.
-    #[hotpath::skip]
-    async fn release_store_telemetry(&self, project_sessions_path: &Path, project_id: &str) {
-        self.store_telemetry_sampling
-            .release_retained_handle(project_sessions_path);
-        let graph_db_paths = {
-            let registry = self.project_servers.lock().await;
-            registry
-                .servers
-                .keys()
-                .filter(|key| {
-                    key.owner.profile_root == self.profile_root
-                        && key.owner.project_id.as_deref() == Some(project_id)
-                })
-                .map(|key| key.owner.graph_db_path.clone())
-                .collect::<BTreeSet<_>>()
-        };
-        for graph_db_path in graph_db_paths {
-            self.store_telemetry_sampling
-                .release_retained_handle(&graph_db_path);
-        }
     }
 
     #[hotpath::skip]
@@ -446,7 +221,6 @@ pub(super) async fn retire_runtime_work(
     >,
     profile_root: &Path,
     project_id: &str,
-    failure_fence: Option<Arc<super::project_retirement::ProjectRetirementFenceV1>>,
 ) -> Result<()> {
     let server_retirements = {
         let mut registry = project_servers.lock().await;
@@ -500,15 +274,6 @@ pub(super) async fn retire_runtime_work(
             super::super::project_server_lifecycle::retire_project_servers_now(servers).await;
         });
         super::project_retirement::track_retirement_task(tracked_retirements, owner, task).await;
-    }
-    if let Some(fence) = failure_fence {
-        super::project_retirement::attach_project_retirement_fence(
-            tracked_retirements,
-            profile_root,
-            project_id,
-            fence,
-        )
-        .await;
     }
     let deadline = tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
     let receipt = super::project_retirement::settle_project_retirements(
@@ -575,18 +340,6 @@ impl RemoteRecoveryProjectLifecycle for RemoteRecoveryProjectLifecycleV1 {
             Ok(RemoteRecoveryAdmission::hold(guard))
         })
     }
-
-    fn quiesce<'a>(
-        &'a self,
-        project_id: &'a ProjectId,
-        database: &'a RegisteredGlobalDbLeaseV1,
-    ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryQuiescence>> + Send + 'a>> {
-        Box::pin(async move {
-            let fence =
-                RemoteRecoveryProjectLifecycleV1::quiesce(self, project_id, database).await?;
-            Ok(RemoteRecoveryQuiescence::hold(fence))
-        })
-    }
 }
 
 #[cfg(unix)]
@@ -611,7 +364,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::StoreAdministration;
-    use crate::daemon::{DaemonInvocationState, ProjectOpenGates};
 
     fn profile_identity(
         root: &Path,
@@ -639,10 +391,7 @@ mod tests {
             .with_profile_identity(first_identity.clone());
         let second = administration.with_profile_identity(second_identity.clone());
         first
-            .install_remote_recovery_project_lifecycle(
-                DaemonInvocationState::default(),
-                Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default())),
-            )
+            .install_remote_recovery_project_lifecycle()
             .expect("install lifecycle factory");
 
         let first_lifecycle = first

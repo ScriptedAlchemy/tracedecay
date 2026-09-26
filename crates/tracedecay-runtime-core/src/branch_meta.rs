@@ -129,12 +129,6 @@ impl BranchMeta {
         Self::with_db_file(default_branch, crate::config::DB_FILENAME)
     }
 
-    /// Creates a new metadata whose default-branch entry references the main
-    /// DB filename appropriate for `data_dir`.
-    pub fn new_for_dir(data_dir: &Path, default_branch: &str) -> Self {
-        Self::with_db_file(default_branch, crate::config::db_filename(data_dir))
-    }
-
     fn with_db_file(default_branch: &str, db_file: &str) -> Self {
         let now = now_unix_str();
         let mut branches = HashMap::new();
@@ -177,13 +171,6 @@ impl BranchMeta {
             return None; // never remove the default branch
         }
         self.branches.remove(name)
-    }
-
-    /// Updates the `last_synced_at` timestamp for a branch.
-    pub fn touch_synced(&mut self, name: &str) {
-        if let Some(entry) = self.branches.get_mut(name) {
-            entry.last_synced_at = now_unix_str();
-        }
     }
 
     pub fn publish_graph_source(&mut self, name: &str, source: BranchGraphSourceV1) {
@@ -358,20 +345,6 @@ pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<(
     save_branch_meta_serialized(data_dir, &serialized)
 }
 
-/// Advances the `last_synced_at` timestamp for `branch` in the project's
-/// branch metadata, best-effort.
-///
-/// This is the entry point every successful sync path calls so `branch_list`
-/// reflects real sync activity (previously `last_synced_at` only moved at
-/// branch-add finalize, making the list misleading). It silently no-ops when
-/// there is no branch metadata (single-DB mode / pre-branch projects) or when
-/// `branch` is untracked, a sync of an untracked branch has no entry to touch.
-/// The shared branch lock serializes this load-modify-save sequence with branch
-/// add, removal, GC, and pending deletion recovery.
-pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
-    update_synced_timestamp_with(tracedecay_dir, branch, || {});
-}
-
 /// Atomically allocates and publishes the exact worktree/ref/OID identity
 /// that produced a tracked branch graph.
 ///
@@ -468,21 +441,6 @@ pub fn rollback_graph_source_publication(
     *entry = publication.previous_entry.clone();
     save_branch_meta(tracedecay_dir, &meta)?;
     Ok(BranchGraphSourceRollbackOutcomeV1::Restored)
-}
-
-fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock: impl FnOnce()) {
-    let Ok(_branch_lock) = crate::branch::acquire_branch_lock_blocking(tracedecay_dir) else {
-        return;
-    };
-    after_lock();
-    let Some(mut meta) = load_branch_meta(tracedecay_dir) else {
-        return;
-    };
-    if !meta.is_tracked(branch) {
-        return;
-    }
-    meta.touch_synced(branch);
-    let _ = save_branch_meta(tracedecay_dir, &meta);
 }
 
 fn now_unix_str() -> String {
@@ -587,74 +545,9 @@ mod tests {
     }
 
     #[test]
-    fn update_synced_timestamp_advances_tracked_branch() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut meta = BranchMeta::new("main");
-        meta.add_branch("feature/foo", "main");
-        // Backdate so the advance is observable regardless of same-second timing.
-        meta.branches.get_mut("feature/foo").unwrap().last_synced_at = "1000".to_string();
-        save_branch_meta(dir.path(), &meta).unwrap();
-
-        update_synced_timestamp(dir.path(), "feature/foo");
-
-        let reloaded = load_branch_meta(dir.path()).unwrap();
-        let synced: u64 = reloaded.branches["feature/foo"]
-            .last_synced_at
-            .parse()
-            .unwrap();
-        assert!(synced > 1000, "last_synced_at should advance, got {synced}");
-    }
-
-    #[test]
-    fn update_synced_timestamp_holds_shared_branch_lock_during_load_modify_save() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut meta = BranchMeta::new("main");
-        meta.add_branch("feature/foo", "main");
-        save_branch_meta(dir.path(), &meta).unwrap();
-        let mut observed_contention = false;
-
-        update_synced_timestamp_with(dir.path(), "feature/foo", || {
-            let error = crate::branch::try_acquire_branch_add_lock(dir.path())
-                .expect_err("timestamp update must already own the shared branch lock");
-            observed_contention = matches!(
-                error,
-                tracedecay_domain::errors::TraceDecayError::SyncLock { .. }
-            );
-        });
-
-        assert!(observed_contention);
-        assert!(
-            load_branch_meta(dir.path())
-                .unwrap()
-                .is_tracked("feature/foo")
-        );
-    }
-
-    #[test]
-    fn update_synced_timestamp_noops_for_unknown_branch() {
-        let dir = tempfile::tempdir().unwrap();
-        let meta = BranchMeta::new("main");
-        save_branch_meta(dir.path(), &meta).unwrap();
-
-        // Untracked branch: must not create an entry or error.
-        update_synced_timestamp(dir.path(), "does/not/exist");
-
-        let reloaded = load_branch_meta(dir.path()).unwrap();
-        assert!(!reloaded.is_tracked("does/not/exist"));
-    }
-
-    #[test]
-    fn update_synced_timestamp_noops_without_meta() {
-        let dir = tempfile::tempdir().unwrap();
-        // No branch-meta.json present; must silently no-op.
-        update_synced_timestamp(dir.path(), "main");
-        assert!(load_branch_meta(dir.path()).is_none());
-    }
-
-    #[test]
     fn graph_source_publication_round_trips_exact_worktree_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = BranchMeta::new_for_dir(dir.path(), "main");
+        let meta = BranchMeta::new("main");
         save_branch_meta(dir.path(), &meta).unwrap();
         let source = BranchGraphSourceV1 {
             publication_epoch: BranchGraphPublicationEpochV1::new(1).unwrap(),
@@ -697,7 +590,7 @@ mod tests {
     #[test]
     fn graph_source_rollback_requires_the_exact_installed_entry() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = BranchMeta::new_for_dir(dir.path(), "main");
+        let meta = BranchMeta::new("main");
         save_branch_meta(dir.path(), &meta).unwrap();
         let draft = BranchGraphSourceDraftV1 {
             project_id: "project.fixture".to_owned(),
@@ -745,7 +638,7 @@ mod tests {
     #[test]
     fn concurrent_graph_source_publications_allocate_distinct_epochs() {
         let dir = tempfile::tempdir().unwrap();
-        let mut meta = BranchMeta::new_for_dir(dir.path(), "main");
+        let mut meta = BranchMeta::new("main");
         meta.add_branch("feature/one", "main");
         meta.add_branch("feature/two", "main");
         save_branch_meta(dir.path(), &meta).unwrap();

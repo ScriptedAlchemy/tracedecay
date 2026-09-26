@@ -1,7 +1,8 @@
 //! Extended primitive port: module API, qualified names, diagnostics, and storage status history.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
@@ -127,9 +128,18 @@ pub(super) struct DurableStorageStatusHistoryV1 {
     samples: Vec<StorageStatusHistoryPointV1>,
 }
 
-pub(super) fn storage_status_history_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+/// One lock per history file: concurrent reads of one store serialize their
+/// read-modify-write so no sample is dropped, and reads of different stores
+/// never wait on each other.
+// ponytail: entries are never evicted; the map holds one empty mutex per
+// store history path this daemon has read, bounded by its registered stores.
+fn storage_status_history_lock(history_path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(locks.entry(history_path.to_path_buf()).or_default())
 }
 
 pub(super) fn storage_status_history_path(
@@ -153,50 +163,8 @@ pub(super) fn update_storage_status_history(
     database_bytes: u64,
     observed_at: i64,
 ) -> (Vec<StorageStatusHistoryPointV1>, String) {
-    update_storage_status_history_with_lock(
-        storage_status_history_lock(),
-        history_path,
-        project_id,
-        store_path,
-        database_bytes,
-        observed_at,
-    )
-}
-
-pub(super) fn update_storage_status_history_with_lock(
-    history_lock: &Mutex<()>,
-    history_path: &Path,
-    project_id: Option<String>,
-    store_path: String,
-    database_bytes: u64,
-    observed_at: i64,
-) -> (Vec<StorageStatusHistoryPointV1>, String) {
-    // The production lock serializes the read-modify-write of one history
-    // file, but is process-global: every project's storage-status read funnels
-    // through it. A blocking acquire let one stalled write convoy every
-    // concurrent status read daemon-wide, so contention degrades to the
-    // current sample as a typed bounded state instead of waiting.
-    let _guard = match history_lock.try_lock() {
-        Ok(guard) => guard,
-        Err(std::sync::TryLockError::WouldBlock) => {
-            return (
-                vec![StorageStatusHistoryPointV1 {
-                    observed_at,
-                    database_bytes,
-                }],
-                "current_sample_only_history_lock_contended".to_owned(),
-            );
-        }
-        Err(std::sync::TryLockError::Poisoned(_)) => {
-            return (
-                vec![StorageStatusHistoryPointV1 {
-                    observed_at,
-                    database_bytes,
-                }],
-                "current_sample_only_history_lock_failed".to_owned(),
-            );
-        }
-    };
+    let history_lock = storage_status_history_lock(history_path);
+    let _guard = history_lock.lock().unwrap_or_else(PoisonError::into_inner);
     let stored = std::fs::read(history_path).ok();
     let restored = stored
         .as_deref()

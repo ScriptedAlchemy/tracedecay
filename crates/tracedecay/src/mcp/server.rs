@@ -375,6 +375,8 @@ pub struct McpServer {
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
         Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
+    code_index_readiness_waiter:
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter>,
     dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     dashboard_pr_autotrack_reader:
@@ -831,6 +833,7 @@ impl McpServer {
             remote_operational_status,
             dashboard_doctor_report_reader,
             dashboard_code_index_freshness_reader,
+            code_index_readiness_waiter,
             dashboard_feedback_status_reader,
             dashboard_pr_autotrack_reader,
             diagnostics_lsp,
@@ -860,7 +863,7 @@ impl McpServer {
             host_admission_test_runtime,
         } = context;
         let file_token_map = HashMap::new();
-        let response_handle_project_root = cg.project_root().to_path_buf();
+        let response_handle_root = cg.store_layout().response_handle_root.clone();
         let persisted_tokens_saved = match cg.get_tokens_saved().await {
             Ok(persisted) => Some(persisted),
             Err(error) => {
@@ -1079,6 +1082,7 @@ impl McpServer {
             dashboard_doctor_report_reader,
             doctor_report_published: AtomicBool::new(false),
             dashboard_code_index_freshness_reader,
+            code_index_readiness_waiter,
             dashboard_feedback_status_reader,
             dashboard_pr_autotrack_reader,
             background_refresh_writer,
@@ -1136,7 +1140,7 @@ impl McpServer {
 
         tokio::task::spawn_blocking(move || {
             let _ = cleanup_expired_response_handles(
-                &response_handle_project_root,
+                &response_handle_root,
                 tracedecay_runtime_core::tracedecay::current_timestamp(),
             );
         });
@@ -1443,7 +1447,8 @@ impl McpServer {
         }
 
         let cg = self.cg_snapshot().await;
-        stats["response_handles"] = response_handle_stats_json(Some(cg.project_root()));
+        stats["response_handles"] =
+            response_handle_stats_json(Some(&cg.store_layout().response_handle_root));
 
         // Surface the verbose worktree-mismatch warning when present, so
         // `tracedecay_status` is the one tool whose output is loud about

@@ -51,7 +51,6 @@ fn observed_fixture() -> RemoteOperationalStatusReadV1 {
             has_sequence_gap: false,
         },
         false,
-        true,
         false,
         false,
         UtcMicros(10),

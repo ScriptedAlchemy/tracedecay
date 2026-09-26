@@ -22,6 +22,34 @@ installs every crate into `.pnpm/crates`, which the committed
 `test-all` aliases defined in `.cargo/config.toml`. Commands below run from the
 repository root unless noted.
 
+Two Cargo errors mean "run `pnpm install` at the repository root". Before any
+install, Cargo reports `failed to read root of directory source
+<repo>/.pnpm/crates/git`. When `Cargo.lock` names a crate that is not vendored
+yet, it reports `no matching package named '<crate>' found` with `location
+searched: directory source '<repo>/.pnpm/crates/crates-io'`.
+`verifyDepsBeforeRun` guards only the npm packages against `pnpm-lock.yaml`;
+`pnpm install` reads `Cargo.lock` as it is and never rewrites it or fails when
+a `Cargo.toml` no longer matches it.
+
+To add, remove, or bump a crate, edit the manifests by hand and refresh the
+lock from outside the checkout with the pinned toolchain, then vendor the
+result:
+
+```bash
+# <toolchain> is the channel in rust-toolchain.toml; add -p <crate> for one bump
+cd / && cargo +<toolchain> update -w --manifest-path "$repo/Cargo.toml"
+cd "$repo" && pnpm install
+```
+
+Inside the checkout `cargo update` refuses the vendored git sources and
+`cargo add` sees only vendored crates. Do not use `pnpm add crate:`; from a
+member directory it regenerates the whole `Cargo.lock`, and at the root it
+fails. `pnpm remove crate:` is unsupported. Unused `.pnpm/crates` directories
+stay in place after `pnpm install` and are inert once the lock stops naming
+them. Cargo reads `.cargo/config.toml` from its working directory, so run
+`sdks/codegen` cargo commands from `sdks/codegen`; `sdks/codegen/generate.sh`
+does this itself.
+
 Use your current checkout; no particular absolute path or historical PR branch
 is required. See [AGENTS.md](AGENTS.md) for checkout safety and shared-work rules.
 

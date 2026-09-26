@@ -672,12 +672,11 @@ async fn code_source(
         }
     };
     let payload = read.payload;
-    let Ok(total) = u64::try_from(payload.total) else {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::CodeGraph,
-            "code_graph_contract_invalid",
-            "code graph search returned a negative total",
-        );
+    let total = payload.total;
+    let omission_reasons = if payload.has_more && total.is_none() {
+        vec!["query page limit".to_owned()]
+    } else {
+        Vec::new()
     };
     let rows = match payload
         .results
@@ -698,10 +697,10 @@ async fn code_source(
         ExplorerSourceIdV1::CodeGraph,
         request,
         rows,
-        Some(total),
+        total,
         json!({"query": request.query}),
         "symbols",
-        Vec::new(),
+        omission_reasons,
     );
     source.freshness = "fresh";
     source.watermark = Some(read.generation);

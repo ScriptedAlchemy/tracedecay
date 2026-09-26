@@ -152,7 +152,7 @@ where
         ));
     }
     let durability = SourceEditDurability::for_graph(graph);
-    let _lock = durability.lock()?;
+    let _lock = durability.lock().await?;
     let input_digest = request.input_digest().map_err(application_contract_error)?;
     let requested_authority = tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
         request.authority.clone(),

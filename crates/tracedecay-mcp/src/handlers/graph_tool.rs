@@ -62,7 +62,7 @@ pub async fn compute_graph_tool(
 /// server uses its retained cache; the CLI stats the project files. Rendering
 /// them here would mark the result accounted and skip that cache.
 pub fn render_graph_tool(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     args: &Value,
     completion: GraphToolCompletionV1,
 ) -> Result<ToolResult> {
@@ -74,13 +74,18 @@ pub fn render_graph_tool(
     } = completion;
     let mut rendered = match &result {
         GraphToolResultV1::Context(context) => {
-            render_context(project_root, args, context, touched_files)?
+            render_context(response_handle_root, args, context, touched_files)?
         }
         GraphToolResultV1::Node(NodeResultV1::NotFound(not_found))
         | GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
         }
-        _ => generic_tool_result(project_root, args, &result.result_value()?, touched_files),
+        _ => generic_tool_result(
+            response_handle_root,
+            args,
+            &result.result_value()?,
+            touched_files,
+        ),
     };
     if let Some(served) = &code_graph {
         append_code_graph_freshness(&mut rendered, served);

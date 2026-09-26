@@ -841,7 +841,7 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
             |row| row.get(0),
         )
         .expect("read sealed revision");
-    assert_eq!(revision, 27);
+    assert_eq!(revision, 28);
     let staging = std::fs::read_dir(code_text_artifact_staging_root(store.path()))
         .expect("artifacts root")
         .map(|entry| entry.expect("artifact entry").file_name())
@@ -929,6 +929,9 @@ async fn dashboard_freshness_reports_the_sealed_clone_census_across_a_restart() 
         while !latest.query_owners_are_ready() {
             latest.advance_text_serving(1).expect("advance text owners");
         }
+        // Clone readiness reports stale while the seating pass still verifies
+        // source; the census claim is about the settled owner's first read.
+        wait_for_settled_owner(&registry, fixture.path()).await;
         let freshness = registry
             .dashboard_freshness(fixture.path())
             .await

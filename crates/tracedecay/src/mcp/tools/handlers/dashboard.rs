@@ -651,7 +651,12 @@ pub(crate) async fn shutdown_dashboard() -> Result<()> {
 }
 
 fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
-    generic_tool_result(Some(cg.project_root()), args, payload, vec![])
+    generic_tool_result(
+        Some(&cg.store_layout().response_handle_root),
+        args,
+        payload,
+        vec![],
+    )
 }
 
 #[hotpath::measure(label = "mcp.dashboard.open.total")]

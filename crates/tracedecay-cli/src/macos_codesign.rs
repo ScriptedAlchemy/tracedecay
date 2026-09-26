@@ -1,14 +1,18 @@
 //! Stable macOS ad-hoc code-signing identity for the tracedecay executable.
 //!
 //! rustc's linker ad-hoc signs each binary using the hashed deps filename
-//! (`tracedecay-<hash>`). macOS TCC treats that identifier as the app, so
-//! every local rebuild re-prompts for removable volumes and files, and the
-//! daemon blocks in `open()` until the prompt is answered.
+//! (`tracedecay-<hash>`). The default ad-hoc designated requirement is
+//! `cdhash H"..."`, that binary's exact hash. macOS TCC keys removable-volume
+//! and file grants on the designated requirement, so every local rebuild
+//! re-prompts and the daemon blocks in `open()` until the prompt is answered.
 //!
 //! [`stabilize_installed_executable`] replaces an unsigned or ad-hoc signature
-//! with [`STABLE_SIGNING_IDENTIFIER`]. A Developer ID or other team signature
-//! is left in place. Release workflows do not Apple-sign; this runs only for
-//! the installed file after its archive checksum has matched.
+//! with [`STABLE_SIGNING_IDENTIFIER`] and designated requirement
+//! `identifier "dev.tracedecay.cli"`. An ad-hoc signature that already has
+//! that identifier but a cdhash requirement is re-signed. A Developer ID or
+//! other team signature is left in place. Release workflows do not
+//! Apple-sign; this runs only for the installed file after its archive
+//! checksum has matched.
 
 use std::fs::File;
 use std::io::Read;
@@ -22,19 +26,32 @@ pub(crate) const STABLE_SIGNING_IDENTIFIER: &str = "dev.tracedecay.cli";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MacosSignaturePlan {
-    /// Already `dev.tracedecay.cli`, or signed by a team.
+    /// Stable identifier requirement, or signed by a team.
     Preserve,
-    /// Unsigned or ad-hoc with an unstable identifier.
+    /// Unsigned, hashed ad-hoc, or ad-hoc whose requirement is a cdhash.
     ApplyStableAdhoc,
 }
 
-/// Decide from `codesign -dv` output. `report` is the combined stderr and stdout.
+/// `codesign -r` value. One argument: the `=` marks inline requirement text.
+fn stable_requirement_argument() -> String {
+    format!("-r=designated => identifier \"{STABLE_SIGNING_IDENTIFIER}\"")
+}
+
+fn is_stable_designated_requirement(requirement: &str) -> bool {
+    requirement == format!("identifier \"{STABLE_SIGNING_IDENTIFIER}\"")
+}
+
+/// Decide from `codesign -d --verbose=2 -r-` output.
+/// `report` is the combined stderr and stdout.
 pub(crate) fn plan_macos_signature(report: &str) -> MacosSignaturePlan {
     let mut identifier = None;
+    let mut designated = None;
     let mut foreign = false;
     for line in report.lines() {
         if let Some(value) = line.strip_prefix("Identifier=") {
             identifier = Some(value.trim());
+        } else if let Some(requirement) = line.strip_prefix("designated => ") {
+            designated = Some(requirement.trim());
         } else if line.starts_with("Authority=") {
             foreign = true;
         } else if let Some(team) = line.strip_prefix("TeamIdentifier=") {
@@ -44,7 +61,9 @@ pub(crate) fn plan_macos_signature(report: &str) -> MacosSignaturePlan {
             }
         }
     }
-    if foreign || identifier == Some(STABLE_SIGNING_IDENTIFIER) {
+    let stable = identifier == Some(STABLE_SIGNING_IDENTIFIER)
+        && designated.is_some_and(is_stable_designated_requirement);
+    if foreign || stable {
         MacosSignaturePlan::Preserve
     } else {
         MacosSignaturePlan::ApplyStableAdhoc
@@ -93,6 +112,7 @@ fn apply_stable_adhoc_signature(path: &Path, enabled: bool) -> Result<()> {
             "--identifier",
             STABLE_SIGNING_IDENTIFIER,
         ])
+        .arg(stable_requirement_argument())
         .arg(path)
         .output()
         .map_err(|error| TraceDecayError::Config {
@@ -138,7 +158,7 @@ fn read_header(path: &Path) -> Result<[u8; 4]> {
 
 fn codesign_report(path: &Path) -> Result<String> {
     let output = Command::new("codesign")
-        .args(["-dv", "--verbose=2"])
+        .args(["-d", "--verbose=2", "-r-"])
         .arg(path)
         .output()
         .map_err(|error| TraceDecayError::Config {
@@ -185,9 +205,37 @@ TeamIdentifier=not set
     }
 
     #[test]
-    fn stable_identifier_is_preserved() {
-        let report = format!("Identifier={STABLE_SIGNING_IDENTIFIER}\nSignature=adhoc\n");
+    fn stable_identifier_requirement_is_preserved() {
+        let report = format!(
+            "Identifier={STABLE_SIGNING_IDENTIFIER}\n\
+             Signature=adhoc\n\
+             CandidateCDHash sha256=0123456789abcdef\n\
+             designated => identifier \"{STABLE_SIGNING_IDENTIFIER}\"\n"
+        );
         assert_eq!(plan_macos_signature(&report), MacosSignaturePlan::Preserve);
+    }
+
+    #[test]
+    fn stable_identifier_with_cdhash_requirement_is_replaced() {
+        let report = format!(
+            "Identifier={STABLE_SIGNING_IDENTIFIER}\n\
+             Signature=adhoc\n\
+             TeamIdentifier=not set\n\
+             designated => cdhash H\"0123456789abcdef0123456789abcdef01234567\"\n"
+        );
+        assert_eq!(
+            plan_macos_signature(&report),
+            MacosSignaturePlan::ApplyStableAdhoc
+        );
+    }
+
+    #[test]
+    fn stable_identifier_without_designated_requirement_is_replaced() {
+        let report = format!("Identifier={STABLE_SIGNING_IDENTIFIER}\nSignature=adhoc\n");
+        assert_eq!(
+            plan_macos_signature(&report),
+            MacosSignaturePlan::ApplyStableAdhoc
+        );
     }
 
     #[test]
@@ -196,6 +244,7 @@ TeamIdentifier=not set
 Identifier=tracedecay-3d1e6be7cae777a9
 Authority=Developer ID Application: Example (TEAMID1234)
 TeamIdentifier=TEAMID1234
+designated => cdhash H\"0123456789abcdef0123456789abcdef01234567\"
 ";
         assert_eq!(plan_macos_signature(report), MacosSignaturePlan::Preserve);
     }

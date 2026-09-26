@@ -333,7 +333,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let serving_source_witness: Arc<RwLock<Option<super::super::ServingSourceWitnessV1>>> =
             Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
-        let (serving_generation_changed, _) = tokio::sync::watch::channel(());
+        let serving_generation_changed = Arc::new(tokio::sync::watch::channel(()).0);
         let serving_generation_installation = Arc::new(Mutex::new(None));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
@@ -2659,6 +2659,7 @@ impl CodeIndexSchedulerRegistryV1 {
             worker_loop,
             label = "daemon.code_index.scheduler_worker"
         ));
+        self.register_worker_shutdown_signal(&shutting_down, &wake, &serving_generation_changed);
         entry.insert(MountedCodeIndexWorktreeV1 {
             project_id,
             repository_id,

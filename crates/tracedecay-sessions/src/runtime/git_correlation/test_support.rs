@@ -97,7 +97,6 @@ pub(crate) struct MemoryEvidenceGraphRuntime {
     cancelled: AtomicBool,
     cancel_after_publish: AtomicBool,
     fail_next_publication: AtomicBool,
-    fail_after_successful_publications: AtomicUsize,
     successful_publications: AtomicUsize,
     read_gate: SnapshotReadGate,
 }
@@ -126,7 +125,6 @@ impl Default for MemoryEvidenceGraphRuntime {
             cancelled: AtomicBool::new(false),
             cancel_after_publish: AtomicBool::new(false),
             fail_next_publication: AtomicBool::new(false),
-            fail_after_successful_publications: AtomicUsize::new(usize::MAX),
             successful_publications: AtomicUsize::new(0),
             read_gate: SnapshotReadGate::default(),
         }
@@ -144,15 +142,6 @@ impl MemoryEvidenceGraphRuntime {
 
     pub(crate) fn fail_next_publication(&self) {
         self.fail_next_publication.store(true, Ordering::Release);
-    }
-
-    pub(crate) fn fail_after_successful_publications(&self, count: usize) {
-        let threshold = self
-            .successful_publications
-            .load(Ordering::Acquire)
-            .saturating_add(count);
-        self.fail_after_successful_publications
-            .store(threshold, Ordering::Release);
     }
 
     pub(crate) fn successful_publications(&self) -> usize {
@@ -208,17 +197,6 @@ impl VerifiedGraphRuntimePortV1 for MemoryEvidenceGraphRuntime {
         if self.fail_next_publication.swap(false, Ordering::AcqRel) {
             return Err(GraphDbError::unavailable(
                 "injected Git evidence publication failure",
-            ));
-        }
-        let successful = self.successful_publications.load(Ordering::Acquire);
-        let failure_threshold = self
-            .fail_after_successful_publications
-            .load(Ordering::Acquire);
-        if successful >= failure_threshold {
-            self.fail_after_successful_publications
-                .store(usize::MAX, Ordering::Release);
-            return Err(GraphDbError::unavailable(
-                "injected Git evidence publication failure after durable progress",
             ));
         }
         if cancelled.load(Ordering::Acquire) || self.cancelled.load(Ordering::Acquire) {

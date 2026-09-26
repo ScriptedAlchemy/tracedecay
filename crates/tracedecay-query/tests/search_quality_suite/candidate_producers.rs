@@ -1075,6 +1075,86 @@ pub(crate) fn projection_metadata(
     }
 }
 
+/// Appends do not sync, so a killed builder leaves exactly the bytes it
+/// wrote: the staging file and its WAL. Resuming from those bytes must pick
+/// up at the last committed page and seal the same file an uninterrupted
+/// build seals.
+#[test]
+fn killed_builder_resumes_from_its_unsynced_commits_and_seals_identical_bytes() {
+    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(pages.len() >= 2, "the fixture must span several pages");
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+
+    let uninterrupted_path = directory.path().join("uninterrupted.staging");
+    {
+        let mut builder =
+            CodeLexicalArtifactBuilderV1::create(&uninterrupted_path, fixture.metadata.clone())
+                .expect("create uninterrupted artifact");
+        for page in &pages {
+            builder.append_page(page, &control).expect("append page");
+        }
+        builder
+            .rebuild_and_finalize(&mut fixture.open_source(1), &control)
+            .expect("seal uninterrupted artifact");
+    }
+
+    let live_path = directory.path().join("live.staging");
+    let killed_path = directory.path().join("killed.staging");
+    let mut live = CodeLexicalArtifactBuilderV1::create(&live_path, fixture.metadata.clone())
+        .expect("create live artifact");
+    live.append_page(&pages[0], &control)
+        .expect("append the first page");
+    // The process image at a SIGKILL: every byte written so far, no close.
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let from = PathBuf::from(format!("{}{suffix}", live_path.display()));
+        if from.exists() {
+            std::fs::copy(&from, format!("{}{suffix}", killed_path.display()))
+                .expect("capture the killed builder's file");
+        }
+    }
+    assert!(
+        PathBuf::from(format!("{}-wal", killed_path.display())).exists(),
+        "an unsynced append must live in the staging WAL"
+    );
+    drop(live);
+
+    let sealed = {
+        let mut resumed =
+            CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &killed_path,
+                fixture.metadata.clone(),
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+                &control,
+            )
+            .expect("resume the killed builder's staging");
+        assert_eq!(
+            resumed
+                .progress()
+                .expect("resumed progress")
+                .next_page_ordinal,
+            1,
+            "the resumed staging must keep exactly the committed page"
+        );
+        for page in &pages[1..] {
+            resumed.append_page(page, &control).expect("append page");
+        }
+        resumed
+            .rebuild_and_finalize(&mut fixture.open_source(1), &control)
+            .expect("seal the resumed artifact");
+        std::fs::read(&killed_path).expect("read resumed artifact")
+    };
+    assert!(
+        !PathBuf::from(format!("{}-wal", killed_path.display())).exists(),
+        "the seal must fold the WAL into the one sealed file"
+    );
+    assert_eq!(
+        Sha256::digest(&sealed),
+        Sha256::digest(std::fs::read(&uninterrupted_path).expect("read uninterrupted artifact")),
+        "a resumed build must seal the uninterrupted build's bytes"
+    );
+}
+
 #[test]
 fn disk_artifact_resume_and_reopen_serve_lexical_results() {
     let (fixture, pages, source_receipt) = real_verified_pages();
@@ -1084,12 +1164,6 @@ fn disk_artifact_resume_and_reopen_serve_lexical_results() {
         .iter()
         .flat_map(|page| page.chunks().iter().cloned())
         .collect::<Vec<_>>();
-    let import_evidence = pages
-        .iter()
-        .flat_map(|page| page.imports())
-        .next()
-        .expect("real source import evidence")
-        .clone();
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("lexical-artifact-v1.sqlite");
     let control = ArtifactControl { cancelled: false };
@@ -1124,6 +1198,17 @@ fn disk_artifact_resume_and_reopen_serve_lexical_results() {
             .rebuild_and_finalize(&mut final_source, &control)
             .expect("rebuild and finalize artifact from verified source")
     };
+    assert_eq!(
+        (
+            verified.total_imports(),
+            verified.import_dictionary_digest()
+        ),
+        (
+            source_receipt.total_imports(),
+            source_receipt.import_dictionary_digest()
+        ),
+        "the receipt binds the source's imports without storing their evidence"
+    );
     let artifact_bytes = std::fs::read(&artifact_path).expect("read finalized artifact");
     let artifact_digest = ManifestDigest::new(format!(
         "sha256:{}",
@@ -1159,15 +1244,6 @@ fn disk_artifact_resume_and_reopen_serve_lexical_results() {
         Some("src/artifact.ts::render")
     );
     assert_eq!(symbol_occurrence.kind.as_deref(), Some("function"));
-    let import_witness = reader
-        .import_membership(&import_evidence)
-        .expect("import membership")
-        .expect("exact import witness");
-    assert_eq!(import_witness.evidence, import_evidence);
-    assert_eq!(
-        &import_witness.import_dictionary_digest,
-        verified.import_dictionary_digest()
-    );
 
     let mut request = lexical_request(
         "rendre return value",
@@ -2721,7 +2797,7 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     )
     .expect("the current revision must open");
 
-    for revision in [26i64, 28] {
+    for revision in [27i64, 29] {
         let connection =
             rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
@@ -3069,7 +3145,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
             |row| row.get(0),
         )
         .expect("read current format revision");
-    assert_eq!(format_revision, 27);
+    assert_eq!(format_revision, 28);
     let (ngram_lists, ngram_postings, untagged_ngram_lists): (i64, i64, i64) = connection
         .query_row(
             "SELECT COUNT(*), SUM(document_frequency), SUM(substr(documents, 1, 1) NOT IN (x'00', x'01')) FROM ngram_postings",
@@ -3115,7 +3191,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
     let redundant_structures: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_schema WHERE (type = 'index' AND name NOT LIKE 'sqlite_autoindex_clone_%') \
-             OR (type = 'table' AND name IN ('rows', 'vocabulary', 'term_stats', 'ngram_statistics', 'document_integrity', 'import_integrity', 'term_posting_runs', 'exact_posting_runs', 'ngram_posting_pages', 'row_chunk_pages'))",
+             OR (type = 'table' AND name IN ('rows', 'vocabulary', 'term_stats', 'ngram_statistics', 'document_integrity', 'import_integrity', 'import_evidence', 'term_posting_runs', 'exact_posting_runs', 'ngram_posting_pages', 'row_chunk_pages'))",
             [],
             |row| row.get(0),
         )
@@ -3323,8 +3399,7 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
     let authority_rows: i64 = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM source_pages) + \
-                    (SELECT COUNT(*) FROM row_chunk_pages) + \
-                    (SELECT COUNT(*) FROM import_evidence)",
+                    (SELECT COUNT(*) FROM row_chunk_pages)",
             [],
             |row| row.get(0),
         )
@@ -3831,7 +3906,7 @@ fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation
     // Everything one prepared page of this fixture charges: the builder's
     // fixed ledger, the prepared page, and one insert-plan entry per staged
     // term and exact posting.
-    const EXACT_BUDGET: usize = 67_264_530;
+    const EXACT_BUDGET: usize = 67_263_718;
 
     let (fixture, pages, _) = real_verified_pages();
     let pages = &pages[..1];
@@ -4960,11 +5035,7 @@ fn disk_artifact_preseal_gate_denies_external_derived_mutation() {
         true,
     ))
     .expect("term posting count");
-    let original_imports: i64 = connection
-        .query_row("SELECT COUNT(*) FROM import_evidence", [], |row| row.get(0))
-        .expect("import evidence count");
     assert!(original_term_postings > 0);
-    assert!(original_imports > 0);
     let mut mutated_row = original_row.clone();
     mutated_row.push(b' ');
     let row_mutation = connection.execute(
@@ -5024,12 +5095,8 @@ fn disk_artifact_preseal_gate_denies_external_derived_mutation() {
                 .sum::<i64>()
         })
         .sum();
-    let rebuilt_imports: i64 = connection
-        .query_row("SELECT COUNT(*) FROM import_evidence", [], |row| row.get(0))
-        .expect("finalized import evidence count");
     assert_eq!(rebuilt_row, original_row);
     assert_eq!(rebuilt_term_postings, original_term_postings);
-    assert_eq!(rebuilt_imports, original_imports);
 }
 
 #[test]
@@ -5166,12 +5233,15 @@ fn disk_artifact_cancellation_rolls_back_import_append_and_reopen_verification()
         progress_before
     );
     let connection = rusqlite::Connection::open(&artifact_path).expect("inspect staging artifact");
-    let imports: i64 = connection
-        .query_row("SELECT COUNT(*) FROM import_evidence", [], |row| row.get(0))
-        .expect("count staged imports");
-    let imports = u64::try_from(imports).expect("staged import count must be nonnegative");
+    let staged_import_pages: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM source_pages WHERE page_ordinal = ?1",
+            [i64::try_from(import_page.page_ordinal()).expect("page ordinal fits i64")],
+            |row| row.get(0),
+        )
+        .expect("count staged import page receipts");
     assert_eq!(
-        imports, 0,
+        staged_import_pages, 0,
         "cancelled import page must roll back atomically"
     );
     drop(connection);

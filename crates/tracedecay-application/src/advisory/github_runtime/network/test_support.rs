@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-pub(super) fn read_http_request_with_headers(
+pub(in crate::advisory::github_runtime) fn read_http_request_with_headers(
     stream: &mut TcpStream,
 ) -> (String, serde_json::Value) {
     // macOS `accept` inherits `O_NONBLOCK` from a non-blocking listener, so
@@ -49,7 +49,10 @@ pub(super) fn read_http_request(stream: &mut TcpStream) -> serde_json::Value {
     read_http_request_with_headers(stream).1
 }
 
-pub(super) fn write_http_json(stream: &mut TcpStream, value: &serde_json::Value) {
+pub(in crate::advisory::github_runtime) fn write_http_json(
+    stream: &mut TcpStream,
+    value: &serde_json::Value,
+) {
     let body = serde_json::to_vec(value).unwrap();
     write!(
         stream,

@@ -1385,8 +1385,7 @@ async fn worktree_graph_mount_does_not_require_git() {
         .await
         .expect("register non-git project authority");
     let project_store_root = profile_root.join("projects/project.non-git-worktree");
-    let database_path =
-        project_store_root.join(tracedecay_project::config::db_filename(&project_store_root));
+    let database_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     std::fs::create_dir_all(database_path.parent().expect("database parent"))
         .expect("database directory");
     let authority = DatabaseAuthority::for_runtime(&database_path, "non-git project graph mount")
@@ -1666,8 +1665,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     )
     .expect("daemon database scope");
     let project_store_root = profile_root.join("projects/project.derived-graph-corrupt");
-    let database_path =
-        project_store_root.join(tracedecay_project::config::db_filename(&project_store_root));
+    let database_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     std::fs::create_dir_all(database_path.parent().expect("database parent"))
         .expect("database directory");
 
@@ -1955,8 +1953,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
         .expect("register project authority");
     let project_store_root = profile_root.join("projects/project.graph-publication");
     std::fs::create_dir_all(&project_store_root).expect("project store directory");
-    let main_path =
-        project_store_root.join(tracedecay_project::config::db_filename(&project_store_root));
+    let main_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     let unpublished_path = project_store_root.join("unpublished.db");
     rusqlite::Connection::open(&unpublished_path)
         .expect("seed unpublished branch database")

@@ -257,6 +257,107 @@ fn rust_cross_crate_impl_binds_through_public_reexport_chain() {
     );
 }
 
+/// tokio 1.53.1 `tokio/tests/macros_rename_test.rs`, verbatim.
+const TOKIO_MACROS_RENAME_TEST: &str = r#"#![cfg(all(feature = "full", not(target_os = "wasi")))] // Wasi doesn't support threading
+
+#[allow(unused_imports)]
+use std as tokio;
+
+use ::tokio as tokio1;
+
+mod test {
+    pub use ::tokio;
+}
+
+async fn compute() -> usize {
+    let join = tokio1::spawn(async { 1 });
+    join.await.unwrap()
+}
+
+#[tokio1::main(crate = "tokio1")]
+async fn compute_main() -> usize {
+    compute().await
+}
+
+#[test]
+fn crate_rename_main() {
+    assert_eq!(1, compute_main());
+}
+
+#[tokio1::test(crate = "tokio1")]
+async fn crate_rename_test() {
+    assert_eq!(1, compute().await);
+}
+
+#[test::tokio::test(crate = "test::tokio")]
+async fn crate_path_test() {
+    assert_eq!(1, compute().await);
+}
+"#;
+
+#[test]
+fn rust_extern_prelude_absolute_use_paths_index_like_their_relative_form() {
+    let generation = published_rust_workspace(&[
+        ("file.absolute.a", "crates/a/src/lib.rs", "pub trait T {}\n"),
+        (
+            "file.absolute.b",
+            "crates/b/src/lib.rs",
+            // The local `mod a` must not capture the extern-prelude path `::a`.
+            "mod a {}\nuse ::a::T;\npub struct S;\nimpl T for S {}\n",
+        ),
+        (
+            "file.absolute.tokio",
+            "tokio/tests/macros_rename_test.rs",
+            TOKIO_MACROS_RENAME_TEST,
+        ),
+    ]);
+
+    let bindings = |path: &str| {
+        generation
+            .imports()
+            .iter()
+            .filter(|binding| binding.logical_path == path)
+            .map(|binding| {
+                (
+                    binding.module_specifier.as_str(),
+                    binding.imported_name.as_deref(),
+                    binding.local_name.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        bindings("crates/b/src/lib.rs"),
+        [("a", Some("T"), Some("T"))]
+    );
+    // `use ::tokio as tokio1;` binds a crate root, exactly like `use std as tokio;`.
+    assert_eq!(
+        bindings("tokio/tests/macros_rename_test.rs"),
+        Vec::<(&str, Option<&str>, Option<&str>)>::new()
+    );
+
+    assert_resolved_edge(
+        &generation,
+        &symbol_occurrence(&generation, "crates/b/src/lib.rs::S"),
+        &symbol_occurrence(&generation, "crates/a/src/lib.rs::T"),
+        RelationEdgeKindV1::Implements,
+    );
+    let compute_main = symbol_occurrence(
+        &generation,
+        "tokio/tests/macros_rename_test.rs::compute_main",
+    );
+    let compute = symbol_occurrence(&generation, "tokio/tests/macros_rename_test.rs::compute");
+    assert!(
+        generation
+            .edges()
+            .iter()
+            .any(|edge| edge.from_occurrence == compute_main
+                && edge.to_occurrence == compute
+                && edge.kind == RelationEdgeKindV1::Calls),
+        "the file behind `use ::tokio as tokio1;` must be indexed with its calls"
+    );
+}
+
 #[test]
 fn rust_constructor_and_typed_receiver_calls_bind_through_the_crate_path() {
     let generation = published_rust_workspace(&[

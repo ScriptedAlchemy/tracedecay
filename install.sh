@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stable ad-hoc identifier for local macOS installs. TCC keys removable-volume
-# and file grants on it. The linker default is the hashed deps filename
-# (`tracedecay-<hash>`), so every rebuild is a new app and the daemon blocks
-# in open() until the prompt is answered. A Developer ID or other team
-# signature is preserved.
+# Stable ad-hoc identity for local macOS installs. TCC keys removable-volume
+# and file grants on the designated requirement. The default ad-hoc
+# requirement is `cdhash H"..."`, that binary's exact hash, so an Allow
+# does not survive the next rebuild even when the identifier stays
+# `dev.tracedecay.cli`. The linker default identifier is the hashed deps
+# filename (`tracedecay-<hash>`). Release strip runs after the link and
+# writes that filename back into the ad-hoc signature. This runs on the
+# final file, after that strip, and embeds
+# `designated => identifier "dev.tracedecay.cli"`. A Developer ID or other
+# team signature is preserved.
 TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER=dev.tracedecay.cli
 
-# Re-sign `target` when it is an unsigned or ad-hoc Mach-O. No-op off Darwin
-# and for non-Mach-O files (the Linux installer tests install a shell fixture).
+# Re-sign `target` when it is an unsigned or ad-hoc Mach-O whose designated
+# requirement is not the stable identifier. No-op off Darwin and for
+# non-Mach-O files (the Linux installer tests install a shell fixture).
 stabilize_macos_adhoc_identity() {
   local target=$1
   if [[ ${TRACEDECAY_ASSUME_DARWIN:-} != 1 && "$(uname -s)" != Darwin ]]; then
@@ -25,8 +31,10 @@ stabilize_macos_adhoc_identity() {
     feedfacf | cffaedfe | feedface | cefaedfe | cafebabe | bebafeca | cafebabf | bfbafeca) ;;
     *) return 0 ;;
   esac
-  local report ident team
-  report=$(codesign -dv --verbose=2 "$target" 2>&1 || true)
+  local report ident team designated
+  # `-r-` prints `designated => ...`. `-dv` does not, so a cdhash requirement
+  # is invisible there.
+  report=$(codesign -d --verbose=2 -r- "$target" 2>&1 || true)
   if printf '%s\n' "$report" | grep -q '^Authority='; then
     return 0
   fi
@@ -35,10 +43,18 @@ stabilize_macos_adhoc_identity() {
     return 0
   fi
   ident=$(printf '%s\n' "$report" | sed -n 's/^Identifier=//p' | head -n 1)
-  if [[ $ident == "$TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER" ]]; then
+  designated=$(printf '%s\n' "$report" | sed -n 's/^designated => //p' | head -n 1)
+  if [[ $ident == "$TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER" \
+    && $designated == "identifier \"${TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER}\"" ]]; then
     return 0
   fi
-  codesign --force --sign - --identifier "$TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER" "$target"
+  # `-r=designated => ...` is one argument. The `=` is both how the short
+  # option takes its value and the marker that the value is requirement
+  # text rather than a path.
+  codesign --force --sign - \
+    --identifier "$TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER" \
+    -r="designated => identifier \"${TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER}\"" \
+    "$target"
 }
 
 # The macOS link wrapper sources this file to reuse the function above.

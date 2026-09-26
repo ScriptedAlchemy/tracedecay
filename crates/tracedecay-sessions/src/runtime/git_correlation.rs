@@ -1210,29 +1210,28 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 
 mod attribution;
 mod backfill;
+mod convergence;
 mod publication_outbox;
 mod store;
 #[cfg(test)]
 pub(crate) use attribution::publish_graph_evidence_controlled;
 pub use attribution::{
-    CommitAttributionSweepOutcome, ScannedCommit, SpanScanTarget, SpanWindow, TargetScan,
-    commit_overlap_kind, graph_evidence_publication_key, match_commit_to_spans,
-    publish_graph_evidence, publish_transcript_graph_evidence, rebuild_pre_index_git_evidence,
-    run_commit_attribution_sweep,
+    ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
+    graph_evidence_publication_key, match_commit_to_spans, publish_graph_evidence,
+    publish_transcript_graph_evidence, rebuild_pre_index_git_evidence,
 };
+pub use backfill::run_backfill;
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
-    BoundedBackfillOutcome, BoundedGitControl, BranchTimelineEntry,
-    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitHistoryIndexFrontier, GitReflogSource,
-    IncrementalBackfillOutcome, SessionActivityRow, SystemGit, WindowBranchSegment,
+    BoundedBackfillOutcome, BoundedGitControl, BranchTimelineEntry, GitHistoryIndexFrontier,
+    GitReflogSource, SessionActivityRow, SystemGit, WindowBranchSegment,
     branch_timeline_from_reflog, git_commit_reference_exists, parse_commit_log,
-    run_bounded_history_index_page, run_incremental_backfill_outcome, window_branch_segments,
+    run_bounded_history_index_page, window_branch_segments,
 };
-pub use backfill::{run_backfill, run_incremental_backfill};
+pub use convergence::{GitEvidencePass, GitEvidencePassOutcome, converge_git_evidence_pass};
 pub use publication_outbox::{
-    DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT, GitEvidencePublicationReplayOutcome,
     enqueue_git_evidence_publication, pending_git_evidence_publication_count,
-    replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
+    replay_pending_git_evidence_publications,
 };
 pub use store::{
     AnalyticsSessionTimestamp, AnalyticsSessionTimestampSource, GitCorrelationSessionStore,

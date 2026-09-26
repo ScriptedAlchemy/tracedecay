@@ -483,7 +483,9 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
             .records
             .get(&request.publication_key)
             .cloned()
-            .ok_or(GraphPublicationStoreErrorV1::Infrastructure)?;
+            .ok_or_else(|| {
+                GraphPublicationStoreErrorV1::Infrastructure("unstaged test publication".to_owned())
+            })?;
         if self.heads.get(&request.publication_key.projection)
             != request.expected_prior_head.as_ref()
         {

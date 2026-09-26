@@ -18,7 +18,7 @@ use super::auth::{
 use super::capture_protocol::RemoteCaptureRequestV1;
 use super::protocol::{EnrollmentRequestV1, RemoteProtocolBodyV1, RemoteProtocolRequestV1};
 use super::query::RemoteQueryRequestV1;
-use super::recovery::{BackupRequestV1, PromotionConfirmationV1, StagedRestoreConfirmationV1};
+use super::recovery::PromotionConfirmationV1;
 use super::replay::RemoteReplayRequestV1;
 use super::transfer::RemoteFrameTransferRequestV1;
 
@@ -37,8 +37,6 @@ pub enum RemoteCredentialUseV1 {
     TransferFrame,
     Replay,
     Query,
-    CreateBackup,
-    PublishRestore,
     Promote,
 }
 
@@ -51,8 +49,6 @@ impl RemoteCredentialUseV1 {
             | Self::TransferFrame
             | Self::Replay
             | Self::Query
-            | Self::CreateBackup
-            | Self::PublishRestore
             | Self::Promote => RemoteCredentialClassV1::Enrollment,
         }
     }
@@ -65,8 +61,6 @@ impl RemoteCredentialUseV1 {
             Self::TransferFrame => Some(RemoteCapabilityV1::TransferFrame),
             Self::Replay => Some(RemoteCapabilityV1::Replay),
             Self::Query => Some(RemoteCapabilityV1::Query),
-            Self::CreateBackup => Some(RemoteCapabilityV1::CreateBackup),
-            Self::PublishRestore => Some(RemoteCapabilityV1::PublishRestore),
             Self::Promote => Some(RemoteCapabilityV1::Promote),
         }
     }
@@ -327,48 +321,6 @@ impl RemoteAuthenticatedSessionV1 {
         Ok(())
     }
 
-    pub fn bind_backup(
-        &self,
-        request: &RemoteProtocolRequestV1<BackupRequestV1>,
-    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
-        self.bind_protocol(request)?;
-        request
-            .body
-            .validate(request.sent_at.0)
-            .map_err(|_| RemoteCredentialAdmissionErrorV1::BindingMismatch)?;
-        if self.use_case != RemoteCredentialUseV1::CreateBackup
-            || request.body.expected.brain_id != self.record.brain_id().as_str()
-            || !request
-                .expected_authority
-                .as_ref()
-                .is_some_and(|writer| request.body.expected.matches_writer(writer))
-        {
-            return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
-        }
-        Ok(())
-    }
-
-    pub fn bind_restore_publication(
-        &self,
-        request: &RemoteProtocolRequestV1<StagedRestoreConfirmationV1>,
-    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
-        self.bind_protocol(request)?;
-        request
-            .body
-            .validate(request.sent_at.0)
-            .map_err(|_| RemoteCredentialAdmissionErrorV1::BindingMismatch)?;
-        if self.use_case != RemoteCredentialUseV1::PublishRestore
-            || !request.expected_authority.as_ref().is_some_and(|writer| {
-                writer.brain_id == *self.record.brain_id()
-                    && writer.authority_epoch.0 == request.body.expected_authority_epoch
-                    && writer.placement_revision.get() == request.body.expected_placement_revision
-            })
-        {
-            return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
-        }
-        Ok(())
-    }
-
     pub fn bind_promotion(
         &self,
         request: &RemoteProtocolRequestV1<PromotionConfirmationV1>,
@@ -503,37 +455,6 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteQueryRequestV1 {
     }
 }
 
-impl RemoteSessionBoundProtocolBodyV1 for BackupRequestV1 {
-    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::CreateBackup;
-
-    fn execution_expires_at(&self) -> Option<UtcMicros> {
-        Some(UtcMicros(self.expires_at_micros))
-    }
-
-    fn bind_authenticated_session(
-        session: &RemoteAuthenticatedSessionV1,
-        request: &RemoteProtocolRequestV1<Self>,
-    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
-        session.bind_backup(request)
-    }
-}
-
-impl RemoteSessionBoundProtocolBodyV1 for StagedRestoreConfirmationV1 {
-    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::PublishRestore;
-    const REAUTHORIZE_BEFORE_EXECUTION: bool = true;
-
-    fn execution_expires_at(&self) -> Option<UtcMicros> {
-        Some(UtcMicros(self.expires_at_micros))
-    }
-
-    fn bind_authenticated_session(
-        session: &RemoteAuthenticatedSessionV1,
-        request: &RemoteProtocolRequestV1<Self>,
-    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
-        session.bind_restore_publication(request)
-    }
-}
-
 impl RemoteSessionBoundProtocolBodyV1 for PromotionConfirmationV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Promote;
     const REAUTHORIZE_BEFORE_EXECUTION: bool = true;
@@ -654,9 +575,7 @@ where
     ) -> Result<RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionErrorV1> {
         if !matches!(
             session.use_case,
-            RemoteCredentialUseV1::PublishRestore
-                | RemoteCredentialUseV1::TransferFrame
-                | RemoteCredentialUseV1::Promote
+            RemoteCredentialUseV1::TransferFrame | RemoteCredentialUseV1::Promote
         ) {
             return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
         }
@@ -770,7 +689,7 @@ mod tests {
             capabilities: BTreeSet::from([
                 RemoteCapabilityV1::Replay,
                 RemoteCapabilityV1::Query,
-                RemoteCapabilityV1::PublishRestore,
+                RemoteCapabilityV1::TransferFrame,
             ]),
             scope: scope(),
         }
@@ -885,7 +804,7 @@ mod tests {
         let wrong_route_session = service
             .admit_before_body(
                 &presented,
-                RemoteCredentialUseV1::PublishRestore,
+                RemoteCredentialUseV1::TransferFrame,
                 UtcMicros(20),
             )
             .unwrap();
@@ -987,7 +906,7 @@ mod tests {
         let session = service
             .admit_before_body(
                 &presented,
-                RemoteCredentialUseV1::PublishRestore,
+                RemoteCredentialUseV1::TransferFrame,
                 UtcMicros(20),
             )
             .unwrap();

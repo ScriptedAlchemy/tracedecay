@@ -80,7 +80,7 @@ fn domain_symbol_rules_warning_is_silent_without_the_file() {
     let project = tempfile::tempdir().expect("temp project root");
     assert_eq!(domain_symbol_rules_warning(project.path()), None);
 
-    std::fs::create_dir_all(tracedecay_project::config::get_tracedecay_dir(
+    std::fs::create_dir_all(tracedecay_runtime_core::config::get_tracedecay_dir(
         project.path(),
     ))
     .expect("create project marker dir");

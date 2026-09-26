@@ -14,7 +14,7 @@ use tracedecay_domain::{
     RepositoryId, SourceSpan, SymbolOccurrenceId, WorktreeId,
 };
 
-use crate::code_index_freshness::CodeIndexStalenessStateV1;
+use crate::code_index_freshness::{CodeIndexConvergenceParkedV1, CodeIndexStalenessStateV1};
 use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
 pub const MAX_REDUNDANCY_FAMILIES_V1: u32 = 100;
@@ -101,6 +101,10 @@ pub struct PrimitiveIndexingStateV1 {
     pub stale_lanes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The park holding convergence until the operator applies its remedy.
+    /// No wake retries it, so repeating the request cannot change the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<CodeIndexConvergenceParkedV1>,
 }
 
 /// Freshness verdict carried by every search and context response. `indexing`
@@ -900,6 +904,7 @@ mod tests {
                 rebuild_in_flight: Some(true),
                 stale_lanes: vec!["lexical".to_owned()],
                 reason: None,
+                parked: None,
             }),
         };
         let stale = serde_json::to_value(stale).expect("context result serializes");

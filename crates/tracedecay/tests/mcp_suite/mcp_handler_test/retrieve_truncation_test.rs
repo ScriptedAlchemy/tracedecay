@@ -59,14 +59,13 @@ async fn retrieve_tool_returns_full_stored_response() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let original = "{\"items\":[{\"id\":1,\"name\":\"alpha\"}]}";
     let stored = tracedecay_mcp::response_handles::store_response_handle(
-        cg.project_root(),
+        &cg.store_layout().response_handle_root,
         original,
         tracedecay_runtime_core::tracedecay::current_timestamp(),
     )
     .unwrap();
 
-    let response_handle_root =
-        tracedecay_runtime_core::storage::resolve_response_handle_root(cg.project_root()).unwrap();
+    let response_handle_root = &cg.store_layout().response_handle_root;
     let stored_payload: Value = serde_json::from_str(
         &fs::read_to_string(response_handle_root.join(format!("{}.json", stored.handle))).unwrap(),
     )
@@ -138,7 +137,7 @@ async fn retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_fra
 
     for original in cases {
         let stored = tracedecay_mcp::response_handles::store_response_handle(
-            cg.project_root(),
+            &cg.store_layout().response_handle_root,
             &original,
             tracedecay_runtime_core::tracedecay::current_timestamp(),
         )
@@ -195,7 +194,7 @@ async fn retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_fra
 async fn retrieve_offset_beyond_content_returns_typed_reason() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let stored = tracedecay_mcp::response_handles::store_response_handle(
-        cg.project_root(),
+        &cg.store_layout().response_handle_root,
         "short",
         tracedecay_runtime_core::tracedecay::current_timestamp(),
     )
@@ -252,7 +251,7 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
     );
 
     let expired = tracedecay_mcp::response_handles::store_response_handle(
-        cg.project_root(),
+        &cg.store_layout().response_handle_root,
         "{\"items\":[42]}",
         tracedecay_runtime_core::tracedecay::current_timestamp()
             - tracedecay_mcp::response_handles::RESPONSE_HANDLE_TTL_SECS
@@ -288,13 +287,12 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
             .contains("Re-run the original MCP tool")
     );
 
-    let identity_path =
-        tracedecay_runtime_core::storage::repository_identity_path(cg.project_root()).unwrap();
-    fs::write(
-        &identity_path,
-        r#"{"schema_version":1,"project_id":"../operator-private"}"#,
-    )
-    .unwrap();
+    // An unreadable record fails closed without disclosing local paths.
+    let unreadable = cg
+        .store_layout()
+        .response_handle_root
+        .join("rh_0123456789abcdef01234567.json");
+    fs::create_dir_all(&unreadable).unwrap();
     let unavailable = handle_tool_call(
         &cg,
         "tracedecay_retrieve",
@@ -303,11 +301,11 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
         None,
     )
     .await
-    .expect_err("invalid storage identity must fail closed");
+    .expect_err("an unreadable handle record must fail closed");
     let public = unavailable.to_string();
     assert!(public.contains("response-handle cache is unavailable"));
     assert!(!public.contains(cg.project_root().to_string_lossy().as_ref()));
-    assert!(!public.contains(identity_path.to_string_lossy().as_ref()));
+    assert!(!public.contains(unreadable.to_string_lossy().as_ref()));
 }
 
 #[cfg(feature = "test-transport")]

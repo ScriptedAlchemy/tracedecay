@@ -6,6 +6,40 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
+    fn every_retired_checkout_layout_file_is_a_typed_project_store_reset() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        for name in ["enrollment.json", "config.json", "tracedecay.db"] {
+            let dir = tempfile::tempdir().unwrap();
+            let checkout_dir = dir.path().join(".tracedecay");
+            refuse_retired_checkout_layout(dir.path()).unwrap();
+            fs::create_dir_all(&checkout_dir).unwrap();
+            fs::write(checkout_dir.join("domain-symbols.toml"), "").unwrap();
+            refuse_retired_checkout_layout(dir.path()).unwrap();
+
+            fs::write(checkout_dir.join(name), "{}").unwrap();
+            let error = refuse_retired_checkout_layout(dir.path()).unwrap_err();
+
+            let (authority, reason) = error.reset_required_context().unwrap();
+            assert_eq!(authority, "project store", "{name}");
+            assert!(reason.contains(&checkout_dir.display().to_string()), "{reason}");
+            assert_eq!(retired_checkout_layout_dir(dir.path()), Some(checkout_dir));
+        }
+    }
+
+    #[test]
+    fn the_profile_root_is_never_a_retired_checkout_layout() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile_root = crate::config::user_data_dir().unwrap();
+        assert_eq!(
+            profile_root.file_name(),
+            Some(std::ffi::OsStr::new(crate::config::TRACEDECAY_DIR))
+        );
+        fs::write(profile_root.join("enrollment.json"), "{}").unwrap();
+
+        refuse_retired_checkout_layout(profile_root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn repository_marker_keeps_the_existing_store_when_fallback_identity_differs() {
         let dir = tempfile::tempdir().unwrap();
         let project_root = dir.path().join("repo");
@@ -472,33 +506,5 @@ mod tests {
         // The file must still be openable for a further append after the cycle.
         PrivateStoreIo::append_line(&path, "{\"a\":3}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
-    }
-
-    /// A response handle never decides that a directory is a project: an
-    /// unenrolled checkout resolves to the profile-wide root and mints no
-    /// `projects/proj_<hash>/` shard; an enrolled one keeps its own shard.
-    #[test]
-    fn response_handle_root_never_mints_a_shard_for_an_unenrolled_checkout() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = default_profile_root().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let project_root = project.path().canonicalize().unwrap();
-
-        let root = resolve_response_handle_root(&project_root).unwrap();
-        assert_eq!(root, profile_root.join(RESPONSE_HANDLES_DIRECTORY));
-        assert!(
-            !profile_root.join("projects").exists(),
-            "resolving a response-handle root must not create a project shard"
-        );
-
-        pin_fixture_repository_identity(&project_root, "proj_response_handles").unwrap();
-        let enrolled = resolve_response_handle_root(&project_root).unwrap();
-        assert_eq!(
-            enrolled,
-            resolve_layout_for_current_profile(&project_root)
-                .unwrap()
-                .response_handle_root
-        );
-        assert!(enrolled.starts_with(profile_root.join("projects")));
     }
 }

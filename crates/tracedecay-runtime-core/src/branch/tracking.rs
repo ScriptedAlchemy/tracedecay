@@ -290,10 +290,7 @@ pub async fn prepare_branch_tracking_in_layout(
                     ),
                 }
             })?;
-            (
-                branch_meta::BranchMeta::new_for_dir(tracedecay_dir, &default),
-                true,
-            )
+            (branch_meta::BranchMeta::new(&default), true)
         }
     };
 
@@ -384,17 +381,11 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
     assert_eq!(meta.default_branch, "main");
     assert_eq!(meta.branches.len(), 1);
     let default = meta.branches.get("main").unwrap();
-    assert_eq!(default.db_file, crate::config::db_filename(&data_dir));
+    assert_eq!(default.db_file, crate::config::DB_FILENAME);
     assert!(default.parent.is_none());
     assert!(default.created_at.parse::<u64>().unwrap() > 0);
     assert_eq!(default.last_synced_at, default.created_at);
     assert!(!meta_path.with_extension("json.tmp").exists());
-}
-
-pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
-    // Load-modify-save under the shared branch lock; the preparation no
-    // longer holds it across the sync.
-    crate::branch_meta::update_synced_timestamp(tracedecay_dir, &prepared.branch_name);
 }
 
 #[hotpath::measure(label = "runtime_core.branch.rollback_prepared")]

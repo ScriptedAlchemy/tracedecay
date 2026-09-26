@@ -42,7 +42,6 @@ mod multi_root_scope_set_cas_mcp;
 mod ownership;
 mod profile_retained;
 mod remote_project_deletion;
-mod remote_project_recovery;
 mod replay;
 mod restart_proxy;
 mod rmcp_route;
@@ -290,10 +289,7 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
         .expect("install test daemon profile worker plan");
     engine
         .store_administration
-        .install_remote_recovery_project_lifecycle(
-            engine.invocation.clone(),
-            Arc::clone(&engine.project_open_gates),
-        )
+        .install_remote_recovery_project_lifecycle()
         .unwrap();
     engine
 }

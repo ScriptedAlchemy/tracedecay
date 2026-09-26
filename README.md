@@ -249,13 +249,22 @@ cargo check --no-default-features
 cargo clippy --workspace --all-targets
 ```
 
-On macOS those links ad-hoc sign `tracedecay` as `dev.tracedecay.cli`.
-macOS TCC keys removable-volume and file grants on that identifier; the
-linker default (`tracedecay-<hash>`) changes every build and re-prompts,
-and the daemon blocks in `open()` until the prompt is answered. `install.sh`
-and `tracedecay update` apply the same identity after the archive checksum
-check when the binary is unsigned or only ad-hoc signed. A Developer ID or
-other team signature is left as published.
+On macOS `tracedecay` is ad-hoc signed as `dev.tracedecay.cli` with
+designated requirement `identifier "dev.tracedecay.cli"`. macOS TCC keys
+removable-volume and file grants on that requirement. The default ad-hoc
+requirement is the binary's cdhash, so an Allow does not survive the next
+rebuild; the linker default identifier (`tracedecay-<hash>`) changes every
+build as well, and the daemon blocks in `open()` until the prompt is
+answered. A release build strips after linking, which mints that identifier
+again from the deps filename; the workspace rustc wrapper signs the product
+once rustc has finished, so `cargo build --release` and
+`cargo install --path crates/tracedecay-cli` keep the stable identity on
+the binary cargo copies into place. `install.sh` and `tracedecay update`
+apply the same identity to the installed file after the archive checksum
+check when the binary is unsigned or ad-hoc signed, including an ad-hoc
+signature whose identifier already matches but whose requirement is still
+a cdhash. A Developer ID or other team signature is left as published.
+Release jobs do not Apple-sign.
 
 ## Docs
 

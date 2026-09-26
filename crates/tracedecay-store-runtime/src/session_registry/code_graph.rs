@@ -30,9 +30,6 @@ use tracedecay_store::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
-use tracedecay_code_index_retention::code_index_generations::{
-    acquire_generation_segments_publication_lock, code_generation_segments_root,
-};
 use tracedecay_code_index_runtime::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
@@ -42,8 +39,6 @@ pub(super) use memory_runtime::{
     MemoryGraphRuntimeTaskContext, inline_graph_publication_input_digest,
 };
 pub(super) mod graph_attachment;
-#[cfg(test)]
-mod linked_bundle_tests;
 #[cfg(test)]
 mod sealed_publication_tests;
 mod seals;
@@ -330,6 +325,72 @@ impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
     }
 }
 
+/// Superseded-replay retirement commits once per retired replay and once per
+/// cleanup finalization. A request probe grants exactly one commit, which the
+/// publish that installed the head has already spent, so retirement runs
+/// under its own probe that admits each commit while it is uninterrupted.
+struct GraphRetirementProbeV1(GraphPublicationProbeV1);
+
+impl GraphRetirementProbeV1 {
+    fn new(
+        stage: &str,
+        projection: &GraphProjectionIdentityV1,
+        request_cancellation: Arc<dyn GraphCancellation>,
+        lifecycle_cancellation: Arc<dyn GraphCancellation>,
+        deadline_at: Instant,
+    ) -> std::result::Result<(RuntimeRequestControlV1, Self), GraphDbError> {
+        let label = format!("{stage}:{}", projection.projection.as_str());
+        let cancellation = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new(format!("graph-retire:{label}"))
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            generation: 1,
+        };
+        let deadline = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new(format!("graph-retire-deadline:{label}"))
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let control = RuntimeRequestControlV1 {
+            requested_at: tracedecay_contracts::clock::now_micros(),
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
+        };
+        Ok((
+            control,
+            Self(GraphPublicationProbeV1 {
+                request_cancellation,
+                lifecycle_cancellation,
+                deadline_at,
+                cancellation,
+                deadline,
+                commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
+            }),
+        ))
+    }
+}
+
+impl RuntimeRequestProbeV1 for GraphRetirementProbeV1 {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        self.0.cancellation_identity()
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        self.0.deadline_identity()
+    }
+
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        self.0.interruption()
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.0.interruption().is_none()
+    }
+
+    fn requires_isolated_commit(&self) -> bool {
+        true
+    }
+}
+
 struct CombinedAtomicGraphCancellationV1 {
     local: Arc<AtomicBool>,
     registry: Option<Arc<AtomicBool>>,
@@ -568,15 +629,26 @@ fn retire_superseded_replays(
     graph_registry: &tracedecay_graph_db::GraphDbRegistry,
     registration: GraphDbRegistration,
     storage: &mut dyn GraphPublicationStoreV1,
-    context: &GraphPublicationOperationContextV1<'_>,
     projection: &GraphProjectionIdentityV1,
 ) {
-    match graph_registry.retire_superseded_projection_replays(
-        registration,
-        storage,
-        context,
+    let retirement = GraphRetirementProbeV1::new(
+        stage,
         projection,
-    ) {
+        Arc::clone(&registration.cancellation),
+        Arc::clone(&registration.lifecycle_cancellation),
+        registration.deadline,
+    )
+    .and_then(|(control, probe)| {
+        let context = GraphPublicationOperationContextV1::new(&control, &probe)
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        graph_registry.retire_superseded_projection_replays(
+            registration,
+            storage,
+            &context,
+            projection,
+        )
+    });
+    match retirement {
         Ok(receipt) if receipt == tracedecay_graph_db::SupersededReplayRetirement::default() => {
             tracing::debug!(
                 event = "graph_superseded_replays_clean",
@@ -1042,14 +1114,25 @@ impl RetainedVerifiedGraphRuntimeV1 {
         // projection. Inline manifests have no code-index owner whose
         // retention would ever reclaim them, so this publish is their only
         // retirement path.
-        match self
-            .graph_registry
-            .retire_superseded_projection_replays_with_lease(
-                &graph,
-                &mut storage,
-                &context,
-                &relational_projection,
-            ) {
+        let retirement = GraphRetirementProbeV1::new(
+            "publish-manifest",
+            &relational_projection,
+            Arc::clone(&request_cancellation),
+            graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
+            deadline_at,
+        )
+        .and_then(|(control, probe)| {
+            let context = GraphPublicationOperationContextV1::new(&control, &probe)
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            self.graph_registry
+                .retire_superseded_projection_replays_with_lease(
+                    &graph,
+                    &mut storage,
+                    &context,
+                    &relational_projection,
+                )
+        });
+        match retirement {
             Ok(receipt)
                 if receipt != tracedecay_graph_db::SupersededReplayRetirement::default() =>
             {
@@ -1224,29 +1307,6 @@ impl RetainedCodeGraphRuntimeV1 {
         self
     }
 
-    /// Drops aborted catalog/manifest staging files for this sealed digest.
-    /// A retry must not inherit another attempt's `.read-bundle-*.tmp` scratch.
-    #[hotpath::measure(label = "daemon.session_registry.sweep_read_bundle_temporaries")]
-    pub fn sweep_aborted_read_bundle_temporaries(&self) -> std::result::Result<(), GraphDbError> {
-        tracedecay_graph_db::sweep_aborted_sealed_read_bundle_temporaries(
-            &self.generations_root,
-            &self.read_bundle_artifacts_root()?,
-            &self.sealed_state_digest,
-        )
-    }
-
-    fn code_store_root(&self) -> std::result::Result<&std::path::Path, GraphDbError> {
-        self.generations_root
-            .parent()
-            .ok_or_else(|| GraphDbError::unavailable("code generations root has no store root"))
-    }
-
-    /// Bundle artifacts live beside the generation segments that every
-    /// worktree scope of the project shares, so identical graphs store one.
-    fn read_bundle_artifacts_root(&self) -> std::result::Result<std::path::PathBuf, GraphDbError> {
-        Ok(code_generation_segments_root(self.code_store_root()?))
-    }
-
     #[hotpath::measure(label = "daemon.session_registry.publish_snapshot")]
     pub fn publish_verified_snapshot(
         &self,
@@ -1258,7 +1318,6 @@ impl RetainedCodeGraphRuntimeV1 {
                 "code_graph.publish_verified_snapshot_with_stage_boundary",
             ));
         }
-        self.sweep_aborted_read_bundle_temporaries()?;
         // The project-shard build permit is claimed before manifest
         // projection and held through publication so 1/2/4/8 worktree scopes
         // cannot overlap corpus-sized transients. Same-generation seat and
@@ -1753,7 +1812,6 @@ impl RetainedCodeGraphRuntimeV1 {
                     &graph_registry,
                     registration,
                     &mut storage,
-                    &context,
                     &projection,
                 );
                 Ok(outcome)
@@ -2121,11 +2179,6 @@ impl RetainedCodeGraphRuntimeV1 {
                 // Hashing already ran without the pool lock. Release before
                 // materialization so retention/replay cleanup can proceed.
                 drop(replay_pool_lock);
-                // Seal-time bundle: stage from the in-hand rows before the
-                // publish consumes them, commit only after it succeeds.
-                let bundle_identity = prepared.manifest.identity();
-                let staged_bundle =
-                    self.stage_sealed_read_bundle(&prepared.manifest, &prepared.request_cancelled);
                 match observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::ActiveReplayPublish,
                     publish(
@@ -2135,7 +2188,6 @@ impl RetainedCodeGraphRuntimeV1 {
                     ),
                 ) {
                     Ok(publication) => {
-                        self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
                         *staging_release = Some(prepared.relational_projection.clone());
                         return Ok(publication.snapshot);
                     }
@@ -2146,7 +2198,6 @@ impl RetainedCodeGraphRuntimeV1 {
                     // and its partial contents, then republish fresh through
                     // the append path below, that is what restores service.
                     Err(conflict @ GraphDbError::Conflict { .. }) => {
-                        drop(staged_bundle);
                         let pending = match storage
                             .replay(&prepared.publication_key, context)
                             .map_err(GraphDbError::from)?
@@ -2329,11 +2380,6 @@ impl RetainedCodeGraphRuntimeV1 {
             }
         }
         drop(replay_pool_lock);
-        // Seal-time bundle: stage from the in-hand rows before the publish
-        // consumes them, commit only after it succeeds.
-        let bundle_identity = prepared.manifest.identity();
-        let staged_bundle =
-            self.stage_sealed_read_bundle(&prepared.manifest, &prepared.request_cancelled);
         let publication = observe_code_graph_publication(
             CodeGraphPublicationConflictStageV1::FinalPublish,
             publish(
@@ -2342,144 +2388,8 @@ impl RetainedCodeGraphRuntimeV1 {
                 Some(Arc::clone(&prepared.manifest)),
             ),
         )?;
-        self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
         *staging_release = Some(prepared.relational_projection.clone());
         Ok(publication.snapshot)
-    }
-
-    /// Loads this generation's interactive-catalog bundle artifact, verified
-    /// against the generation identity through the sealed read bundle
-    /// envelope. `Absent` and `Stale` are typed states the caller must log
-    /// before falling back to open-time re-derivation.
-    pub fn load_sealed_read_bundle_catalog(
-        &self,
-        request_cancelled: &Arc<AtomicBool>,
-    ) -> std::result::Result<tracedecay_graph_db::SealedReadBundleArtifactStateV1, GraphDbError>
-    {
-        let identity = tracedecay_code_index::graph_projection::code_graph_manifest_identity(
-            self.authority.namespace().clone(),
-            &self.generation_id,
-            &GraphProjectorRevision::try_from(
-                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
-            )?,
-        )
-        .map_err(map_code_graph_error)?;
-        let cancellation = CombinedAtomicGraphCancellationV1 {
-            local: Arc::clone(request_cancelled),
-            registry: Some(Arc::clone(&self.lifecycle_cancelled)),
-        };
-        tracedecay_graph_db::load_sealed_read_bundle_artifact(
-            &self.generations_root,
-            &self.read_bundle_artifacts_root()?,
-            &self.sealed_state_digest,
-            &identity,
-            tracedecay_code_index::graph_projection::INTERACTIVE_CATALOG_ARTIFACT_NAME,
-            &|| {
-                if cancellation.is_cancelled() {
-                    Err(GraphDbError::Cancelled)
-                } else {
-                    Ok(())
-                }
-            },
-        )
-    }
-
-    /// Stages the sealed read bundle's artifacts from the manifest rows the
-    /// seal already holds, before publication consumes them. Streaming to a
-    /// staged temporary file keeps the derivation out of the publish RAM
-    /// peak; nothing becomes visible until [`Self::commit_sealed_read_bundle`]
-    /// runs after the publication succeeds. A staging failure is logged and
-    /// degrades to the open-time re-derivation fallback, it never fails the
-    /// seal itself.
-    fn stage_sealed_read_bundle(
-        &self,
-        manifest: &GraphGenerationManifest,
-        request_cancelled: &Arc<AtomicBool>,
-    ) -> Option<tracedecay_graph_db::SealedReadBundleWriterV1> {
-        let cancellation = CombinedAtomicGraphCancellationV1 {
-            local: Arc::clone(request_cancelled),
-            registry: Some(Arc::clone(&self.lifecycle_cancelled)),
-        };
-        let stage = || {
-            self.sweep_aborted_read_bundle_temporaries()?;
-            let artifacts_root = self.read_bundle_artifacts_root()?;
-            std::fs::create_dir_all(&artifacts_root).map_err(|error| {
-                GraphDbError::unavailable(format!(
-                    "failed to create the sealed read bundle artifact root: {error}"
-                ))
-            })?;
-            let mut writer = tracedecay_graph_db::SealedReadBundleWriterV1::create(
-                &self.generations_root,
-                &artifacts_root,
-                &self.sealed_state_digest,
-            )?;
-            writer.stage_artifact(
-                tracedecay_code_index::graph_projection::INTERACTIVE_CATALOG_ARTIFACT_NAME,
-                &mut |out| {
-                    tracedecay_code_index::graph_projection::write_interactive_catalog_artifact(
-                        manifest,
-                        out,
-                        &cancellation,
-                    )
-                    .map_err(|error| GraphDbError::unavailable(error.to_string()))
-                },
-            )?;
-            Ok::<_, GraphDbError>(writer)
-        };
-        match stage() {
-            Ok(writer) => Some(writer),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    generation = %self.generation_id,
-                    "sealed read bundle staging failed; open will re-derive the interactive catalog"
-                );
-                None
-            }
-        }
-    }
-
-    /// Commits a staged sealed read bundle after its generation's publication
-    /// succeeded. Commit failure degrades to the logged open-time fallback.
-    fn commit_sealed_read_bundle(
-        &self,
-        writer: Option<tracedecay_graph_db::SealedReadBundleWriterV1>,
-        identity: &tracedecay_graph_db::GraphGenerationManifestIdentity,
-    ) {
-        let Some(writer) = writer else {
-            return;
-        };
-        let cancelled = || self.lifecycle_cancelled.load(Ordering::Acquire);
-        let commit = || {
-            // A placed artifact is unreferenced until its manifest lands; the
-            // shared lock keeps the project's segment sweep out until then.
-            let _segments_lock =
-                acquire_generation_segments_publication_lock(self.code_store_root()?, &cancelled)
-                    .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-            writer.commit(identity, &|| {
-                if cancelled() {
-                    Err(GraphDbError::Cancelled)
-                } else {
-                    Ok(())
-                }
-            })
-        };
-        match commit() {
-            Ok(manifest) => {
-                tracing::info!(
-                    generation = %self.generation_id,
-                    artifacts = manifest.artifacts.len(),
-                    "sealed read bundle written at seal"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    generation = %self.generation_id,
-                    "sealed read bundle commit failed; open will re-derive the interactive catalog"
-                );
-            }
-        }
     }
 
     fn relational_projection(
@@ -2816,7 +2726,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 &graph_registry,
                 registration.clone(),
                 &mut storage,
-                &context,
                 &projection,
             );
             let outcome = graph_registry.release_sealed_generation_staging_rows(
@@ -3062,12 +2971,6 @@ impl DaemonSessionRuntimeRegistryV1 {
 }
 
 impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
-    fn sweep_aborted_read_bundle_temporaries(
-        &self,
-    ) -> std::result::Result<(), tracedecay_graph_db::GraphDbError> {
-        Self::sweep_aborted_read_bundle_temporaries(self)
-    }
-
     fn authority(
         &self,
     ) -> Arc<tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1> {
@@ -3103,16 +3006,6 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
         tracedecay_graph_db::GraphDbError,
     > {
         Self::recover_verified_generation(self, request_cancelled)
-    }
-
-    fn load_sealed_read_bundle_catalog(
-        &self,
-        request_cancelled: &Arc<AtomicBool>,
-    ) -> std::result::Result<
-        tracedecay_graph_db::SealedReadBundleArtifactStateV1,
-        tracedecay_graph_db::GraphDbError,
-    > {
-        Self::load_sealed_read_bundle_catalog(self, request_cancelled)
     }
 }
 

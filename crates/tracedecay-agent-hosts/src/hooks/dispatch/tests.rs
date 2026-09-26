@@ -925,10 +925,7 @@ fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
     let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         &project_root,
         &tracedecay_runtime_core::storage::default_profile_root().unwrap(),
-        &tracedecay_runtime_core::storage::EnrollmentMarker {
-            project_id: "proj_hook_binding_contention".to_owned(),
-            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-        },
+        "proj_hook_binding_contention",
     )
     .unwrap();
     fn contention_scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {

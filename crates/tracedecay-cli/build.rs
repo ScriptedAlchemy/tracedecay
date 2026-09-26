@@ -87,7 +87,7 @@ impl EmbeddedDashboard {
 /// differs from the recorded one. This script never installs dependencies.
 /// `pnpm install` owns them, together with the Cargo sources this build
 /// compiles, and `pnpm run` (`verifyDepsBeforeRun: error`) refuses to build
-/// against a tree that no longer matches `pnpm-lock.yaml`. When
+/// against a `node_modules` tree that no longer matches `pnpm-lock.yaml`. When
 /// `TRACEDECAY_SKIP_DASHBOARD_BUILD` is set the prebuilt `dashboard/app-dist`
 /// is staged instead and must match the digest
 /// `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` names, so a skip can never embed

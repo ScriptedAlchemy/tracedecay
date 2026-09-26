@@ -12,7 +12,6 @@ use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::path_safety::canonical_root_identity;
-use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
 /// Creates a temporary Rust project and returns a direct protocol server.
 ///
@@ -123,8 +122,7 @@ pub(crate) fn spec_initialize_request(id: Value) -> String {
 }
 
 pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
-    resolve_response_handle_root(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
+    cg.store_layout().response_handle_root.clone()
 }
 
 pub(crate) fn jsonrpc_notification(method: &str) -> String {

@@ -42,7 +42,6 @@ pub struct PreparedCodeLexicalArtifactPageV1 {
     pub(super) import_dictionary_digest: ManifestDigest,
     pub(super) previous_cursor: Option<Vec<u8>>,
     pub(super) next_cursor: Vec<u8>,
-    pub(super) imports: Vec<PreparedImportV1>,
     pub(super) clone_bodies: Vec<PreparedCloneBodyV1>,
     pub(super) documents: Vec<PreparedDocumentV1>,
     /// The page's rows as stored blocks keyed by their first document.
@@ -112,12 +111,6 @@ impl PreparedCodeLexicalArtifactPageV1 {
                 )
             })
     }
-}
-
-#[derive(Debug)]
-pub(super) struct PreparedImportV1 {
-    pub(super) canonical: Vec<u8>,
-    pub(super) integrity_digest: ManifestDigest,
 }
 
 #[derive(Debug)]
@@ -241,17 +234,6 @@ pub(super) fn prepare_page(
         documents.push(prepared);
         texts.push(text);
     }
-    let mut imports = Vec::with_capacity(page.imports().len());
-    for evidence in page.imports() {
-        checkpoint(control)?;
-        let canonical = serde_json::to_vec(evidence)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        let integrity_digest = import_integrity_digest(&canonical, &canonical)?;
-        imports.push(PreparedImportV1 {
-            canonical,
-            integrity_digest,
-        });
-    }
     let mut clone_bodies = Vec::with_capacity(page.clone_bodies().len());
     for body in page.clone_bodies() {
         checkpoint(control)?;
@@ -296,7 +278,6 @@ pub(super) fn prepare_page(
     )?;
     let base_sections_receipt = prepare_base_sections_receipt(
         page.page_ordinal(),
-        &imports,
         &documents,
         &texts,
         &ngram_shards,
@@ -342,7 +323,6 @@ pub(super) fn prepare_page(
         import_dictionary_digest: page.next_cursor().import_dictionary_digest().clone(),
         previous_cursor,
         next_cursor,
-        imports,
         clone_bodies,
         documents,
         row_blocks,
@@ -415,7 +395,6 @@ fn prepare_clone_body(
 
 fn prepare_base_sections_receipt(
     page_ordinal: u64,
-    imports: &[PreparedImportV1],
     documents: &[PreparedDocumentV1],
     texts: &[PreparedTextV1],
     ngram_shards: &[PreparedNgramShardV1],
@@ -423,27 +402,14 @@ fn prepare_base_sections_receipt(
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
     let mut document_integrity =
         PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[0])?;
-    let mut import_integrity =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[1])?;
-    let mut import_evidence =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[2])?;
-    let mut rows = PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[3])?;
+    let mut rows = PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[1])?;
     let mut term_postings =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[4])?;
+        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[2])?;
     let mut exact_postings =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[5])?;
+        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[3])?;
     let mut ngram_postings =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[6])?;
+        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[4])?;
 
-    for import in imports {
-        checkpoint(control)?;
-        import_integrity.begin_row()?;
-        import_integrity.blob(&import.canonical)?;
-        import_integrity.text(import.integrity_digest.as_str())?;
-        import_evidence.begin_row()?;
-        import_evidence.blob(&import.canonical)?;
-        import_evidence.blob(&import.canonical)?;
-    }
     for (document, text) in documents.iter().zip(texts) {
         checkpoint(control)?;
         document_integrity.begin_row()?;
@@ -486,8 +452,6 @@ fn prepare_base_sections_receipt(
         page_ordinal,
         vec![
             document_integrity.finish()?,
-            import_integrity.finish()?,
-            import_evidence.finish()?,
             rows.finish()?,
             term_postings.finish()?,
             exact_postings.finish()?,
@@ -729,22 +693,6 @@ fn hash_blob(hasher: &mut Sha256, value: &[u8]) -> Result<(), CodeLexicalArtifac
     hash_bytes(hasher, value)
 }
 
-fn import_integrity_digest(
-    canonical: &[u8],
-    evidence: &[u8],
-) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-import.v1\0");
-    hash_bytes(&mut hasher, canonical)?;
-    hash_bytes(&mut hasher, evidence)?;
-    integrity_digest(hasher)
-}
-
-fn integrity_digest(hasher: Sha256) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    ManifestDigest::from_sha256_bytes(&hasher.finalize())
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
-}
-
 fn prepared_retained_bytes(
     page: &PreparedCodeLexicalArtifactPageV1,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
@@ -757,13 +705,6 @@ fn prepared_retained_bytes(
         .and_then(|bytes| bytes.checked_add(page.import_dictionary_digest.as_str().len()))
         .and_then(|bytes| bytes.checked_add(page.next_cursor.capacity()))
         .and_then(|bytes| bytes.checked_add(page.previous_cursor.as_ref().map_or(0, Vec::capacity)))
-        .and_then(|bytes| {
-            bytes.checked_add(
-                page.imports
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<PreparedImportV1>()),
-            )
-        })
         .and_then(|bytes| bytes.checked_add(clone_body_bytes))
         .and_then(|bytes| {
             bytes.checked_add(
@@ -789,12 +730,6 @@ fn prepared_retained_bytes(
             })
         })
         .ok_or_else(prepared_charge_overflow)?;
-    for import in &page.imports {
-        bytes = bytes
-            .checked_add(import.canonical.capacity())
-            .and_then(|bytes| bytes.checked_add(import.integrity_digest.as_str().len()))
-            .ok_or_else(prepared_charge_overflow)?;
-    }
     for document in &page.documents {
         bytes = bytes
             .checked_add(document.chunk_id.capacity())
@@ -904,13 +839,6 @@ fn estimated_sqlite_writes(
         &page.base_sections_receipt,
         &page.next_cursor,
     )?;
-    for import in &page.imports {
-        rows = rows.checked_add(2).ok_or_else(prepared_write_overflow)?;
-        bytes = bytes
-            .checked_add(import.canonical.len().saturating_mul(2))
-            .and_then(|bytes| bytes.checked_add(import.integrity_digest.as_str().len()))
-            .ok_or_else(prepared_write_overflow)?;
-    }
     let (clone_rows, clone_bytes) = estimated_clone_body_writes(&page.clone_bodies)?;
     rows = rows
         .checked_add(clone_rows)

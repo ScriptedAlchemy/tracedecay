@@ -300,6 +300,7 @@ pub(super) async fn register_project_open_production_owners(
         invocation.feedback_runtime_registrar().open_and_register(
             database.clone(),
             project_root.to_path_buf(),
+            graph.store_layout().response_handle_root.clone(),
             scope.clone(),
             access.clone(),
             Arc::new(DaemonCallableCodeAuthorizationSource::production(

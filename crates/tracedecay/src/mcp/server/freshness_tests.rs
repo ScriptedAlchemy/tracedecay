@@ -254,7 +254,7 @@ async fn a_cancelled_machine_reads_as_settled_and_refuses_further_phases() {
 async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db() {
     let (cg, dir, _pin) = init_indexed_repo().await;
     let profile_root =
-        tracedecay_project::config::user_data_dir().expect("configured profile root");
+        tracedecay_runtime_core::config::user_data_dir().expect("configured profile root");
     let override_root = dir.path().join("registry-override");
     let runtime = FreshnessRuntime::open(&override_root).await;
     let registry = runtime.profile_database().await;

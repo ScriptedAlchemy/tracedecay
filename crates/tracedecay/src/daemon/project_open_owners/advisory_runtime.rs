@@ -43,6 +43,8 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::operation_stream::OperationKind;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope;
 use tracedecay_contracts::context_scout::ContextScoutDeliveryOutcomeV1;
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
@@ -54,7 +56,7 @@ use tracedecay_contracts::feedback::{
 };
 use tracedecay_contracts::{
     ApplicationProblem, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, RequestContext, SafeDiagnostic, now_micros,
+    DisclosureClass, LegalAction, RequestContext, RetryDirective, SafeDiagnostic, now_micros,
 };
 use tracedecay_domain::GitHeadStateV1;
 use tracedecay_domain::feedback::{
@@ -753,6 +755,11 @@ async fn refresh_feedback_cycle(
         .lock()
         .await
         .mounted_providers_for_files(&indexed_files);
+    let compiler_seed =
+        tracedecay_code_index_runtime::code_index_scheduler::feedback_language_document_identity_from_generation(
+            &indexed_generation,
+            "rust",
+        )?;
     let provider_seed =
         tracedecay_code_index_runtime::code_index_scheduler::feedback_document_identity_from_generation(
             indexed_generation,
@@ -795,6 +802,7 @@ async fn refresh_feedback_cycle(
         project_runtime_db: producer.session_db.clone(),
         runtime_state,
         provider_seed,
+        compiler_seed,
         document_identity: Arc::new(document_identity),
         code_index_identity: Arc::new(producer.code_index_schedulers.clone()),
         test_attribution: Arc::new(producer.code_index_schedulers.clone()),
@@ -1464,15 +1472,25 @@ async fn register_production_feedback_cycle(
             scope: state.scope.clone(),
             configuration: Arc::clone(state.graph.configuration_runtime()),
         });
+    let provider_identity_failed = |error: LspRuntimeFailure| TraceDecayError::Config {
+        message: format!(
+            "project-open provider code-index identity failed: {}",
+            error.class()
+        ),
+    };
+    let compiler_seed =
+        tracedecay_code_index_runtime::code_index_scheduler::feedback_language_document_identity_from_generation(
+            &indexed_generation,
+            "rust",
+        )
+        .map_err(provider_identity_failed)?;
     let provider_seed =
         tracedecay_code_index_runtime::code_index_scheduler::feedback_document_identity_from_generation(
             indexed_generation,
             project_root,
             None,
         )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open provider code-index identity failed: {}", error.class()),
-        })?;
+        .map_err(provider_identity_failed)?;
     let document_identity =
         tracedecay_code_index_runtime::code_index_scheduler::ScopedFeedbackDocumentIdentityV1::new(
             invocation.code_index_schedulers.clone(),
@@ -1492,6 +1510,7 @@ async fn register_production_feedback_cycle(
         project_runtime_db: state.session_db.clone(),
         runtime_state,
         provider_seed,
+        compiler_seed,
         document_identity: Arc::new(document_identity),
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
         test_attribution: Arc::new(invocation.code_index_schedulers.clone()),
@@ -1988,6 +2007,7 @@ async fn register_project_proximity_read_authority(
             project_root: project_root.to_path_buf(),
             feedback_scope,
             proximity_read,
+            code_index_schedulers: invocation.code_index_schedulers.clone(),
         }) as Arc<dyn DaemonAdvisoryCycleInvocationPort>,
     );
     invocation
@@ -2006,8 +2026,8 @@ async fn register_project_proximity_read_authority(
 }
 
 /// Early proximity-only owner: serves `feedback_proximity` before the sealed
-/// generation mounts the full advisory cycle. Advisory-cycle invocations stay
-/// unavailable until that upgrade replaces this owner.
+/// generation mounts the full advisory cycle. Advisory-cycle invocations name
+/// why no generation can mount it until that upgrade replaces this owner.
 #[derive(Clone)]
 struct ProjectOpenProximityReadOwnerV1 {
     graph: Arc<tracedecay_project::project::TraceDecay>,
@@ -2015,6 +2035,7 @@ struct ProjectOpenProximityReadOwnerV1 {
     project_root: std::path::PathBuf,
     feedback_scope: FeedbackScopeV1,
     proximity_read: FeedbackProximityReadRuntimeV1,
+    code_index_schedulers: CodeIndexSchedulerRegistryV1,
 }
 
 impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
@@ -2023,9 +2044,36 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
         _request: DaemonAdvisoryCycleInvocationRequest,
     ) -> DaemonAdvisoryCycleInvocationFuture<'_> {
         Box::pin(async move {
+            let without_generation =
+                |code: &str, message: &str, legal_action| ApplicationProblem::Unsupported {
+                    diagnostic: SafeDiagnostic {
+                        code: code.to_owned(),
+                        message: message.to_owned(),
+                    },
+                    retry: RetryDirective::Never,
+                    legal_actions: vec![legal_action],
+                };
+            if code_index_disabled_for_scope(&self.code_index_schedulers, &self.scope) {
+                return Err(without_generation(
+                    "feedback.advisory-cycle.code-index-disabled",
+                    "The code index is disabled for this checkout, so no generation can mount the advisory feedback cycle",
+                    LegalAction::CorrectRequest,
+                ));
+            }
+            if self
+                .code_index_schedulers
+                .reconciled_without_generation_for_scope(&self.scope)
+                .await
+            {
+                return Err(without_generation(
+                    "feedback.advisory-cycle.no-indexable-source",
+                    "The checkout has no indexable source files, so no generation can mount the advisory feedback cycle",
+                    LegalAction::Reconcile,
+                ));
+            }
             Err(ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "feedback.advisory-cycle.unavailable".to_owned(),
-                message: "The advisory feedback cycle is not mounted yet".to_owned(),
+                message: "The advisory feedback cycle mounts once the first code-index generation is sealed".to_owned(),
             }))
         })
     }
@@ -2202,38 +2250,16 @@ async fn resolve_production_github_provider_config(
     let stack_observability =
         resolve_github_stack_observability(invocation, project_root, state, &owner, &repository)
             .await;
-    let authorization_context =
-        github_discovery_authorization_context(&state.access, feedback_scope);
-    let discovery_request = github_discovery_source_access_request(feedback_scope);
-    let head_commit_id = feedback_scope.head_commit_id.clone();
-    let discovery_http = GitHubHttpReadConfigV1::default();
-    let discovery_credential = credential.clone();
-    let discovery = match authorization_context
-        .as_ref()
-        .zip(discovery_request.as_ref())
-    {
-        Some((context, request))
-            if source_access.authorize(context, request).await
-                == GitHubProviderLifecycleV1::Ready =>
-        {
-            let control =
-                GitHubDiscoveryControlV1::bounded(Instant::now() + Duration::from_secs(15));
-            let blocking_control = control.clone();
-            tokio::task::spawn_blocking(move || {
-                discover_exact_commit_pull_request_v1(
-                    &owner,
-                    &repository,
-                    &head_commit_id,
-                    &discovery_http,
-                    &discovery_credential,
-                    &blocking_control,
-                )
-            })
-            .await
-            .ok()
-        }
-        _ => None,
-    };
+    let discovery = discover_production_pull_request(
+        project_root,
+        state,
+        feedback_scope,
+        source_access.as_ref(),
+        &owner,
+        &repository,
+        &credential,
+    )
+    .await;
     let github = match discovery {
         Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)) => {
             let target = pull.target.clone();
@@ -2259,6 +2285,78 @@ async fn resolve_production_github_provider_config(
         github_source_access: source_access,
         ci,
     })
+}
+
+/// Resolves the pull request whose head is this checkout's branch at its exact
+/// commit, and records why when none is admitted. `None` means discovery was
+/// not attempted: GitHub source access is not granted for this scope.
+async fn discover_production_pull_request(
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+    feedback_scope: &FeedbackScopeV1,
+    source_access: &dyn GitHubSourceAccessAuthorityV1,
+    owner: &str,
+    repository: &str,
+    credential: &GitHubReadOnlyCredentialV1,
+) -> Option<GitHubExactCommitDiscoveryOutcomeV1> {
+    let authorization_context =
+        github_discovery_authorization_context(&state.access, feedback_scope);
+    let discovery_request = github_discovery_source_access_request(feedback_scope);
+    let source_access_lifecycle = match authorization_context
+        .as_ref()
+        .zip(discovery_request.as_ref())
+    {
+        Some((context, request)) => source_access.authorize(context, request).await,
+        None => GitHubProviderLifecycleV1::Denied,
+    };
+    let head_ref_name = feedback_scope.branch_ref.strip_prefix("refs/heads/");
+    let discovery = match (source_access_lifecycle, head_ref_name) {
+        (GitHubProviderLifecycleV1::Ready, Some(head_ref_name)) => {
+            let owner = owner.to_owned();
+            let repository = repository.to_owned();
+            let head_ref_name = head_ref_name.to_owned();
+            let head_commit_id = feedback_scope.head_commit_id.clone();
+            let credential = credential.clone();
+            let control =
+                GitHubDiscoveryControlV1::bounded(Instant::now() + Duration::from_secs(15));
+            let blocking_control = control.clone();
+            tokio::task::spawn_blocking(move || {
+                discover_exact_commit_pull_request_v1(
+                    &owner,
+                    &repository,
+                    &head_ref_name,
+                    &head_commit_id,
+                    &GitHubHttpReadConfigV1::default(),
+                    &credential,
+                    &blocking_control,
+                )
+            })
+            .await
+            .ok()
+        }
+        _ => None,
+    };
+    match &discovery {
+        Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)) => tracing::info!(
+            event = "github_pull_request_discovery",
+            outcome = "found",
+            project = %project_root.display(),
+            pull_request = pull.target.pull_request_number,
+            head_repository = %format!("{}/{}", pull.head_repository_owner, pull.head_repository_name),
+        ),
+        Some(outcome) => tracing::info!(
+            event = "github_pull_request_discovery",
+            outcome = ?outcome,
+            project = %project_root.display(),
+        ),
+        None => tracing::info!(
+            event = "github_pull_request_discovery",
+            outcome = "not_attempted",
+            source_access = ?source_access_lifecycle,
+            project = %project_root.display(),
+        ),
+    }
+    discovery
 }
 
 /// Mounts the canonical Observatory lane for GitHub stack observations.

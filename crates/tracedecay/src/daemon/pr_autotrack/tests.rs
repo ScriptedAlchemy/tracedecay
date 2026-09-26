@@ -904,10 +904,11 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
     let staged_repo = repo.path().to_path_buf();
     let (staged_sender, staged_receiver) = tokio::sync::oneshot::channel();
     let owner = tokio::spawn(async move {
-        let lifecycle = try_acquire_manual_branch_lifecycle(
+        let lifecycle = acquire_manual_branch_lifecycle(
             &staged_graph.store_layout().data_root,
             "feature/advance",
         )
+        .await
         .unwrap();
         let staged = activate_manual_branch_head_with_lifecycle(
             &staged_repo,
@@ -951,7 +952,9 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
         schedulers.clone(),
         "feature/advance".to_owned(),
         data_root.clone(),
-        try_acquire_manual_branch_lifecycle(&data_root, "feature/advance").unwrap(),
+        acquire_manual_branch_lifecycle(&data_root, "feature/advance")
+            .await
+            .unwrap(),
         tracedecay_runtime_core::cancellation::CancellationToken::new(),
     )
     .await
@@ -977,7 +980,9 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
         schedulers.clone(),
         "feature/advance".to_owned(),
         data_root.clone(),
-        try_acquire_manual_branch_lifecycle(&data_root, "feature/advance").unwrap(),
+        acquire_manual_branch_lifecycle(&data_root, "feature/advance")
+            .await
+            .unwrap(),
         tracedecay_runtime_core::cancellation::CancellationToken::new(),
     )
     .await
@@ -1017,7 +1022,7 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_mutating_git() {
+async fn manual_branch_activation_queues_behind_the_exact_lifecycle_before_mutating_git() {
     use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
     let repo = tempfile::tempdir().unwrap();
@@ -1031,32 +1036,40 @@ async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_muta
         .unwrap(),
     );
     let lifecycle =
-        try_acquire_manual_branch_lifecycle(&graph.store_layout().data_root, "feature/contended")
+        acquire_manual_branch_lifecycle(&graph.store_layout().data_root, "feature/contended")
+            .await
             .expect("first lifecycle owner");
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);
-
-    let error =
-        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/contended")
-            .await
-            .expect_err("concurrent exact branch activation must be rejected");
-
-    assert!(matches!(
-        &error,
-        ManualBranchActivationError::LifecycleContended { .. }
-    ));
-    assert!(
+    let tracking_refs = || {
         git_output(
             repo.path(),
             &[
                 "for-each-ref",
                 "--format=%(refname)",
-                "refs/tracedecay/branch"
-            ]
+                "refs/tracedecay/branch",
+            ],
         )
         .trim()
-        .is_empty()
-    );
+        .to_owned()
+    };
+
+    let activation =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/contended");
+    tokio::pin!(activation);
+    let queued = tokio::time::timeout(Duration::from_millis(200), &mut activation)
+        .await
+        .is_err();
+    let refs_while_queued = tracking_refs();
     drop(lifecycle);
+    let activated = activation.await.map(|activation| activation.branch);
+
+    assert!(
+        queued,
+        "same-branch activation must wait for the lifecycle owner"
+    );
+    assert_eq!(refs_while_queued, "");
+    assert_eq!(activated, Ok("feature/contended".to_owned()));
+    assert_ne!(tracking_refs(), "");
     schedulers.shutdown().await;
 }
 
@@ -1076,7 +1089,8 @@ async fn failed_manual_branch_sealing_retires_the_exact_mount_worktree_and_track
     );
     let data_root = graph.store_layout().data_root.clone();
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);
-    let lifecycle = try_acquire_manual_branch_lifecycle(&data_root, "feature/failure-cleanup")
+    let lifecycle = acquire_manual_branch_lifecycle(&data_root, "feature/failure-cleanup")
+        .await
         .expect("lifecycle owner");
     let activation = activate_manual_branch_head_with_lifecycle(
         repo.path(),
@@ -1286,7 +1300,8 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
     let owner_branch = branch.to_owned();
     let requester = tokio::spawn(async move {
         let owner = tokio::spawn(async move {
-            let lifecycle = try_acquire_manual_branch_lifecycle(&owner_data_root, &owner_branch)
+            let lifecycle = acquire_manual_branch_lifecycle(&owner_data_root, &owner_branch)
+                .await
                 .expect("activation owner acquires the exact lifecycle");
             let control = PrCommandControl::with_timeout(Duration::from_millis(300));
             let outcome = activate_manual_branch_with_administration(
@@ -1363,7 +1378,8 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
             .is_none_or(|metadata| !metadata.branches.contains_key(branch)),
         "activation alone must not leak sealed branch provenance"
     );
-    let lifecycle = try_acquire_manual_branch_lifecycle(&data_root, branch)
+    let lifecycle = acquire_manual_branch_lifecycle(&data_root, branch)
+        .await
         .expect("completed owner releases the exact lifecycle lease");
     cleanup_manual_branch_activation(
         repo.path(),

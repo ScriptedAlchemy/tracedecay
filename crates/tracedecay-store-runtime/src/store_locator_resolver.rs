@@ -597,10 +597,7 @@ impl LocalStoreRuntimeResolverV1 {
         let layout = storage::profile_sharded_layout(
             &canonical_project_root,
             canonical_profile_root,
-            &storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: storage::StorageMode::ProfileSharded,
-            },
+            project_id.as_str(),
         )
         .map_err(|_| LocalStoreLocatorUnavailableReasonV1::InvalidEnrollment)?;
         let expected_store_root =

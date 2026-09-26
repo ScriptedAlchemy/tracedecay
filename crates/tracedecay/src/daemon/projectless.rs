@@ -413,6 +413,7 @@ async fn projectless_registry_response(
         "tracedecay_project_context" => {
             tracedecay_mcp::handlers::info::handle_project_context(
                 active_project_root,
+                None,
                 arguments,
                 Some(&registry_reads),
             )

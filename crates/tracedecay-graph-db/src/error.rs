@@ -207,8 +207,11 @@ impl From<GraphPublicationStoreErrorV1> for GraphDbError {
             GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::DeadlineExceeded) => {
                 GraphDbError::DeadlineExceeded
             }
-            GraphPublicationStoreErrorV1::Infrastructure => {
-                GraphDbError::unavailable("relational graph publication authority is unavailable")
+            error @ GraphPublicationStoreErrorV1::Infrastructure(_) => {
+                GraphDbError::unavailable(error.to_string())
+            }
+            error @ GraphPublicationStoreErrorV1::CommitRefused => {
+                GraphDbError::invalid(error.to_string())
             }
             GraphPublicationStoreErrorV1::Corrupt(message) => GraphDbError::Corrupt { message },
         }

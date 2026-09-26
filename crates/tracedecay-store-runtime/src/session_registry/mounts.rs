@@ -18,9 +18,7 @@ use tracedecay_rusqlite_runtime::remote::{
 use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_store::{ProjectId, StoreShardIdV1, StoreShardScopeV1};
 
-use super::remote_recovery::{
-    DaemonRemoteRecoveryPhysicalEffectsV1, RemoteRecoveryPublicationContextV1,
-};
+use super::remote_recovery::DaemonRemoteRecoveryPhysicalEffectsV1;
 use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, LifecycleShardRuntimePublisher,
     LocalProfileIdentityAuthorityV1, LocalProfileStoreAuthorityV1,
@@ -825,8 +823,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                         Some(pin),
                         None,
                         true,
-                        false,
-                        None,
                         "mount Remote Brain node store",
                     ),
                     label = "daemon.store.remote_node.open"
@@ -879,36 +875,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         let recovery = if let Some(recovery) = existing_recovery {
             recovery
         } else {
-            let publication = RemoteRecoveryPublicationContextV1::new(
-                self.identity.clone(),
-                self.incarnation,
-                Arc::clone(&self.resolver),
-                self.registry.clone(),
-                self.graph_registry.clone(),
-                Arc::clone(&self.graph_lifecycle_cancelled),
-                Arc::clone(&self.operation_task_owner),
-                self.profile_authority_pin("attach remote recovery authority")
-                    .await?,
-                self.project_owners.clone(),
-                Arc::clone(&self.remote_replay_transaction),
-                self.session_sync_service(),
-                self.remote_recovery_project_lifecycle(),
-            );
-            let backup_root = database
-                .canonical_database_path()
-                .parent()
-                .ok_or_else(|| {
-                    session_registry_error(
-                        "attach remote recovery authority",
-                        "RemoteNode database has no parent directory".to_owned(),
-                    )
-                })?
-                .join("recovery-artifacts");
             let effects = Arc::new(DaemonRemoteRecoveryPhysicalEffectsV1::new(
                 storage.clone(),
-                backup_root,
                 Arc::clone(&self.remote_replay_transaction),
-                publication,
+                self.remote_recovery_project_lifecycle(),
                 tokio::runtime::Handle::current(),
             ));
             let recovery = database.remote_recovery_authority(effects)?;
@@ -1089,7 +1059,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 let state = match state {
                     ProjectRuntimeOwnerStateV1::Opening => "opening",
                     ProjectRuntimeOwnerStateV1::ReplacingSessions => "replacing_sessions",
-                    ProjectRuntimeOwnerStateV1::Recovering => "recovering",
                     ProjectRuntimeOwnerStateV1::Retiring => "retiring",
                     ProjectRuntimeOwnerStateV1::Ready(_)
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
@@ -1189,7 +1158,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 }
                 ProjectRuntimeOwnerStateV1::Opening
                 | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                | ProjectRuntimeOwnerStateV1::Recovering
                 | ProjectRuntimeOwnerStateV1::Retiring => {
                     return Err(session_registry_error(
                         "drain graph owners for shutdown",
@@ -1273,19 +1241,14 @@ impl DaemonSessionRuntimeRegistryV1 {
                     ));
                 }
                 Some(
-                    ProjectRuntimeOwnerStateV1::Retiring
+                    state @ (ProjectRuntimeOwnerStateV1::Retiring
                     | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                    | ProjectRuntimeOwnerStateV1::Recovering
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
-                    | ProjectRuntimeOwnerStateV1::Faulted(_),
+                    | ProjectRuntimeOwnerStateV1::Faulted(_)),
                 ) => {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
-                    return Err(TraceDecayError::project_route(
-                        "project_runtime_retiring",
-                        true,
-                        "Project runtime is unavailable while retirement is terminal or in progress",
-                    ));
+                    return Err(state.unavailable_route_error());
                 }
                 None => false,
             }
@@ -1435,16 +1398,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                 "Project runtime is already opening",
             )),
             Some(
-                ProjectRuntimeOwnerStateV1::Retiring
+                state @ (ProjectRuntimeOwnerStateV1::Retiring
                 | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                | ProjectRuntimeOwnerStateV1::Recovering
                 | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
-                | ProjectRuntimeOwnerStateV1::Faulted(_),
-            ) => Err(TraceDecayError::project_route(
-                "project_runtime_retiring",
-                true,
-                "Project runtime is unavailable while retirement is terminal or in progress",
-            )),
+                | ProjectRuntimeOwnerStateV1::Faulted(_)),
+            ) => Err(state.unavailable_route_error()),
             None => Err(session_registry_error(
                 "issue mounted project memory database client",
                 "project memory owner is not mounted".to_string(),
@@ -1486,16 +1444,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                 "Project runtime is already opening",
             )),
             Some(
-                ProjectRuntimeOwnerStateV1::Retiring
+                state @ (ProjectRuntimeOwnerStateV1::Retiring
                 | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                | ProjectRuntimeOwnerStateV1::Recovering
                 | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
-                | ProjectRuntimeOwnerStateV1::Faulted(_),
-            ) => Err(TraceDecayError::project_route(
-                "project_runtime_retiring",
-                true,
-                "Project runtime is unavailable while retirement is terminal or in progress",
-            )),
+                | ProjectRuntimeOwnerStateV1::Faulted(_)),
+            ) => Err(state.unavailable_route_error()),
             None => Err(session_registry_error(
                 "issue mounted project memory database client",
                 "project memory owner is not mounted".to_string(),
@@ -1555,19 +1508,14 @@ impl DaemonSessionRuntimeRegistryV1 {
                     ))
                 }
                 Some(
-                    ProjectRuntimeOwnerStateV1::Retiring
+                    state @ (ProjectRuntimeOwnerStateV1::Retiring
                     | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                    | ProjectRuntimeOwnerStateV1::Recovering
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
-                    | ProjectRuntimeOwnerStateV1::Faulted(_),
+                    | ProjectRuntimeOwnerStateV1::Faulted(_)),
                 ) => {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
-                    Err(TraceDecayError::project_route(
-                        "project_runtime_retiring",
-                        true,
-                        "Project runtime is unavailable while retirement is terminal or in progress",
-                    ))
+                    Err(state.unavailable_route_error())
                 }
                 None => Ok((false, None)),
             }
@@ -1666,16 +1614,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "Project runtime is already opening",
                 )),
                 Some(
-                    ProjectRuntimeOwnerStateV1::Retiring
+                    state @ (ProjectRuntimeOwnerStateV1::Retiring
                     | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                    | ProjectRuntimeOwnerStateV1::Recovering
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
-                    | ProjectRuntimeOwnerStateV1::Faulted(_),
-                ) => Err(TraceDecayError::project_route(
-                    "project_runtime_retiring",
-                    true,
-                    "Project runtime is unavailable while retirement is terminal or in progress",
-                )),
+                    | ProjectRuntimeOwnerStateV1::Faulted(_)),
+                ) => Err(state.unavailable_route_error()),
                 None => Ok(None),
             }
         }?;

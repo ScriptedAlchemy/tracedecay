@@ -301,106 +301,106 @@ pub(crate) async fn warm_code_index_search(server: &McpServer, query: &str) {
     wait_for_code_index_generation(server, query).await;
 }
 
-/// Poll `tracedecay_status` and `tracedecay_search` until the current
-/// worktree generation is sealed and the exact, lexical, and graph lanes
-/// report complete coverage, the same terminal signal daemon journeys
-/// wait on. Ranked matches are not stable while a required lane is still
-/// warming or the search generation has not caught the sealed worktree.
+/// One `tracedecay_status` read held by `wait_for` until the index reaches
+/// `state`; panics unless it ends `reached`.
 #[cfg(feature = "test-transport")]
-pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &str) {
-    let mut last_search = Value::Null;
-    let mut last_status = Value::Null;
-    for _ in 0..60 {
-        let status = handle_real_server_tool_call(
-            server,
+pub(crate) async fn wait_for_readiness(server: &McpServer, state: &str, budget: Duration) -> Value {
+    let status = handle_real_server_tool_call(
+        server,
+        "tracedecay_status",
+        json!({
+            "include_branch_diagnostics": false,
+            "include_storage_health": false,
+            "include_session_ingest": false,
+            "include_staleness": false,
+            "wait_for": {
+                "state": state,
+                "timeout_ms": u64::try_from(budget.as_millis()).expect("budget fits u64"),
+            },
+        }),
+    )
+    .await;
+    let status: Value =
+        serde_json::from_str(extract_real_server_text(&status)).expect("typed project status JSON");
+    assert_eq!(
+        status["wait"],
+        json!({ "outcome": "reached" }),
+        "code index never became {state}: {status}"
+    );
+    status
+}
+
+/// [`wait_for_readiness`] over a production composition harness.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn harness_wait_for_readiness(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    state: &str,
+    budget: Duration,
+) -> Value {
+    let response = harness
+        .call_tool(
+            project_root,
             "tracedecay_status",
             json!({
+                "format": "json",
                 "include_branch_diagnostics": false,
                 "include_storage_health": false,
                 "include_session_ingest": false,
                 "include_staleness": false,
+                "wait_for": {
+                    "state": state,
+                    "timeout_ms": u64::try_from(budget.as_millis()).expect("budget fits u64"),
+                },
             }),
         )
-        .await;
-        last_status = serde_json::from_str(extract_real_server_text(&status))
-            .expect("typed project status JSON");
-        let freshness = &last_status["code_index_freshness"];
-        let status_generation = freshness["worktree"]["latest_generation_id"].as_str();
-
-        let result =
-            handle_real_server_tool_call(server, "tracedecay_search", json!({ "query": query }))
-                .await;
-        last_search =
-            serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
-        let incomplete = common::incomplete_code_index_query_lanes(&last_search);
-        // `status = current` and complete lanes prove the generation, but the
-        // seat can still owe its source proof to a continuation pass, and a
-        // read taken before that pass binds it reports `verifying`. A settled
-        // seat answers `fresh`; take the first search that reports it.
-        if freshness["status"] == "current"
-            && last_search["reason"].as_str() != Some("authority_unavailable")
-            && last_search["code_generation"].as_str() == status_generation
-            && status_generation.is_some()
-            && incomplete.is_empty()
-            && last_search["freshness"] == json!({ "state": "fresh" })
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    let incomplete = common::incomplete_code_index_query_lanes(&last_search);
-    panic!(
-        "code-index search did not settle within the polling budget: incomplete lanes={incomplete:?}; status={last_status}; search={last_search}"
+        .await
+        .expect("production status call");
+    assert!(
+        response.error.is_none(),
+        "status failed: {:?}",
+        response.error
     );
+    let result = response.result.expect("status result");
+    let status: Value = serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .expect("status text content"),
+    )
+    .expect("typed project status JSON");
+    assert_eq!(
+        status["wait"],
+        json!({ "outcome": "reached" }),
+        "code index never became {state}: {status}"
+    );
+    status
 }
 
-/// Poll `tracedecay_status` until the exact generation is current and its
-/// native code graph is serving.
-///
-/// `code_index_freshness.status = current` permits a graph that is still
-/// pending or unavailable, so graph-facing fixtures must also observe the
-/// canonical `code_graph_serving.state = ready` publication boundary.
+/// Wait until the current worktree generation serves its native graph, then
+/// require `query` to answer from that generation with every lane complete
+/// and a fresh seat, the same terminal signal daemon journeys use.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &str) {
+    let status = wait_for_readiness(server, "ready", Duration::from_secs(30)).await;
+    let generation = status["code_index_freshness"]["worktree"]["latest_generation_id"].as_str();
+    let result =
+        handle_real_server_tool_call(server, "tracedecay_search", json!({ "query": query })).await;
+    let search: Value =
+        serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
+    assert_eq!(search["code_generation"].as_str(), generation, "{search}");
+    assert_eq!(
+        common::incomplete_code_index_query_lanes(&search),
+        Vec::<&str>::new(),
+        "a ready generation left search lanes incomplete: {search}"
+    );
+    assert_eq!(search["freshness"], json!({ "state": "fresh" }), "{search}");
+}
+
+/// Wait until the exact generation is current and its native code graph is
+/// serving.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn wait_for_current_graph(server: &McpServer) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let status = handle_real_server_tool_call(
-                server,
-                "tracedecay_status",
-                json!({
-                    "include_branch_diagnostics": false,
-                    "include_storage_health": false,
-                    "include_session_ingest": false,
-                    "include_staleness": false,
-                }),
-            )
-            .await;
-            let status: Value = serde_json::from_str(extract_real_server_text(&status))
-                .expect("typed project status JSON");
-            let freshness = &status["code_index_freshness"];
-            let serving = &freshness["worktree"]["code_graph_serving"];
-            match (
-                freshness["status"].as_str(),
-                serving["state"].as_str(),
-                serving["reason"].as_str(),
-                freshness["worktree"]["staleness_state"].as_str(),
-            ) {
-                (Some("current"), Some("ready"), _, _) => break,
-                (Some("warming"), _, _, _)
-                | (Some("stale"), Some("ready"), _, Some("verifying"))
-                | (_, Some("pending"), _, _)
-                | (_, Some("unavailable"), Some("generation_unavailable"), _) => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                (_, Some("refused"), _, _) | (_, _, Some("activation_disabled"), _) => {
-                    panic!("graph readiness was refused: {status}");
-                }
-                actual => panic!("graph readiness became {actual:?}: {status}"),
-            }
-        }
-    })
-    .await
-    .expect("graph did not become current within the publication budget");
+    wait_for_readiness(server, "ready", Duration::from_secs(20)).await;
 }
 
 #[cfg(feature = "test-transport")]
@@ -440,8 +440,7 @@ impl ProductionCompositionFixture {
         ))
         .await
         .expect("reopen production composition");
-        let (data_dir_guard, global_db_guard) =
-            pin_production_composition_profile(&harness, &project_root);
+        let (data_dir_guard, global_db_guard) = pin_production_composition_profile(&harness);
         Self {
             harness,
             project_root,
@@ -482,8 +481,7 @@ pub(crate) async fn production_composition_fixture_with_sources(
     ))
     .await
     .expect("production composition harness");
-    let (data_dir_guard, global_db_guard) =
-        pin_production_composition_profile(&harness, &project_root);
+    let (data_dir_guard, global_db_guard) = pin_production_composition_profile(&harness);
     ProductionCompositionFixture {
         harness,
         project_root,
@@ -530,21 +528,14 @@ fn seed_production_composition_project(
 #[cfg(feature = "test-transport")]
 fn pin_production_composition_profile(
     harness: &ProductionProjectCompositionHarnessV1,
-    project_root: &Path,
 ) -> (common::EnvVarGuard, common::EnvVarGuard) {
     let profile_root = harness.profile_root();
-    let data_dir_guard =
-        common::EnvVarGuard::set(tracedecay_project::config::USER_DATA_DIR_ENV, profile_root);
+    let data_dir_guard = common::EnvVarGuard::set(
+        tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
+        profile_root,
+    );
     let global_db_guard =
         common::EnvVarGuard::set(common::GLOBAL_DB_ENV, profile_root.join("global.db"));
-    let response_handle_root =
-        tracedecay_runtime_core::storage::resolve_response_handle_root(project_root)
-            .expect("production composition response-handle root");
-    assert!(
-        response_handle_root.starts_with(profile_root),
-        "response handles must stay inside the fixture profile: {}",
-        response_handle_root.display()
-    );
     (data_dir_guard, global_db_guard)
 }
 
@@ -1074,14 +1065,15 @@ impl HomeEnvGuard {
     pub(crate) fn set(_process_env: &ProcessEnvGuard, home: &Path) -> Self {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(tracedecay_project::config::USER_DATA_DIR_ENV);
+        let previous_data_dir =
+            std::env::var_os(tracedecay_runtime_core::config::USER_DATA_DIR_ENV);
         let home = canonicalize_test_dir(home);
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::set_var("USERPROFILE", &home);
             std::env::set_var(
-                tracedecay_project::config::USER_DATA_DIR_ENV,
-                home.join(tracedecay_project::config::TRACEDECAY_DIR),
+                tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
+                home.join(tracedecay_runtime_core::config::TRACEDECAY_DIR),
             );
         }
         Self {
@@ -1105,9 +1097,9 @@ impl Drop for HomeEnvGuard {
             }
             match self.previous_data_dir.take() {
                 Some(value) => {
-                    std::env::set_var(tracedecay_project::config::USER_DATA_DIR_ENV, value)
+                    std::env::set_var(tracedecay_runtime_core::config::USER_DATA_DIR_ENV, value)
                 }
-                None => std::env::remove_var(tracedecay_project::config::USER_DATA_DIR_ENV),
+                None => std::env::remove_var(tracedecay_runtime_core::config::USER_DATA_DIR_ENV),
             }
         }
     }

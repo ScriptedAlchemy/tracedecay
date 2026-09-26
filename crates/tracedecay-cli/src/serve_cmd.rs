@@ -99,11 +99,10 @@ fn proxy_serve_handshake(
     };
 
     let ambient_discovery =
-        !explicit_path && tracedecay_project::config::is_ambient_project_root(&resolved_path);
+        !explicit_path && tracedecay_runtime_core::config::is_ambient_project_root(&resolved_path);
     let initialized = !ambient_discovery && TraceDecay::is_initialized(&resolved_path);
     // `serve` is a database-free proxy. It may consult only an already-pinned
-    // in-memory snapshot; missing authority disables implicit auto-init rather
-    // than reading legacy `config.json` from the client process.
+    // in-memory snapshot.
     // A never-opened project has no pinned snapshot, so `cached_sync_config`
     // fails. Follow the schema default (auto-init enabled) in that case rather
     // than failing closed: otherwise a discovery-mode client sitting in an
@@ -118,7 +117,7 @@ fn proxy_serve_handshake(
         ))
     .then(|| tracedecay_runtime_core::worktree::git_worktree_root(&resolved_path))
     .flatten()
-    .filter(|root| !tracedecay_project::config::is_ambient_project_root(root));
+    .filter(|root| !tracedecay_runtime_core::config::is_ambient_project_root(root));
     if let Some(root) = auto_init_root.as_ref() {
         resolved_path.clone_from(root);
     }

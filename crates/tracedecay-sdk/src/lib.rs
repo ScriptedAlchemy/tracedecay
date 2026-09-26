@@ -36,6 +36,13 @@ pub mod work {
     };
 }
 
+/// `tracedecay_status` `wait_for`: the readiness request and its outcome.
+pub mod status {
+    pub use tracedecay_contracts::code_index_freshness::{
+        CodeIndexReadinessTargetV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
+    };
+}
+
 /// Workflow definition storage and task-handoff commands, plus their
 /// executable capability inventory.
 pub mod workflow {

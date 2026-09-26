@@ -142,7 +142,13 @@ fn rendered_tool_result<F>(
 where
     F: FnOnce() -> String,
 {
-    support_rendered(Some(ctx.project_root()), args, value, touched_files, md)
+    support_rendered(
+        Some(&ctx.store_layout().response_handle_root),
+        args,
+        value,
+        touched_files,
+        md,
+    )
 }
 
 /// [`rendered_tool_result`] with the default [`render::generic_md`] body.
@@ -152,7 +158,12 @@ fn generic_tool_result(
     value: &Value,
     touched_files: Vec<String>,
 ) -> ToolResult {
-    support_generic(Some(ctx.project_root()), args, value, touched_files)
+    support_generic(
+        Some(&ctx.store_layout().response_handle_root),
+        args,
+        value,
+        touched_files,
+    )
 }
 
 #[hotpath::measure(label = "mcp.graph.search.total")]
@@ -381,7 +392,17 @@ where
             if let Some(unavailable_graph) = graph_evidence.unavailable() {
                 output["verified_graph_evidence"] = unavailable_graph.clone();
             }
-            let failure = format!("code-index search unavailable: {reason}");
+            let failure = match freshness
+                .indexing
+                .as_ref()
+                .and_then(|indexing| indexing.parked.as_ref())
+            {
+                Some(parked) => format!(
+                    "code-index search unavailable: parked: {}; remedy: {}",
+                    parked.reason, parked.remediation
+                ),
+                None => format!("code-index search unavailable: {reason}"),
+            };
             Ok(rendered_tool_result(ctx, &args, &output, Vec::new(), || {
                 format!(
                     "{}{}",

@@ -16,6 +16,86 @@ const POLL_SECS = 'project.config.sync.auto_track_pr_poll_secs';
 const WATCHER_DEBOUNCE = 'user.watcher_debounce';
 const WORKERS = 'user.code_index_workers';
 
+/** Every effective key the `/api/settings` fixture serves, by section, in page order. */
+const FIXTURE_SETTINGS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  [
+    'project',
+    [
+      'project.config.context_scout',
+      'project.config.exclude',
+      'project.config.extract_docstrings',
+      'project.config.git_ignore',
+      'project.config.include',
+      'project.config.max_file_size',
+      'project.config.sync.auto_track_pr_branches',
+      'project.config.sync.auto_track_pr_poll_secs',
+      'project.config.telemetry.timings',
+      'project.config.track_call_sites',
+      'project.configuration_revision_id',
+      'project.configuration_snapshot_id',
+      'project.pr_autotrack.tracked',
+    ],
+  ],
+  [
+    'user',
+    [
+      'user.code_index_worker_configuration_revision_id',
+      'user.code_index_worker_configuration_snapshot_id',
+      'user.code_index_worker_status.available_logical_cpus',
+      'user.code_index_worker_status.configured.mode',
+      'user.code_index_worker_status.effective_workers',
+      'user.code_index_worker_status.environment_override_workers',
+      'user.code_index_worker_status.limiting_reason',
+      'user.code_index_worker_status.memory_safe_workers',
+      'user.code_index_workers',
+      'user.configuration_revision_id',
+      'user.configuration_snapshot_id',
+      'user.extraction_timeout_secs',
+      'user.installed_agents',
+      'user.upload_enabled',
+      'user.watcher_debounce',
+    ],
+  ],
+  [
+    'environment',
+    [
+      'environment.global_accounting_enabled',
+      'environment.global_accounting_mode',
+      'environment.pricing_offline',
+      'environment.variables.TRACEDECAY_ENABLE_GLOBAL_DB',
+      'environment.variables.TRACEDECAY_DATA_DIR',
+    ],
+  ],
+  [
+    'automation',
+    [
+      'automation.availability.available',
+      'automation.availability.reason',
+      'automation.availability.required_authority',
+      'automation.backend',
+      'automation.config_endpoint',
+      'automation.enabled',
+      'automation.host_mode',
+    ],
+  ],
+  [
+    'storage',
+    [
+      'storage.dashboard_root',
+      'storage.graph_db',
+      'storage.lcm_db',
+      'storage.lcm_scope',
+      'storage.memory_db',
+      'storage.project_id',
+      'storage.project_root',
+      'storage.savings_db',
+      'storage.storage_mode',
+      'storage.store_root',
+    ],
+  ],
+  ['version', ['version.cached_latest_version', 'version.channel', 'version.version']],
+];
+
 function projectPatchResponse(current: unknown) {
   return {
     application_outcome: {
@@ -738,15 +818,19 @@ describe('SettingsPage effective configuration review', () => {
     await findRow(MAX_FILE_SIZE);
     const rowKeys = () =>
       [...document.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key'));
-    const unfiltered = rowKeys();
-    expect(unfiltered).toContain(POLL_SECS);
-    expect(unfiltered).toContain('user.watcher_debounce');
-    expect(screen.getByText(`${unfiltered.length} settings`)).toBeTruthy();
+    const sections = () =>
+      [...document.querySelectorAll<HTMLElement>('[role="rowgroup"][data-section]')].map((group) => [
+        group.dataset['section'],
+        [...group.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key')),
+      ]);
+    expect(sections()).toEqual(FIXTURE_SETTINGS);
+    const total = FIXTURE_SETTINGS.flatMap(([, keys]) => keys).length;
+    expect(screen.getByText(`${total} settings`)).toBeTruthy();
 
     const filter = screen.getByLabelText('Filter configuration');
     await user.type(filter, 'poll');
     expect(rowKeys()).toEqual([POLL_SECS]);
-    expect(screen.getByText(`1 of ${unfiltered.length} settings`)).toBeTruthy();
+    expect(screen.getByText(`1 of ${total} settings`)).toBeTruthy();
 
     await user.clear(filter);
     await user.type(filter, 'codex_app_server');

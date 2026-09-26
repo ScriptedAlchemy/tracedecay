@@ -77,7 +77,6 @@ struct ProjectOpenTaskRegistry {
     routes: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
     retiring: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
     closed_profiles: BTreeSet<PathBuf>,
-    quiesced_projects: BTreeSet<ProjectOpenIdentityV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,20 +84,6 @@ struct ProjectOpenIdentityV1 {
     profile_root: PathBuf,
     project_id: String,
     project_roots: BTreeSet<PathBuf>,
-}
-
-pub(super) struct ProjectOpenIdentityQuiescenceV1 {
-    tasks: ProjectOpenTasks,
-    identity: ProjectOpenIdentityV1,
-}
-
-impl Drop for ProjectOpenIdentityQuiescenceV1 {
-    fn drop(&mut self) {
-        self.tasks
-            .lock_registry()
-            .quiesced_projects
-            .remove(&self.identity);
-    }
 }
 
 struct ProjectOpenTaskEntry {
@@ -635,19 +620,6 @@ impl ProjectOpenTasks {
                 "project open denied: authenticated profile was remotely deleted".to_owned(),
             ));
         }
-        if registry.quiesced_projects.iter().any(|identity| {
-            project_route_matches_identity(
-                &route,
-                &identity.profile_root,
-                &identity.project_id,
-                &identity.project_roots,
-            )
-        }) {
-            hotpath::gauge!("daemon.project.open.refused.project_quiesced").inc(1.0);
-            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
-                "project open temporarily unavailable during remote recovery".to_owned(),
-            ));
-        }
         if let Some(entry) = registry.retiring.get(&route) {
             hotpath::gauge!("daemon.project.open.joined.retiring").inc(1.0);
             return ProjectOpenTaskClaim::InFlight(entry.state.clone());
@@ -933,38 +905,6 @@ impl ProjectOpenTasks {
             DAEMON_TASK_ABORT_DEADLINE,
         )
         .await
-    }
-
-    #[hotpath::measure(label = "daemon.project.admit.quiesce", future = true)]
-    pub(super) async fn quiesce_project_identity(
-        &self,
-        profile_root: &Path,
-        project_id: &str,
-        project_roots: &BTreeSet<PathBuf>,
-    ) -> Option<ProjectOpenIdentityQuiescenceV1> {
-        let identity = ProjectOpenIdentityV1 {
-            profile_root: profile_root.to_path_buf(),
-            project_id: project_id.to_owned(),
-            project_roots: project_roots.clone(),
-        };
-        let routes = {
-            let mut registry = self.lock_registry();
-            if !registry.quiesced_projects.insert(identity.clone()) {
-                return None;
-            }
-            project_routes_for_retirement(&mut registry, &identity)
-        };
-        if !self
-            .drain_retiring_routes(routes, DAEMON_TASK_ABORT_DEADLINE)
-            .await
-        {
-            self.lock_registry().quiesced_projects.remove(&identity);
-            return None;
-        }
-        Some(ProjectOpenIdentityQuiescenceV1 {
-            tasks: self.clone(),
-            identity,
-        })
     }
 
     #[hotpath::measure(label = "daemon.project.admit.shutdown_identity", future = true)]
@@ -1278,7 +1218,7 @@ mod refused_store_invalidation_tests {
     fn seed_refused_store(profile_root: &Path, project_root: &Path) -> PathBuf {
         let data_root = store_data_root(profile_root, project_root);
         std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
         std::fs::write(&db_path, b"refused-store-stand-in").unwrap();
         db_path
     }
@@ -1461,5 +1401,3 @@ mod status_tests {
 
 #[cfg(test)]
 mod lsp_upgrade_tests;
-#[cfg(test)]
-mod quiescence_tests;

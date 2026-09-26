@@ -236,3 +236,44 @@ printf 'not-a-digest  %s\n' "$BETA_ASSET" \
 expect_installer_failure \
   "$tmpdir/invalid-SHA256SUMS" \
   "SHA256SUMS has an invalid digest for ${BETA_ASSET}"
+
+# The published binary has already been through release strip: its ad-hoc
+# identifier is the deps filename (`tracedecay-<hash>`), not the installed
+# name. install.sh signs the installed file.
+deps_hash=3d1e6be7cae777a9
+printf '\xcf\xfa\xed\xfe' >"$tmpdir/archive/tracedecay"
+printf 'rest' >>"$tmpdir/archive/tracedecay"
+chmod +x "$tmpdir/archive/tracedecay"
+cat >"$tmpdir/bin/codesign" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == -d || ${1:-} == -dv || ${1:-} == --display ]]; then
+  printf '%s\n' "${CODESIGN_REPORT:-}"
+  exit 0
+fi
+printf '%s\n' "$*" >>"${CODESIGN_LOG:?}"
+SH
+chmod +x "$tmpdir/bin/codesign"
+codesign_log=$tmpdir/codesign.log
+: >"$codesign_log"
+PATH="$tmpdir/bin:$PATH" \
+  CODESIGN_LOG="$codesign_log" \
+  codesign --force --sign - --identifier "tracedecay-${deps_hash}" \
+  "$tmpdir/archive/tracedecay"
+tar -czf "$tmpdir/${BETA_ASSET}" -C "$tmpdir/archive" tracedecay
+(
+  cd "$tmpdir"
+  sha256sum "$BETA_ASSET" >SHA256SUMS
+)
+rm -rf "$tmpdir/install"
+mkdir -p "$tmpdir/install"
+CODESIGN_LOG="$codesign_log" \
+  CODESIGN_REPORT=$'Identifier=tracedecay-'"${deps_hash}"$'\nSignature=adhoc\nTeamIdentifier=not set\n' \
+  run_installer env TRACEDECAY_ASSUME_DARWIN=1 "$INSTALLER" \
+  >"$tmpdir/macho-install.log"
+strip_line=$(head -n 1 "$codesign_log")
+stable_line=$(tail -n 1 "$codesign_log")
+[[ $strip_line == "--force --sign - --identifier tracedecay-${deps_hash} ${tmpdir}/archive/tracedecay" ]]
+[[ $stable_line == "--force --sign - --identifier dev.tracedecay.cli -r=designated => identifier \"dev.tracedecay.cli\" ${tmpdir}/install/tracedecay" ]]
+[[ $strip_line != "$stable_line" ]]
+grep -Fq "Installed tracedecay ${BETA_TAG#v}" "$tmpdir/macho-install.log"

@@ -1899,7 +1899,7 @@ async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
     assert_eq!(served.generation, "generation.mcp-verified-graph-fixture.1");
     assert!(served.freshness.is_stale());
     let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
         &json!({}),
         stale,
     )
@@ -1931,7 +1931,7 @@ async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
             .is_stale()
     );
     let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
         &json!({}),
         current,
     )

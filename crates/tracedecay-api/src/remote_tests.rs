@@ -30,10 +30,7 @@ use tracedecay_contracts::remote::query::{
     REMOTE_QUERY_SCHEMA_REVISION_V1, RemoteQueryOperationV1, RemoteQueryRequestV1,
     RemoteQueryResultV1,
 };
-use tracedecay_contracts::remote::recovery::{
-    BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
-    RecoveryAuthorityExpectationV1, StagedRestoreConfirmationV1, StagedRestoreProgressV1,
-};
+use tracedecay_contracts::remote::recovery::{PromotionCasReceiptV1, PromotionConfirmationV1};
 use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
 use tracedecay_contracts::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
@@ -155,8 +152,6 @@ macro_rules! unreachable_protocol_port {
 unreachable_protocol_port!(RemoteCaptureRequestV1, RemoteCaptureReceiptV1);
 unreachable_protocol_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
 unreachable_protocol_port!(RemoteQueryRequestV1, RemoteQueryResultV1);
-unreachable_protocol_port!(BackupRequestV1, BackupOperationStateV1);
-unreachable_protocol_port!(StagedRestoreConfirmationV1, StagedRestoreProgressV1);
 unreachable_protocol_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
 unreachable_protocol_port!(RemoteFrameTransferRequestV1, RemoteFrameTransferReceiptV1);
 
@@ -209,7 +204,7 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         revoked_at: None,
         capabilities: std::collections::BTreeSet::from([
             RemoteCapabilityV1::Query,
-            RemoteCapabilityV1::CreateBackup,
+            RemoteCapabilityV1::Promote,
         ]),
         scope: scope.clone(),
     };
@@ -338,8 +333,6 @@ fn test_protocol_router(
             replay: port.clone(),
             frame_transfer: port.clone(),
             query: port.clone(),
-            backup: port.clone(),
-            restore: port.clone(),
             promotion: port,
         },
         admission,
@@ -400,10 +393,10 @@ fn query_http_request(body: Body) -> Request<Body> {
         .unwrap()
 }
 
-fn backup_http_request(body: Body) -> Request<Body> {
+fn recovery_http_request(route: &str, body: Body) -> Request<Body> {
     Request::builder()
         .method("POST")
-        .uri("/backup")
+        .uri(route)
         .header(AUTHORIZATION, "Bearer 0123456789abcdef0123456789abcdef")
         .header("content-type", "application/json")
         .body(body)
@@ -536,44 +529,72 @@ async fn exactly_bound_query_delegates_once() {
     assert_eq!(port_calls.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn backup_http_route_binds_the_request_expiry_as_execution_deadline() {
-    let port_calls = Arc::new(AtomicUsize::new(0));
-    let controlled_deadline = Arc::new(AtomicI64::new(0));
+fn failover_request_body() -> Vec<u8> {
     let writer = expected_authority();
-    let body = RemoteHttpRequestV1 {
+    serde_json::to_vec(&RemoteHttpRequestV1 {
         request: RemoteProtocolRequestV1::new(
-            RequestId::new("request.remote.backup").unwrap(),
+            RequestId::new("request.remote.failover").unwrap(),
             id::<BrainId>("brain.remote"),
             id::<BrainNodeId>("node.remote"),
             4,
             Some(writer.clone()),
             UtcMicros(20),
-            BackupRequestV1 {
-                operation_id: "backup.remote".to_owned(),
-                expected: RecoveryAuthorityExpectationV1 {
-                    brain_id: writer.brain_id.as_str().to_owned(),
-                    shard_id: writer.shard_id.as_str().to_owned(),
-                    generation_id: writer.generation_id.as_str().to_owned(),
-                    authority_node_id: writer.authority_node_id.as_str().to_owned(),
-                    placement_revision: writer.placement_revision.get(),
-                    authority_epoch: writer.authority_epoch.0,
-                },
+            PromotionConfirmationV1 {
+                preview_id: "promotion.remote".to_owned(),
+                expected_authority_epoch: writer.authority_epoch.0,
+                expected_placement_revision: writer.placement_revision.get(),
                 expires_at_micros: 40,
             },
         )
         .unwrap(),
-    };
-    let body = serde_json::to_vec(&body).unwrap();
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn failover_http_route_binds_the_request_expiry_as_execution_deadline() {
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let controlled_deadline = Arc::new(AtomicI64::new(0));
     let response =
         deadline_capturing_router(Arc::clone(&port_calls), Arc::clone(&controlled_deadline))
-            .oneshot(backup_http_request(Body::from(body)))
+            .oneshot(recovery_http_request(
+                "/failover",
+                Body::from(failover_request_body()),
+            ))
             .await
             .unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(port_calls.load(Ordering::SeqCst), 1);
     assert_eq!(controlled_deadline.load(Ordering::SeqCst), 40);
+}
+
+#[tokio::test]
+async fn backup_and_restore_routes_are_not_mounted_beside_failover() {
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let router = authenticated_router(Arc::clone(&port_calls));
+    for route in ["/backup", "/restore"] {
+        let response = router
+            .clone()
+            .oneshot(recovery_http_request(
+                route,
+                Body::from(failover_request_body()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+    }
+    assert_eq!(port_calls.load(Ordering::SeqCst), 0);
+
+    let failover = router
+        .oneshot(recovery_http_request(
+            "/failover",
+            Body::from(failover_request_body()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(failover.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(port_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]

@@ -1,0 +1,50 @@
+{
+  "capture": {
+    "captured_at": "2026-09-26T01:40:00Z",
+    "pull_request": "https://github.com/dtolnay/anyhow/pull/463",
+    "note": "Fork-headed pull request: head sb123sb123/anyhow fix/462-new-with-backtrace, base dtolnay/anyhow master."
+  },
+  "rest_commit_pulls": {
+    "url": "https://api.github.com/repos/dtolnay/anyhow/commits/c7b210a78b32ea90b10860c58983f8c0a742ed03/pulls",
+    "response": []
+  },
+  "graphql_head_ref": {
+    "url": "https://api.github.com/graphql",
+    "variables": {
+      "owner": "dtolnay",
+      "name": "anyhow",
+      "head": "fix/462-new-with-backtrace"
+    },
+    "response": {
+      "data": {
+        "repository": {
+          "pullRequests": {
+            "pageInfo": {
+              "hasNextPage": false
+            },
+            "nodes": [
+              {
+                "databaseId": 4597599038,
+                "number": 463,
+                "headRefOid": "c7b210a78b32ea90b10860c58983f8c0a742ed03",
+                "baseRefOid": "c63b279f3f4af2b02ca6267d9eb47d6d10497f69",
+                "headRepositoryOwner": {
+                  "login": "sb123sb123"
+                },
+                "headRepository": {
+                  "name": "anyhow"
+                },
+                "baseRepository": {
+                  "name": "anyhow",
+                  "owner": {
+                    "login": "dtolnay"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

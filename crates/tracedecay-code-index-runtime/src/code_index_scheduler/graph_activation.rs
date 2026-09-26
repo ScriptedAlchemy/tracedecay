@@ -398,11 +398,6 @@ impl CodeGraphActivationAuthorityV1 {
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-                retained
-                    .sweep_aborted_read_bundle_temporaries()
-                    .map_err(|error| {
-                        CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
-                    })?;
                 let pending_catalog_warm = tokio::task::spawn_blocking(move || {
                     latest.activate_persistent_graph_generation(
                         retained,
@@ -475,11 +470,6 @@ impl CodeGraphActivationAuthorityV1 {
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-                retained
-                    .sweep_aborted_read_bundle_temporaries()
-                    .map_err(|error| {
-                        CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
-                    })?;
                 let pending_catalog_warm = tokio::task::spawn_blocking(move || {
                     latest.activate_persistent_graph(retained, cancellation)
                 })
@@ -595,72 +585,13 @@ impl GraphCancellation for SchedulerGraphCancellation {
 }
 
 struct PendingInteractiveCatalogWarmV1 {
-    retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,
-    generation_id: tracedecay_domain::CodeGenerationId,
     store: Arc<CodeGraphProjectionStore>,
-    request_cancelled: Arc<AtomicBool>,
     cancellation: Arc<dyn GraphCancellation>,
 }
 
 impl PendingInteractiveCatalogWarmV1 {
     #[hotpath::measure(label = "code_graph.catalog.background_warm")]
     fn run(self) -> Result<(), CodeGraphProjectionError> {
-        let catalog_loaded = match self
-            .retained
-            .load_sealed_read_bundle_catalog(&self.request_cancelled)
-        {
-            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Loaded {
-                artifact,
-                bytes,
-            }) => match self
-                .store
-                .install_interactive_catalog_artifact(&bytes, Arc::clone(&self.cancellation))
-            {
-                Ok(()) => {
-                    tracing::info!(
-                        generation = %self.generation_id,
-                        bytes = artifact.bytes,
-                        "code graph interactive catalog loaded from sealed read bundle"
-                    );
-                    true
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        generation = %self.generation_id,
-                        "sealed read bundle catalog failed to install; re-deriving the catalog from the projection"
-                    );
-                    false
-                }
-            },
-            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Absent { reason }) => {
-                tracing::info!(
-                    generation = %self.generation_id,
-                    reason = %reason,
-                    "no sealed read bundle catalog; re-deriving the catalog from the projection"
-                );
-                false
-            }
-            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Stale { detail }) => {
-                tracing::warn!(
-                    generation = %self.generation_id,
-                    detail = %detail,
-                    "sealed read bundle catalog is stale; re-deriving the catalog from the projection"
-                );
-                false
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    generation = %self.generation_id,
-                    "sealed read bundle load failed; re-deriving the catalog from the projection"
-                );
-                false
-            }
-        };
-        if catalog_loaded {
-            return Ok(());
-        }
         self.store
             .warm_interactive_catalog_with_cancellation(self.cancellation)
     }
@@ -711,10 +642,7 @@ impl LatestCodeTextGenerationV1 {
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         Ok(Some(PendingInteractiveCatalogWarmV1 {
-            retained,
-            generation_id,
             store,
-            request_cancelled: cancellation,
             cancellation: graph_cancellation,
         }))
     }
@@ -728,9 +656,6 @@ impl LatestCompleteCodeIndexV1 {
         cancellation: Arc<AtomicBool>,
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let generation_id = self.generation.manifest().generation_id.clone();
-        retained
-            .sweep_aborted_read_bundle_temporaries()
-            .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         let authority = retained.authority();
         let snapshot = hotpath::measure_block!(
             "code_graph.activation.publish_verified_snapshot",
@@ -754,9 +679,9 @@ impl LatestCompleteCodeIndexV1 {
         )?);
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
-        // Bundle IO and catalog materialization are optional accelerators. The
-        // immutable occurrence graph is already verified, so publish it first
-        // and keep only catalog-dependent lookups in the typed warming state.
+        // The immutable occurrence graph is already verified, so publish it
+        // first and keep only catalog-dependent lookups in the typed warming
+        // state while the catalog is derived from it in the background.
         store.mark_interactive_catalog_warming()?;
         store.warm_serving_engine()?;
         let reader = hotpath::measure_block!("code_graph.activation.evidence_reader", {
@@ -778,10 +703,7 @@ impl LatestCompleteCodeIndexV1 {
         let _ = self.generation.test_attribution_authority();
         let _ = self.record_index();
         Ok(Some(PendingInteractiveCatalogWarmV1 {
-            retained,
-            generation_id,
             store,
-            request_cancelled: cancellation,
             cancellation: graph_cancellation,
         }))
     }

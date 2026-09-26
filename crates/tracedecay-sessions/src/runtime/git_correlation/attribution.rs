@@ -168,9 +168,10 @@ pub enum TargetScan {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CommitAttributionSweepOutcome {
-    pub commits_attributed: usize,
+/// Commits matched against a set of spans, before any publication.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitAttribution {
+    pub records: Vec<CommitSessionRecord>,
     pub unavailable_references: usize,
 }
 
@@ -321,14 +322,15 @@ fn publish_transcript_graph_evidence_locked(
     let identity =
         git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     let cancelled = Arc::new(AtomicBool::new(false));
-    let (mut spans, commits) =
-        match recover_git_evidence_projection(runtime, &identity, Arc::clone(&cancelled))? {
-            Some(store) => (
-                store.projection().spans().to_vec(),
-                store.projection().commit_sessions().to_vec(),
-            ),
-            None => (Vec::new(), Vec::new()),
-        };
+    let head = recover_git_evidence_projection(runtime, &identity, Arc::clone(&cancelled))?;
+    let publish_unchanged = head.is_none();
+    let (mut spans, commits) = match head {
+        Some(store) => (
+            store.projection().spans().to_vec(),
+            store.projection().commit_sessions().to_vec(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
     let candidates = transcript_spans_from_observations(&spans, observations, merge_gap_secs);
     let mut spans_changed = 0;
     for incoming in &candidates {
@@ -340,9 +342,12 @@ fn publish_transcript_graph_evidence_locked(
         runtime,
         identity,
         publication_prefix,
-        spans,
-        commits,
-        spans_changed,
+        MergedGraphEvidence {
+            spans,
+            commits,
+            spans_changed,
+            publish_unchanged,
+        },
         new_commits,
         cancelled,
     )
@@ -358,14 +363,15 @@ fn publish_graph_evidence_locked(
     let identity =
         git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     // A never-published projection is the typed empty start.
-    let (mut spans, commits) =
-        match recover_git_evidence_projection(runtime, &identity, Arc::clone(&cancelled))? {
-            Some(store) => (
-                store.projection().spans().to_vec(),
-                store.projection().commit_sessions().to_vec(),
-            ),
-            None => (Vec::new(), Vec::new()),
-        };
+    let head = recover_git_evidence_projection(runtime, &identity, Arc::clone(&cancelled))?;
+    let publish_unchanged = head.is_none();
+    let (mut spans, commits) = match head {
+        Some(store) => (
+            store.projection().spans().to_vec(),
+            store.projection().commit_sessions().to_vec(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
     let mut spans_changed = 0;
     for incoming in new_spans {
         if merge_span(&mut spans, incoming) {
@@ -376,9 +382,12 @@ fn publish_graph_evidence_locked(
         runtime,
         identity,
         publication_prefix,
-        spans,
-        commits,
-        spans_changed,
+        MergedGraphEvidence {
+            spans,
+            commits,
+            spans_changed,
+            publish_unchanged,
+        },
         new_commits,
         cancelled,
     )
@@ -421,9 +430,12 @@ pub async fn rebuild_pre_index_git_evidence<S: GitCorrelationSessionStore>(
             runtime,
             identity.clone(),
             "pre-index-rebuild",
-            Vec::new(),
-            Vec::new(),
-            0,
+            MergedGraphEvidence {
+                spans: Vec::new(),
+                commits: Vec::new(),
+                spans_changed: 0,
+                publish_unchanged: true,
+            },
             &[],
             Arc::new(AtomicBool::new(false)),
         )?;
@@ -431,22 +443,39 @@ pub async fn rebuild_pre_index_git_evidence<S: GitCorrelationSessionStore>(
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The recovered head with incoming spans already merged.
+struct MergedGraphEvidence {
+    spans: Vec<SessionGitSpan>,
+    commits: Vec<CommitSessionRecord>,
+    spans_changed: usize,
+    /// A merge that changes nothing republishes the head only when no head
+    /// exists yet or it must be replaced; otherwise it would mint a new
+    /// generation of identical evidence.
+    publish_unchanged: bool,
+}
+
 fn publish_merged_graph_evidence(
     runtime: &dyn VerifiedGraphRuntimePortV1,
     identity: tracedecay_graph_db::GraphProjectionIdentity,
     publication_prefix: &str,
-    spans: Vec<SessionGitSpan>,
-    mut commits: Vec<CommitSessionRecord>,
-    spans_changed: usize,
+    merged: MergedGraphEvidence,
     new_commits: &[CommitSessionRecord],
     cancelled: Arc<AtomicBool>,
 ) -> Result<(usize, usize), GitCorrelationError> {
+    let MergedGraphEvidence {
+        spans,
+        mut commits,
+        spans_changed,
+        publish_unchanged,
+    } = merged;
     let mut commits_changed = 0;
     for incoming in new_commits {
         if merge_commit(&mut commits, incoming) {
             commits_changed += 1;
         }
+    }
+    if !publish_unchanged && spans_changed == 0 && commits_changed == 0 {
+        return Ok((0, 0));
     }
     let publication_key = graph_evidence_publication_key(publication_prefix, &spans, &commits)?;
     let projection = GitEvidenceProjectionV1::new(&publication_key, spans, commits)?;
@@ -462,7 +491,7 @@ fn publish_merged_graph_evidence(
     Ok((spans_changed, commits_changed))
 }
 
-fn transcript_spans_from_observations(
+pub(super) fn transcript_spans_from_observations(
     current: &[SessionGitSpan],
     observations: &[SpanObservation],
     merge_gap_secs: i64,
@@ -542,7 +571,7 @@ pub fn graph_evidence_publication_key(
     Ok(format!("{prefix}:{}", digest_bytes(&bytes)))
 }
 
-fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitSpan) -> bool {
+pub(super) fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitSpan) -> bool {
     if spans.iter().any(|span| span == incoming) {
         return false;
     }
@@ -570,7 +599,10 @@ fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitSpan) -> boo
     true
 }
 
-fn merge_commit(commits: &mut Vec<CommitSessionRecord>, incoming: &CommitSessionRecord) -> bool {
+pub(super) fn merge_commit(
+    commits: &mut Vec<CommitSessionRecord>,
+    incoming: &CommitSessionRecord,
+) -> bool {
     let Some(existing) = commits.iter_mut().find(|record| {
         record.commit_sha == incoming.commit_sha && record.session_id == incoming.session_id
     }) else {
@@ -594,46 +626,30 @@ fn merge_commit(commits: &mut Vec<CommitSessionRecord>, incoming: &CommitSession
     }
 }
 
-/// Runs commit attribution against the currently verified span projection.
+/// Matches every commit a span target's history holds against `spans`.
 ///
-/// Every span is rescanned because the immutable graph projection has no SQL
-/// `updated_at` surrogate. Content-addressed graph publication makes replay a
-/// no-op while still admitting late historical spans.
-pub async fn run_commit_attribution_sweep<S, F>(
-    session_store: &S,
+/// Every target is rescanned because the immutable graph projection has no
+/// SQL `updated_at` surrogate; merging the records into the head is a no-op
+/// for commits it already holds.
+pub fn attribute_commits<F>(
+    spans: &[SessionGitSpan],
     gap_secs: i64,
     mut scan: F,
-) -> Result<CommitAttributionSweepOutcome, GitCorrelationError>
+) -> Result<CommitAttribution, GitCorrelationError>
 where
-    S: GitCorrelationSessionStore,
     F: FnMut(&SpanScanTarget) -> TargetScan,
 {
-    let runtime = session_store.graph_runtime()?;
-    let identity =
-        git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
-    let cancelled = Arc::new(AtomicBool::new(false));
-    // A never-published projection has no spans to attribute: the sweep is
-    // truthfully a no-op, not a retryable failure.
-    let Some(store) = recover_git_evidence_projection(runtime, &identity, cancelled)? else {
-        return Ok(CommitAttributionSweepOutcome::default());
-    };
-    let projection = store.projection().clone();
-    let targets = scan_targets(projection.spans());
-    let mut records = Vec::new();
-    let mut unavailable_references = 0_usize;
-    for target in &targets {
-        let spans = span_windows_for(
-            projection.spans(),
-            target.branch.as_deref(),
-            &target.worktree,
-        );
-        if spans.is_empty() {
+    let mut attribution = CommitAttribution::default();
+    for target in &scan_targets(spans) {
+        let windows = span_windows_for(spans, target.branch.as_deref(), &target.worktree);
+        if windows.is_empty() {
             continue;
         }
         let commits = match scan(target) {
             TargetScan::Scanned(commits) => commits,
             TargetScan::MissingReference => {
-                unavailable_references = unavailable_references.saturating_add(1);
+                attribution.unavailable_references =
+                    attribution.unavailable_references.saturating_add(1);
                 continue;
             }
             TargetScan::Unavailable => {
@@ -644,29 +660,17 @@ where
             }
         };
         for commit in commits {
-            records.extend(match_commit_to_spans(
+            attribution.records.extend(match_commit_to_spans(
                 &commit.sha,
                 target.branch.as_deref(),
                 &target.worktree,
                 commit.committed_at,
-                &spans,
+                &windows,
                 gap_secs,
             ));
         }
     }
-    if records.is_empty() {
-        return Ok(CommitAttributionSweepOutcome {
-            commits_attributed: 0,
-            unavailable_references,
-        });
-    }
-    let (_, inserted) = session_store
-        .publish_graph_evidence_owned("git-attribution".to_owned(), Vec::new(), records)
-        .await?;
-    Ok(CommitAttributionSweepOutcome {
-        commits_attributed: inserted,
-        unavailable_references,
-    })
+    Ok(attribution)
 }
 
 #[cfg(test)]

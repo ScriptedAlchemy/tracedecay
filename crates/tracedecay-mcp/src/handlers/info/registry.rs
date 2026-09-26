@@ -34,8 +34,12 @@ fn registry_result(args: &Value, payload: &Value) -> ToolResult {
 /// The registry tree view renders only an `ok` listing. An `unavailable`
 /// payload carries the same zeroed tree keys for shape stability and must
 /// not be read back as "no registered projects".
-fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) -> ToolResult {
-    rendered_tool_result(root, args, payload, vec![], || {
+fn render_registry_result(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+    payload: &Value,
+) -> ToolResult {
+    rendered_tool_result(response_handle_root, args, payload, vec![], || {
         if payload.get("status").and_then(Value::as_str) == Some("ok")
             && payload.get("project_tree").is_some()
         {
@@ -241,6 +245,7 @@ fn project_context_selector(
 #[hotpath::measure(label = "mcp.info.project_context.total")]
 pub async fn handle_project_context(
     project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     args: Value,
     registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
@@ -274,7 +279,11 @@ pub async fn handle_project_context(
             "stores": context.stores,
         }),
     };
-    Ok(render_registry_result(project_root, &args, &payload))
+    Ok(render_registry_result(
+        response_handle_root,
+        &args,
+        &payload,
+    ))
 }
 
 #[cfg(test)]

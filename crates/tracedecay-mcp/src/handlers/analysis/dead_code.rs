@@ -4,6 +4,7 @@ use super::*;
 
 #[hotpath::measure(future = true, label = "mcp.analysis.dead_code.total")]
 pub async fn handle_dead_code(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -81,7 +82,7 @@ pub async fn handle_dead_code(
     );
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,

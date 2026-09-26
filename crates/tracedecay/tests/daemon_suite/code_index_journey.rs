@@ -263,10 +263,21 @@ pub async fn tool(
     name: &str,
     arguments: Value,
 ) -> Value {
+    tool_within(socket, handshake, name, arguments, RECEIPT_TIMEOUT).await
+}
+
+/// [`tool`] for a call that legitimately holds for up to `call_timeout`.
+async fn tool_within(
+    socket: &Path,
+    handshake: &DaemonHandshake,
+    name: &str,
+    arguments: Value,
+    call_timeout: Duration,
+) -> Value {
     let deadline = Instant::now() + RECEIPT_TIMEOUT;
     loop {
         let result = tokio::time::timeout(
-            RECEIPT_TIMEOUT,
+            call_timeout,
             call_tool(socket, handshake, name, arguments.clone()),
         )
         .await
@@ -471,9 +482,46 @@ pub async fn assert_project_identity(
     );
 }
 
-/// Reads typed freshness receipts until the daemon serves a complete, fresh
-/// generation that differs from `prior_generation`, carries the expected ref and
-/// source revision, and answers `query` from that same generation.
+/// One `tracedecay_status` read held by `wait_for` until the index reaches
+/// `state` (`fresh` or `ready`) within `budget`; panics unless the wait ends
+/// `reached`.
+pub async fn wait_for_readiness(
+    socket: &Path,
+    handshake: &DaemonHandshake,
+    state: &str,
+    budget: Duration,
+) -> Value {
+    // The transport must outlive the wait so its typed outcome is observed.
+    let observed = tool_within(
+        socket,
+        handshake,
+        "tracedecay_status",
+        json!({
+            "format": "json",
+            "include_branch_diagnostics": false,
+            "include_storage_health": false,
+            "include_session_ingest": false,
+            "include_staleness": false,
+            "wait_for": {
+                "state": state,
+                "timeout_ms": u64::try_from(budget.as_millis()).expect("budget fits u64"),
+            },
+        }),
+        budget + tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE,
+    )
+    .await;
+    assert_eq!(
+        observed["wait"],
+        json!({ "outcome": "reached" }),
+        "index never became {state}: {observed}; daemon_log={}",
+        daemon_log_for_failure()
+    );
+    observed
+}
+
+/// Waits until the daemon serves a complete, ready generation that differs
+/// from `prior_generation`, carries the expected ref and source revision, and
+/// answers `query` from that same generation.
 #[allow(clippy::too_many_arguments)]
 pub async fn wait_for_terminal_generation(
     socket: &Path,
@@ -486,73 +534,54 @@ pub async fn wait_for_terminal_generation(
     query: &str,
     expected_path: Option<&str>,
 ) -> TerminalGenerationReceipt {
-    let mut last_status = Value::Null;
-    let mut last_search = Value::Null;
-    tokio::time::timeout(RECEIPT_TIMEOUT, async {
-        loop {
-            let observed = status(socket, handshake).await;
-            let worktree = &observed["code_index_freshness"]["worktree"];
-            let generation = worktree["latest_generation_id"]
-                .as_str()
-                .map(str::to_owned);
-            let revision_matches = worktree["source_revision"].as_str() == expected_revision;
-            let terminal = observed["code_index_freshness"]["status"] == "current"
-                && worktree["coverage"] == "complete"
-                && worktree["staleness_state"] == "fresh"
-                && worktree["source_reference"] == expected_reference
-                && revision_matches
-                && generation.is_some()
-                && prior_generation.is_none_or(|prior| generation.as_deref() != Some(prior));
-            last_status = observed;
-            if !terminal {
-                // Yield so the daemon worker (and other Tokio tasks on this
-                // runtime) can make progress. A tight status poll starved
-                // reconcile under load and turned a slow seat into a
-                // RECEIPT_TIMEOUT with incomplete lanes forever empty.
-                tokio::time::sleep(Duration::from_millis(25)).await;
-                continue;
-            }
-            let observed_search = search(socket, handshake, query).await;
-            last_search = observed_search;
-            if last_search["code_generation"].as_str() != generation.as_deref() {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-                continue;
-            }
-            let paths = result_paths(&last_search);
-            let query_matches = expected_path
-                .map_or_else(|| paths.is_empty(), |expected| paths.contains(&expected));
-            if !query_matches {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-                continue;
-            }
-            let incomplete = lanes_short_of_terminal(&last_search);
-            if !incomplete.is_empty() {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-                continue;
-            }
-            assert_exact_identity(
-                &last_status,
-                project,
-                identity,
-                expected_reference,
-                expected_revision,
-            );
-            assert_project_identity(socket, handshake, project, identity).await;
-            return TerminalGenerationReceipt {
-                generation_id: generation.expect("terminal generation"),
-                status: last_status.clone(),
-                search: last_search.clone(),
-            };
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "timed out waiting for terminal generation for {query}; incomplete lanes={:?}; status={last_status}; search={last_search}; daemon_log={}",
-            lanes_short_of_terminal(&last_search),
-            daemon_log_for_failure()
-        )
-    })
+    let observed = wait_for_readiness(socket, handshake, "ready", RECEIPT_TIMEOUT).await;
+    let worktree = &observed["code_index_freshness"]["worktree"];
+    let generation = worktree["latest_generation_id"]
+        .as_str()
+        .expect("a ready index names its generation")
+        .to_owned();
+    assert_eq!(
+        worktree["source_reference"], expected_reference,
+        "{observed}"
+    );
+    assert_eq!(
+        worktree["source_revision"].as_str(),
+        expected_revision,
+        "{observed}"
+    );
+    assert!(
+        prior_generation.is_none_or(|prior| generation != prior),
+        "ready still served the prior generation: {observed}"
+    );
+    let found = search(socket, handshake, query).await;
+    assert_eq!(
+        found["code_generation"].as_str(),
+        Some(generation.as_str()),
+        "{found}"
+    );
+    let paths = result_paths(&found);
+    assert!(
+        expected_path.map_or_else(|| paths.is_empty(), |expected| paths.contains(&expected)),
+        "{query} did not answer {expected_path:?} from the ready generation: {found}"
+    );
+    assert_eq!(
+        lanes_short_of_terminal(&found),
+        Vec::<&str>::new(),
+        "a ready generation left search lanes incomplete: {found}"
+    );
+    assert_exact_identity(
+        &observed,
+        project,
+        identity,
+        expected_reference,
+        expected_revision,
+    );
+    assert_project_identity(socket, handshake, project, identity).await;
+    TerminalGenerationReceipt {
+        generation_id: generation,
+        status: observed.clone(),
+        search: found,
+    }
 }
 
 pub async fn deliver_save(project: &Path, paths: &[&str]) {

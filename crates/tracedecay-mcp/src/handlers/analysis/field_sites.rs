@@ -4,6 +4,7 @@ use super::*;
 
 #[hotpath::measure(future = true, label = "mcp.analysis.field_sites.total")]
 pub async fn handle_field_sites(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -47,7 +48,6 @@ pub async fn handle_field_sites(
     // Graph phase is done. The source walk reads every candidate file, so it
     // belongs on a blocking worker like the sibling analysis scans.
     let project_root = graph.project_root()?.to_path_buf();
-    let response_project_root = project_root.clone();
     let (writes, reads, touched) = hotpath::future!(
         tokio::task::spawn_blocking(move || {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
@@ -184,7 +184,7 @@ pub async fn handle_field_sites(
         }
     });
     Ok(generic_tool_result(
-        Some(&response_project_root),
+        Some(response_handle_root),
         &args,
         &payload,
         touched,

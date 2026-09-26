@@ -219,14 +219,7 @@ fn existing_profile_store_layout(
     profile_root: &Path,
     project_id: &str,
 ) -> Result<Option<StoreLayout>> {
-    let layout = storage::profile_sharded_layout(
-        profile_root,
-        profile_root,
-        &storage::EnrollmentMarker {
-            project_id: project_id.to_owned(),
-            storage_mode: storage::StorageMode::ProfileSharded,
-        },
-    )?;
+    let layout = storage::profile_sharded_layout(profile_root, profile_root, project_id)?;
     let store_exists = layout.graph_db_path.is_file()
         || layout.manifest_path.as_deref().is_some_and(Path::is_file);
     Ok(store_exists.then_some(layout))
@@ -284,14 +277,7 @@ async fn remap_moved_nongit_project(
     registry: &RegisteredGlobalDb,
     candidate: &MovedNongitCandidate,
 ) -> Result<Option<StoreLayout>> {
-    let layout = storage::profile_sharded_layout(
-        new_root,
-        profile_root,
-        &storage::EnrollmentMarker {
-            project_id: candidate.project_id.clone(),
-            storage_mode: storage::StorageMode::ProfileSharded,
-        },
-    )?;
+    let layout = storage::profile_sharded_layout(new_root, profile_root, &candidate.project_id)?;
     storage::write_store_manifest(&layout)?;
     registry
         .upsert_code_project(&candidate.project_id, new_root, None, None, None)

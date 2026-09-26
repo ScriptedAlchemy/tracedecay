@@ -919,6 +919,8 @@ impl RustExtractor {
         reexport_scope: Option<&ImportReexportScopeV1>,
     ) {
         let (module_specifier, imported_name) = match full_path.rsplit_once("::") {
+            // `use ::krate;` binds an extern crate root, exactly like `use krate;`.
+            Some(("", _)) => return,
             Some(parts) => parts,
             None if Self::declares_module(state, full_path) => ("self", full_path),
             None => return,
@@ -977,6 +979,11 @@ impl RustExtractor {
     }
 
     fn canonical_rust_import_module(state: &ExtractionState<'_>, module: &str) -> String {
+        // `::krate::path` resolves through the extern prelude only, so a local
+        // module of the same name never shadows it.
+        if let Some(extern_path) = module.strip_prefix("::") {
+            return extern_path.to_owned();
+        }
         let first = module.split("::").next().unwrap_or(module);
         if matches!(first, "crate" | "self" | "super") || !Self::declares_module(state, first) {
             module.to_owned()

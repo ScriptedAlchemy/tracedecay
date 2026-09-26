@@ -530,9 +530,12 @@ pub async fn handle_analytics(
         }
     }
 
-    Ok(tool_json_with_md(Some(&scope.root), &args, &value, || {
-        renderers::analytics_md(&value)
-    }))
+    Ok(tool_json_with_md(
+        Some(&cg.store_layout().response_handle_root),
+        &args,
+        &value,
+        || renderers::analytics_md(&value),
+    ))
 }
 
 #[expect(

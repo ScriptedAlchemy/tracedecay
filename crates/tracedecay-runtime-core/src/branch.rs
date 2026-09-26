@@ -85,8 +85,8 @@ pub use admin::{
 };
 pub use tracking::{
     BranchAddOutcome, BranchTrackingPreparation, PreparedBranchRollbackOutcome,
-    PreparedBranchTracking, finalize_prepared_branch_tracking, find_nearest_tracked_ancestor,
-    local_branch_exists, prepare_branch_tracking_in_layout, rollback_prepared_branch_tracking,
+    PreparedBranchTracking, find_nearest_tracked_ancestor, local_branch_exists,
+    prepare_branch_tracking_in_layout, rollback_prepared_branch_tracking,
 };
 pub(crate) use tracking::{now_unix_secs, parse_unix_secs};
 

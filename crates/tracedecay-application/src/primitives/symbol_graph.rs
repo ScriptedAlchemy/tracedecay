@@ -150,46 +150,17 @@ where
                 if let Err(failure) = validate_claim_generation(&claim, &graph.reader) {
                     return failed_with(context, failure);
                 }
-                let query = request.query.as_str();
-                let Ok(exact) = graph.reader.resolve_simple_name(
-                    query,
-                    None,
+                let Ok(page) = graph.reader.search_symbols(
+                    request.query.as_str(),
+                    Some(&|_, binding, _| in_scope_parts(binding, &request.scope)),
+                    0,
                     MAX_COMPATIBILITY_RESULTS,
                     Arc::clone(&graph.cancellation),
                 ) else {
                     return failed(context, "canonical symbol search failed");
                 };
-                let mut symbols = exact
-                    .into_iter()
-                    .filter(|symbol| in_scope(symbol, &request.scope))
-                    .take(MAX_COMPATIBILITY_RESULTS)
-                    .collect::<Vec<_>>();
-                if symbols.len() < MAX_COMPATIBILITY_RESULTS {
-                    let exact_occurrences = symbols
-                        .iter()
-                        .map(|symbol| symbol.occurrence.clone())
-                        .collect::<HashSet<_>>();
-                    let remaining = MAX_COMPATIBILITY_RESULTS - symbols.len();
-                    let Ok(mut containing) = graph.reader.find_symbols(
-                        &|occurrence, binding, metadata| {
-                            !exact_occurrences.contains(occurrence)
-                                && in_scope_parts(binding, &request.scope)
-                                && metadata.is_some_and(|metadata| {
-                                    contains_ignore_ascii_case(&metadata.simple_name, query)
-                                        || contains_ignore_ascii_case(
-                                            &metadata.qualified_name,
-                                            query,
-                                        )
-                                })
-                        },
-                        remaining,
-                        Arc::clone(&graph.cancellation),
-                    ) else {
-                        return failed(context, "canonical symbol search failed");
-                    };
-                    symbols.append(&mut containing);
-                }
-                let records = symbols
+                let records = page
+                    .symbols
                     .into_iter()
                     .map(|symbol| symbol_record(symbol, None))
                     .collect::<Result<Vec<_>, _>>();

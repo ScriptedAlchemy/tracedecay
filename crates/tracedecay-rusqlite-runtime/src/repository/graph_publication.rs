@@ -32,7 +32,7 @@ impl EncodedProjection {
     fn new(identity: &GraphProjectionIdentityV1) -> GraphPublicationStoreResultV1<Self> {
         Ok(Self {
             shard_id: serde_json::to_string(&identity.shard_id)
-                .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?,
+                .map_err(|error| infrastructure("encode graph projection shard", error))?,
             namespace: identity.namespace.as_str().to_owned(),
             projection: identity.projection.as_str().to_owned(),
         })
@@ -277,7 +277,8 @@ fn encode_optional_head(
     head: Option<&GraphVerifiedHeadV1>,
 ) -> GraphPublicationStoreResultV1<Option<String>> {
     head.map(|head| {
-        serde_json::to_string(head).map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+        serde_json::to_string(head)
+            .map_err(|error| infrastructure("encode graph verified head", error))
     })
     .transpose()
 }
@@ -285,7 +286,8 @@ fn encode_optional_head(
 fn encode_direct_dependency_generations(
     dependencies: &[GraphDependencyGenerationIdentityV1],
 ) -> GraphPublicationStoreResultV1<Vec<u8>> {
-    serde_json::to_vec(dependencies).map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+    serde_json::to_vec(dependencies)
+        .map_err(|error| infrastructure("encode graph replay dependencies", error))
 }
 
 fn sequence_from_i64(value: i64) -> GraphPublicationStoreResultV1<GraphPublicationSequenceV1> {
@@ -317,10 +319,11 @@ fn begin_verified_commit(
     if context.try_begin_verified_commit() {
         return Ok(());
     }
-    context.interruption().map_or(
-        Err(GraphPublicationStoreErrorV1::Infrastructure),
-        |reason| Err(GraphPublicationStoreErrorV1::Interrupted(reason)),
-    )
+    context
+        .interruption()
+        .map_or(Err(GraphPublicationStoreErrorV1::CommitRefused), |reason| {
+            Err(GraphPublicationStoreErrorV1::Interrupted(reason))
+        })
 }
 
 fn begin_replay_retirement_commit(
@@ -329,10 +332,11 @@ fn begin_replay_retirement_commit(
     if context.try_begin_replay_retirement_commit() {
         return Ok(());
     }
-    context.interruption().map_or(
-        Err(GraphPublicationStoreErrorV1::Infrastructure),
-        |reason| Err(GraphPublicationStoreErrorV1::Interrupted(reason)),
-    )
+    context
+        .interruption()
+        .map_or(Err(GraphPublicationStoreErrorV1::CommitRefused), |reason| {
+            Err(GraphPublicationStoreErrorV1::Interrupted(reason))
+        })
 }
 
 fn begin_pending_discard_commit(
@@ -341,10 +345,11 @@ fn begin_pending_discard_commit(
     if context.try_begin_pending_discard_commit() {
         return Ok(());
     }
-    context.interruption().map_or(
-        Err(GraphPublicationStoreErrorV1::Infrastructure),
-        |reason| Err(GraphPublicationStoreErrorV1::Interrupted(reason)),
-    )
+    context
+        .interruption()
+        .map_or(Err(GraphPublicationStoreErrorV1::CommitRefused), |reason| {
+            Err(GraphPublicationStoreErrorV1::Interrupted(reason))
+        })
 }
 
 fn begin_retired_cleanup_finalize_commit(
@@ -353,10 +358,15 @@ fn begin_retired_cleanup_finalize_commit(
     if context.try_begin_retired_cleanup_finalize_commit() {
         return Ok(());
     }
-    context.interruption().map_or(
-        Err(GraphPublicationStoreErrorV1::Infrastructure),
-        |reason| Err(GraphPublicationStoreErrorV1::Interrupted(reason)),
-    )
+    context
+        .interruption()
+        .map_or(Err(GraphPublicationStoreErrorV1::CommitRefused), |reason| {
+            Err(GraphPublicationStoreErrorV1::Interrupted(reason))
+        })
+}
+
+fn infrastructure(operation: &str, error: impl std::fmt::Display) -> GraphPublicationStoreErrorV1 {
+    GraphPublicationStoreErrorV1::Infrastructure(format!("{operation}: {error}"))
 }
 
 fn corrupt(error: impl std::fmt::Display) -> GraphPublicationStoreErrorV1 {

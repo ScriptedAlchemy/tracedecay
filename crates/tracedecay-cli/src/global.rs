@@ -4,7 +4,9 @@ use crate::{commands::daemon_tool_json, current_unix_timestamp};
 
 pub(crate) use tracedecay_runtime_core::storage::{ProjectStorageLocation, ProjectStorageStatus};
 
-pub(crate) fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
+pub(crate) fn classify_project_storage(
+    project_root: &Path,
+) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
     tracedecay_runtime_core::storage::classify_project_storage(project_root)
 }
 
@@ -15,9 +17,8 @@ pub(crate) async fn classify_project_storage_with_registry(
     >,
     profile_root: Option<&Path>,
 ) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
-    let location = classify_project_storage(project_root);
     let (Some(registry), Some(profile_root)) = (registry, profile_root) else {
-        return Ok(location);
+        return classify_project_storage(project_root);
     };
     registry
         .classify_project_storage(project_root, profile_root)
@@ -61,9 +62,8 @@ fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
 
 /// Best-effort: try to flush pending tokens to the worldwide counter.
 ///
-/// `upload_enabled` is the already-resolved canonical user-profile setting.
-/// Legacy user metadata carries the pending counter and cooldown timestamps,
-/// but it is never an authorization fallback for upload.
+/// `upload_enabled` is the already-resolved canonical user-profile setting;
+/// `config` only carries the pending counter and cooldown timestamps.
 /// `force` = true on status/sync commands (always attempt), false on others
 /// (only flush if stale > 30s).
 pub(crate) fn try_flush(
@@ -301,7 +301,7 @@ pub(crate) fn find_descendant_tracedecay(
             let path = entry.path();
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str == tracedecay_project::config::TRACEDECAY_DIR {
+            if name_str == tracedecay_runtime_core::config::TRACEDECAY_DIR {
                 continue;
             }
             if name_str == ".git" {
@@ -377,7 +377,7 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
     }
     eprintln!();
     if !all && targets.is_empty() {
-        eprintln!("  \x1b[33m(no project .tracedecay directories found)\x1b[0m");
+        eprintln!("  \x1b[33m(no project stores found)\x1b[0m");
     } else if !targets.is_empty() {
         eprintln!("Targets:");
         for t in targets {
@@ -386,9 +386,6 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
                 t.data_root.display(),
                 t.status.label()
             );
-            if let Some(marker_root) = &t.marker_root {
-                eprintln!("    marker: {}", marker_root.display());
-            }
         }
     }
     eprintln!();
@@ -612,9 +609,8 @@ mod gather_tests {
     }
 
     #[test]
-    fn canonical_upload_denial_overrides_stale_legacy_metadata() {
+    fn canonical_upload_denial_leaves_pending_tokens_unflushed() {
         let mut config = tracedecay_session_memory::user_config::UserConfig {
-            upload_enabled: true,
             pending_upload: 42,
             ..tracedecay_session_memory::user_config::UserConfig::default()
         };

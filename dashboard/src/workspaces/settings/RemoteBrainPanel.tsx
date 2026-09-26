@@ -176,10 +176,6 @@ function ObservedBody({
           detail={payload.replay_coverage_complete ? 'complete' : 'incomplete'}
         />
         <Field
-          term="backup verified"
-          detail={payload.current_backup_verified ? 'verified' : 'not verified'}
-        />
-        <Field
           term="failover"
           detail={payload.failover_in_progress ? 'in progress' : 'idle'}
         />

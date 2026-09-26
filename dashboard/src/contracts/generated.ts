@@ -3183,7 +3183,6 @@ export const GraphNodeV1Schema = z.object({
 export type GraphNodeV1 = z.infer<typeof GraphNodeV1Schema>;
 
 export const GraphOverviewPayloadV1Schema = z.object({
-  edges_by_kind: z.array(z.lazy(() => GraphKindCountV1Schema)),
   files_by_language: z.array(z.lazy(() => GraphLanguageCountV1Schema)),
   largest_files: z.array(z.lazy(() => GraphLargestFileV1Schema)),
   nodes_by_kind: z.array(z.lazy(() => GraphKindCountV1Schema)),
@@ -3206,11 +3205,12 @@ export type GraphPathPayloadV1 = z.infer<typeof GraphPathPayloadV1Schema>;
 
 export const GraphSearchPayloadV1Schema = z.object({
   count: z.number().int().safe().min(0),
+  has_more: z.boolean(),
   limit: z.number().int().safe(),
   offset: z.number().int().safe(),
   query: z.string(),
   results: z.array(z.lazy(() => GraphNodeV1Schema)),
-  total: z.number().int().safe(),
+  total: z.number().int().safe().min(0).nullable(),
 });
 export type GraphSearchPayloadV1 = z.infer<typeof GraphSearchPayloadV1Schema>;
 
@@ -4980,7 +4980,6 @@ export type RemoteListenerKindV1 = z.infer<typeof RemoteListenerKindV1Schema>;
 export const RemoteOperationalStatusPayloadV1Schema = z.discriminatedUnion("kind", [z.object({
   authority: z.lazy(() => RemoteAuthoritySummaryV1Schema),
   coverage: z.lazy(() => DoctorCoverageCompletenessV1Schema),
-  current_backup_verified: z.boolean(),
   enrollment_configured: z.boolean(),
   failover_in_progress: z.boolean(),
   kind: z.literal("observed"),

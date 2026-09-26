@@ -81,7 +81,9 @@ export function SymbolMatches({
               <p className="td-legend border-b border-edge-subtle px-3 py-2">
                 {capped
                   ? `${rows.length} of ${data.total} matches`
-                  : `${data.total ?? rows.length} matches`}
+                  : data.total == null && data.has_more
+                    ? `first ${rows.length} matches, more not counted`
+                    : `${data.total ?? rows.length} matches`}
               </p>
             }
             renderItem={(node) => (

@@ -8,8 +8,8 @@ use std::sync::{
 
 use serde_json::json;
 use tracedecay_application::pr_tracking::{
-    ManualBranchLifecycleLeaseV1, manual_branch_source_owns_artifacts,
-    try_acquire_manual_branch_lifecycle,
+    ManualBranchLifecycleLeaseV1, acquire_manual_branch_lifecycle,
+    manual_branch_source_owns_artifacts,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
@@ -22,7 +22,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
 #[cfg(unix)]
-use super::scheduler::AutomationSchedulerHandle;
+use super::scheduler::{AutomationSchedulerHandle, AutomationSchedulerSignal};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry;
 #[cfg(unix)]
@@ -477,6 +477,10 @@ pub(super) struct StoreAdministration {
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
+    /// Early-stop handles of every started automation loop, kept outside the
+    /// async scheduler map so synchronous cancel never waits for that map.
+    #[cfg(unix)]
+    automation_scheduler_signals: Arc<std::sync::Mutex<Vec<AutomationSchedulerSignal>>>,
     #[cfg(unix)]
     manual_branch_publications: Arc<ManualBranchPublicationTasks>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
@@ -597,6 +601,8 @@ impl Default for StoreAdministration {
                 tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            #[cfg(unix)]
+            automation_scheduler_signals: Arc::default(),
             #[cfg(unix)]
             manual_branch_publications: Arc::new(ManualBranchPublicationTasks::default()),
             session_temporal_refresh_schedulers: Arc::new(
@@ -1320,6 +1326,13 @@ impl StoreAdministration {
         &self.automation_schedulers
     }
 
+    #[cfg(unix)]
+    pub(super) fn automation_scheduler_signals(
+        &self,
+    ) -> &std::sync::Mutex<Vec<AutomationSchedulerSignal>> {
+        &self.automation_scheduler_signals
+    }
+
     pub(super) fn session_temporal_refresh_schedulers(
         &self,
     ) -> &Arc<SessionTemporalRefreshSchedulerRegistry> {
@@ -1767,9 +1780,8 @@ impl StoreAdministration {
         // configuration store. Resolve the pinned snapshot on demand when this
         // process has not yet opened the project (first operation, or the first
         // after a daemon restart) instead of failing closed. The resolver reads
-        // only durable authority; it never consults legacy config input and a
-        // genuinely unresolvable store still fails before any destructive store
-        // action.
+        // only durable authority; a genuinely unresolvable store still fails
+        // before any destructive store action.
         let config =
             tracedecay_project::config::resolve_runtime_configuration_for_registered_database(
                 project_root,
@@ -1819,7 +1831,8 @@ impl StoreAdministration {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let lifecycle_leases = acquire_manual_branch_retirement_leases(data_root, &retirements)?;
+        let lifecycle_leases =
+            acquire_manual_branch_retirement_leases(data_root, &retirements).await?;
         let lifecycle_leases = cleanup_manual_branch_retirements(
             project_root,
             data_root,
@@ -1834,24 +1847,25 @@ impl StoreAdministration {
     }
 }
 
-#[hotpath::measure(label = "daemon.branch_admin.acquire_retirement_leases")]
-fn acquire_manual_branch_retirement_leases(
+#[hotpath::measure(label = "daemon.branch_admin.acquire_retirement_leases", future = true)]
+async fn acquire_manual_branch_retirement_leases(
     data_root: &Path,
     retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
 ) -> Result<Vec<ManualBranchLifecycleLeaseV1>> {
-    retirements
-        .iter()
-        .map(|retirement| {
-            try_acquire_manual_branch_lifecycle(data_root, &retirement.branch).map_err(|error| {
-                TraceDecayError::Config {
+    let mut leases = Vec::with_capacity(retirements.len());
+    for retirement in retirements {
+        leases.push(
+            acquire_manual_branch_lifecycle(data_root, &retirement.branch)
+                .await
+                .map_err(|error| TraceDecayError::Config {
                     message: format!(
                         "branch removal for '{}' is contended or unavailable: {error}",
                         retirement.branch
                     ),
-                }
-            })
-        })
-        .collect()
+                })?,
+        );
+    }
+    Ok(leases)
 }
 
 #[hotpath::measure(label = "daemon.branch_admin.cleanup_retirements", future = true)]

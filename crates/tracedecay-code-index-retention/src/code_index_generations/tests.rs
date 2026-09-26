@@ -1624,6 +1624,53 @@ fn maintenance_preparation_wakes_for_an_unreferenced_final_segment() {
     );
 }
 
+/// Earlier seals wrote a read bundle beside the generation and its segments.
+/// No reader names those files any more, so ordinary maintenance reclaims
+/// every file of that shape and leaves other names in the roots alone.
+#[test]
+fn maintenance_reclaims_retired_read_bundle_files() {
+    let store = tempfile::TempDir::new().expect("create unpublished store");
+    let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&generations_root).expect("create generation root");
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+    let hex = "ab".repeat(32);
+    let retired = [
+        generations_root.join(format!("read-bundle-{hex}.json")),
+        generations_root.join(format!(".read-bundle-{hex}.4242.1.tmp")),
+        segments_root.join(format!("read-bundle-artifact-{hex}.bin")),
+    ];
+    for path in &retired {
+        std::fs::write(path, b"retired read bundle bytes").expect("write retired bundle file");
+    }
+    let unrelated = segments_root.join("unrelated.txt");
+    std::fs::write(&unrelated, b"not a retention shape").expect("write unrelated file");
+
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("prepare retired bundle retention unit");
+    assert!(plan.has_collectable_work());
+    let report = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(99),
+        None,
+    )
+    .expect("execute retired bundle retention unit");
+
+    assert_eq!(
+        retired.iter().map(|path| path.exists()).collect::<Vec<_>>(),
+        vec![false, false, false]
+    );
+    assert!(unrelated.exists());
+    assert!(report.deleted_generations.is_empty());
+}
+
 #[test]
 fn collectable_maintenance_preparation_escalates_to_full_verification() {
     let (store, _generations) = fixture_store(8);
@@ -2955,6 +3002,90 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     assert!(!orphan_staging.exists());
     assert!(!orphan_sidecar.exists());
     assert!(!orphan_compacting.exists());
+}
+
+/// A daemon killed while `VACUUM INTO` writes the compacted rewrite leaves
+/// SQLite's rollback journal for that rewrite beside it (issue #2127). The
+/// next retention pass must collect it with the rest of the dead build's
+/// staging family, under a receipt, instead of refusing the whole inventory
+/// on every pass, and must leave the active build's copy to its builder.
+#[test]
+fn killed_compaction_journal_is_collected_with_its_staging_family() {
+    let (store, generations) = fixture_store(1);
+    let active = generations.last().expect("active generation");
+    let staging_root = code_text_artifact_staging_root(store.path());
+    std::fs::create_dir_all(&staging_root).expect("create staging root");
+    let active_digest = sha256_hex_suffix(&active.state_digest).expect("active sealed digest");
+    let active_journal = staging_root.join(format!(
+        ".text-artifact-{active_digest}.staging-compacting-journal"
+    ));
+    std::fs::write(&active_journal, b"active rewrite journal").expect("write active journal");
+    let killed = "f148823506c0ab16dccaa6c9442ea2820c73eefa2c40f7893fe20f3d5a288437";
+    let killed_family = [
+        (
+            format!(".text-artifact-{killed}.staging"),
+            &b"killed staging"[..],
+        ),
+        (
+            format!(".text-artifact-{killed}.staging-compacting"),
+            &b"killed rewrite"[..],
+        ),
+        (
+            format!(".text-artifact-{killed}.staging-compacting-journal"),
+            &b"killed rewrite journal"[..],
+        ),
+    ];
+    for (name, bytes) in &killed_family {
+        std::fs::write(staging_root.join(name), bytes).expect("write killed build residue");
+    }
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(23),
+        None,
+    )
+    .expect("retention collects the killed build's residue");
+
+    let mut deleted = report
+        .deleted_text_artifacts
+        .iter()
+        .map(|candidate| (candidate.artifact_file.as_str(), candidate.size_bytes))
+        .collect::<Vec<_>>();
+    deleted.sort_unstable();
+    assert_eq!(
+        deleted,
+        vec![
+            (
+                ".text-artifact-f148823506c0ab16dccaa6c9442ea2820c73eefa2c40f7893fe20f3d5a288437.staging",
+                14
+            ),
+            (
+                ".text-artifact-f148823506c0ab16dccaa6c9442ea2820c73eefa2c40f7893fe20f3d5a288437.staging-compacting",
+                14
+            ),
+            (
+                ".text-artifact-f148823506c0ab16dccaa6c9442ea2820c73eefa2c40f7893fe20f3d5a288437.staging-compacting-journal",
+                22
+            ),
+        ]
+    );
+    let receipt = report
+        .text_artifact_receipt
+        .expect("text-artifact retention receipt");
+    assert_eq!(receipt.reclaimed_bytes, 50);
+    for (name, _) in &killed_family {
+        assert!(
+            !staging_root.join(name).exists(),
+            "{name} must be collected"
+        );
+    }
+    assert!(
+        active_journal.is_file(),
+        "the active build's rewrite journal belongs to its builder"
+    );
+    assert!(!text_artifact_transaction_path(store.path()).exists());
 }
 
 /// A seated successor releases the serving pin on its predecessor, and a

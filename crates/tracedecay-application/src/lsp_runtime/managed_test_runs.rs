@@ -150,7 +150,7 @@ impl OperationEventTestRunProjection {
         let content = serde_json::to_string(&record)
             .map_err(|_| LspRuntimeFailure::new("test-run-expansion-handle-invalid"))?;
         store_response_handle(
-            &self.project.project_root,
+            self.project.feedback.response_handle_root(),
             &content,
             micros_to_seconds(issued_at),
         )

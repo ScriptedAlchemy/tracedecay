@@ -525,6 +525,13 @@ pub async fn wait_until_repository_discovery_blocks(directory: &Path) -> bool {
     *entered.borrow()
 }
 
+/// Production builds arm no discovery blocks, so the probe budget always
+/// falls through to its own deadline.
+#[cfg(not(any(test, feature = "test-helpers")))]
+pub async fn wait_until_repository_discovery_blocks(_directory: &Path) -> bool {
+    false
+}
+
 #[cfg(any(test, feature = "test-helpers"))]
 fn armed_discovery_block(directory: &Path) -> Option<std::sync::Arc<RepositoryDiscoveryBlockGate>> {
     let observations = repository_discovery_observations();

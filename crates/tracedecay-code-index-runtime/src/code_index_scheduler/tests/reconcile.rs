@@ -6066,6 +6066,105 @@ async fn background_reconciles_respect_a_single_admission_permit() {
     registry.shutdown().await;
 }
 
+/// `tracedecay_status` `wait_for` rides on this wait. While graph activation
+/// of the first generation is held, a short wait for `ready` times out on the
+/// published generation with its graph pending; a longer one returns
+/// `Reached` only once activation is released, and the freshness it leaves
+/// behind serves that graph.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn readiness_wait_reaches_ready_exactly_when_the_held_graph_publishes() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold worker before publication");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let scope = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .expect("mounted scope");
+    let gate = super::super::graph_activation::install_injected_activation_gate(&scope.worktree_id);
+    let mut publications = registry.subscribe_generation_publications();
+    drop(admission);
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_until_started())
+        .await
+        .expect("graph activation reached the held gate");
+    let published = tokio::time::timeout(Duration::from_secs(10), publications.recv())
+        .await
+        .expect("publication deadline")
+        .expect("sealed publication");
+
+    let held = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+            Duration::from_millis(50),
+        )
+        .await
+        .expect("freshness read");
+    let tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::TimedOut {
+        last: Some(last),
+    } = held
+    else {
+        panic!("a held graph cannot be ready: {held:?}");
+    };
+    assert_eq!(
+        last.latest_generation_id.as_deref(),
+        Some(published.generation_id.as_str())
+    );
+    assert_eq!(
+        last.code_graph_serving,
+        Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Pending)
+    );
+
+    let waiter = registry.clone();
+    let root = fixture.path().to_path_buf();
+    let wait = tokio::spawn(async move {
+        waiter
+            .wait_for_readiness(
+                &root,
+                tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+                SERVING_SEAT_FAILURE_CEILING,
+            )
+            .await
+    });
+    gate.release();
+    let reached = wait
+        .await
+        .expect("wait task joins")
+        .expect("freshness read");
+    assert!(
+        matches!(
+            reached,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+        ),
+        "{reached:?}"
+    );
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.code_graph_serving,
+        Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready)
+    );
+    assert_eq!(
+        freshness.latest_generation_id.as_deref(),
+        Some(published.generation_id.as_str())
+    );
+    registry.shutdown().await;
+}
+
 /// A pass can start and settle entirely between two reads of the running
 /// level. The owner-activity counts only grow, so a reader that looks after
 /// the pass still sees it, and the worker phase says the pass and its tail

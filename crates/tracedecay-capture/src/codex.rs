@@ -350,8 +350,8 @@ fn append_codex_session_meta_agent_relations(
         relations = relations.with_agent_id(agent_id);
     }
     // The spawning `spawn_agent` call id is recorded only in the parent's
-    // rollout (`SubAgentActivity` `started` item), never in the child's, so
-    // the child carries no parent tool-use id.
+    // rollout (`SubAgentActivity` `started` item), never in the child's; the
+    // parent's spawn rollup binds it once both sessions are projected.
     if let Some(parent) = parent_session_id {
         if let Some(parent_agent_id) = observation_id_from_native(&parent) {
             relations = relations.with_parent_agent_id(parent_agent_id);
@@ -397,6 +397,12 @@ fn append_codex_event_facts(
             };
             if item.get("type").and_then(Value::as_str) == Some("FileChange") {
                 append_codex_file_change_facts(payload, item, timestamp, facts);
+                return;
+            }
+            if item.get("type").and_then(Value::as_str) == Some("SubAgentActivity")
+                && item.get("kind").and_then(Value::as_str) == Some("started")
+            {
+                append_codex_subagent_spawn_fact(item, facts);
                 return;
             }
             if item.get("type").and_then(Value::as_str) != Some("UserMessage") {
@@ -468,6 +474,38 @@ fn append_codex_event_facts(
             state: CanonicalUnknownStateV1::Absent,
         }),
     }
+}
+
+/// One `item_completed` `SubAgentActivity` `started` item: the parent
+/// rollout's only record binding a spawned thread (`agent_thread_id`) to the
+/// `spawn_agent` call that started it (`id`, the call's `call_id`). Either
+/// missing leaves the item typed malformed rather than a partial spawn.
+fn append_codex_subagent_spawn_fact(item: &Value, facts: &mut Vec<CanonicalObservationFactV1>) {
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let (Some(child), Some(call_id)) = (text("agent_thread_id"), text("id")) else {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "item_completed.SubAgentActivity".to_string(),
+            state: CanonicalUnknownStateV1::Malformed,
+        });
+        return;
+    };
+    let mut content = serde_json::Map::new();
+    content.insert(
+        "tool_use_id".to_string(),
+        Value::String(call_id.to_string()),
+    );
+    if let Some(agent_path) = text("agent_path") {
+        content.insert("text".to_string(), Value::String(agent_path.to_string()));
+    }
+    facts.push(CanonicalObservationFactV1::Workflow {
+        evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+        reference: Some(child.to_string()),
+        content: Some(Value::Object(content)),
+    });
 }
 
 /// One `item_completed` `FileChange` item: Codex's record of an applied patch.
@@ -1204,5 +1242,61 @@ mod provider_usage_tests {
             envelope.relations().message_id().map(ObservationId::as_str),
             Some("user-item-1")
         );
+    }
+
+    fn subagent_activity(item: serde_json::Value) -> Vec<CanonicalObservationFactV1> {
+        let native = json!({
+            "timestamp": "2026-09-02T00:39:03.193Z",
+            "type": "event_msg",
+            "payload": {"type": "item_completed", "thread_id": "parent-thread", "item": item}
+        });
+        super::normalize_codex_observation(
+            &native,
+            "parent-thread",
+            Some("parent-thread"),
+            ObservationId::new("record.fixture").unwrap(),
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+        )
+        .unwrap()
+        .facts()
+        .to_vec()
+    }
+
+    #[test]
+    fn subagent_activity_started_records_the_spawned_thread_and_its_call() {
+        let facts = subagent_activity(json!({
+            "type": "SubAgentActivity", "id": "call_oRAA9a98",
+            "kind": "started", "agent_thread_id": "child-thread", "agent_path": "/root/explorer"
+        }));
+        assert_eq!(
+            facts,
+            vec![CanonicalObservationFactV1::Workflow {
+                evidence_kind: tracedecay_domain::CanonicalWorkflowEvidenceKindV1::Subagent,
+                reference: Some("child-thread".to_owned()),
+                content: Some(json!({"tool_use_id": "call_oRAA9a98", "text": "/root/explorer"})),
+            }]
+        );
+
+        let interacted = subagent_activity(json!({
+            "type": "SubAgentActivity", "id": "call_later",
+            "kind": "interacted", "agent_thread_id": "child-thread"
+        }));
+        assert!(
+            interacted
+                .iter()
+                .all(|fact| !matches!(fact, CanonicalObservationFactV1::Workflow { .. })),
+            "only the started item names the spawning call: {interacted:?}"
+        );
+
+        let unnamed = subagent_activity(json!({
+            "type": "SubAgentActivity", "id": "call_x", "kind": "started"
+        }));
+        assert!(matches!(
+            unnamed.as_slice(),
+            [CanonicalObservationFactV1::Unknown {
+                state: tracedecay_domain::CanonicalUnknownStateV1::Malformed,
+                ..
+            }]
+        ));
     }
 }

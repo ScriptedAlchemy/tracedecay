@@ -1,5 +1,7 @@
 //! Dependency-clean graph-navigation handlers over [`VerifiedGraphQuery`].
 
+use std::path::Path;
+
 use serde_json::{Value, json};
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
@@ -157,6 +159,7 @@ pub async fn compute_node(
 /// Cross-run node lookup by name.
 #[hotpath::measure(label = "mcp.graph.by_qualified_name.total")]
 pub async fn handle_by_qualified_name(
+    response_handle_root: &Path,
     graph: &VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
@@ -179,7 +182,7 @@ pub async fn handle_by_qualified_name(
 
     let value = hotpath::measure_block!("mcp.graph.by_qualified_name.serialize", json!(items));
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &value,
         touched_files,
@@ -190,7 +193,11 @@ pub async fn handle_by_qualified_name(
 /// the public-API surface of a symbol so callers can avoid reading the
 /// source file just to inspect the signature.
 #[hotpath::measure(label = "mcp.graph.signature.total")]
-pub async fn handle_signature(graph: &VerifiedGraphQuery, args: Value) -> Result<ToolResult> {
+pub async fn handle_signature(
+    response_handle_root: &Path,
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     let nodes = hotpath::measure_block!(
         "mcp.graph.signature.graph",
         nodes_addressed_by_args(graph, &args)?
@@ -222,7 +229,7 @@ pub async fn handle_signature(graph: &VerifiedGraphQuery, args: Value) -> Result
 
     let value = hotpath::measure_block!("mcp.graph.signature.serialize", json!(items));
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &value,
         touched_files,
@@ -232,7 +239,11 @@ pub async fn handle_signature(graph: &VerifiedGraphQuery, args: Value) -> Result
 /// Derive annotations attached to a symbol. Accepts `node_id` or
 /// `qualified_name`. Macro expansion is outside the retained syntax evidence.
 #[hotpath::measure(label = "mcp.graph.derives.total")]
-pub async fn handle_derives(graph: &VerifiedGraphQuery, args: Value) -> Result<ToolResult> {
+pub async fn handle_derives(
+    response_handle_root: &Path,
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     let nodes = hotpath::measure_block!(
         "mcp.graph.derives.graph",
         nodes_addressed_by_args(graph, &args)?
@@ -270,7 +281,7 @@ pub async fn handle_derives(graph: &VerifiedGraphQuery, args: Value) -> Result<T
 
     let output = hotpath::measure_block!("mcp.graph.derives.serialize", json!(items));
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,

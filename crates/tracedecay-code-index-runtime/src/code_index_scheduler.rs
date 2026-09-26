@@ -209,9 +209,11 @@ pub use registry::CodeIndexReconcileAdmissionV1;
 pub use registry::CodeIndexSchedulerRegistryV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
 pub use registry::{
-    CodeIndexOwnerActivityV1, CodeIndexWorkerPhaseV1, ScopedFeedbackDocumentIdentityV1,
+    CodeIndexOwnerActivityV1, CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1,
+    CodeIndexWorkerPhaseV1, ScopedFeedbackDocumentIdentityV1,
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
     feedback_document_identity_from_generation,
+    feedback_language_document_identity_from_generation,
 };
 pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 

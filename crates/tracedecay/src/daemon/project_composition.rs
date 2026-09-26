@@ -474,6 +474,8 @@ struct ProjectRoutePorts {
     code_index: ProjectCodeIndexAuthorities,
     dashboard_code_index_freshness_reader:
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
+    code_index_readiness_waiter:
+        tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter,
     dashboard_feedback_status_reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
     dashboard_pr_autotrack_reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -521,6 +523,7 @@ impl ComposedCoreServer {
             .with_dashboard_code_index_freshness_reader(Arc::clone(
                 &ports.dashboard_code_index_freshness_reader,
             ))
+            .with_code_index_readiness_waiter(Arc::clone(&ports.code_index_readiness_waiter))
             .with_dashboard_feedback_status_reader(Arc::clone(
                 &ports.dashboard_feedback_status_reader,
             ))
@@ -923,6 +926,9 @@ impl ProjectOpenInputs<'_> {
             ports: ProjectRoutePorts {
                 code_index,
                 dashboard_code_index_freshness_reader: project_dashboard_freshness_reader(
+                    self.invocation.code_index_schedulers.clone(),
+                ),
+                code_index_readiness_waiter: project_readiness_waiter(
                     self.invocation.code_index_schedulers.clone(),
                 ),
                 dashboard_feedback_status_reader:
@@ -1843,6 +1849,20 @@ fn project_dashboard_freshness_reader(
             Box::pin(async move { schedulers.dashboard_freshness_read(&project_root).await })
         });
     reader
+}
+
+/// `tracedecay_status` `wait_for` over this route's code-index schedulers.
+fn project_readiness_waiter(
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+) -> tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter {
+    Arc::new(move |project_root, target, budget| {
+        let schedulers = schedulers.clone();
+        Box::pin(async move {
+            schedulers
+                .wait_for_readiness(&project_root, target, budget)
+                .await
+        })
+    })
 }
 
 fn project_dashboard_pr_autotrack_reader()

@@ -44,6 +44,7 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
         }
         _ => {
             portable_health::dispatch_tool(
+                &cg.store_layout().response_handle_root,
                 &verified_graph_open(&options),
                 tool_name,
                 args,

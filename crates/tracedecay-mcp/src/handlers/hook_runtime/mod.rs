@@ -117,7 +117,11 @@ pub async fn handle_hook_runtime(
             )));
         }
     };
-    Ok(tool_json(Some(cg.project_root()), &args, &output))
+    Ok(tool_json(
+        Some(&cg.store_layout().response_handle_root),
+        &args,
+        &output,
+    ))
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.lsp")]

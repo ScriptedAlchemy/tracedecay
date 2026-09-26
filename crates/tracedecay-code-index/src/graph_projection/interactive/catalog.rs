@@ -352,6 +352,7 @@ impl CatalogScan {
 
         self.catalog.imports = self.imports_by_entity.into_values().collect();
         self.catalog.imports.sort_by(canonical_import_order);
+        self.catalog.finalize();
         Ok(self.catalog)
     }
 }
@@ -378,14 +379,6 @@ impl<K: Ord> SymbolDegreeCounts<K> {
 
     pub(super) fn record_incoming(&mut self, symbol: K) {
         self.counts.entry(symbol).or_default().1 += 1;
-    }
-
-    pub(super) fn get<Q>(&self, symbol: &Q) -> (u64, u64)
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.counts.get(symbol).copied().unwrap_or_default()
     }
 
     pub(super) fn take<Q>(&mut self, symbol: &Q) -> (u64, u64)

@@ -5,6 +5,7 @@ use tree_sitter::{Node, Parser};
 
 #[hotpath::measure(future = true, label = "mcp.analysis.constructors.total")]
 pub async fn handle_constructors(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -54,7 +55,7 @@ pub async fn handle_constructors(
             })
         );
         return Ok(generic_tool_result(
-            Some(graph.project_root()?),
+            Some(response_handle_root),
             &args,
             &payload,
             vec![],
@@ -197,7 +198,7 @@ pub async fn handle_constructors(
         })
     );
     Ok(generic_tool_result(
-        Some(project_root),
+        Some(response_handle_root),
         &args,
         &payload,
         touched,

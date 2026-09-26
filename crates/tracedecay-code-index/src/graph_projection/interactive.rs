@@ -38,18 +38,17 @@ use super::{
 };
 use crate::lineage::LineageSymbolRecordV1;
 
-mod artifact;
 mod catalog;
 mod imports;
 mod models;
 
-pub use self::artifact::{INTERACTIVE_CATALOG_ARTIFACT_NAME, write_interactive_catalog_artifact};
 use self::models::CatalogSymbol;
 pub(super) use self::models::InteractiveCatalog;
 pub use self::models::{
-    CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
-    CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphRankedSymbolV1,
-    CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
+    CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
+    CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1,
+    CodeGraphPathSearchV1, CodeGraphRankedSymbolV1, CodeGraphSemanticEdgeV1,
+    CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolSearchPageV1,
     CodeGraphSymbolSummaryV1,
 };
 
@@ -75,8 +74,8 @@ pub(super) struct InteractiveCatalogCache {
     state: RwLock<InteractiveCatalogState>,
     build: Mutex<()>,
     /// Count of full projection warm scans run against this store, so tests
-    /// can prove a bundled generation opened without any warm work. The scan
-    /// may run on a background thread, hence an atomic.
+    /// can prove concurrent readers share one scan. The scan may run on a
+    /// background thread, hence an atomic.
     scan_builds: std::sync::atomic::AtomicUsize,
 }
 
@@ -157,49 +156,7 @@ impl CodeGraphProjectionStore {
         }
     }
 
-    /// Installs a digest-verified sealed-read-bundle catalog artifact as this
-    /// store's ready interactive catalog, so no projection warm scan ever
-    /// runs for this generation. The bundle envelope has already proven the
-    /// bytes against the generation identity; this decodes them, revalidates
-    /// structure, and publishes the catalog into the shared slot.
-    ///
-    /// Idempotent over an already-ready catalog. Refused while a warm build
-    /// owns the slot: the owner's outcome wins, so a loaded artifact can
-    /// never half-replace an in-flight scan.
-    pub fn install_interactive_catalog_artifact(
-        &self,
-        bytes: &[u8],
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<(), CodeGraphProjectionError> {
-        if cancellation.is_cancelled() {
-            return Err(CodeGraphProjectionError::Cancelled);
-        }
-        let catalog = hotpath::measure_block!(
-            "code_graph.catalog.bundle_install",
-            artifact::decode_interactive_catalog_artifact(bytes, cancellation.as_ref())
-        )?;
-        let mut state = self
-            .interactive_catalog
-            .state
-            .write()
-            .map_err(|_| catalog_lock_poisoned())?;
-        match &*state {
-            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming { owner: None } => {
-                *state = InteractiveCatalogState::Ready(Arc::new(catalog));
-                Ok(())
-            }
-            InteractiveCatalogState::Ready(_) => Ok(()),
-            InteractiveCatalogState::Warming { owner: Some(_) } => {
-                Err(CodeGraphProjectionError::Unavailable(
-                    "code graph interactive catalog warm already has an owner".to_owned(),
-                ))
-            }
-            InteractiveCatalogState::Failed(error) => Err(error.clone()),
-        }
-    }
-
-    /// Number of full projection warm scans this store has run. A bundled
-    /// generation must open with this still at zero.
+    /// Number of full projection warm scans this store has run.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn interactive_catalog_scan_builds(&self) -> usize {
         self.interactive_catalog
@@ -715,6 +672,126 @@ impl CodeGraphInteractiveReader {
                 })
                 .collect(),
             symbol_count: catalog.symbols.len(),
+        })
+    }
+
+    /// Generation-wide counts with the `largest_files` most symbol-dense
+    /// files, read from aggregates the catalog derived when it was built.
+    pub fn census(
+        &self,
+        largest_files: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<CodeGraphCensusV1, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(cancellation)?;
+        Ok(CodeGraphCensusV1 {
+            symbols: catalog.symbols.len() as u64,
+            semantic_edges: catalog.semantic_edges,
+            files: catalog.files.len() as u64,
+            symbols_by_kind: catalog.symbols_by_kind.clone(),
+            files_by_language: catalog.files_by_language.clone(),
+            largest_files: catalog
+                .largest_files
+                .iter()
+                .take(largest_files)
+                .cloned()
+                .collect(),
+        })
+    }
+
+    /// Canonical symbol name search: exact simple-name hits from the
+    /// simple-name index first (occurrence order), then every other symbol
+    /// whose simple or qualified name contains `query` (ASCII
+    /// case-insensitive) in canonical occurrence order. Returns the
+    /// `[offset, offset + limit)` window of the symbols `admit` accepts (all
+    /// when `None`); the scan stops one match past the window.
+    ///
+    /// ponytail: a query with fewer matches than the window scans every
+    /// catalog name (~150 ms on a 200k-symbol generation); a name n-gram
+    /// index built with the catalog is the upgrade when that bites.
+    pub fn search_symbols(
+        &self,
+        query: &str,
+        admit: Option<&CodeGraphSymbolPredicate<'_>>,
+        offset: usize,
+        limit: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<CodeGraphSymbolSearchPageV1, CodeGraphProjectionError> {
+        const CANCELLATION_INTERVAL: usize = 4_096;
+
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        require_positive(limit, "code graph symbol search limit")?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let admitted = |occurrence: &SymbolOccurrenceId, symbol: &CatalogSymbol| {
+            admit.is_none_or(|admit| {
+                admit(
+                    occurrence,
+                    symbol.binding.as_ref(),
+                    symbol.metadata.as_ref(),
+                )
+            })
+        };
+        let exact: BTreeSet<&SymbolOccurrenceId> = catalog
+            .by_simple_name
+            .get(&query.to_lowercase())
+            .into_iter()
+            .flatten()
+            .filter(|occurrence| {
+                catalog
+                    .symbols
+                    .get(*occurrence)
+                    .is_some_and(|symbol| admitted(occurrence, symbol))
+            })
+            .collect();
+
+        let mut symbols = Vec::new();
+        let mut matched = 0_usize;
+        let mut has_more = false;
+        let mut accept = |occurrence: &SymbolOccurrenceId| -> bool {
+            if matched >= offset {
+                if symbols.len() == limit {
+                    has_more = true;
+                    return true;
+                }
+                if let Some(summary) = catalog.summary(occurrence) {
+                    symbols.push(summary);
+                }
+            }
+            matched += 1;
+            false
+        };
+        'scan: {
+            for occurrence in &exact {
+                if accept(occurrence) {
+                    break 'scan;
+                }
+            }
+            for (index, (occurrence, symbol)) in catalog.symbols.iter().enumerate() {
+                if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
+                    return Err(CodeGraphProjectionError::Cancelled);
+                }
+                let named = symbol.metadata.as_ref().is_some_and(|metadata| {
+                    contains_ignore_ascii_case(&metadata.simple_name, query)
+                        || contains_ignore_ascii_case(&metadata.qualified_name, query)
+                });
+                if named
+                    && !exact.contains(occurrence)
+                    && admitted(occurrence, symbol)
+                    && accept(occurrence)
+                {
+                    break 'scan;
+                }
+            }
+        }
+        let total = if query.is_empty() && admit.is_none() {
+            Some(catalog.symbols.len() as u64)
+        } else {
+            (!has_more).then_some(matched as u64)
+        };
+        Ok(CodeGraphSymbolSearchPageV1 {
+            symbols,
+            has_more,
+            total,
         })
     }
 
@@ -1291,6 +1368,14 @@ fn source_relation_kinds() -> Result<BTreeSet<GraphRelationKind>, CodeGraphProje
 
 fn target_relation_kinds() -> Result<BTreeSet<GraphRelationKind>, CodeGraphProjectionError> {
     Ok(BTreeSet::from([GraphRelationKind::new(TARGET_EDGE_KIND)?]))
+}
+
+fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
+    query.is_empty()
+        || value
+            .as_bytes()
+            .windows(query.len())
+            .any(|window| window.eq_ignore_ascii_case(query.as_bytes()))
 }
 
 fn require_positive(value: usize, what: &str) -> Result<(), CodeGraphProjectionError> {

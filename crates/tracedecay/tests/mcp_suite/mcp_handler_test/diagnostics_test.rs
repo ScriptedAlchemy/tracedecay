@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
 const UNPUBLISHED_CODE: &str = "application.diagnostics.unsupported";
-const UNPUBLISHED_MESSAGE: &str = "No diagnostic producer is configured for this project: it has no tsconfig.json, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
+const UNPUBLISHED_MESSAGE: &str = "No diagnostic producer is configured for this scope: no tsconfig.json was found under the project root, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
+const UNPUBLISHED_MAIN_RS_MESSAGE: &str = "No diagnostic producer is configured for this scope: no tsconfig owns `src/main.rs` (searched src/tsconfig.json, tsconfig.json, and their project references), so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
+const UNPUBLISHED_MISSING_FILE_MESSAGE: &str = "No diagnostic producer is configured for this scope: no tsconfig owns `src/does-not-exist.rs` (searched src/tsconfig.json, tsconfig.json, and their project references), so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
 
 #[tokio::test]
 async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() {
@@ -84,14 +86,22 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     let markdown =
         call_diagnostics(&server, json!({"scope": "workspace", "format": "markdown"})).await;
 
-    for (label, result) in [
-        ("workspace", &workspace),
-        ("src/main.rs", &indexed_file),
-        ("src/does-not-exist.rs", &missing_file),
-        ("maximum_diagnostics 0", &zero_page),
-        ("maximum_diagnostics 1001", &oversized_page),
+    for (label, result, message) in [
+        ("workspace", &workspace, UNPUBLISHED_MESSAGE),
+        ("src/main.rs", &indexed_file, UNPUBLISHED_MAIN_RS_MESSAGE),
+        (
+            "src/does-not-exist.rs",
+            &missing_file,
+            UNPUBLISHED_MISSING_FILE_MESSAGE,
+        ),
+        ("maximum_diagnostics 0", &zero_page, UNPUBLISHED_MESSAGE),
+        (
+            "maximum_diagnostics 1001",
+            &oversized_page,
+            UNPUBLISHED_MESSAGE,
+        ),
     ] {
-        assert_unpublished_json(label, result);
+        assert_unpublished_json(label, result, message);
     }
 
     let workspace_id = request_id(&workspace);
@@ -148,7 +158,7 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     assert!(markdown_text.contains("\n- Terminality: `pre_admission`"));
     assert!(
         markdown_text.contains(
-            "\n- Message: No diagnostic producer is configured for this project: it has no tsconfig.json, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay\\_diagnose (\\`cargo\\_output\\`), then read again."
+            "\n- Message: No diagnostic producer is configured for this scope: no tsconfig.json was found under the project root, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay\\_diagnose (\\`cargo\\_output\\`), then read again."
         ),
         "{markdown_text}"
     );
@@ -190,7 +200,7 @@ async fn assert_protocol_refusal(server: &McpServer, arguments: Value, message: 
     assert_eq!(response["error"]["data"]["tool"], "tracedecay_diagnostics");
 }
 
-fn assert_unpublished_json(label: &str, result: &Value) {
+fn assert_unpublished_json(label: &str, result: &Value, message: &str) {
     assert_eq!(
         result["isError"],
         json!(true),
@@ -225,10 +235,7 @@ fn assert_unpublished_json(label: &str, result: &Value) {
         payload["problem"]["code"], UNPUBLISHED_CODE,
         "{label}: {payload}"
     );
-    assert_eq!(
-        payload["problem"]["message"], UNPUBLISHED_MESSAGE,
-        "{label}: {payload}"
-    );
+    assert_eq!(payload["problem"]["message"], message, "{label}: {payload}");
     assert_eq!(
         payload["problem"]["revision"],
         json!(1),
@@ -282,7 +289,7 @@ fn assert_unpublished_json(label: &str, result: &Value) {
         payload["problem"]["diagnostic"],
         json!({
             "code": UNPUBLISHED_CODE,
-            "message": UNPUBLISHED_MESSAGE,
+            "message": message,
         }),
         "{label}: {payload}"
     );

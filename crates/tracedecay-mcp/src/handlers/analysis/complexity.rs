@@ -6,6 +6,7 @@ use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
 #[hotpath::measure(future = true, label = "mcp.analysis.complexity.total")]
 pub async fn handle_complexity(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -85,7 +86,7 @@ pub async fn handle_complexity(
     });
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,
@@ -276,6 +277,7 @@ fn verify_doc_coverage_sources_current(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.doc_coverage.total")]
 pub async fn handle_doc_coverage(
+    response_handle_root: &Path,
     project_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -347,7 +349,7 @@ pub async fn handle_doc_coverage(
         "files": files,
     });
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,
@@ -356,6 +358,7 @@ pub async fn handle_doc_coverage(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.god_class.total")]
 pub async fn handle_god_class(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -430,7 +433,7 @@ pub async fn handle_god_class(
     });
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,

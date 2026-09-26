@@ -20,7 +20,7 @@ use super::project_composition::daemon_transcript_source_home;
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 use super::*;
 #[cfg(unix)]
-use tracedecay_application::pr_tracking::try_acquire_manual_branch_lifecycle;
+use tracedecay_application::pr_tracking::acquire_manual_branch_lifecycle;
 use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
@@ -400,10 +400,7 @@ async fn install_production_composition_profile_workers(
                     profile_identity.profile_id(),
                 )
                 .await?;
-            store_administration.install_remote_recovery_project_lifecycle(
-                invocation.clone(),
-                Arc::clone(project_open_gates),
-            )?;
+            store_administration.install_remote_recovery_project_lifecycle()?;
             install_http_application_cold_resolver(
                 http_application_registry,
                 store_administration.clone(),
@@ -535,7 +532,7 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
         let live_profile_root =
-            tracedecay_project::config::user_data_dir().filter(|path| path.exists());
+            tracedecay_runtime_core::config::user_data_dir().filter(|path| path.exists());
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -554,7 +551,7 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
         let live_profile_root =
-            tracedecay_project::config::user_data_dir().filter(|path| path.exists());
+            tracedecay_runtime_core::config::user_data_dir().filter(|path| path.exists());
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -571,7 +568,7 @@ impl ProductionProjectCompositionHarnessV1 {
         scope_prefix: impl Into<String>,
     ) -> ProductionHarnessOpenFuture {
         let live_profile_root =
-            tracedecay_project::config::user_data_dir().filter(|path| path.exists());
+            tracedecay_runtime_core::config::user_data_dir().filter(|path| path.exists());
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -900,14 +897,9 @@ impl ProductionProjectCompositionHarnessV1 {
         administration
             .run_manual_branch_publication(|cancellation| async move {
                 let _lifecycle =
-                    try_acquire_manual_branch_lifecycle(&graph.store_layout().data_root, &branch)
-                        .map_err(|error| {
-                        TraceDecayError::project_route(
-                            error.reason_code(),
-                            error.retryable(),
-                            error.detail(),
-                        )
-                    })?;
+                    acquire_manual_branch_lifecycle(&graph.store_layout().data_root, &branch)
+                        .await
+                        .map_err(super::branch_add::lifecycle_route_error)?;
                 super::branch_add::branch_publication_context(&graph)?
                     .track_exact_worktree_branch(
                         &schedulers,
@@ -1551,28 +1543,30 @@ mod code_index_activation_test {
         let owner_cancellation = cancellation.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let owner = tokio::spawn(async move {
-            let _lease =
-                try_acquire_manual_branch_lifecycle(&data_root, "main").expect("lifecycle owner");
+            let _lease = acquire_manual_branch_lifecycle(&data_root, "main")
+                .await
+                .expect("lifecycle owner");
             ready_tx.send(()).expect("publish owner readiness");
             owner_cancellation.cancelled().await;
         });
         ready_rx.await.expect("lifecycle owner started");
 
-        let error = harness
-            .track_worktree_branch(&project, &project, "main")
-            .await
-            .expect_err("harness publication must not bypass the lifecycle owner");
-        assert!(
-            error.to_string().contains("lifecycle is already active"),
-            "{error}"
-        );
+        {
+            let publication = harness.track_worktree_branch(&project, &project, "main");
+            tokio::pin!(publication);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), &mut publication)
+                    .await
+                    .is_err(),
+                "harness publication must queue behind the lifecycle owner, not bypass it"
+            );
 
-        cancellation.cancel();
-        owner.await.expect("cancelled lifecycle owner");
-        harness
-            .track_worktree_branch(&project, &project, "main")
-            .await
-            .expect("publication proceeds after lifecycle owner cancellation");
+            cancellation.cancel();
+            owner.await.expect("cancelled lifecycle owner");
+            publication
+                .await
+                .expect("queued publication proceeds once the lifecycle owner releases");
+        }
         harness.shutdown().await;
     }
 }
@@ -1585,6 +1579,9 @@ mod journey_test_support;
 
 #[cfg(test)]
 mod delivery_read_gate_journey_test;
+
+#[cfg(test)]
+mod advisory_cycle_language_journey_test;
 
 #[cfg(test)]
 mod generation_retention_test;

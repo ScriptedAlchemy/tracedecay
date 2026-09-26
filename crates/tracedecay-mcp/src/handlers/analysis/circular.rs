@@ -30,6 +30,7 @@ struct BoundedCycle {
 
 #[hotpath::measure(future = true, label = "mcp.analysis.circular.total")]
 pub async fn handle_circular(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
@@ -63,7 +64,7 @@ pub async fn handle_circular(
     );
 
     Ok(rendered_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         vec![],

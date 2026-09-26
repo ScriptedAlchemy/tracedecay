@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tracedecay_mcp::JsonRpcResponse;
 
 use crate::support::{
-    ProductionCompositionFixture, extract_first_json_content,
+    ProductionCompositionFixture, extract_first_json_content, harness_wait_for_readiness,
     production_composition_fixture_with_sources,
 };
 
@@ -101,54 +101,13 @@ fn site(
 }
 
 async fn wait_for_current_graph(fixture: &ProductionCompositionFixture) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let response = fixture
-                .harness
-                .call_tool(
-                    &fixture.project_root,
-                    "tracedecay_status",
-                    json!({
-                        "format": "json",
-                        "include_branch_diagnostics": false,
-                        "include_storage_health": false,
-                        "include_session_ingest": false,
-                        "include_staleness": false,
-                    }),
-                )
-                .await
-                .expect("typed project status while awaiting the current graph");
-            assert!(
-                response.error.is_none(),
-                "status failed over production MCP: {:?}",
-                response.error
-            );
-            let status =
-                extract_first_json_content(response.result.as_ref().expect("status result"));
-            let freshness = &status["code_index_freshness"];
-            let serving = &freshness["worktree"]["code_graph_serving"];
-            match (
-                freshness["status"].as_str(),
-                serving["state"].as_str(),
-                serving["reason"].as_str(),
-                freshness["worktree"]["staleness_state"].as_str(),
-            ) {
-                (Some("current"), Some("ready"), _, _) => break,
-                (Some("warming"), _, _, _)
-                | (Some("stale"), Some("ready"), _, Some("verifying"))
-                | (_, Some("pending"), _, _)
-                | (_, Some("unavailable"), Some("generation_unavailable"), _) => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                (_, Some("refused"), _, _) | (_, _, Some("activation_disabled"), _) => {
-                    panic!("graph readiness was refused: {status}");
-                }
-                actual => panic!("graph readiness became {actual:?}: {status}"),
-            }
-        }
-    })
-    .await
-    .expect("graph did not become current within the publication budget");
+    harness_wait_for_readiness(
+        &fixture.harness,
+        &fixture.project_root,
+        "ready",
+        Duration::from_secs(20),
+    )
+    .await;
 }
 
 fn write_constructor_fixture(project: &Path) {

@@ -1,5 +1,7 @@
 //! `tracedecay_files`, indexed file listing with prefix and glob filters.
 
+use std::path::Path;
+
 use crate::ToolResult;
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::tools::render::Md;
@@ -12,6 +14,7 @@ use super::verified::{self, indexed_files};
 
 #[hotpath::measure(future = true, label = "mcp.info.files.total")]
 pub async fn handle_files(
+    response_handle_root: &Path,
     graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -55,7 +58,7 @@ pub async fn handle_files(
         })
     });
     Ok(rendered_tool_result(
-        Some(project_root),
+        Some(response_handle_root),
         &args,
         &payload,
         touched_files,
