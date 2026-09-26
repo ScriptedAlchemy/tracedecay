@@ -27,7 +27,9 @@ use tracedecay_domain::feedback::{
 };
 
 use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
-use crate::feedback::cycle_runtime::{CanonicalFeedbackResultV1, FeedbackCycleRuntime};
+use crate::feedback::cycle_runtime::{
+    CanonicalFeedbackResultV1, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
+};
 use crate::feedback::observations::FeedbackObservationEmitterV1;
 use crate::operation_stream::OperationEmitter;
 use tracedecay_contracts::feedback::observations::{

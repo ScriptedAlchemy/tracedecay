@@ -9,13 +9,38 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::{SkillUsageLedger, SkillUsageRecord, config_error};
+use crate::automation::managed_skills::MANAGED_SKILL_STORE_AUTHORITY;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_private_fs::FileLease;
 
 const SKILL_USAGE_DIR: &str = "skill_usage";
+/// Released shapes this binary does not read: the monolithic ledger shared by
+/// every skill, and the dedupe set its one-time split left beside the records.
+const RELEASED_MONOLITHIC_LEDGER: &str = "skill_usage.json";
+const RELEASED_SPLIT_IMPORTS: &str = "legacy-imported-events.json";
 
 pub(super) fn skill_usage_dir(profile_root: &Path) -> PathBuf {
     profile_root.join("agent_managed").join(SKILL_USAGE_DIR)
+}
+
+fn refuse_released_shapes(profile_root: &Path) -> Result<()> {
+    for path in [
+        profile_root
+            .join("agent_managed")
+            .join(RELEASED_MONOLITHIC_LEDGER),
+        skill_usage_dir(profile_root).join(RELEASED_SPLIT_IMPORTS),
+    ] {
+        if fs::symlink_metadata(&path).is_ok() {
+            return Err(TraceDecayError::reset_required(
+                MANAGED_SKILL_STORE_AUTHORITY,
+                format!(
+                    "skill usage '{}' is the released monolithic ledger shape",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn skill_usage_record_path(profile_root: &Path, skill_id: &str) -> PathBuf {
@@ -85,6 +110,7 @@ pub(super) async fn record_imported_event(
 }
 
 fn load_ledger_sync(profile_root: &Path) -> Result<SkillUsageLedger> {
+    refuse_released_shapes(profile_root)?;
     let mut ledger = SkillUsageLedger::default();
     let directory = skill_usage_dir(profile_root);
     let entries = match fs::read_dir(&directory) {
@@ -126,6 +152,7 @@ fn with_skill_lock(
     mutate: impl FnOnce(&mut SkillUsageRecord) -> Result<bool>,
     seed_timestamp: i64,
 ) -> Result<SkillUsageRecord> {
+    refuse_released_shapes(profile_root)?;
     let directory = skill_usage_dir(profile_root);
     fs::create_dir_all(&directory).map_err(|error| {
         config_error(format!(

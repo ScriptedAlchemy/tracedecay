@@ -245,6 +245,55 @@ pub(super) fn visit_reexport(state: &mut ExtractionState<'_>, node: TsNode<'_>) 
     }
 }
 
+/// `export default <name>` and `export default function|class <name>` export
+/// a module-scope binding under the name `default`. Like a same-module export
+/// clause, the row names the declaring file itself (`./util.ts`), so the seal
+/// resolves `default` back to that binding: a declaration here or a local
+/// import. An anonymous default export names no binding and records nothing.
+pub(super) fn visit_default_export(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
+    if node.child_by_field_name("source").is_some() || !has_unnamed_child_kind(node, "default") {
+        return;
+    }
+    let declaration = node.child_by_field_name("declaration");
+    let name_node = match declaration {
+        Some(declaration) => declaration.child_by_field_name("name"),
+        None => node
+            .child_by_field_name("value")
+            .filter(|value| value.kind() == "identifier"),
+    };
+    let Some(name_node) = name_node else {
+        return;
+    };
+    let namespace = if declaration.is_some_and(|declaration| {
+        matches!(
+            declaration.kind(),
+            "interface_declaration" | "type_alias_declaration"
+        )
+    }) {
+        ImportNamespaceV1::Type
+    } else {
+        ImportNamespaceV1::Value
+    };
+    let file_name = state.file_path.rsplit('/').next().unwrap_or_default();
+    if file_name.is_empty() {
+        return;
+    }
+    let module_specifier = format!("./{file_name}");
+    let Some(module_kind) = import_module_kind("typescript", &module_specifier) else {
+        return;
+    };
+    let local_name = state.node_text(name_node).to_string();
+    push_evidence(
+        state,
+        &module_specifier,
+        (Some(local_name), Some("default".to_owned())),
+        BindingShape::REEXPORT,
+        namespace,
+        module_kind,
+        name_node,
+    );
+}
+
 fn visit_named_imports(
     state: &mut ExtractionState<'_>,
     named_imports: TsNode<'_>,

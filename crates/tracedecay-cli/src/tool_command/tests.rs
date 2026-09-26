@@ -156,12 +156,11 @@ fn rejects_non_numeric_flag() {
 #[test]
 fn args_escape_hatch_reads_at_file() {
     let d = def("search");
-    let dir = std::env::temp_dir().join(format!("ts-args-at-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // Payload comfortably above Linux's 128 KiB MAX_ARG_STRLEN to prove
     // the @file path carries what a literal argv string cannot.
     let big = "x".repeat(200 * 1024);
-    let path = dir.join("payload.json");
+    let path = dir.path().join("payload.json");
     std::fs::write(&path, format!(r#"{{"query":"{big}","limit":7}}"#)).unwrap();
     let parsed =
         parse_invocation(&d, &["--args".to_string(), format!("@{}", path.display())]).unwrap();
@@ -170,7 +169,6 @@ fn args_escape_hatch_reads_at_file() {
         parsed.tool_args["query"].as_str().map(str::len),
         Some(big.len())
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -188,13 +186,11 @@ fn args_escape_hatch_reads_bare_path() {
     // `--args` is a whole-payload arg, so a bare file path works without the
     // `@` sigil used by per-key file values.
     let d = def("search");
-    let dir = std::env::temp_dir().join(format!("ts-args-bare-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("payload.json");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("payload.json");
     std::fs::write(&path, r#"{"query":"bare","limit":4}"#).unwrap();
     let parsed = parse_invocation(&d, &["--args".to_string(), path.display().to_string()]).unwrap();
     assert_eq!(parsed.tool_args, json!({ "query": "bare", "limit": 4 }));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

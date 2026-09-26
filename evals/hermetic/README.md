@@ -8,8 +8,8 @@ sessions depend on the real `~/.claude`, `~/.tracedecay`, and
 
 ```bash
 # One-shot: build + isolate + install + index + one trivial scenario.
-evals/hermetic/run.sh smoke --agent claude --model sonnet --debug --keep
-evals/hermetic/run.sh smoke --agent codex --debug --keep
+evals/hermetic/run.sh smoke --agent claude --model sonnet --debug
+evals/hermetic/run.sh smoke --agent codex --debug
 
 # Full corpus against a reusable env:
 ENV=$(evals/hermetic/run.sh setup --agent claude --debug)
@@ -90,8 +90,8 @@ warns loudly if it does not.
   env.sh                  sourceable export block (for reuse and manual debugging)
 ```
 
-`--keep` preserves the env for inspection; otherwise a freshly created env is
-removed on exit. `teardown --env-dir` refuses to delete anything that is not an
+`smoke` removes the env it created on exit. A `setup` env lives until
+`teardown --env-dir`, which refuses to delete anything that is not an
 `eval-env-*` dir under `$TMPDIR`.
 
 ## Corpus schema
@@ -170,7 +170,7 @@ scenario) and `summary.md` (pass count + per-scenario table).
 - **Model non-determinism.** Tool-use counts vary run to run; treat pass/fail as
   a signal over a corpus, not a single scenario.
 - **The `tracedecay init` index cost.** Indexing the tracedecay repo is not
-  free; reuse an env dir with `--keep` across corpus runs.
+  free; run several corpora against one `setup` env, then `teardown` it.
 - **Network / model backend.** Evals hit the real Anthropic API using the copied
   credential. There is no offline mode.
 - **Codex auth.** Codex mode copies only `~/.codex/auth.json` into the isolated
@@ -223,8 +223,8 @@ evals/hermetic/run.sh teardown --env-dir "$ENV"
 ```
 
 This is **not CI**. It runs deliberately, hits the real Anthropic API, and
-**consumes model credits**, reuse an env dir with `--keep` rather than
-re-setting up per run. A **low feedback-adoption %** is the *expected* baseline
+**consumes model credits**, run several corpora against one `setup` env
+rather than re-setting up per run. A **low feedback-adoption %** is the *expected* baseline
 today; that gap is the measurement, not a bug. It quantifies exactly what the
 recent context-lane, tool-description, and memory-digest changes aim to close,
 so the same corpus doubles as a **before/after** measure of those changes.

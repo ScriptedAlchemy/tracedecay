@@ -144,6 +144,9 @@ export function workAuthority(
   const base = { id: 'work', label: 'Work', source: 'work.views' } as const;
   if (handoffs.state === 'pending') return { ...base, kind: 'loading', detail: 'reading' };
   if (handoffs.state === 'refused') return { ...base, kind: handoffs.chip, detail: handoffs.detail };
+  if (handoffs.state === 'absent') {
+    return { ...base, kind: 'complete_zero_findings', detail: 'no Work graph yet · create a task' };
+  }
   const coverage =
     attempts.state === 'read'
       ? attempts.coverage === 'complete'

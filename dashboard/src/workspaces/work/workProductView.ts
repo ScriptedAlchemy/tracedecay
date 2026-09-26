@@ -162,12 +162,17 @@ function taskView(entry: WorkGraphVersionEntryV1, item: WorkItemV1): WorkTaskVie
   };
 }
 
+/** The current product graph for the page: a board, a refusal, or the typed
+ * answer that no graph exists yet under an authorized selection. */
+export type WorkProductViewResult = WorkResult<WorkProductView> | { readonly outcome: 'absent' };
+
 /** Reduce the current product graph to the local camera model without
  * inventing data the product authority does not publish. */
 export function currentWorkProductView(
   result: WorkResult<WorkGraphReadV1> | undefined,
-): WorkResult<WorkProductView> | undefined {
+): WorkProductViewResult | undefined {
   if (result === undefined || result.outcome === 'refused') return result;
+  if (result.value.mode === 'absent') return { outcome: 'absent' };
   if (result.value.mode !== 'current') {
     return {
       outcome: 'refused',

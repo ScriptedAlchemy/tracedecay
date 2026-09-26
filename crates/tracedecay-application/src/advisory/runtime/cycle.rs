@@ -103,7 +103,7 @@ where
         context: &RequestContext,
         mut control: AdvisoryCycleControl,
         request: AdvisoryCycleRequest,
-    ) -> Result<AdvisoryCycleOutcome, ApplicationContractError> {
+    ) -> Result<AdvisoryCycleOutcome, FeedbackCycleRuntimeError> {
         if let Err(error) = request.validate_for(&self.feedback_scope) {
             self.observations.observe_source_event(
                 &request.feedback.input,
@@ -112,7 +112,7 @@ where
                     outcome: FeedbackOutcomeV1::Rejected,
                 },
             );
-            return Err(error);
+            return Err(error.into());
         }
         let mut contributions = AdvisoryContributionsV1::absent();
         mark_unrequested_remote_providers(
@@ -705,7 +705,7 @@ where
         context: &RequestContext,
         request: FeedbackCycleExecutionRequest,
         contributions: AdvisoryContributionsV1,
-    ) -> Result<AdvisoryCycleOutcome, ApplicationContractError> {
+    ) -> Result<AdvisoryCycleOutcome, FeedbackCycleRuntimeError> {
         let observation_input = request.input.clone();
         let advisory = contributions.as_feedback_cycle_advisory()?;
         self.observe_provider_states(&observation_input, &contributions);

@@ -23,6 +23,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
 };
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::feedback::{
     FeedbackActorContextV1, FeedbackAdvisoryProviderStateV1, FeedbackAuthoritativeRuntimeStateV1,
     FeedbackBaselineHorizonV1, FeedbackBaselineStateV1, FeedbackBudgetV1,
@@ -46,6 +47,7 @@ use tracedecay_lsp::{
     LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
 };
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::storage::resolve_response_handle_root;
 use tracedecay_tool_catalog::CapabilityId;
 
 use super::{
@@ -998,5 +1000,81 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
         store.record_publication(&cancelled, &publication).await,
         FeedbackPublicationRecordState::Cancelled,
         "cancelled publication must not persist"
+    );
+}
+
+#[tokio::test]
+async fn held_handle_store_lock_surfaces_the_typed_deadline_miss() {
+    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let root = tempfile::tempdir().expect("root");
+    std::fs::create_dir_all(root.path().join("src")).expect("source directory");
+    std::fs::write(root.path().join("src/lib.rs"), SOURCE).expect("source");
+    let database = database(root.path()).await;
+    let observed_at = now_micros();
+    seed_github_diagnostic(&database, observed_at).await;
+    let resolved = scope();
+    let operation = operation();
+    let context = context(&resolved, &operation, observed_at);
+    let access = source_access(&resolved, &operation, observed_at);
+    let runtime = Arc::new(
+        open_feedback_runtime(database, root.path(), resolved, access)
+            .await
+            .expect("feedback runtime"),
+    );
+    let request = cycle_request(digest('a'), observed_at);
+    let service = feedback_service(runtime.clone(), &request);
+    let execution = service
+        .execute_with_advisory(
+            &context,
+            request,
+            FeedbackCycleAdvisoryV1 {
+                providers: complete_advisory_providers(),
+                findings: vec![github_finding()],
+            },
+        )
+        .await
+        .expect("durable cycle");
+    let handle_root = resolve_response_handle_root(root.path()).expect("handle root");
+    let lock_parent = handle_root.parent().expect("handle root parent");
+    std::fs::create_dir_all(lock_parent).expect("handle lock parent");
+    let lock_path = lock_parent.join(format!(
+        ".{}.lock",
+        handle_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("handle root leaf")
+    ));
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("handle lock");
+    held.lock().expect("hold handle lock");
+
+    let error = compose_canonical_result(
+        &runtime,
+        execution,
+        tracedecay_domain::feedback::FeedbackDurabilityV1::Durable,
+    )
+    .expect_err("a held handle-store lock must fail the handle mint");
+    held.unlock().expect("release handle lock");
+
+    let cause = std::iter::successors(Some(&error as &dyn std::error::Error), |error| {
+        error.source()
+    })
+    .find_map(|error| error.downcast_ref::<TraceDecayError>());
+    let expected = format!(
+        "response-handle writer lock at {} stayed contended past its admission deadline; retry the operation",
+        lock_path.display()
+    );
+    assert!(
+        matches!(cause, Some(TraceDecayError::SyncLock { message }) if *message == expected),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.lsp_failure_class(),
+        "feedback-cycle-handle-store-busy"
     );
 }

@@ -81,9 +81,9 @@ pub struct StoreCensusEntry {
     /// on the opened store directory immediately before deleting it.
     pub expected_content_fence: StoreContentFence,
     pub expected_manifest_bytes: Option<Vec<u8>>,
-    /// Registered graph-scope database paths, relative to `data_root`. Scopes
-    /// may sit at custom relative paths, so the durable-data check cannot infer
-    /// them from the main graph alone.
+    /// Registered graph-scope database paths, relative to the profile root as
+    /// store registration records them. Scopes may sit at custom paths, so the
+    /// durable-data check cannot infer them from the main graph alone.
     pub graph_scope_relpaths: Vec<PathBuf>,
 }
 
@@ -132,9 +132,9 @@ pub struct OrphanStoreFinding {
     pub expected_data_root_fence: StoreDirectoryFence,
     pub expected_content_fence: StoreContentFence,
     pub expected_manifest_bytes: Option<Vec<u8>>,
-    /// Registered graph-scope database paths, relative to `data_root`; carried
-    /// through so the durable-data check covers every registered graph-scope
-    /// database.
+    /// Registered graph-scope database paths, relative to the profile root;
+    /// carried through so the durable-data check covers every registered
+    /// graph-scope database.
     pub graph_scope_relpaths: Vec<PathBuf>,
 }
 

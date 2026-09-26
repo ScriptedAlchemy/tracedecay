@@ -3,7 +3,6 @@ set -euo pipefail
 
 script_path=${BASH_SOURCE[0]}
 repo=$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)
-keep_temp=false
 reuse_release_binary=""
 skip_packaged_runtime_battery=false
 
@@ -20,7 +19,6 @@ release-builds the source tree.
 
 Options:
   --repo PATH                      Repository root (default: parent of this script)
-  --keep-temp                      Preserve the isolated package/install directory
   --reuse-release-binary PATH      Also prove this already-built production
                                    binary reports the staged source commit
   --skip-packaged-runtime-battery  After packaging and manifest checks, skip
@@ -121,6 +119,7 @@ assert_required_assets() {
     "tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json"
     "tests/fixtures/packaged_host_events/opencode/baseline.json"
     "tests/fixtures/packaged_host_events/pi.json"
+    "tests/fixtures/packaged_host_events/droid.json"
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
     "tests/fixtures/provider_normalization/codex/agent_message.input.json"
     "tests/fixtures/analytics/codex_skill_prose.txt"
@@ -218,10 +217,6 @@ while (($#)); do
       repo=$2
       shift 2
       ;;
-    --keep-temp)
-      keep_temp=true
-      shift
-      ;;
     --reuse-release-binary)
       [[ $# -ge 2 ]] || die "--reuse-release-binary requires a path"
       reuse_release_binary=$2
@@ -275,7 +270,8 @@ for fixture in \
   kimi-code.json \
   kimi/post-tool-use-edit.json \
   opencode/baseline.json \
-  pi.json; do
+  pi.json \
+  droid.json; do
   cmp -s \
     "$repo/crates/tracedecay-hooks/fixtures/host_events/$fixture" \
     "$repo/tests/fixtures/packaged_host_events/$fixture" ||
@@ -286,14 +282,7 @@ product_version=$(read_workspace_product_version "$repo/Cargo.toml")
   die "$repo/Cargo.toml must declare a literal version in [workspace.package]"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-distribution.XXXXXX")
-cleanup() {
-  if [[ $keep_temp == true ]]; then
-    echo "distribution acceptance: preserved temporary directory $work"
-  else
-    rm -rf -- "$work"
-  fi
-}
-trap cleanup EXIT
+trap 'rm -rf -- "$work"' EXIT
 
 host_target=""
 while IFS= read -r rustc_version_line; do

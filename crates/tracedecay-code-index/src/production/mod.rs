@@ -1310,23 +1310,33 @@ impl CodeIndexPublishedGenerationV1 {
     /// Use this wherever bytes were genuinely re-read (sealed-generation
     /// restore) so the memoized fast path can never mask a real re-read.
     pub(crate) fn validate_fresh(&self) -> Result<(), CodeIndexProductionErrorV1> {
-        self.validate_uncached(None)?;
+        self.validate_uncached(None, true)?;
         let _ = self.validated.set(());
         Ok(())
     }
 
-    /// Like [`Self::validate_fresh`], but skips deep per-file artifact checks for
-    /// pages Arc-shared from an already-validated parent generation.
+    /// Validate a generation assembled in memory by this build.
+    ///
+    /// Skips re-deriving what this build derived moments ago from the same
+    /// immutable values: per-file artifact checks (each page was validated
+    /// where it was produced, by extraction, rematerialization, or
+    /// [`Self::validate_fresh`] on restore) and the source commitments, which
+    /// `build_and_publish` computes from this projection's change set.
+    /// Generation-level structure and the corpus complement proof still run.
     pub(crate) fn validate_fresh_reusing_parent(
         &self,
         parent: Option<&Self>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
-        self.validate_uncached(parent)?;
+        self.validate_uncached(parent, false)?;
         let _ = self.validated.set(());
         Ok(())
     }
 
-    fn validate_uncached(&self, parent: Option<&Self>) -> Result<(), CodeIndexProductionErrorV1> {
+    fn validate_uncached(
+        &self,
+        parent: Option<&Self>,
+        reread: bool,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
         self.manifest
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -1414,9 +1424,11 @@ impl CodeIndexPublishedGenerationV1 {
                 )
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         }
-        commitments
-            .validate_for_changes(&self.projection.request().changes)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        if reread {
+            commitments
+                .validate_for_changes(&self.projection.request().changes)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        }
         self.ignored_source_roster
             .validate(&self.snapshot, &self.repository_parse_identity)?;
         if self.chunks.generation_id() != &self.manifest.generation_id
@@ -1460,7 +1472,7 @@ impl CodeIndexPublishedGenerationV1 {
             collect_bounded_ordered(&files, |file, _worker| {
                 let shared =
                     shared_occurrences.contains(&file.artifacts.chunks.document.file_occurrence_id);
-                if !shared {
+                if reread {
                     file.artifacts
                         .validate()
                         .map_err(CodeIndexProductionErrorV1::Chunk)?;

@@ -18,10 +18,11 @@ use super::daemon::daemon_tool_json;
 const PROFILE_OFFLINE_LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PROFILE_SQLITE_DATABASES: [&str; 3] = ["global.db", "user-sessions.db", "user-memory.db"];
-const PROFILE_DATABASE_PATHS: [&str; 8] = [
+const PROFILE_DATABASE_PATHS: [&str; 9] = [
     "projects",
     "stores",
     "remote",
+    "agent_managed",
     "user-sessions.grafeo",
     "user-sessions.grafeo.wal",
     "user-memory.grafeo",

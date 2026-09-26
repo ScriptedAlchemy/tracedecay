@@ -101,10 +101,7 @@ async fn status_reports_payload_gc_run_metadata_after_apply() {
         .await
         .expect("external payload should ingest");
 
-    let cfg = LcmGcConfig {
-        backup_before_reap: false,
-        ..LcmGcConfig::default()
-    };
+    let cfg = LcmGcConfig::default();
     let report = db
         .lcm_run_payload_gc_apply_for_test(
             HostAdmissionScope::Profile,

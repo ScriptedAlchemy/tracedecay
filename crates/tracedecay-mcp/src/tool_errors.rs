@@ -336,6 +336,16 @@ fn is_project_store_authority(authority: &str) -> bool {
     PROJECT_STORE_AUTHORITIES.contains(&authority)
 }
 
+/// Authorities whose refused shape was written into an agent host's files.
+/// No profile reset reaches it; its reset deletes exactly the block or
+/// package the refusal reason names.
+const HOST_ARTIFACT_AUTHORITIES: [&str; 2] =
+    ["managed skill prompt index", "materialized skill package"];
+
+fn is_host_artifact_authority(authority: &str) -> bool {
+    HOST_ARTIFACT_AUTHORITIES.contains(&authority)
+}
+
 fn project_root_argument(project_root: Option<&std::path::Path>) -> String {
     project_root.map_or_else(
         || "<project-root>".to_string(),
@@ -355,6 +365,8 @@ pub fn reset_required_command(authority: &str, project_root: Option<&std::path::
             "tracedecay storage reset-project-store --project-root {} --yes",
             project_root_argument(project_root)
         )
+    } else if is_host_artifact_authority(authority) {
+        "delete the block or package directory named in the refusal".to_string()
     } else {
         "tracedecay wipe --all --yes".to_string()
     }
@@ -374,6 +386,15 @@ pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::P
              {command}\n\
              then re-run `tracedecay init {}`",
             project_root_argument(project_root)
+        );
+    }
+    if is_host_artifact_authority(authority) {
+        return format!(
+            "refused authority: {authority}\n\
+             this binary does not adopt or migrate that host file; reset it (its old \
+             content is deleted, nothing is backed up):\n  \
+             {command}\n\
+             the next managed-skill export writes the current shape"
         );
     }
     format!(
@@ -505,6 +526,14 @@ mod tests {
             "{profile}"
         );
         assert!(!profile.contains("reset-project-store"), "{profile}");
+
+        let host = super::reset_required_remedy("managed skill prompt index", None);
+        assert!(host.contains("refused authority: managed skill prompt index"));
+        assert!(
+            host.contains("\n  delete the block or package directory named in the refusal\n"),
+            "{host}"
+        );
+        assert!(!host.contains("wipe --all"), "{host}");
     }
 
     #[test]

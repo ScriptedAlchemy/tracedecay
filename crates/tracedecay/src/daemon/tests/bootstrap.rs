@@ -197,18 +197,28 @@ fn daemon_project_route_rejects_the_user_profile_root() {
     assert!(error.to_string().contains("ambient user/filesystem root"));
 }
 
+/// The route names the real directory the way the operator spells it: `..`
+/// resolved, and on Windows the plain drive path, never the `\\?\` verbatim
+/// form `std::fs::canonicalize` returns.
 #[test]
 fn daemon_project_route_uses_the_product_root_identity() {
     let project = TempDir::new().expect("project root");
+    std::fs::create_dir(project.path().join("nested")).expect("nested directory");
     let mut handshake = test_handshake_defaults();
-    handshake.project_path = Some(project.path().to_path_buf());
+    handshake.project_path = Some(project.path().join("nested").join(".."));
 
-    let expected = tracedecay_runtime_core::path_safety::canonical_root_identity(project.path());
     let (project_root, route) =
         super::super::project_route_for_handshake(&handshake).expect("resolve project route");
 
-    assert_eq!(project_root, expected);
-    assert_eq!(route.project_path, expected);
+    let real = std::fs::canonicalize(project.path()).expect("real project path");
+    #[cfg(windows)]
+    let real = std::path::PathBuf::from(
+        real.to_str()
+            .and_then(|verbatim| verbatim.strip_prefix(r"\\?\"))
+            .expect("std spells a temp disk path verbatim"),
+    );
+    assert_eq!(project_root, real);
+    assert_eq!(route.project_path, real);
 }
 
 /// Enrolls `project_root` on disk exactly as a previously-initialized project

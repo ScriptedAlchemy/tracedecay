@@ -19,8 +19,8 @@ use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    ParseOffset, build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
-    derive_canonical_projection,
+    ParseOffset, SessionRefreshStore as _, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor, derive_canonical_projection,
 };
 
 mod compression_ownership;
@@ -1554,6 +1554,216 @@ fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restar
         assert!(status.summary_node_count > 0);
         assert_eq!(status.summary_convergence.unavailable_session_count, 0);
         assert!(status.summary_convergence.reasons.is_empty());
+    });
+}
+
+async fn active_projection_frontier(db: &RegisteredGlobalDb, session_id: &str) -> Option<i64> {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT CAST(json_extract(frozen_watermarks_json, '$.projection_frontier') AS INTEGER)
+             FROM session_temporal_generations
+             WHERE session_id = ?1 AND state = 'active'",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .map(|row| row.get::<i64>(0).unwrap())
+}
+
+/// An explicit refresh request shaped like the session refresh service's:
+/// bound to the caller's view of the frontier through its refresh key.
+fn explicit_refresh_request(
+    session: &SessionId,
+    observed_through: u64,
+    committed_through: u64,
+) -> tracedecay_store::SessionRefreshBeginOrJoinRequestV1 {
+    let source_id =
+        tracedecay_domain::SessionSourceIdV1::new(format!("{}:cursor", session.as_str())).unwrap();
+    let frontier = tracedecay_domain::SessionSourceFrontierV1::new(observed_through);
+    let refresh_key = tracedecay_domain::SessionRefreshKeyV1::new(
+        "root.lcm-effects",
+        session.clone(),
+        vec![
+            tracedecay_domain::SessionRefreshSourceTargetV1::new(source_id, frontier, frontier)
+                .unwrap(),
+        ],
+        "session-refresh-projector.fixture.v1",
+        format!("sha256:{committed_through:064x}"),
+    )
+    .unwrap();
+    tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+        session.clone(),
+        tracedecay_store::SessionRefreshFrontierV1::new(observed_through, committed_through)
+            .unwrap(),
+    )
+    .with_refresh_key(refresh_key)
+}
+
+async fn eventually<F, Fut>(what: &str, mut ready: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let reached = tokio::time::timeout(Duration::from_secs(30), async {
+        while !ready().await {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "timed out waiting for {what}");
+}
+
+/// Ingest, park without a summarizer, configure one, let the background
+/// scheduler project and publish summaries, then begin an explicit refresh
+/// from the caller's pre-ingest view of the frontier.
+#[cfg(unix)]
+#[test]
+fn refresh_begins_at_the_committed_frontier_after_background_summaries_publish() {
+    run_with_test_env_lock(async {
+        let fixture = ProjectSummarizerFixture::open().await;
+        fixture.pin(LcmSummarizerExecutablesV1::unconfigured());
+        let db = fixture.db();
+        let session_id = "refresh-after-summaries-session";
+        let records = (1..=8_u64)
+            .map(|ordinal| {
+                canonical_record_for_scope(
+                    canonical_envelope(
+                        "cursor",
+                        session_id,
+                        &format!("{session_id}-message-{ordinal}"),
+                        None,
+                        (ordinal, ordinal - 1),
+                        vec![serde_json::json!({
+                            "kind": "message",
+                            "role": if ordinal % 2 == 1 { "user" } else { "assistant" },
+                            "content": format!(
+                                "canonical refresh journey message {ordinal} with durable context"
+                            )
+                        })],
+                    ),
+                    ObservationScopeV1::Project {
+                        project_id: fixture.project_id.clone(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        ingest_canonical(&db, session_id, &[], &records.iter().collect::<Vec<_>>()).await;
+
+        let parked =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(
+            parked.sessions[0].disposition,
+            super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Pending {
+                reason: "cursor_agent_unconfigured".to_owned(),
+            }
+        );
+
+        let registry = super::super::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry::default();
+        let wake = registry
+            .ensure_profile(db.db_path().to_path_buf(), db.clone())
+            .await;
+        eventually(
+            "the background projection of all eight messages",
+            || async { active_projection_frontier(&db, session_id).await == Some(8) },
+        )
+        .await;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let cursor_bin = temporary.path().join("cursor-agent");
+        std::fs::write(
+            &cursor_bin,
+            "#!/bin/sh\nprintf '%s\\n' 'summary published before the explicit refresh'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        fixture.pin(LcmSummarizerExecutablesV1 {
+            cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, Some(5))
+                .unwrap(),
+            codex: LcmSummarizerExecutableV1::Unconfigured,
+        });
+        wake.wake();
+        eventually("background summaries to publish", || async {
+            db.lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap()
+                .summary_node_count
+                > 0
+        })
+        .await;
+        assert!(
+            registry
+                .wait_profile_idle(db.db_path(), Duration::from_secs(10))
+                .await
+        );
+
+        let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db.as_ref());
+        let session = SessionId::new(session_id).unwrap();
+        let begun = store
+            .begin_or_join_session_refresh(explicit_refresh_request(&session, 8, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            (begun.target_frontier(), begun.disposition()),
+            (
+                tracedecay_store::SessionRefreshFrontierV1::new(8, 8).unwrap(),
+                tracedecay_store::SessionRefreshDispositionV1::Started,
+            )
+        );
+
+        // A window the store already moved past is a stale request, not an
+        // unavailable store.
+        let stale = store
+            .begin_or_join_session_refresh(explicit_refresh_request(&session, 7, 0))
+            .await;
+        assert!(
+            matches!(
+                stale,
+                Err(tracedecay_store::SessionStoreError::StaleRefreshFrontier {
+                    observed_through: 7,
+                    committed_through: 0,
+                    active_projection_frontier: 8,
+                })
+            ),
+            "{stale:?}"
+        );
+
+        wake.wake();
+        let receipt_request = tracedecay_store::SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            session,
+        );
+        eventually("the explicit refresh to complete", || async {
+            store
+                .session_refresh_receipt(receipt_request.clone())
+                .await
+                .unwrap()
+                .is_some()
+        })
+        .await;
+        assert_eq!(
+            store
+                .session_refresh_receipt(receipt_request)
+                .await
+                .unwrap()
+                .map(|receipt| (
+                    receipt.state(),
+                    receipt.frontier(),
+                    receipt.failure_code().cloned()
+                )),
+            Some((
+                tracedecay_store::SessionRefreshTerminalStateV1::Complete,
+                tracedecay_store::SessionRefreshFrontierV1::new(8, 8).unwrap(),
+                None,
+            ))
+        );
+        registry.shutdown().await;
     });
 }
 

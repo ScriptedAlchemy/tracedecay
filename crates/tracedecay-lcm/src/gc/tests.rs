@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 
 use crate::schema;
 use crate::util::{self, file_mtime_seconds};
@@ -533,7 +534,6 @@ async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<
     let mtime = file_mtime_seconds(&fs::symlink_metadata(&path).map_err(|err| err.to_string())?);
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -611,7 +611,6 @@ async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence() -
     );
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -629,6 +628,58 @@ async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence() -
     assert_eq!(report.orphans.count, 1);
     assert_eq!(report.totals.files, 1);
     assert!(!payload_path(&store, &payload_ref).exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn applied_gc_reaps_in_place_without_copying_the_database() -> Result<(), String> {
+    let store = test_store().await?;
+    let payload_ref = seed_payload(&store, "message-1", "body to reap").await?;
+    drop_raw_reference(&store, &payload_ref).await?;
+    payload::delete_external_payload(
+        &store.conn,
+        &store.storage_root,
+        &payload_ref,
+        &payload::DeleteOpts {
+            rewrite_placeholders: true,
+            remove_file: false,
+            verify_hash: false,
+        },
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let root_entries = |root: &Path| -> Result<Vec<String>, String> {
+        let mut names = fs::read_dir(root)
+            .map_err(|err| err.to_string())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?;
+        names.retain(|name| !name.starts_with("sessions.db-"));
+        names.sort();
+        Ok(names)
+    };
+    let file_mtime = file_mtime_seconds(
+        &fs::symlink_metadata(payload_path(&store, &payload_ref)).map_err(|err| err.to_string())?,
+    );
+
+    let report = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &LcmGcConfig::default(),
+        true,
+        file_mtime + LcmGcConfig::default().grace_seconds as i64,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    assert_eq!(report.orphans.count, 1);
+    assert!(!payload_path(&store, &payload_ref).exists());
+    assert_eq!(
+        root_entries(&store.storage_root)?,
+        vec!["lcm-payloads".to_string(), "sessions.db".to_string()]
+    );
     Ok(())
 }
 
@@ -729,7 +780,6 @@ async fn gc_on_store_without_payload_dir_reports_empty_run() -> Result<(), Strin
     let store = test_store().await?;
     assert!(!payload::payload_dir(&store.storage_root).exists());
     let cfg = LcmGcConfig {
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -762,7 +812,6 @@ async fn gc_reports_missing_payloads_when_payload_dir_was_deleted() -> Result<()
     std::fs::remove_dir_all(payload::payload_dir(&store.storage_root))
         .map_err(|err| format!("remove payload dir: {err}"))?;
     let cfg = LcmGcConfig {
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -791,7 +840,6 @@ async fn unreferenced_payload_two_scan_reaps_after_grace() -> Result<(), String>
     drop_raw_reference(&store, &payload_ref).await?;
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -846,7 +894,6 @@ async fn run_payload_gc_dry_run_does_not_mutate() -> Result<(), String> {
     insert_gc_mark(&store, &payload_ref, "unreferenced", 1).await?;
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -893,7 +940,6 @@ async fn orphan_phase_honors_mtime_grace_then_reaps() -> Result<(), String> {
     );
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -936,7 +982,6 @@ async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_wi
     let cfg = LcmGcConfig {
         reap_missing_enabled: false,
         reap_missing_after: 10,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -973,7 +1018,6 @@ async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_wi
     let cfg = LcmGcConfig {
         reap_missing_enabled: true,
         reap_missing_after: 10,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1027,7 +1071,6 @@ async fn missing_metadata_clears_mark_when_file_reappears() -> Result<(), String
     let cfg = LcmGcConfig {
         reap_missing_enabled: true,
         reap_missing_after: 10,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1104,7 +1147,6 @@ async fn run_payload_gc_isolates_corrupted_ref_errors_while_reaping_orphans() ->
     let newest_orphan_mtime = orphan_a_mtime.max(orphan_b_mtime);
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1152,7 +1194,6 @@ async fn unreadable_payload_path_never_reaps_live_metadata() -> Result<(), Strin
     let cfg = LcmGcConfig {
         reap_missing_enabled: true,
         reap_missing_after: 10,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1619,7 +1660,6 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
     let refs = seed_reapable_payloads(&store, count).await?;
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         max_batch_size: 64,
         ..Default::default()
     }

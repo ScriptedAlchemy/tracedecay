@@ -106,6 +106,9 @@ pub enum SessionRefreshServiceOutcome {
     Denied,
     WrongScope,
     Stale,
+    StaleFrontier {
+        active_projection_frontier: u64,
+    },
     NotFound,
     Aborted,
     DeadlineExceeded,

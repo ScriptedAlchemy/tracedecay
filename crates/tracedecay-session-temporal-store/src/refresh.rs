@@ -170,6 +170,12 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .await
                 .map_err(|error| storage(BEGIN_REFRESH, error))?
         });
+        let request = match read_active_generation(&transaction, request.session_id()).await? {
+            Some((_, active_watermarks)) => {
+                rebase_on_committed_frontier(request, active_watermarks.projection_frontier())?
+            }
+            None => request,
+        };
         let request_digest = refresh_binding_digest(&request)?;
 
         if let Some(existing) =
@@ -203,12 +209,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             ensure_active_session_cursor_key_in_transaction(&transaction).await?;
         let (active_generation, active_watermarks) =
             ensure_active_generation(&transaction, &request).await?;
-        if request.target_frontier().committed_through() != active_watermarks.projection_frontier()
-        {
-            return Err(SessionStoreError::InvalidStateTransition {
-                context: "refresh source frontier must match active projection frontier",
-            });
-        }
         let candidate_generation = next_generation(&transaction, request.session_id()).await?;
         let mut frozen_watermarks = SessionFrozenWatermarksV1::new(
             active_generation,
@@ -1253,32 +1253,69 @@ async fn read_running_operation(
         .transpose()
 }
 
-async fn ensure_active_generation(
+async fn read_active_generation(
     conn: &impl crate::handle::SessionTemporalExec,
-    request: &SessionRefreshBeginOrJoinRequestV1,
-) -> SessionStoreResult<(SessionProjectionGenerationV1, SessionFrozenWatermarksV1)> {
+    session_id: &SessionId,
+) -> SessionStoreResult<Option<(SessionProjectionGenerationV1, SessionFrozenWatermarksV1)>> {
     let mut rows = conn
         .query(
             "SELECT generation, frozen_watermarks_json
              FROM session_temporal_generations
              WHERE session_id = ?1 AND state = 'active'",
-            params![request.session_id().as_str()],
+            params![session_id.as_str()],
         )
         .await
         .map_err(|error| storage(BEGIN_REFRESH, error))?;
-    if let Some(row) = rows
+    let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage(BEGIN_REFRESH, error))?
-    {
-        let generation = decode_generation_i64(
-            row.get(0).map_err(|error| storage(BEGIN_REFRESH, error))?,
-            BEGIN_REFRESH,
-        )?;
-        let encoded: String = row.get(1).map_err(|error| storage(BEGIN_REFRESH, error))?;
-        return Ok((generation, decode_watermarks(&encoded)?));
+    else {
+        return Ok(None);
+    };
+    let generation = decode_generation_i64(
+        row.get(0).map_err(|error| storage(BEGIN_REFRESH, error))?,
+        BEGIN_REFRESH,
+    )?;
+    let encoded: String = row.get(1).map_err(|error| storage(BEGIN_REFRESH, error))?;
+    Ok(Some((generation, decode_watermarks(&encoded)?)))
+}
+
+/// Starts the refresh window at the session's committed projection frontier.
+///
+/// The caller's `committed_through` is its last view of that frontier, and
+/// the daemon's own discovery refreshes advance it in the background, so a
+/// window whose target still contains the committed frontier begins there.
+/// A window the store already moved past, or one claiming more than was
+/// committed, is a stale request the caller must rebuild.
+fn rebase_on_committed_frontier(
+    request: SessionRefreshBeginOrJoinRequestV1,
+    committed: u64,
+) -> SessionStoreResult<SessionRefreshBeginOrJoinRequestV1> {
+    let requested = request.target_frontier();
+    if committed == requested.committed_through() {
+        return Ok(request);
     }
-    drop(rows);
+    if committed < requested.committed_through() || committed > requested.observed_through() {
+        return Err(SessionStoreError::StaleRefreshFrontier {
+            observed_through: requested.observed_through(),
+            committed_through: requested.committed_through(),
+            active_projection_frontier: committed,
+        });
+    }
+    Ok(request.with_target_frontier(SessionRefreshFrontierV1::new(
+        requested.observed_through(),
+        committed,
+    )?))
+}
+
+async fn ensure_active_generation(
+    conn: &impl crate::handle::SessionTemporalExec,
+    request: &SessionRefreshBeginOrJoinRequestV1,
+) -> SessionStoreResult<(SessionProjectionGenerationV1, SessionFrozenWatermarksV1)> {
+    if let Some(active) = read_active_generation(conn, request.session_id()).await? {
+        return Ok(active);
+    }
 
     let generation = SessionProjectionGenerationV1::new(1)?;
     let watermarks = SessionFrozenWatermarksV1::new(

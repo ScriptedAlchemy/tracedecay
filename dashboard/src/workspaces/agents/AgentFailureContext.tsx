@@ -177,6 +177,22 @@ function AttemptFailures({ reading }: { reading: AttemptFailureReading }) {
       </section>
     );
   }
+  if (reading.state === 'absent') {
+    return (
+      <section
+        aria-label="Attempt failures"
+        className="flex min-w-0 flex-col gap-1.5"
+        data-agent-attempt-failures="absent"
+      >
+        <h3 className="td-legend text-text-secondary">Attempts</h3>
+        <StateChip kind="complete_zero_findings" detail="no Work graph yet" />
+        <p className="text-3xs leading-snug text-text-muted">
+          No task has been created, so no attempt has run. Create a task on the Work page to
+          start the graph.
+        </p>
+      </section>
+    );
+  }
   if (reading.coverage === 'unavailable') {
     return (
       <section

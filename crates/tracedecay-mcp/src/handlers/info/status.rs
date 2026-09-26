@@ -147,18 +147,19 @@ fn ready_serving_source(
 }
 
 fn attach_compact_branch_summary(
-    branch_diagnostics: &BranchDiagnostics,
+    open_active_branch: Option<&str>,
+    serving_branch: Option<&str>,
     output: &mut Value,
     retrieval_serving: &CodeIndexRetrievalServingV1,
 ) {
     // Both status shapes consume the serving identity reconciled with the
     // ready generation source below.
     // Do not alias open/active into current/live: those are distinct under drift.
-    if let Some(active) = branch_diagnostics.open_active_branch.as_deref() {
+    if let Some(active) = open_active_branch {
         output["active_branch"] = json!(active);
     }
     let branch_servable = retrieval_serving.attach(output);
-    if branch_servable && let Some(serving) = branch_diagnostics.serving_branch.as_deref() {
+    if branch_servable && let Some(serving) = serving_branch {
         output["serving_branch"] = json!(serving);
     }
 }
@@ -328,7 +329,7 @@ pub async fn handle_status(
         ),
     };
     let ready_serving_source = ready_serving_source(freshness_payload.as_ref());
-    let branch_diagnostics = ctx.branch_diagnostics_for_serving_source(
+    let (source_reference, source_revision, source_is_current) = (
         ready_serving_source.map(|source| source.reference),
         ready_serving_source.and_then(|source| source.revision),
         ready_serving_source.is_some_and(|source| source.current_source_verified),
@@ -355,9 +356,24 @@ pub async fn handle_status(
     }
 
     if include_branch_diagnostics {
+        let branch_diagnostics = ctx.branch_diagnostics_for_serving_source(
+            source_reference,
+            source_revision,
+            source_is_current,
+        );
         attach_full_branch_status(&branch_diagnostics, &mut output, &retrieval_serving);
     } else {
-        attach_compact_branch_summary(&branch_diagnostics, &mut output, &retrieval_serving);
+        let (open_active_branch, serving_branch) = ctx.serving_branch_identity_for_serving_source(
+            source_reference,
+            source_revision,
+            source_is_current,
+        );
+        attach_compact_branch_summary(
+            open_active_branch.as_deref(),
+            serving_branch.as_deref(),
+            &mut output,
+            &retrieval_serving,
+        );
     }
 
     // Session-transcript ingest health (recall trust): last ingest time and

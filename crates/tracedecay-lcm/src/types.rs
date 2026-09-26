@@ -490,8 +490,6 @@ pub struct LcmGcConfig {
     pub reap_missing_enabled: bool,
     #[serde(default = "default_lcm_gc_max_batch_size")]
     pub max_batch_size: usize,
-    #[serde(default = "default_lcm_gc_backup_before_reap")]
-    pub backup_before_reap: bool,
     #[serde(default = "default_lcm_gc_interval_seconds")]
     pub interval_seconds: u64,
     #[serde(default = "default_lcm_gc_enabled")]
@@ -519,7 +517,6 @@ impl Default for LcmGcConfig {
             reap_missing_after: default_lcm_gc_reap_missing_after(),
             reap_missing_enabled: default_lcm_gc_reap_missing_enabled(),
             max_batch_size: default_lcm_gc_max_batch_size(),
-            backup_before_reap: default_lcm_gc_backup_before_reap(),
             interval_seconds: default_lcm_gc_interval_seconds(),
             gc_enabled: default_lcm_gc_enabled(),
         }
@@ -541,10 +538,6 @@ fn default_lcm_gc_reap_missing_enabled() -> bool {
 
 fn default_lcm_gc_max_batch_size() -> usize {
     500
-}
-
-fn default_lcm_gc_backup_before_reap() -> bool {
-    true
 }
 
 fn default_lcm_gc_interval_seconds() -> u64 {

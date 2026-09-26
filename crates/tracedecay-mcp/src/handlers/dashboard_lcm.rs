@@ -130,7 +130,7 @@ impl DashboardLcmReadAdapter {
         // manifest and ordering, while each execute call reauthorizes and
         // canonically hydrates that page.
         let temporal = loop {
-            let Some(query) = retrieval_query(&request, cursor.clone(), aggregate) else {
+            let Some(query) = retrieval_query(&request, cursor.clone()) else {
                 return not_ready(
                     DashboardLcmReadStateV1::Unavailable,
                     "lcm_dashboard_request_invalid",
@@ -790,7 +790,6 @@ fn initial_cursor(request: &DashboardLcmReadRequestV1) -> Option<String> {
 fn retrieval_query(
     request: &DashboardLcmReadRequestV1,
     cursor: Option<String>,
-    aggregate: bool,
 ) -> Option<SessionTemporalQuery> {
     let (session_id, cursor, query_text, limit, retrieval_scope, roles, source, time_range) =
         match request {
@@ -889,10 +888,12 @@ fn retrieval_query(
         TemporalModeV1::Current,
         RetrievalGrainV1::Occurrence,
         limit,
-        if aggregate {
-            DiversityLimits::unbounded()
-        } else {
+        // Only a ranked search spreads hits across sources; a session page is
+        // the transcript window itself and must serve every record in it.
+        if matches!(request, DashboardLcmReadRequestV1::Search { .. }) {
             DiversityLimits::default()
+        } else {
+            DiversityLimits::unbounded()
         },
         ContextBudget {
             max_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT as u64,
@@ -1046,12 +1047,17 @@ mod tests {
             limit: 100,
             cursor: Some("opaque-temporal-cursor".to_owned()),
         };
-        let query = retrieval_query(&request, initial_cursor(&request), false)
+        let query = retrieval_query(&request, initial_cursor(&request))
             .expect("cursor-backed dashboard page");
 
         assert_eq!(query.limit(), 100);
         assert_eq!(query.cursor(), Some("opaque-temporal-cursor"));
         assert!(query.semantic_filter().include_summaries);
+        assert_eq!(
+            query.diversity(),
+            DiversityLimits::unbounded(),
+            "a transcript page serves every record, never a diversity-capped sample"
+        );
     }
 
     #[test]
@@ -1061,12 +1067,8 @@ mod tests {
             session_id: None,
             limit: 400,
         };
-        let query = retrieval_query(
-            &request,
-            Some("opaque-frozen-manifest-cursor".to_owned()),
-            true,
-        )
-        .expect("aggregate continuation");
+        let query = retrieval_query(&request, Some("opaque-frozen-manifest-cursor".to_owned()))
+            .expect("aggregate continuation");
 
         assert_eq!(query.limit(), 100);
         assert_eq!(query.cursor(), Some("opaque-frozen-manifest-cursor"));

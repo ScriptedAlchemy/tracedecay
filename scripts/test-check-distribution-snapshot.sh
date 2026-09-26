@@ -56,7 +56,8 @@ for fixture in \
   kimi-code.json \
   kimi/post-tool-use-edit.json \
   opencode/baseline.json \
-  pi.json; do
+  pi.json \
+  droid.json; do
   mkdir -p -- \
     "$repo/crates/tracedecay-hooks/fixtures/host_events/$(dirname -- "$fixture")" \
     "$repo/tests/fixtures/packaged_host_events/$(dirname -- "$fixture")"
@@ -90,14 +91,41 @@ git -C "$repo" commit -qm "test fixture"
 real_cp=$(command -v cp)
 real_python=$(command -v python3)
 
+# The package boundary is the last point where the gate's staged tree exists,
+# so the staged-snapshot assertions run there and record that they did.
 cat >"$bin/cargo" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
   build) exit 0 ;;
-  package) exit 77 ;;
+  package) ;;
   *) exit 2 ;;
 esac
+manifest=
+while (($#)); do
+  if [[ $1 == --manifest-path ]]; then
+    manifest=$2
+    break
+  fi
+  shift
+done
+staged=$(dirname -- "$manifest")
+grep -Fxq "original readme" "$staged/crates/tracedecay/README.md" || {
+  echo "packaged asset was copied from the mutated live repository" >&2
+  exit 1
+}
+grep -Fxq "mutated live readme" "$TEST_REPO/README.md"
+product_fixtures="$staged/crates/tracedecay/tests/fixtures"
+[[ ! -e "$product_fixtures/crate_local" ]] || {
+  echo "crate-local content survived beside the staged root asset" >&2
+  exit 1
+}
+[[ -f "$product_fixtures/packaged_host_events/claude.json" ]] || {
+  echo "staged root asset is missing from the product package" >&2
+  exit 1
+}
+printf '%s\n' "$staged" >"$TEST_STATE/staged-checked"
+exit 77
 SH
 cat >"$bin/rustc" <<'SH'
 #!/usr/bin/env bash
@@ -146,7 +174,7 @@ REAL_PYTHON="$real_python" \
 TEST_REPO="$repo" \
 TEST_STATE="$state" \
 TMPDIR="$work" \
-  "$gate" --repo "$repo" --keep-temp >"$output" 2>&1
+  "$gate" --repo "$repo" >"$output" 2>&1
 status=$?
 set -e
 [[ $status -eq 77 ]] || {
@@ -155,21 +183,14 @@ set -e
   exit 1
 }
 
-distribution_work=$(printf '%s\n' "$work"/tracedecay-distribution.*)
-staged="$distribution_work/staged"
-grep -Fxq "original readme" "$staged/crates/tracedecay/README.md" || {
-  echo "packaged asset was copied from the mutated live repository" >&2
+staged=$(<"$state/staged-checked")
+[[ $staged == "$work"/tracedecay-distribution.*/staged ]] || {
+  echo "staged-snapshot assertions did not run inside the gate's work directory: $staged" >&2
   exit 1
 }
-grep -Fxq "mutated live readme" "$repo/README.md"
-
-product_fixtures="$staged/crates/tracedecay/tests/fixtures"
-[[ ! -e "$product_fixtures/crate_local" ]] || {
-  echo "crate-local content survived beside the staged root asset" >&2
-  exit 1
-}
-[[ -f "$product_fixtures/packaged_host_events/claude.json" ]] || {
-  echo "staged root asset is missing from the product package" >&2
+leftover=$(find "$work" -maxdepth 1 -name 'tracedecay-distribution.*' -print)
+[[ -z $leftover ]] || {
+  echo "distribution gate left its temporary directory behind: $leftover" >&2
   exit 1
 }
 

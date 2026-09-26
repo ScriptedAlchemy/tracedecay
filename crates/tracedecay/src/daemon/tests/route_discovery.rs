@@ -12,11 +12,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use tracedecay_daemon_service::ProjectRuntimePublicationStateV1;
 use tracedecay_runtime_core::git_discovery::identity_resolution_elapsed;
 use tracedecay_runtime_core::git_repository::{
-    delay_repository_discovery_for_test, observe_repository_discovery_for_test,
-    repository_discovery_count_for_test, repository_topology_resolution_count_for_test,
-    reset_repository_discovery_for_test,
+    block_repository_discovery_for_test, delay_repository_discovery_for_test,
+    observe_repository_discovery_for_test, repository_discovery_count_for_test,
+    repository_topology_resolution_count_for_test, reset_repository_discovery_for_test,
 };
 
 use super::bootstrap::run_git;
@@ -46,6 +47,83 @@ fn handshake_for(project: &Path, profile_root: &Path) -> DaemonHandshake {
         client_identity: test_client_identity_for(profile_root.to_path_buf()),
         ..test_handshake_defaults()
     }
+}
+
+/// One checkout parked inside repository discovery must not keep the profile
+/// runtime or any other project from opening.
+///
+/// The parked walk waits on a channel, not a timer, and does not hold the
+/// topology slot or the process-wide project-open capacity gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocked_repository_discovery_lets_other_projects_reach_ready() {
+    let home = TempDir::new().expect("isolated home");
+    let profile_root = home.path().join("profile");
+    let blocked = home.path().join("blocked");
+    let responsive = home.path().join("responsive");
+    committed_repository(&blocked);
+    committed_repository(&responsive);
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&blocked, &client_identity).await;
+    initialize_test_project(&responsive, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "blocked repository discovery");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+
+    let mut block = block_repository_discovery_for_test(&blocked);
+    let blocked_engine = engine.clone();
+    let blocked_handshake = handshake_for(&blocked, &profile_root);
+    let blocked_open =
+        tokio::spawn(async move { blocked_engine.project_server(&blocked_handshake).await });
+    block.wait_entered().await;
+
+    let blocked_result = blocked_open.await.expect("blocked open task");
+    let Err(blocked_error) = blocked_result else {
+        panic!("a blocked discovery must not open that project");
+    };
+    assert!(
+        matches!(
+            blocked_error.project_route_context(),
+            Some((
+                crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                true,
+                _
+            ))
+        ),
+        "blocked discovery must stay typed-retryable, got: {blocked_error}"
+    );
+    let message = blocked_error.to_string();
+    let blocked_identity = tracedecay_runtime_core::path_safety::canonical_root_identity(&blocked);
+    assert!(
+        message.contains(&format!(
+            "repository discovery blocked on {}",
+            blocked_identity.display()
+        )),
+        "blocked discovery must name the path, got: {message}"
+    );
+
+    let responsive_handshake = handshake_for(&responsive, &profile_root);
+    engine
+        .project_server(&responsive_handshake)
+        .await
+        .expect("an unrelated project opens while discovery is blocked");
+    assert_eq!(
+        engine
+            .invocation
+            .service
+            .project_runtimes
+            .publication_state(&responsive),
+        Some(ProjectRuntimePublicationStateV1::Ready),
+        "the unrelated project's runtime must reach Ready while discovery is blocked"
+    );
+    engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile runtime reaches Ready while one discovery is blocked");
+
+    block.release();
+    reset_repository_discovery_for_test(&blocked);
+    reset_repository_discovery_for_test(&responsive);
 }
 
 /// A slow checkout must not hold the worker its connection is served on.

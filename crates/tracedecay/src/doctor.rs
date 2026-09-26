@@ -141,18 +141,7 @@ pub async fn run_doctor(
                 }
             }
         }
-        Err(error) if crate::daemon::error_is_project_not_enrolled(error) => {
-            report_project_not_enrolled(&mut dc, &project_path);
-            DatabaseHealth::unknown("project_not_enrolled")
-        }
-        Err(error) => {
-            report_daemon_diagnostics_unavailable(
-                &mut dc,
-                fallback_database_path(&project_path).as_deref(),
-                error,
-            );
-            DatabaseHealth::unknown("canonical_doctor_report_unavailable")
-        }
+        Err(error) => classify_daemon_status_error(&mut dc, &project_path, error),
     };
     check_watcher(&mut dc);
     let upload_enabled = configured_upload_enabled(&project_path).await;
@@ -561,6 +550,64 @@ impl DatabaseHealth {
             (Self::Healthy, Self::Healthy) => Self::Healthy,
         }
     }
+}
+
+/// Warming and discovery-blocked refusals are not lost database authority.
+///
+/// The closed-connection / WAL recovery text belongs to a daemon that
+/// disappeared while owning the store. A profile that is still warming, or a
+/// repository walk blocked on one path, is a retryable state.
+fn classify_daemon_status_error(
+    dc: &mut DoctorCounters,
+    project_path: &Path,
+    error: &tracedecay_domain::errors::TraceDecayError,
+) -> DatabaseHealth {
+    if let Some(message) = daemon_warming_doctor_message(project_path, error) {
+        dc.warn(&message);
+        return DatabaseHealth::unknown("daemon_warming");
+    }
+    if crate::daemon::error_is_project_not_enrolled(error) {
+        report_project_not_enrolled(dc, project_path);
+        return DatabaseHealth::unknown("project_not_enrolled");
+    }
+    report_daemon_diagnostics_unavailable(
+        dc,
+        fallback_database_path(project_path).as_deref(),
+        error,
+    );
+    DatabaseHealth::unknown("canonical_doctor_report_unavailable")
+}
+
+fn daemon_warming_doctor_message(
+    project_path: &Path,
+    error: &tracedecay_domain::errors::TraceDecayError,
+) -> Option<String> {
+    if crate::daemon::error_is_repository_discovery_deferred(error) {
+        return Some(format!(
+            "daemon is still warming: repository discovery blocked on {}",
+            repository_discovery_block_path(error, project_path)
+        ));
+    }
+    if crate::daemon::error_is_project_warming(error) {
+        return Some("daemon is still warming: profile runtime is warming".to_owned());
+    }
+    None
+}
+
+fn repository_discovery_block_path(
+    error: &tracedecay_domain::errors::TraceDecayError,
+    project_path: &Path,
+) -> String {
+    let Some((_, _, detail)) = error.project_route_context() else {
+        return project_path.display().to_string();
+    };
+    detail
+        .split("repository discovery blocked on ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map_or_else(|| project_path.display().to_string(), str::to_owned)
 }
 
 fn report_project_not_enrolled(dc: &mut DoctorCounters, project_path: &Path) {

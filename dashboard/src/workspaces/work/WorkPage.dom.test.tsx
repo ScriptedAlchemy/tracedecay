@@ -159,6 +159,41 @@ describe('the Work page over mounted routes', () => {
     expect(container.querySelector('[data-work-board]')).toBeNull();
   });
 
+  it('offers task creation when no Work graph exists yet, and keeps a denial a denial', async () => {
+    const absent = {
+      mode: 'absent',
+      authorized_scope: {
+        owner_brain_id: 'brain.work',
+        owner_profile_id: 'profile.work',
+        selection: { selection: 'profile_owned_no_git' },
+      },
+      selection_coverage: { coverage: 'complete', covered_events: 0 },
+    };
+    serve((url) =>
+      url.includes('/work/views')
+        ? { status: 200, body: workSuccess(absent, 'binding.http.work.views') }
+        : { status: 503, body: { kind: 'problem', value: { problem: {} } } },
+    );
+    const first = renderPage();
+    await waitFor(() =>
+      expect(first.container.querySelector('[data-work-graph="absent"]')).not.toBeNull(),
+    );
+    expect(screen.getAllByText(/no Work graph yet/).length).toBeGreaterThan(0);
+    expect(screen.getByText('Create work')).toBeTruthy();
+    expect(screen.queryByText(/not authorized/)).toBeNull();
+    expect(first.container.querySelector('[data-work-board]')).toBeNull();
+    expect(
+      first.container.querySelector('[data-work-register]')?.getAttribute('data-work-register'),
+    ).toBe('complete_zero_findings');
+    first.unmount();
+
+    serve(() => ({ status: 404, body: { kind: 'problem', value: { problem: {} } } }));
+    const denied = renderPage();
+    await waitFor(() => expect(screen.getByText(/not authorized/)).toBeTruthy());
+    expect(denied.container.querySelector('[data-work-graph="absent"]')).toBeNull();
+    expect(screen.queryByText('Create work')).toBeNull();
+  });
+
   it('reports an envelope it cannot read as unsupported rather than guessing', async () => {
     serve(() => ({ status: 200, body: { kind: 'success', value: { outcome: {} } } }));
     const { container } = renderPage();

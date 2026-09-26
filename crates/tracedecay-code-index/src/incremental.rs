@@ -494,10 +494,7 @@ pub fn plan_chunk_increment(
         reused_count,
         reused_digest,
     };
-    changes.manifest_digest = changes.compute_digest().map_err(|error| {
-        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
-    })?;
-    changes.validate().map_err(|error| {
+    changes.seal().map_err(|error| {
         ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
     })?;
     Ok(changes)
@@ -608,10 +605,7 @@ pub(crate) fn plan_chunk_increment_arc_shared(
         reused_count,
         reused_digest,
     };
-    changes.manifest_digest = changes.compute_digest().map_err(|error| {
-        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
-    })?;
-    changes.validate().map_err(|error| {
+    changes.seal().map_err(|error| {
         ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
     })?;
     Ok(changes)

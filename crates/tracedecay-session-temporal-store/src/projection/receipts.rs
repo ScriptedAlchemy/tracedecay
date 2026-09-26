@@ -17,7 +17,9 @@ use super::super::query::{
     PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, storage, storage_message,
 };
 use super::super::rebuild::checkpoint_relation_rebuild_control;
-use super::super::relation_projection::reconstruct_logical_copy_relations;
+use super::super::relation_projection::{
+    count_canonical_logical_copies, reconstruct_logical_copy_relations,
+};
 use super::super::relations::{LogicalCopyRelation, SessionRelationProjection};
 use super::persist::*;
 
@@ -964,9 +966,9 @@ async fn projection_progress_counts(
     batch: &SessionTemporalProjectionBatchV1,
     baseline: ProjectionProgressBaseline,
 ) -> SessionStoreResult<(usize, usize)> {
-    let prior = if batch.batch_ordinal() == 0
-        && matches!(baseline, ProjectionProgressBaseline::SeededFromActive)
-    {
+    let seeded_from_active = batch.batch_ordinal() == 0
+        && matches!(baseline, ProjectionProgressBaseline::SeededFromActive);
+    let prior = if seeded_from_active {
         (batch.watermarks().active_generation(), None)
     } else if batch.batch_ordinal() > 0 {
         (
@@ -1011,7 +1013,30 @@ async fn projection_progress_counts(
             )
             .map_err(|error| storage(PERSIST_OPERATION, error))?,
         ),
-        None => (0, 0),
+        // A generation that summary publication derived from the projected one
+        // carries its rows but no projection receipt of its own. The seeded
+        // baseline is then exactly the rows it holds, never an empty count.
+        None if seeded_from_active => {
+            let copies =
+                count_canonical_logical_copies(conn, batch.session_id(), generation).await?;
+            let items = session_temporal_projection_record_count(
+                conn,
+                batch.session_id(),
+                generation,
+                copies,
+            )
+            .await?;
+            (
+                usize::try_from(items).map_err(|error| storage(PERSIST_OPERATION, error))?,
+                usize::try_from(copies).map_err(|error| storage(PERSIST_OPERATION, error))?,
+            )
+        }
+        None => {
+            return Err(storage_message(
+                PERSIST_OPERATION,
+                "prior projection batch receipt is unavailable",
+            ));
+        }
     };
     Ok((
         prior_items

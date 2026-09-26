@@ -21,7 +21,9 @@ use tracedecay_graph_query::{
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
+use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority;
 use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_session_memory::transcript::GlobalDbTranscriptStore;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -340,6 +342,36 @@ impl DashboardTestRuntimeV1 {
             seed,
         )
         .await
+    }
+
+    /// Runs one host provider's transcripts under the fixture `HOME` through
+    /// the production project ingest into this project's session store.
+    pub(crate) async fn ingest_project_provider_for_test(
+        &self,
+        project_root: &Path,
+        provider: tracedecay_sessions::runtime::SessionProvider,
+    ) -> Result<tracedecay_sessions::runtime::shared::TranscriptIngestStats> {
+        let graph_profile_root = self
+            .profile_root
+            .join("dashboard-test-graphs")
+            .join(self.project_id.as_str());
+        let identity =
+            tracedecay_daemon_identity::profile_identity::load_or_create(&graph_profile_root)?;
+        let authority = GlobalDbSessionIngestAuthority::new(self.project_database.as_ref())
+            .with_background_cpu(ensure_process_background_cpu_authority()?);
+        Ok(
+            tracedecay_sessions::runtime::ingest_project_sources_for_provider(
+                identity.brain_id(),
+                identity.profile_id(),
+                &authority,
+                project_root,
+                Some(self.project_id.clone()),
+                Some(provider),
+                false,
+            )
+            .await
+            .stats,
+        )
     }
 
     /// Materializes the pending session-temporal refresh for one seeded

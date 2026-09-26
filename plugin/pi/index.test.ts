@@ -91,7 +91,9 @@ test("read-only tools may target another registered project", async () => {
   await tools
     .get(readOnly.name)
     .execute("call", { name: "X", project_selector: { path: "/other" } }, undefined, undefined, context({ hasUI: false }).ctx)
-  expect(calls).toHaveLength(1)
+  expect(calls.map((call) => [call.args, JSON.parse(call.options.input!)])).toEqual([
+    [["tool", readOnly.name, "--args", "-"], { name: "X", project_selector: { path: "/other" } }],
+  ])
 })
 
 test("mutating tools need approval and never target another project", async () => {

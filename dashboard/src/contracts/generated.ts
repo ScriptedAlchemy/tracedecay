@@ -7380,6 +7380,10 @@ export type WorkGraphReadRequestV1 = z.infer<typeof WorkGraphReadRequestV1Schema
 
 export const WorkGraphReadV1Schema = z.discriminatedUnion("mode", [z.object({
   authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
+  mode: z.literal("absent"),
+  selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
+}), z.object({
+  authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
   mode: z.literal("as_of"),
   selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
   snapshot: z.lazy(() => WorkGraphVersionEntryV1Schema),

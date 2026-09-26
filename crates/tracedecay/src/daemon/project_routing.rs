@@ -130,12 +130,20 @@ pub(super) async fn bind_authenticated_profile_identity(
 pub(super) async fn project_open_gate(
     gates: &tokio::sync::Mutex<ProjectOpenGates>,
     route: &ProjectRouteKey,
-) -> Arc<ProjectOpenGate> {
+) -> Result<Arc<ProjectOpenGate>> {
     let mut gate_route = route.clone();
-    if let Some(git_common_dir) =
-        tracedecay_runtime_core::worktree::git_common_dir(&route.project_path)
-    {
-        gate_route.project_path = git_common_dir;
+    match tracedecay_runtime_core::worktree::git_common_dir_outcome(&route.project_path) {
+        Ok(Some(git_common_dir)) => gate_route.project_path = git_common_dir,
+        Ok(None) => {}
+        Err(tracedecay_runtime_core::git_repository::GitRepositoryError::DiscoveryBlocked {
+            ..
+        }) => {
+            return Err(super::core_proxy::repository_discovery_deferred(
+                &route.project_path,
+                tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
+            ));
+        }
+        Err(_) => {}
     }
     let mut gates = gates.lock().await;
     if let Some(gate) = gates
@@ -143,11 +151,11 @@ pub(super) async fn project_open_gate(
         .get(&gate_route)
         .and_then(std::sync::Weak::upgrade)
     {
-        return gate;
+        return Ok(gate);
     }
     let gate = Arc::new(ProjectOpenGate::new(()));
     gates.gates.insert(gate_route, Arc::downgrade(&gate));
-    gate
+    Ok(gate)
 }
 
 pub(super) async fn project_open_capacity_gate(
@@ -185,16 +193,62 @@ where
     Value: Send + 'static,
 {
     let probe = tokio::task::spawn_blocking(probe);
-    match tokio::time::timeout(REPOSITORY_DISCOVERY_DEADLINE, probe).await {
+    let budget = repository_probe_budget(project_path);
+    tokio::pin!(probe);
+    tokio::pin!(budget);
+    match tokio::select! {
+        biased;
+        joined = &mut probe => Ok(joined),
+        () = &mut budget => Err(()),
+    } {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(_)) => Err(super::core_proxy::repository_discovery_deferred(
             project_path,
             tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::ProbeFailed,
         )),
-        Err(_) => Err(super::core_proxy::repository_discovery_deferred(
+        Err(()) => Err(super::core_proxy::repository_discovery_deferred(
             project_path,
             tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
         )),
+    }
+}
+
+/// Wall-clock discovery budget, or the moment a test parks the walk.
+///
+/// The parked walk is already past any useful wait: returning here marks the
+/// project discovery-blocked without sleeping out the production deadline.
+async fn repository_probe_budget(project_path: &Path) {
+    if tracedecay_runtime_core::git_repository::wait_until_repository_discovery_blocks(project_path)
+        .await
+    {
+        return;
+    }
+    tokio::time::sleep(REPOSITORY_DISCOVERY_DEADLINE).await;
+}
+
+/// Finish or refuse repository discovery before any cross-project admission lock.
+///
+/// Live defect this exists for: one project's `open()` of a git ref ran while
+/// the process-wide project-open capacity gate was held, so every other
+/// project's open queued behind that hang and the profile runtime never
+/// reached Ready.
+pub(super) async fn ensure_checkout_topology_before_admission(project_path: &Path) -> Result<()> {
+    match super::core_proxy::bounded_repository_identity(
+        project_path,
+        super::core_proxy::repository_discovery_parent_deadline(),
+    )
+    .await
+    {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(_)
+        | tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            Ok(())
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(reason) => {
+            Err(super::core_proxy::repository_discovery_deferred(
+                project_path,
+                reason,
+            ))
+        }
     }
 }
 

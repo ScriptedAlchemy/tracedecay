@@ -955,6 +955,86 @@ mod tests {
         (directory, conn)
     }
 
+    const MISSING_SCHEMA_VERSION: LcmError = LcmError::ProfileResetRequired {
+        found_version: None,
+        required_version: schema::LCM_SCHEMA_VERSION,
+    };
+
+    async fn corrupt_schema_version(conn: &Connection) {
+        conn.execute(
+            "UPDATE session_schema_migrations SET version = 'unreadable' WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .expect("corrupt LCM schema version");
+    }
+
+    async fn drop_schema_version(conn: &Connection) {
+        conn.execute(
+            "DELETE FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .expect("drop LCM schema version");
+    }
+
+    #[tokio::test]
+    async fn provider_status_reports_the_schema_version_read_failure() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        seed_provider(&conn, 0).await;
+        let gc_config = LcmGcConfig::default();
+        let read = || {
+            status_for_provider(
+                &*conn,
+                storage.path(),
+                "provider-00",
+                None,
+                false,
+                &gc_config,
+            )
+        };
+        assert_eq!(
+            read().await.expect("current status").schema_version,
+            schema::LCM_SCHEMA_VERSION
+        );
+
+        corrupt_schema_version(&conn).await;
+        let unreadable = read()
+            .await
+            .expect_err("unreadable version is not a status");
+        assert!(matches!(unreadable, LcmError::Db(_)), "{unreadable:?}");
+        drop_schema_version(&conn).await;
+        assert_eq!(
+            read().await.expect_err("missing version is not a status"),
+            MISSING_SCHEMA_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_status_reports_the_schema_version_read_failure() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        seed_provider(&conn, 0).await;
+        let gc_config = LcmGcConfig::default();
+        let read = || aggregate_provider_status(&*conn, storage.path(), None, false, &gc_config);
+        assert_eq!(
+            read().await.expect("current status").schema_version,
+            schema::LCM_SCHEMA_VERSION
+        );
+
+        corrupt_schema_version(&conn).await;
+        let unreadable = read()
+            .await
+            .expect_err("unreadable version is not a status");
+        assert!(matches!(unreadable, LcmError::Db(_)), "{unreadable:?}");
+        drop_schema_version(&conn).await;
+        assert_eq!(
+            read().await.expect_err("missing version is not a status"),
+            MISSING_SCHEMA_VERSION
+        );
+    }
+
     #[tokio::test]
     async fn status_reports_an_unreadable_schema_version_instead_of_the_compiled_one() {
         let (_database_dir, conn) = test_lcm_connection().await;

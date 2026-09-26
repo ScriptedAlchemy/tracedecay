@@ -71,6 +71,9 @@ fn handle_hook_command_inner(
             Commands::HookPiEvent => {
                 Some(tracedecay_agent_hosts::hooks::hook_pi_event(&runtime).await)
             }
+            Commands::HookDroidEvent => {
+                Some(tracedecay_agent_hosts::hooks::hook_droid_event(&runtime).await)
+            }
             _ => None,
         };
         if let Some(code) = native_response_code {

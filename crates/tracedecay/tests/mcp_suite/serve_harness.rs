@@ -203,10 +203,13 @@ pub fn assert_unenrolled_cwd_serve_session(output: &Output, cwd: &Path) {
 
     let tools = json_rpc_response(&output.stdout, 3);
     assert!(
-        tools["result"]["tools"]
-            .as_array()
-            .is_some_and(|tools| !tools.is_empty()),
-        "tools/list must advertise the catalog before a project exists: {tools}"
+        tools["result"]["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "tracedecay_runtime")
+        }),
+        "tools/list must advertise the catalog, including the tool called next, \
+         before a project exists: {tools}"
     );
 
     let refusal = json_rpc_response(&output.stdout, 2);

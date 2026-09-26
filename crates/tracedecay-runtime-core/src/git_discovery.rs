@@ -42,6 +42,11 @@ const DEFAULT_DISCOVERY_TIMEOUT: Duration =
 /// and deadline still interrupt quickly, but avoid waking every 10 ms for the
 /// full discovery budget on a blocking pool worker.
 const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Wire reason a route stays unresolved because repository discovery did not
+/// finish inside its budget. Shared with daemon status and Doctor so a blocked
+/// walk is one typed refusal, not a closed connection.
+pub const REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE: &str = "repository_discovery_deferred";
+
 const REPOSITORY_IDENTITY_ARGS: [&str; 4] = [
     "rev-parse",
     "--show-toplevel",
@@ -294,10 +299,30 @@ async fn authority_identity_off_executor(
         () = cancellation.cancelled() => {
             AuthorityProbe::Interrupted(GitDiscoveryUnknown::Cancelled)
         }
+        // A test block parks the walk on a channel. That is the deadline for
+        // this caller: the project is discovery-blocked, and waiting out the
+        // wall-clock budget would hold admission open for the whole hang.
+        () = discovery_block_budget(directory) => {
+            AuthorityProbe::Interrupted(GitDiscoveryUnknown::DeadlineExceeded)
+        }
         () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.instant())) => {
             AuthorityProbe::Interrupted(GitDiscoveryUnknown::DeadlineExceeded)
         }
     }
+}
+
+/// Completes when a test has parked discovery for `directory`.
+///
+/// Production builds and unblocked paths pend forever so the caller's own
+/// deadline remains the only timer.
+async fn discovery_block_budget(directory: &Path) {
+    #[cfg(any(test, feature = "test-helpers"))]
+    if crate::git_repository::wait_until_repository_discovery_blocks(directory).await {
+        return;
+    }
+    #[cfg(not(any(test, feature = "test-helpers")))]
+    let _ = directory;
+    std::future::pending::<()>().await;
 }
 
 /// Await the answer a joined resolution publishes, or `None` when the
@@ -452,6 +477,11 @@ fn repository_identity_from_authority(directory: &Path) -> Option<GitRepositoryI
         Err(crate::git_repository::GitRepositoryError::NotARepository { .. }) => {
             Some(GitRepositoryIdentityOutcome::NotRepository)
         }
+        // The walk is already owned by another thread. Falling through to the
+        // git CLI would start a second blocking probe of the same volume.
+        Err(crate::git_repository::GitRepositoryError::DiscoveryBlocked { .. }) => Some(
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded),
+        ),
         Err(_) => None,
     }
 }

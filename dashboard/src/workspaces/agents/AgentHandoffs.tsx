@@ -41,6 +41,17 @@ export function AgentHandoffs({ reading }: { reading: AgentHandoffReading }) {
       </div>
     );
   }
+  if (reading.state === 'absent') {
+    return (
+      <div className="flex min-w-0 flex-col gap-1" data-agent-handoffs="absent">
+        <StateChip kind="complete_zero_findings" detail="no Work graph yet" />
+        <p className="text-3xs leading-snug text-text-muted">
+          No task has been created, so no handoff can exist. Create a task on the Work page to
+          start the graph.
+        </p>
+      </div>
+    );
+  }
 
   const {
     handoffs,

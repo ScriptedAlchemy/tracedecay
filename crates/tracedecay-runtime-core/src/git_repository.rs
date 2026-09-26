@@ -4,6 +4,8 @@
 //! and bounded history are read through `gix`.
 
 use std::collections::{BTreeSet, HashMap};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
@@ -33,6 +35,13 @@ pub enum GitRepositoryError {
     UnreadableRepository { path: String, detail: String },
     #[error("Git HEAD is unreadable: {detail}")]
     UnreadableHead { detail: String },
+    /// A discovery for this path is already in progress and has not published.
+    ///
+    /// Callers must not wait on the in-flight walk: the walk is blocking
+    /// filesystem IO, and waiting for it on this thread is what pinned every
+    /// other project open behind one hung `open()`.
+    #[error("repository discovery blocked on {path}")]
+    DiscoveryBlocked { path: String },
     #[error("Git repository {operation} failed: {detail}")]
     Operation {
         operation: &'static str,
@@ -82,10 +91,22 @@ pub struct GitRepositoryTopologyV1 {
     pub common_dir: PathBuf,
 }
 
-/// One retained topology resolution and the lock that makes it single-flight.
+/// One retained topology resolution.
+///
+/// The mutex covers only the memo and the single-flight flag. The blocking
+/// repository walk runs outside it, so a hung `open()` of one checkout cannot
+/// queue every other project-open thread on this lock.
 #[derive(Default)]
 struct CheckoutTopologySlot {
-    resolved: Mutex<Option<Arc<GitRepositoryTopologyV1>>>,
+    state: Mutex<CheckoutTopologyState>,
+}
+
+#[derive(Default)]
+enum CheckoutTopologyState {
+    #[default]
+    Vacant,
+    Resolving,
+    Ready(Arc<GitRepositoryTopologyV1>),
 }
 
 /// Retained checkout-root topologies.
@@ -99,6 +120,39 @@ static CHECKOUT_TOPOLOGY: LazyLock<Mutex<HashMap<PathBuf, Arc<CheckoutTopologySl
 /// A daemon serves few project roots; this bound exists so a long-lived
 /// process that probes many paths cannot grow the memo without limit.
 const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
+
+/// Last branch read from each Git directory's HEAD, keyed by that file's
+/// identity. Bounded and cleared like [`CHECKOUT_TOPOLOGY`].
+static HEAD_BRANCHES: LazyLock<Mutex<HeadBranchMemo>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+type HeadBranchMemo = HashMap<PathBuf, (HeadFileStamp, Option<String>)>;
+
+/// Identity of a HEAD file. Git replaces HEAD by renaming a lock file over
+/// it, so every checkout yields a new inode and change time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeadFileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64),
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+impl HeadFileStamp {
+    fn read(head: &Path) -> Option<Self> {
+        let metadata = std::fs::symlink_metadata(head).ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            inode: (metadata.dev(), metadata.ino()),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+}
 
 /// Repository topology for `path`, resolved once per checkout root.
 ///
@@ -120,13 +174,15 @@ pub fn repository_topology(
     path: &Path,
 ) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
     let slot = checkout_topology_slot(path);
-    let mut resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(topology) = resolved.as_ref()
-        && checkout_topology_is_live(topology)
-    {
-        return Ok(Arc::clone(topology));
+    if let Some(topology) = live_ready_topology(&slot) {
+        return Ok(topology);
     }
-    *resolved = None;
+    if !begin_checkout_resolution(&slot) {
+        return Err(GitRepositoryError::DiscoveryBlocked {
+            path: path.display().to_string(),
+        });
+    }
+    let guard = CheckoutResolutionGuard { slot: &slot };
     #[cfg(any(test, feature = "test-helpers"))]
     observe_topology_resolution(path);
     let topology = Arc::new(
@@ -136,19 +192,82 @@ pub fn repository_topology(
         )?
         .into_topology(),
     );
-    match topology.worktree_root.as_deref() {
-        Some(root) if path.canonicalize().is_ok_and(|canonical| canonical == root) => {
-            *resolved = Some(Arc::clone(&topology));
-        }
-        // Discovered from a subdirectory, a bare repository's control dir, or
-        // any other path the walk did not start at. The answer is not
-        // retainable *for this path*, a repository can appear between it and
-        // the root, but it is the complete, revalidatable answer for the root
-        // it names, so the next question about that root is already paid for.
-        Some(root) => publish_checkout_root_topology(root, &topology),
-        None => {}
-    }
+    guard.publish(path, &topology);
     Ok(topology)
+}
+
+/// A live retained topology, or `None` when the memo is empty, stale, or
+/// another thread owns the walk. Liveness reads the filesystem and must not
+/// run while the slot mutex is held.
+fn live_ready_topology(slot: &CheckoutTopologySlot) -> Option<Arc<GitRepositoryTopologyV1>> {
+    let ready = {
+        let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*state {
+            CheckoutTopologyState::Ready(topology) => Some(Arc::clone(topology)),
+            CheckoutTopologyState::Vacant | CheckoutTopologyState::Resolving => None,
+        }
+    }?;
+    checkout_topology_is_live(&ready).then_some(ready)
+}
+
+/// Claim the single in-flight walk for `slot`.
+///
+/// `false` means another thread already owns it. The caller reports
+/// [`GitRepositoryError::DiscoveryBlocked`] instead of waiting: waiting on
+/// this mutex is the queue that stalled every other project open.
+fn begin_checkout_resolution(slot: &CheckoutTopologySlot) -> bool {
+    let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+    match &*state {
+        CheckoutTopologyState::Resolving => false,
+        CheckoutTopologyState::Ready(_) | CheckoutTopologyState::Vacant => {
+            *state = CheckoutTopologyState::Resolving;
+            true
+        }
+    }
+}
+
+/// Clears a claimed resolution that did not publish, including on panic.
+struct CheckoutResolutionGuard<'a> {
+    slot: &'a CheckoutTopologySlot,
+}
+
+impl CheckoutResolutionGuard<'_> {
+    fn publish(self, path: &Path, topology: &Arc<GitRepositoryTopologyV1>) {
+        let retain = topology
+            .worktree_root
+            .as_deref()
+            .is_some_and(|root| path.canonicalize().is_ok_and(|canonical| canonical == root));
+        if !retain && let Some(root) = topology.worktree_root.as_deref() {
+            // Publish the root before this slot, and without holding this
+            // slot: the root's own resolution never locks a second slot, but
+            // holding this one across that lock would invert the order.
+            publish_checkout_root_topology(root, topology);
+        }
+        let mut state = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *state = if retain {
+            CheckoutTopologyState::Ready(Arc::clone(topology))
+        } else {
+            CheckoutTopologyState::Vacant
+        };
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for CheckoutResolutionGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(*state, CheckoutTopologyState::Resolving) {
+            *state = CheckoutTopologyState::Vacant;
+        }
+    }
 }
 
 /// Retain a topology under the worktree root it resolved, not the path it was
@@ -159,8 +278,8 @@ pub fn repository_topology(
 /// thread holds these two locks in the opposite order.
 fn publish_checkout_root_topology(root: &Path, topology: &Arc<GitRepositoryTopologyV1>) {
     let slot = checkout_topology_slot(root);
-    let mut resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
-    *resolved = Some(Arc::clone(topology));
+    let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+    *state = CheckoutTopologyState::Ready(Arc::clone(topology));
 }
 
 /// A live retained topology for `path`, without resolving one.
@@ -174,9 +293,7 @@ fn retained_checkout_topology(path: &Path) -> Option<Arc<GitRepositoryTopologyV1
             .unwrap_or_else(PoisonError::into_inner)
             .get(path)?,
     );
-    let resolved = slot.resolved.lock().unwrap_or_else(PoisonError::into_inner);
-    let topology = resolved.as_ref()?;
-    checkout_topology_is_live(topology).then(|| Arc::clone(topology))
+    live_ready_topology(&slot)
 }
 
 fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
@@ -247,6 +364,9 @@ struct RepositoryDiscoveryObservation {
     /// repository, so callers can exercise the Git CLI fallback after a
     /// slow unreadable authority phase.
     force_unreadable: bool,
+    /// When set, the walk waits on a test channel instead of sleeping, so a
+    /// hung discovery is controllable without occupying a timeout.
+    block: Option<std::sync::Arc<RepositoryDiscoveryBlockGate>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -269,27 +389,164 @@ fn observed_discovery_root(root: &Path) -> PathBuf {
 
 #[cfg(any(test, feature = "test-helpers"))]
 fn observe_repository_discovery(path: &Path) {
-    let delay = {
+    let (delay, block) = {
         let mut observations = repository_discovery_observations();
         if observations.is_empty() {
             return;
         }
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let mut delay = None;
+        let mut block = None;
         for (root, observation) in observations.iter_mut() {
             if !canonical.starts_with(root) {
                 continue;
             }
             observation.discoveries = observation.discoveries.saturating_add(1);
             delay = delay.or(observation.delay);
+            if block.is_none() {
+                block.clone_from(&observation.block);
+            }
         }
-        delay
+        (delay, block)
     };
-    // Sleeping under the observation lock would serialize every other root's
+    // Waiting under the observation lock would serialize every other root's
     // discovery behind this one and hide the concurrency the tests assert.
+    if let Some(block) = block {
+        block.enter_and_wait();
+    }
     if let Some(delay) = delay {
         std::thread::sleep(delay);
     }
+}
+
+/// One test-owned block of the live discovery walk under a root.
+///
+/// The walk signals [`Self::entered`] and then waits on `release`. Other
+/// projects are not in this wait, and other callers of the blocked root get
+/// [`GitRepositoryError::DiscoveryBlocked`] instead of queueing behind it.
+#[cfg(any(test, feature = "test-helpers"))]
+struct RepositoryDiscoveryBlockGate {
+    entered_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    entered: tokio::sync::watch::Sender<bool>,
+    release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl RepositoryDiscoveryBlockGate {
+    fn enter_and_wait(&self) {
+        let _ = self.entered.send(true);
+        if let Some(entered) = self
+            .entered_tx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            let _ = entered.send(());
+        }
+        if let Some(release) = self
+            .release
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            let _ = release.recv();
+        }
+    }
+}
+
+/// Handle for a discovery walk parked on a channel.
+///
+/// Dropping `release` unblocks the walk. Await [`Self::entered`] to learn the
+/// walk has reached the blocking section.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct RepositoryDiscoveryBlock {
+    pub entered: tokio::sync::oneshot::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl RepositoryDiscoveryBlock {
+    /// Wait until the parked walk has entered its blocking section.
+    pub async fn wait_entered(&mut self) {
+        let _ = (&mut self.entered).await;
+    }
+
+    /// Let the parked walk finish.
+    pub fn release(self) {
+        let _ = self.release.send(());
+    }
+}
+
+/// Park every live discovery walk under `root` until [`RepositoryDiscoveryBlock::release`].
+///
+/// The walk signals `entered` from the blocking section and does not hold the
+/// topology slot while it waits. Implies [`observe_repository_discovery_for_test`].
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn block_repository_discovery_for_test(root: &Path) -> RepositoryDiscoveryBlock {
+    forget_retained_checkout_topology_for_test(root);
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (watch_tx, _watch_rx) = tokio::sync::watch::channel(false);
+    repository_discovery_observations().insert(
+        observed_discovery_root(root),
+        RepositoryDiscoveryObservation {
+            block: Some(std::sync::Arc::new(RepositoryDiscoveryBlockGate {
+                entered_tx: Mutex::new(Some(entered_tx)),
+                entered: watch_tx,
+                release: Mutex::new(Some(release_rx)),
+            })),
+            ..RepositoryDiscoveryObservation::default()
+        },
+    );
+    RepositoryDiscoveryBlock {
+        entered: entered_rx,
+        release: release_tx,
+    }
+}
+
+/// `true` once a test block for `directory` has entered its wait.
+///
+/// `false` immediately when no block is armed, so production deadlines keep
+/// their own timer.
+#[cfg(any(test, feature = "test-helpers"))]
+pub async fn wait_until_repository_discovery_blocks(directory: &Path) -> bool {
+    let Some(block) = armed_discovery_block(directory) else {
+        return false;
+    };
+    let mut entered = block.entered.subscribe();
+    if *entered.borrow() {
+        return true;
+    }
+    while entered.changed().await.is_ok() {
+        if *entered.borrow() {
+            return true;
+        }
+    }
+    *entered.borrow()
+}
+
+/// Production builds arm no discovery blocks, so the probe budget always
+/// falls through to its own deadline.
+#[cfg(not(any(test, feature = "test-helpers")))]
+pub async fn wait_until_repository_discovery_blocks(_directory: &Path) -> bool {
+    false
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn armed_discovery_block(directory: &Path) -> Option<std::sync::Arc<RepositoryDiscoveryBlockGate>> {
+    let observations = repository_discovery_observations();
+    if observations.is_empty() {
+        return None;
+    }
+    let canonical = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+    observations.iter().find_map(|(root, observation)| {
+        canonical
+            .starts_with(root)
+            .then(|| observation.block.clone())
+            .flatten()
+    })
 }
 
 /// Begin counting live discoveries under `root`, and forget any topology
@@ -418,7 +675,14 @@ impl GitRepositoryAuthority {
         {
             return Ok(authority);
         }
-        Self::discover_uncached(path)
+        // Cold opens share the per-path walk. A second caller that finds the
+        // walk already in progress is discovery-blocked instead of starting
+        // another `open()` and queueing on the slot.
+        let topology = repository_topology(path)?;
+        Self::open_retained(&topology).ok_or_else(|| GitRepositoryError::UnreadableRepository {
+            path: path.display().to_string(),
+            detail: "retained Git directory could not be opened".to_owned(),
+        })
     }
 
     /// Open a repository whose topology is already known, or `None` when the
@@ -519,6 +783,44 @@ impl GitRepositoryAuthority {
                 detail: format!("unsupported object format {format}"),
             }),
         }
+    }
+
+    /// The branch HEAD names for the checkout `path` belongs to; `None` when
+    /// HEAD is detached or the repository is unreadable.
+    ///
+    /// Every tool call asks this, and opening the repository per call was the
+    /// dominant per-request Git cost. For a retained checkout the answer is
+    /// reused until the HEAD file's identity changes. Reftable repositories
+    /// keep HEAD in the table stack, so their answer is never reused.
+    pub fn current_branch(path: &Path) -> Option<String> {
+        let topology = repository_topology(path).ok()?;
+        let stamp = HeadFileStamp::read(&topology.git_dir.join("HEAD"));
+        if let Some(stamp) = &stamp
+            && let Some((cached, branch)) = HEAD_BRANCHES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&topology.git_dir)
+            && cached == stamp
+        {
+            return branch.clone();
+        }
+        let authority = match Self::open_retained(&topology) {
+            Some(authority) => authority,
+            None => Self::discover(path).ok()?,
+        };
+        let branch = authority.head().ok()?.branch().map(str::to_owned);
+        // The stamp was taken before the read, so a HEAD replaced in between
+        // is re-read on the next call instead of being pinned.
+        if let Some(stamp) = stamp
+            && !topology.common_dir.join("reftable").exists()
+        {
+            let mut branches = HEAD_BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
+            if branches.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES {
+                branches.clear();
+            }
+            branches.insert(topology.git_dir.clone(), (stamp, branch.clone()));
+        }
+        branch
     }
 
     /// Exact HEAD state for this repository or linked worktree.

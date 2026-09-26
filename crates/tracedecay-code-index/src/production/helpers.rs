@@ -9,7 +9,7 @@ use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId}
 use crate::chunks::{
     CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted, is_typescript_family,
     relation_target_kind_is_compatible, rust_qualified_name_is_ufcs_trait_impl,
-    rust_type_path_alias_for_trait_impl_method,
+    rust_type_path_alias_for_trait_impl_method, typescript_member_call_path,
 };
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::typescript_resolution::{
@@ -486,26 +486,58 @@ where
         for reference in &file.artifacts.unresolved_references {
             if reference.kind != RelationEdgeKindV1::Calls
                 || reference.reference_name.contains("::")
-                || reference.reference_name.contains('.')
             {
                 continue;
             }
-            let Some(binding) = unique_import(file, &reference.reference_name, reference.kind)
-            else {
-                continue;
-            };
-            if typescript_modules.resolve_import_binding(
+            if typescript_import_call_outcome(
                 files,
                 &by_simple_name,
-                binding,
-                reference.kind,
-            ) == ImportBindingOutcomeV1::Unresolved
+                &typescript_modules,
+                file,
+                reference,
+            ) == Some(ImportBindingOutcomeV1::Unresolved)
             {
                 unresolved.push(reference.clone());
             }
         }
     }
     unresolved
+}
+
+/// How a TypeScript-family call binds through the file's import of its
+/// callee: a bare imported name, or a member path read from an imported
+/// module namespace. `None` when no unique local import names the callee.
+fn typescript_import_call_outcome<'a, T>(
+    files: &'a [T],
+    by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+    typescript_modules: &TypeScriptModuleIndexV1,
+    file: &FileGenerationArtifactsV1,
+    reference: &CodeIndexUnresolvedReferenceV1,
+) -> Option<ImportBindingOutcomeV1<'a>>
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    if !reference.reference_name.contains('.') {
+        let binding = unique_import(file, &reference.reference_name, reference.kind)?;
+        return Some(typescript_modules.resolve_import_binding(
+            files,
+            by_simple_name,
+            binding,
+            reference.kind,
+        ));
+    }
+    if reference.kind != RelationEdgeKindV1::Calls {
+        return None;
+    }
+    let (head, members) = typescript_member_call_path(&reference.reference_name)?;
+    let binding = unique_import(file, head, reference.kind)?;
+    Some(typescript_modules.resolve_member_call(
+        files,
+        by_simple_name,
+        binding,
+        members,
+        reference.kind,
+    ))
 }
 
 /// One ordered, panic-contained fan-out over file indices on the indexing pool.
@@ -633,29 +665,32 @@ where
         return None;
     }
     let qualified = reference.reference_name.contains("::");
-    let import = (!qualified)
-        .then(|| unique_import(file, &reference.reference_name, reference.kind))
-        .flatten();
     // A TypeScript-family import binds one exact module and one exact name,
     // so it resolves through module resolution rather than name matching;
     // the ubiquity blocklist guards only name-only binding.
-    if let Some(binding) = import
+    if !qualified
         && is_typescript_family(file.extraction.language.as_str())
-    {
-        return match typescript_modules.resolve_import_binding(
+        && let Some(outcome) = typescript_import_call_outcome(
             files,
             by_simple_name,
-            binding,
-            reference.kind,
-        ) {
+            typescript_modules,
+            file,
+            reference,
+        )
+    {
+        return match outcome {
             ImportBindingOutcomeV1::Bound(target_index, symbol) if target_index != index => {
                 Some((target_index, symbol.occurrence.clone()))
             }
             ImportBindingOutcomeV1::Bound(..)
             | ImportBindingOutcomeV1::External
-            | ImportBindingOutcomeV1::Unresolved => None,
+            | ImportBindingOutcomeV1::Unresolved
+            | ImportBindingOutcomeV1::ValueMember => None,
         };
     }
+    let import = (!qualified)
+        .then(|| unique_import(file, &reference.reference_name, reference.kind))
+        .flatten();
     let has_rust_glob = file.extraction.language.as_str() == "rust"
         && file.artifacts.imports.iter().any(|binding| binding.is_glob);
     if !qualified && import.is_none() && !has_rust_glob {

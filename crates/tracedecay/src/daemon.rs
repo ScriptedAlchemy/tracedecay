@@ -62,7 +62,7 @@ pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
 /// Typed reason a project/profile/owner open has not finished yet.
 pub const PROJECT_WARMING_REASON_CODE: &str = "project_warming";
 /// Typed reason a repository-identity probe deferred past its budget.
-pub const REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE: &str = "repository_discovery_deferred";
+pub use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
 /// Typed reason a retained project server was retired mid-response.
 pub const PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE: &str = "project_server_response_revoked";
 /// Typed reason the in-flight project-open task table is full.
@@ -156,6 +156,14 @@ pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
         Some((PROJECT_WARMING_REASON_CODE, true, _))
+    )
+}
+
+/// True when repository discovery deferred or blocked this route.
+pub(crate) fn error_is_repository_discovery_deferred(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some((REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, _, _))
     )
 }
 
@@ -397,11 +405,11 @@ use project_routing::portable_database_owner_reconciler;
 use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
     bind_authenticated_profile_identity, bounded_repository_probe,
-    cached_or_bind_ready_project_server, prefer_recorded_open_failure,
-    project_open_cancellation_checkpoint, project_open_cancellation_error,
-    project_open_capacity_gate, project_open_gate, project_open_task_capacity_error,
-    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
-    project_warming_error, resolved_project_server_key,
+    cached_or_bind_ready_project_server, ensure_checkout_topology_before_admission,
+    prefer_recorded_open_failure, project_open_cancellation_checkpoint,
+    project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
+    project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
+    project_server_capacity_error, project_warming_error, resolved_project_server_key,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;

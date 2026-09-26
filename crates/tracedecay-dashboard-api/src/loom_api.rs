@@ -549,8 +549,10 @@ async fn read_temporal(
     };
     let git = resolve_git_sources(git_correlation, &page_keys, examined_sessions)
         .map_err(LoomReadFailureV1::Failed)?;
+    let spawn_calls = spawn_call_status(&sessions)?;
 
     let statuses = vec![
+        spawn_calls,
         git.session_commit,
         source_status(SourceStatusInput {
             id: "session_file",
@@ -604,6 +606,70 @@ async fn read_temporal(
         },
         examined_sessions,
         latest_activated_at,
+    })
+}
+
+/// How many displayed child sessions carry the spawning tool call their fork
+/// binds to. A child without one still has its recorded parent; its fork is
+/// placed at the child's start, and the omitted count names the providers
+/// whose transcripts did not record the call.
+fn spawn_call_status(sessions: &[Value]) -> Result<LoomSourceStatusV1, LoomReadFailureV1> {
+    let mut eligible = 0_u64;
+    let mut bound: BTreeSet<String> = BTreeSet::new();
+    let mut unbound: BTreeMap<String, u64> = BTreeMap::new();
+    for session in sessions {
+        if session.get("parent_session_id").is_none_or(Value::is_null) {
+            continue;
+        }
+        eligible += 1;
+        let provider = required_str(session, "provider")?.to_string();
+        if session
+            .get("parent_tool_use_id")
+            .is_some_and(Value::is_string)
+        {
+            bound.insert(provider);
+        } else {
+            *unbound.entry(provider).or_default() += 1;
+        }
+    }
+    let omitted: u64 = unbound.values().sum();
+    let matched = eligible - omitted;
+    let reason = if omitted == 0 {
+        "every displayed child session carries the spawning call its host recorded".to_string()
+    } else {
+        let hosts = unbound
+            .iter()
+            .map(|(provider, count)| format!("{provider} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "child sessions whose host recorded no spawning call are forked at the child \
+             start: {hosts}"
+        )
+    };
+    Ok(LoomSourceStatusV1 {
+        id: "subagent_spawn",
+        label: "Subagent → spawning call",
+        state: if omitted == 0 {
+            DashboardDomainStateV1::Ready
+        } else {
+            DashboardDomainStateV1::Partial
+        },
+        authority: Some("sessions.parent_tool_use_id"),
+        granularity: "host tool-use id",
+        providers: bound.into_iter().collect(),
+        item_count: Some(matched),
+        reason: Some(reason.clone()),
+        required_authority: None,
+        coverage: LoomSourceCoverageV1 {
+            completeness: if omitted == 0 { "complete" } else { "partial" },
+            eligible: Some(eligible),
+            examined: Some(eligible),
+            matched: Some(matched),
+            omitted: Some(omitted),
+            unit: Some("displayed child sessions"),
+            reason,
+        },
     })
 }
 
@@ -1060,6 +1126,12 @@ fn unavailable_payload(reason: &str) -> LoomTemporalPayloadV1 {
         total: 0,
         sessions: Vec::new(),
         source_statuses: vec![
+            unavailable(
+                "subagent_spawn",
+                "Subagent → spawning call",
+                "sessions.parent_tool_use_id",
+                "host tool-use id",
+            ),
             unavailable_required(
                 "session_commit",
                 "Session ↔ commit",

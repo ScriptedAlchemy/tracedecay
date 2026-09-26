@@ -452,6 +452,9 @@ pub enum Commands {
     /// Pi extension lifecycle (`session_start`, `agent_end`) Hook V2 handler.
     #[command(name = "hook-pi-event", hide = true)]
     HookPiEvent,
+    /// Factory Droid lifecycle (`SessionStart`, `Stop`) Hook V2 handler.
+    #[command(name = "hook-droid-event", hide = true)]
+    HookDroidEvent,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
     #[command(long_about = DASHBOARD_LONG_ABOUT, after_help = DASHBOARD_AFTER_HELP)]
     Dashboard {

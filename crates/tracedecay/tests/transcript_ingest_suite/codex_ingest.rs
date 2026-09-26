@@ -638,28 +638,12 @@ async fn codex_file_change_items_record_edit_times_and_call_ids() {
     );
 }
 
-/// A Codex subagent's `session_meta` names its parent thread
-/// (`parent_thread_id`, `source.subagent.thread_spawn.parent_thread_id`) but
-/// not the call that spawned it: the `spawn_agent` `call_id` is recorded only
-/// in the parent's rollout (`function_call` and the `SubAgentActivity`
-/// `started` item), so the child records its parent session and no parent
-/// tool-use id.
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn codex_subagent_records_parent_thread_without_a_spawning_call_id() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
-    init_git_repo(&project);
-    mark_test_project(&project);
-    let parent = "01a05f21-02a8-74a3-84a0-dc2e889604c9";
-    let child = "01a05f8e-17ba-7ff2-84b5-7337fb92dbc6";
-    let cwd = project.to_string_lossy();
-    let dir = home.join(".codex/sessions/2026/09/02");
-    std::fs::create_dir_all(&dir).unwrap();
+const CODEX_SPAWN_PARENT: &str = "01a05f21-02a8-74a3-84a0-dc2e889604c9";
+const CODEX_SPAWN_CHILD: &str = "01a05f8e-17ba-7ff2-84b5-7337fb92dbc6";
+const CODEX_SPAWN_CALL: &str = "call_oRAA9a98A0CtRz7yOPePQLYp";
+
+fn write_codex_spawn_parent(dir: &Path, cwd: &str) {
+    let (parent, child) = (CODEX_SPAWN_PARENT, CODEX_SPAWN_CHILD);
     write_jsonl(
         &dir.join(format!("rollout-2026-09-01T22-39-54-{parent}.jsonl")),
         &[
@@ -691,6 +675,10 @@ async fn codex_subagent_records_parent_thread_without_a_spawning_call_id() {
             }),
         ],
     );
+}
+
+fn write_codex_spawn_child(dir: &Path, cwd: &str) {
+    let (parent, child) = (CODEX_SPAWN_PARENT, CODEX_SPAWN_CHILD);
     write_jsonl(
         &dir.join(format!("rollout-2026-09-02T00-39-02-{child}.jsonl")),
         &[
@@ -714,17 +702,100 @@ async fn codex_subagent_records_parent_thread_without_a_spawning_call_id() {
             }),
         ],
     );
+}
+
+/// A Codex subagent's `session_meta` names its parent thread
+/// (`parent_thread_id`, `source.subagent.thread_spawn.parent_thread_id`) but
+/// not the call that spawned it: the `spawn_agent` `call_id` is recorded only
+/// in the parent's rollout (`function_call` and the `SubAgentActivity`
+/// `started` item). The child records its parent session, and the parent's
+/// spawn record binds the child's `parent_tool_use_id` to that call, which is
+/// the same id the parent's spawn tool-call message carries.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn codex_subagent_binds_the_spawning_call_recorded_by_its_parent() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let cwd = project.to_string_lossy();
+    let dir = home.join(".codex/sessions/2026/09/02");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_codex_spawn_parent(&dir, &cwd);
+    write_codex_spawn_child(&dir, &cwd);
 
     let db = open_project_session_db(&project).await.unwrap();
     ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
 
-    let child_row = db.get_session("codex", child).await.unwrap();
-    assert_eq!(child_row.parent_session_id.as_deref(), Some(parent));
-    assert!(child_row.is_subagent);
-    assert_eq!(child_row.parent_tool_use_id, None);
-    let parent_row = db.get_session("codex", parent).await.unwrap();
+    let child_row = db.get_session("codex", CODEX_SPAWN_CHILD).await.unwrap();
     assert_eq!(
-        (parent_row.parent_session_id, parent_row.is_subagent),
-        (None, false)
+        child_row.parent_session_id.as_deref(),
+        Some(CODEX_SPAWN_PARENT)
+    );
+    assert!(child_row.is_subagent);
+    assert_eq!(
+        child_row.parent_tool_use_id.as_deref(),
+        Some(CODEX_SPAWN_CALL)
+    );
+    let parent_row = db.get_session("codex", CODEX_SPAWN_PARENT).await.unwrap();
+    assert_eq!(
+        (
+            parent_row.parent_session_id,
+            parent_row.is_subagent,
+            parent_row.parent_tool_use_id
+        ),
+        (None, false, None)
+    );
+    let spawn_call = db
+        .search_session_messages("codex", None, "spawn_agent", 10)
+        .await
+        .into_iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("spawn_agent"))
+        .expect("the parent's spawn_agent call is a transcript message");
+    let metadata: serde_json::Value =
+        serde_json::from_str(spawn_call.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["tool_use_id"], CODEX_SPAWN_CALL);
+}
+
+/// The child rollout may be ingested before its parent records the spawn; the
+/// parent's later spawn record binds the already-ingested child.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn codex_child_ingested_before_its_parent_is_bound_when_the_spawn_lands() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let cwd = project.to_string_lossy();
+    let dir = home.join(".codex/sessions/2026/09/02");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_codex_spawn_child(&dir, &cwd);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    let child_row = db.get_session("codex", CODEX_SPAWN_CHILD).await.unwrap();
+    assert_eq!(
+        (
+            child_row.parent_session_id.as_deref(),
+            child_row.parent_tool_use_id.as_deref()
+        ),
+        (Some(CODEX_SPAWN_PARENT), None),
+        "no spawn call is known before the parent's rollout is ingested"
+    );
+
+    write_codex_spawn_parent(&dir, &cwd);
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    let child_row = db.get_session("codex", CODEX_SPAWN_CHILD).await.unwrap();
+    assert_eq!(
+        child_row.parent_tool_use_id.as_deref(),
+        Some(CODEX_SPAWN_CALL)
     );
 }

@@ -437,7 +437,6 @@ class Sandbox:
 
     binary: Path
     fixture: Path
-    keep: bool
     root: Path = field(init=False)
     project: Path = field(init=False)
     profile: Path = field(init=False)
@@ -619,10 +618,7 @@ class Sandbox:
 
     def cleanup(self) -> None:
         self.stop_daemon()
-        if self.keep:
-            print(f"scorecard: sandbox kept at {self.root}", file=sys.stderr)
-        else:
-            shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.root, ignore_errors=True)
 
 
 def freshness(payload: dict) -> dict:
@@ -879,9 +875,9 @@ def restart_current_generation(
 
 
 def run_scenario(
-    binary: Path, fixture: Path, tool_samples: int, keep_sandbox: bool, sampler: RssSampler
+    binary: Path, fixture: Path, tool_samples: int, sampler: RssSampler
 ) -> dict:
-    sandbox = Sandbox(binary=binary, fixture=fixture, keep=keep_sandbox)
+    sandbox = Sandbox(binary=binary, fixture=fixture)
     sandbox.on_spawn = sampler.set_pid
     run: dict = {"sandbox": str(sandbox.root), "fixture_commit": sandbox.head_commit()}
     try:
@@ -1261,7 +1257,6 @@ def main() -> int:
         "--fixture", default=str(DEFAULT_FIXTURE), help="pinned fixture corpus directory"
     )
     parser.add_argument("--label", default="", help="free-form label recorded in the scorecard")
-    parser.add_argument("--keep-sandbox", action="store_true", help="do not delete sandboxes")
     parser.add_argument(
         "--quick", action="store_true", help="smoke settings: --runs 1 --tool-samples 8"
     )
@@ -1324,7 +1319,7 @@ def main() -> int:
     for index in range(args.runs):
         print(f"scorecard: run {index + 1}/{args.runs}", file=sys.stderr)
         sampler = RssSampler()
-        run = run_scenario(binary, fixture, args.tool_samples, args.keep_sandbox, sampler)
+        run = run_scenario(binary, fixture, args.tool_samples, sampler)
         peaks, hwm = sampler.finish()
         run["rss"] = {"peak_bytes": peaks, "vmhwm_bytes_at_phase_end": hwm}
         flatten_store_bytes(run)

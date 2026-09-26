@@ -373,10 +373,18 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
                 .unwrap(),
             )
             .unwrap();
-            assert!(
+            let tool = |name: &str| {
                 schemas
                     .as_array()
-                    .is_some_and(|entries| entries.len() > 100),
+                    .and_then(|entries| entries.iter().find(|entry| entry["name"] == name))
+                    .map(|entry| entry["read_only"].clone())
+            };
+            assert_eq!(
+                (tool("tracedecay_context"), tool("tracedecay_rename_symbol")),
+                (
+                    Some(serde_json::Value::Bool(true)),
+                    Some(serde_json::Value::Bool(false))
+                ),
                 "{} schemas.json did not carry the generated catalog",
                 case.id
             );
@@ -718,7 +726,7 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
 
 /// Hosts whose install/uninstall lifecycle drives a *host-owned* binary
 /// (`claude plugin`, `codex mcp`, `kiro-cli mcp`, `gemini extensions`,
-/// `copilot mcp`) or defers activation to an interactive host flow (Kimi).
+/// `copilot mcp`, `droid mcp`) or defers activation to an interactive host flow (Kimi).
 ///
 /// This suite runs the production CLI against an isolated `HOME` that contains
 /// no host binaries at all, so for these hosts the lifecycle correctly refuses
@@ -734,6 +742,7 @@ fn lifecycle_requires_absent_host_binary(host: HostKindV1) -> bool {
             | HostKindV1::Kiro
             | HostKindV1::Gemini
             | HostKindV1::Copilot
+            | HostKindV1::FactoryDroid
     )
 }
 
