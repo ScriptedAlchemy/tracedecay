@@ -167,8 +167,8 @@ use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use super::LegacyToolCompatibilityOwner;
 use dispatch_groups::{
-    dispatch_admin_tools, dispatch_application_surface_tools, dispatch_git_tools,
-    dispatch_graph_tools, dispatch_health_tools, dispatch_info_tools, dispatch_memory_tools,
+    dispatch_admin_tools, dispatch_application_surface_tools, dispatch_graph_tools,
+    dispatch_health_tools, dispatch_info_tools, dispatch_memory_tools,
     dispatch_session_workflow_tools,
 };
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
@@ -641,9 +641,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 Some(McpToolDispatchGroup::Admin) => {
                     boxed_send(dispatch_admin_tools(tool_name, cg, args, options)).await
                 }
-                Some(McpToolDispatchGroup::Git) => {
-                    boxed_send(dispatch_git_tools(tool_name, cg, args, options)).await
-                }
                 Some(McpToolDispatchGroup::Health) => {
                     boxed_send(dispatch_health_tools(tool_name, cg, args, options)).await
                 }
@@ -656,10 +653,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
                     ))
                     .await
                 }
-                // Typed daemon surface tools already returned above; reaching here means
-                // the name resolves to no reachable dispatch entry.
+                // Typed daemon surface tools already returned above, and the daemon
+                // serves the internal branch-add tool before MCP dispatch; reaching
+                // here means the name resolves to no reachable dispatch entry.
                 Some(
                     McpToolDispatchGroup::ApplicationSurface
+                    | McpToolDispatchGroup::Git
                     | McpToolDispatchGroup::MultiRoot
                     | McpToolDispatchGroup::Work
                     | McpToolDispatchGroup::Workflow,
@@ -811,12 +810,12 @@ fn classify_mcp_tool_dispatch_group(tool_name: &str) -> Option<McpToolDispatchGr
     dispatch_group_for_tool(tool_name)
 }
 
-/// Whether a tool's dispatch resolves to the git handler family.
+/// Whether a tool is bound to the git dispatch family: the internal
+/// branch-add tool, which walks git while building its branch index.
 ///
-/// The MCP server uses this to give every git-walking read the same bounded
-/// deadline the catalog-owned git reads already carry. Asking the canonical
-/// binding table keeps that horizon from drifting into a separate name list
-/// that a newly added git tool would silently miss.
+/// The MCP server uses this to give it the same bounded deadline the
+/// catalog-owned git reads carry. Asking the canonical binding table keeps
+/// that horizon from drifting into a separate name list.
 pub(crate) fn tool_dispatches_git_reads(tool_name: &str) -> bool {
     dispatch_group_for_tool(tool_name) == Some(McpToolDispatchGroup::Git)
 }

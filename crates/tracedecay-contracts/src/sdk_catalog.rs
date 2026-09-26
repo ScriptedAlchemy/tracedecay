@@ -146,7 +146,15 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::Signature
         | ApplicationSurfaceOperation::Derives
         | ApplicationSurfaceOperation::Grep
-        | ApplicationSurfaceOperation::AstGrepSearch) => {
+        | ApplicationSurfaceOperation::AstGrepSearch
+        | ApplicationSurfaceOperation::Affected
+        | ApplicationSurfaceOperation::DiffContext
+        | ApplicationSurfaceOperation::Changelog
+        | ApplicationSurfaceOperation::CommitContext
+        | ApplicationSurfaceOperation::PrContext
+        | ApplicationSurfaceOperation::BranchSearch
+        | ApplicationSurfaceOperation::BranchDiff
+        | ApplicationSurfaceOperation::BranchList) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList

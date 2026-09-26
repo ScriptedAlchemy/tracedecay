@@ -887,6 +887,14 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::Derives
         | ApplicationSurfaceOperation::Grep
         | ApplicationSurfaceOperation::AstGrepSearch
+        | ApplicationSurfaceOperation::Affected
+        | ApplicationSurfaceOperation::DiffContext
+        | ApplicationSurfaceOperation::Changelog
+        | ApplicationSurfaceOperation::CommitContext
+        | ApplicationSurfaceOperation::PrContext
+        | ApplicationSurfaceOperation::BranchSearch
+        | ApplicationSurfaceOperation::BranchDiff
+        | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

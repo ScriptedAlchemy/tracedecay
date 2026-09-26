@@ -4,6 +4,9 @@ use super::*;
 use tracedecay_application::primitives::{
     AffectedTestTraversal, affected_test_proximity, rank_affected_tests,
 };
+use tracedecay_contracts::retrieval::{
+    AffectedRankingMetadataV1, AffectedResultV1, AffectedSurfaceRequestV1, RankedAffectedTestV1,
+};
 
 type FileDependentsByFile = HashMap<String, Vec<String>>;
 type AffectedDependentsFuture<'a> =
@@ -130,37 +133,47 @@ where
 }
 
 #[hotpath::measure(future = true, label = "mcp.git.affected.total")]
-pub async fn handle_affected(
+pub async fn compute_affected<F>(
     ctx: &McpToolContext<'_>,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    graph: F,
     args: Value,
-) -> Result<ToolResult> {
-    ctx.verify_graph_scope(graph)?;
-    let files = require_string_array_arg(&args, "files")?;
-    let max_depth = clamped_depth_arg(&args, "depth", 5, 10);
-
-    let custom_filter = args.get("filter").and_then(|v| v.as_str());
-    let custom_glob = custom_filter.and_then(|p| glob::Pattern::new(p).ok());
+) -> Result<GraphToolCompletionV1>
+where
+    F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
+{
+    let request: AffectedSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_affected")?;
+    let max_depth = clamped_depth(request.depth, 5, 10);
+    let custom_glob = request
+        .filter
+        .as_deref()
+        .map(glob::Pattern::new)
+        .transpose()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "invalid arguments for tracedecay_affected: filter is not a glob pattern: {error}"
+            ),
+        })?;
+    let graph = graph.await?;
+    ctx.verify_graph_scope(&graph)?;
+    let files = request.files;
 
     let traversal = hotpath::future!(
-        collect_verified_affected_test_files(graph, &files, max_depth, custom_glob.as_ref()),
+        collect_verified_affected_test_files(&graph, &files, max_depth, custom_glob.as_ref()),
         label = "mcp.git.affected.traverse"
     )
     .await?;
 
-    let mut result = traversal.test_distances.keys().cloned().collect::<Vec<_>>();
-    result.sort();
+    let mut affected_tests = traversal.test_distances.keys().cloned().collect::<Vec<_>>();
+    affected_tests.sort();
     let ranked = rank_affected_tests(&traversal.test_distances);
     let ranked_tests = ranked
         .iter()
         .enumerate()
-        .map(|(index, test)| {
-            json!({
-                "path": test.path,
-                "rank": index + 1,
-                "distance": test.distance,
-                "proximity": affected_test_proximity(test.distance),
-            })
+        .map(|(index, test)| RankedAffectedTestV1 {
+            path: test.path.clone(),
+            rank: index + 1,
+            distance: test.distance,
+            proximity: affected_test_proximity(test.distance).to_owned(),
         })
         .collect::<Vec<_>>();
     let recommended_tests = ranked
@@ -169,28 +182,22 @@ pub async fn handle_affected(
         .map(|test| test.path.clone())
         .collect::<Vec<_>>();
 
-    let touched_files = unique_file_paths(result.iter().map(std::string::String::as_str));
-    let output = hotpath::measure_block!(
-        "mcp.git.affected.assemble",
-        json!({
-            "changed_files": files,
-            "affected_tests": result,
-            "count": result.len(),
-            "ranked_tests": ranked_tests,
-            "recommended_tests": recommended_tests,
-            "ranking_metadata": {
-                "strategy": "dependency_distance_then_path",
-                "distance": "minimum file-dependency hops from the changed files",
-                "recommended_proximity": ["changed", "direct", "near"],
-                "compatibility_field": "affected_tests",
-            },
-        })
-    );
-
-    Ok(generic_tool_result(
-        Some(&ctx.store_layout().response_handle_root),
-        &args,
-        &output,
+    let touched_files = unique_file_paths(affected_tests.iter().map(String::as_str));
+    let result = AffectedResultV1 {
+        changed_files: files,
+        count: affected_tests.len(),
+        affected_tests,
+        ranked_tests,
+        recommended_tests,
+        ranking_metadata: AffectedRankingMetadataV1 {
+            strategy: "dependency_distance_then_path".to_owned(),
+            distance: "minimum file-dependency hops from the changed files".to_owned(),
+            recommended_proximity: ["changed", "direct", "near"].map(str::to_owned).to_vec(),
+            compatibility_field: "affected_tests".to_owned(),
+        },
+    };
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Affected(result),
         touched_files,
     ))
 }

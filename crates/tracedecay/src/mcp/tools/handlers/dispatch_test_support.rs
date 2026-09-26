@@ -378,7 +378,10 @@ pub(super) async fn concrete_dispatch_group_accepts(
         )
     };
     match group {
+        // The daemon serves the internal branch-add tool, the git group's
+        // only member, before MCP dispatch.
         McpToolDispatchGroup::ApplicationSurface
+        | McpToolDispatchGroup::Git
         | McpToolDispatchGroup::Work
         | McpToolDispatchGroup::Workflow => false,
         McpToolDispatchGroup::MultiRoot => {
@@ -392,9 +395,6 @@ pub(super) async fn concrete_dispatch_group_accepts(
         ),
         McpToolDispatchGroup::Admin => {
             owned(dispatch_admin_tools(tool_name, cg, invalid_args, options).await)
-        }
-        McpToolDispatchGroup::Git => {
-            owned(dispatch_git_tools(tool_name, cg, invalid_args, options).await)
         }
         McpToolDispatchGroup::Health => {
             owned(dispatch_health_tools(tool_name, cg, invalid_args, options).await)

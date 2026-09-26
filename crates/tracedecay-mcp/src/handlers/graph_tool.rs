@@ -1,4 +1,5 @@
-//! Graph-backed reads and reports served by the project's graph-tool owner.
+//! Graph- and git-backed reads and reports served by the project's graph-tool
+//! owner.
 //!
 //! The owner computes each operation's typed catalog result; every surface
 //! renders it here, so MCP and the CLI print the same tool result.
@@ -16,6 +17,11 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::handlers::analysis::{compute_analysis_report, render_circular_md};
 use crate::handlers::ast_grep::{compute_ast_grep_search, render_ast_grep_search};
+use crate::handlers::git::{
+    compute_affected, compute_branch_diff, compute_branch_list, compute_branch_search,
+    compute_changelog, compute_commit_context, compute_diff_context, compute_pr_context,
+    git_tool_failure_message,
+};
 use crate::handlers::graph::{
     compute_by_qualified_name, compute_context, compute_derives, compute_find_exact_symbol,
     compute_impact, compute_node, compute_redundancy, compute_rename_preview, compute_signature,
@@ -141,6 +147,22 @@ pub async fn compute_graph_tool(
             )
             .await
         }
+        ApplicationSurfaceOperation::Affected => {
+            compute_affected(ctx, open(read("file_dependents")?), args).await
+        }
+        ApplicationSurfaceOperation::DiffContext => {
+            compute_diff_context(ctx, open(read("file_dependents")?), args).await
+        }
+        ApplicationSurfaceOperation::Changelog => compute_changelog(ctx, args).await,
+        ApplicationSurfaceOperation::CommitContext => {
+            compute_commit_context(ctx, open(read("file_dependents")?), args).await
+        }
+        ApplicationSurfaceOperation::PrContext => {
+            compute_pr_context(ctx, open(read("file_dependents")?), args).await
+        }
+        ApplicationSurfaceOperation::BranchSearch => compute_branch_search(ctx, args).await,
+        ApplicationSurfaceOperation::BranchDiff => compute_branch_diff(ctx, args).await,
+        ApplicationSurfaceOperation::BranchList => compute_branch_list(ctx, args).await,
         operation => Err(unknown_tool_error(operation.mcp_tool_name())),
     }
 }
@@ -245,6 +267,11 @@ pub fn render_graph_tool(
             Vec::new(),
         ),
     };
+    if let Some(message) = git_tool_failure_message(&result) {
+        rendered = rendered
+            .with_semantic_error(true)
+            .with_failure_message(message);
+    }
     ResponseTrailer {
         touched_files: &touched_files,
         code_graph: code_graph.as_ref(),
@@ -407,6 +434,7 @@ mod tests {
                 fact_ids: vec!["fact.one".to_owned()],
                 error: None,
             }),
+            pr_context: None,
         };
         let completion = |analytics| GraphToolCompletionV1 {
             result: GraphToolResultV1::Context(Box::new(plan_context())),

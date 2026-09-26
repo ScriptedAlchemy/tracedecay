@@ -959,6 +959,7 @@ where
             &memory_matches,
             memory_matches_error.as_deref(),
         )),
+        pr_context: None,
     };
     let retrieval = ContextRetrievalPlanV1 {
         memory: context_memory_stage(

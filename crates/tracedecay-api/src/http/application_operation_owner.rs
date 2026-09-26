@@ -138,7 +138,15 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::Signature
         | ApplicationSurfaceOperation::Derives
         | ApplicationSurfaceOperation::Grep
-        | ApplicationSurfaceOperation::AstGrepSearch => return None,
+        | ApplicationSurfaceOperation::AstGrepSearch
+        | ApplicationSurfaceOperation::Affected
+        | ApplicationSurfaceOperation::DiffContext
+        | ApplicationSurfaceOperation::Changelog
+        | ApplicationSurfaceOperation::CommitContext
+        | ApplicationSurfaceOperation::PrContext
+        | ApplicationSurfaceOperation::BranchSearch
+        | ApplicationSurfaceOperation::BranchDiff
+        | ApplicationSurfaceOperation::BranchList => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

@@ -321,9 +321,13 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
 
 #[tokio::test]
 async fn test_tools_call_plain_text_failure_sets_is_error() {
-    let (server, _dir) = setup_server().await;
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
     let responses = run_server_with_messages(
-        server,
+        std::sync::Arc::clone(&server),
         vec![jsonrpc_request(
             json!(34),
             "tools/call",
@@ -354,6 +358,7 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
         text.contains("## error") && text.contains("**kind:** git"),
         "expected rendered changelog git failure, got: {text}"
     );
+    fixture.harness.shutdown().await;
 }
 
 #[tokio::test]

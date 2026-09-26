@@ -198,6 +198,14 @@ application_surface_operations! {
     Derives => "derives";
     Grep => "grep";
     AstGrepSearch => "ast_grep_search";
+    Affected => "affected";
+    DiffContext => "diff_context";
+    Changelog => "changelog";
+    CommitContext => "commit_context";
+    PrContext => "pr_context";
+    BranchSearch => "branch_search";
+    BranchDiff => "branch_diff";
+    BranchList => "branch_list";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -306,6 +314,14 @@ impl ApplicationSurfaceOperation {
         Self::Derives,
         Self::Grep,
         Self::AstGrepSearch,
+        Self::Affected,
+        Self::DiffContext,
+        Self::Changelog,
+        Self::CommitContext,
+        Self::PrContext,
+        Self::BranchSearch,
+        Self::BranchDiff,
+        Self::BranchList,
     ];
 
     pub fn is_graph_tool(self) -> bool {

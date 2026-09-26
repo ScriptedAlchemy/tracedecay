@@ -1,9 +1,10 @@
-//! Git-backed tool handlers.
+//! Git-backed graph-tool computations.
 //!
 //! `shell` owns every `git` subprocess call; the other siblings turn its output
-//! into tool payloads. This module holds the shared imports (siblings pick them
-//! up through `use super::*`), the two shapes `shell` returns, and the argument
-//! helpers used across siblings.
+//! into typed tool results. This module holds the shared imports (siblings pick
+//! them up through `use super::*`), the comparison shape `shell` returns, the
+//! typed git refusal, and the semantic failure message each refusal renders
+//! with.
 //!
 //! Every authority the family reads arrives through [`McpToolContext`]: the
 //! admitted project route, the caller's deadline and cancellation, the
@@ -14,98 +15,99 @@
 mod affected;
 mod branch;
 mod context;
-mod dispatch;
 mod pr_context_cursor;
 mod shell;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod test_support;
 
-pub use affected::handle_affected;
-pub use branch::{handle_branch_diff, handle_branch_list, handle_branch_search};
+pub use affected::compute_affected;
+pub use branch::{compute_branch_diff, compute_branch_list, compute_branch_search};
 pub use context::{
-    handle_changelog, handle_commit_context, handle_diff_context, handle_pr_context,
+    compute_changelog, compute_commit_context, compute_diff_context, compute_pr_context,
 };
-pub use dispatch::dispatch_tool;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 
-use serde_json::{Value, json};
+use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
+    BranchDiffResultV1, BranchListResultV1, BranchSearchResultV1, ChangelogResultV1,
+    CommitContextResultV1, GitCommitSubjectV1, GitFileChangeStatusV1, GitFileChangeV1,
+    GitFileRoleV1, GitToolErrorKindV1, GitToolErrorV1, GitToolFailureV1, GitToolOperationV1,
+    PrContextResultV1,
+};
 
-use super::support::{generic_tool_result, require_object_args, unique_file_paths};
-use crate::ToolResult;
+use super::graph::graph_tool_completion;
+use super::support::{decode_primitive_request, unique_file_paths};
 use crate::tool_context::McpToolContext;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
-struct GitFileChange {
-    path: String,
-    status: &'static str,
-}
 
 struct GitPrComparison {
     base_oid: String,
     head_oid: String,
     merge_base: String,
-    changes: Vec<GitFileChange>,
-    commits: Vec<Value>,
+    changes: Vec<GitFileChangeV1>,
+    commits: Vec<GitCommitSubjectV1>,
 }
 
-fn git_error_result(
-    ctx: &McpToolContext<'_>,
-    args: &Value,
-    operation: &str,
-    message: &str,
-) -> ToolResult {
-    let output = json!({
-        "error": {
-            "kind": "git",
-            "operation": operation,
-            "message": message,
+fn git_failure(operation: GitToolOperationV1, message: String) -> GitToolFailureV1 {
+    GitToolFailureV1 {
+        error: GitToolErrorV1 {
+            kind: GitToolErrorKindV1::Git,
+            operation,
+            message,
+        },
+    }
+}
+
+/// The failure message a git-context result renders as a semantic tool
+/// error, or `None` when the result is an answer.
+pub fn git_tool_failure_message(result: &GraphToolResultV1) -> Option<String> {
+    match result {
+        GraphToolResultV1::Changelog(ChangelogResultV1::GitFailure(failure))
+        | GraphToolResultV1::CommitContext(CommitContextResultV1::GitFailure(failure))
+        | GraphToolResultV1::PrContext(PrContextResultV1::GitFailure(failure)) => {
+            Some(failure.error.message.clone())
         }
-    });
-    generic_tool_result(
-        Some(&ctx.store_layout().response_handle_root),
-        args,
-        &output,
-        vec![],
-    )
-    .with_semantic_error(true)
-    .with_failure_message(message)
+        GraphToolResultV1::BranchList(BranchListResultV1::Unavailable(_)) => {
+            Some("local branch snapshots are unavailable".to_owned())
+        }
+        GraphToolResultV1::BranchSearch(BranchSearchResultV1::ReferenceUnavailable(
+            unavailable,
+        )) => Some(format!(
+            "branch '{}' does not resolve to a local commit",
+            unavailable.branch
+        )),
+        GraphToolResultV1::BranchDiff(BranchDiffResultV1::ReferenceUnavailable(unavailable)) => {
+            Some(format!(
+                "branch '{}' does not resolve to a local commit",
+                unavailable.base_or_head
+            ))
+        }
+        GraphToolResultV1::BranchSearch(BranchSearchResultV1::SearchUnavailable(unavailable)) => {
+            Some(format!(
+                "branch '{}' search is unavailable for commit {}: {}",
+                unavailable.branch, unavailable.source_revision, unavailable.reason
+            ))
+        }
+        GraphToolResultV1::BranchDiff(BranchDiffResultV1::DiffUnavailable(unavailable)) => {
+            Some(format!(
+                "branch diff {}..{} is unavailable: {}",
+                unavailable.base, unavailable.head, unavailable.reason
+            ))
+        }
+        _ => None,
+    }
 }
 
-/// Typed result returned when a git-dispatched tool exhausts the dispatch
-/// deadline the daemon carried into `dispatch_git_tools`.
-///
-/// Git tree walks, revwalks, diffs, and the branch-add index build are
-/// unbounded on pathological or diverged inputs. When the carried deadline
-/// elapses the caller must receive the same shaped, semantic error every other
-/// git failure surfaces, never a bare hang or a panic.
-pub fn git_dispatch_deadline_result(ctx: &McpToolContext<'_>, tool_name: &str) -> ToolResult {
-    let message =
-        format!("git tool '{tool_name}' exceeded its dispatch deadline and was cancelled");
-    git_error_result(ctx, &json!({ "tool": tool_name }), "deadline", &message)
-}
-
-fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
-    args.get(name)
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
-                .collect()
-        })
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!("missing required parameter: {name} (array of strings)"),
-        })
-}
-
-fn clamped_depth_arg(args: &Value, name: &str, default: usize, max: usize) -> usize {
-    args.get(name)
-        .and_then(serde_json::Value::as_u64)
-        .map_or(default, |v| v.min(max as u64) as usize)
+/// Applies a caller's depth to its default and the family's traversal bound.
+fn clamped_depth(depth: Option<u32>, default: usize, max: usize) -> usize {
+    depth.map_or(default, |depth| {
+        usize::try_from(depth).map_or(max, |depth| depth.min(max))
+    })
 }
 
 fn matches_test_file(
@@ -123,6 +125,8 @@ fn matches_test_file(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use serde_json::json;
+
     use super::test_support::{branched_repository, fixture_context, fixture_project};
     use super::*;
 
@@ -163,10 +167,10 @@ mod tests {
 
         for error in terminal_errors {
             let detail = error.to_string();
-            let result = context::handle_pr_context(
+            let result = context::compute_pr_context(
                 &ctx,
                 async move { Err::<tracedecay_graph_query::VerifiedGraphQuery, _>(error) },
-                json!({"base_ref": "main", "head_ref": "HEAD", "format": "json"}),
+                json!({"base_ref": "main", "head_ref": "HEAD"}),
             )
             .await;
             assert!(
@@ -174,21 +178,5 @@ mod tests {
                 "terminal graph failure must not become partial success: {detail}"
             );
         }
-    }
-
-    /// An elapsed dispatch deadline surfaces as the same shaped semantic git
-    /// failure every other git error uses, so a caller never sees a bare hang.
-    #[test]
-    fn an_elapsed_dispatch_deadline_is_a_typed_semantic_failure() {
-        // Never read, but admission requires a host-absolute root, which a
-        // driveless `/unread` is not on Windows.
-        let project = fixture_project(&std::env::temp_dir().join("unread"));
-        let result =
-            git_dispatch_deadline_result(&fixture_context(&project), "tracedecay_pr_context");
-
-        assert_eq!(result.semantic_error(), Some(true));
-        let message = result.failure_message().unwrap_or_default();
-        assert!(message.contains("tracedecay_pr_context"), "got {message:?}");
-        assert!(message.contains("dispatch deadline"), "got {message:?}");
     }
 }

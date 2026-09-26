@@ -1181,14 +1181,6 @@ fn group_for(def: &ToolDefinition) -> &'static str {
     let n = def.name.as_str();
     if ApplicationSurfaceOperation::from_tool_name(n).is_some() {
         "application"
-    } else if n.starts_with("tracedecay_branch_")
-        || n == "tracedecay_commit_context"
-        || n == "tracedecay_pr_context"
-        || n == "tracedecay_changelog"
-        || n == "tracedecay_diff_context"
-        || n == "tracedecay_affected"
-    {
-        "git & history"
     } else if n == "tracedecay_str_replace"
         || n == "tracedecay_multi_str_replace"
         || n == "tracedecay_insert_at"
