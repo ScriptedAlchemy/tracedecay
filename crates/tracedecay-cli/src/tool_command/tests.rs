@@ -903,25 +903,29 @@ fn join_content_text_joins_warning_and_payload() {
 }
 
 #[test]
-fn join_content_text_routes_the_daemon_metrics_footer_to_stderr() {
+fn join_content_text_routes_the_trailer_and_footer_to_stderr() {
     // `--format json` payloads are parsed from stdout as one document; the
-    // daemon appends its token accounting as a separate block, which must not
-    // trail the payload (run 34296614024: "Extra data: line 4 column 1").
+    // stale-graph trailer and the token accounting are separate blocks that
+    // must not trail the payload (run 34296614024: "Extra data: line 4
+    // column 1").
     let value = json!({
         "content": [
             { "type": "text", "text": r#"{"code":[],"coverage":{"exact":"complete"}}"# },
+            { "type": "text", "text": "\ncode_graph_freshness: stale, serving the last complete generation g.7" },
             { "type": "text", "text": "\ntracedecay_metrics: before=151600 after=3721" }
         ]
     });
+    let stdout = join_content_text(&value);
+    assert_eq!(stdout, r#"{"code":[],"coverage":{"exact":"complete"}}"#);
+    assert!(serde_json::from_str::<Value>(&stdout).is_ok());
     assert_eq!(
-        join_content_text(&value),
-        r#"{"code":[],"coverage":{"exact":"complete"}}"#
+        beside_result_blocks(&value),
+        vec![
+            "code_graph_freshness: stale, serving the last complete generation g.7".to_owned(),
+            "tracedecay_metrics: before=151600 after=3721".to_owned(),
+        ]
     );
-    assert_eq!(
-        token_accounting_footers(&value),
-        vec!["tracedecay_metrics: before=151600 after=3721".to_owned()]
-    );
-    assert!(token_accounting_footers(&json!({ "content": [] })).is_empty());
+    assert!(beside_result_blocks(&json!({ "content": [] })).is_empty());
 }
 
 #[test]
@@ -1153,7 +1157,7 @@ fn application_problem_makes_the_tool_command_fail() {
         requested_format: RequestedOutputFormat::Json,
     };
 
-    let error = print_cli_application_surface(result, true)
+    let error = print_cli_application_surface(None, result, true)
         .expect_err("a canonical application problem must fail the CLI process");
     assert!(
         error

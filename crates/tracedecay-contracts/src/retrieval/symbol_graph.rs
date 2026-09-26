@@ -218,6 +218,49 @@ impl<T> SymbolGraphPage<T> {
     }
 }
 
+impl<T: SymbolGraphItem> SymbolGraphPage<T> {
+    /// Distinct project files the page's symbols live in, in page order.
+    pub fn touched_files(&self) -> Vec<String> {
+        let mut files: Vec<String> = Vec::new();
+        for item in &self.items {
+            let file = &item.symbol().file;
+            if !file.is_empty() && !files.contains(file) {
+                files.push(file.clone());
+            }
+        }
+        files
+    }
+}
+
+/// A symbol-graph page item located by one symbol record.
+pub trait SymbolGraphItem {
+    fn symbol(&self) -> &SymbolPrimitiveRecord;
+}
+
+impl SymbolGraphItem for SymbolPrimitiveRecord {
+    fn symbol(&self) -> &SymbolPrimitiveRecord {
+        self
+    }
+}
+
+impl SymbolGraphItem for SymbolRelationRecord {
+    fn symbol(&self) -> &SymbolPrimitiveRecord {
+        &self.symbol
+    }
+}
+
+impl SymbolGraphItem for ImplementationRecord {
+    fn symbol(&self) -> &SymbolPrimitiveRecord {
+        &self.symbol
+    }
+}
+
+impl SymbolGraphItem for TypeHierarchyRecord {
+    fn symbol(&self) -> &SymbolPrimitiveRecord {
+        &self.symbol
+    }
+}
+
 #[derive(Debug)]
 pub struct SymbolSearchPrimitiveRequest {
     pub query: EphemeralSanitizedQueryViewV1,

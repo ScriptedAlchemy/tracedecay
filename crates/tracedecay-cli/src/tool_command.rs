@@ -61,7 +61,7 @@ use tracedecay_daemon_service::application_surface::observe_surface_argument_rej
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::tools::response_trailers::{
-    TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
+    CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
 };
 use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
@@ -497,7 +497,7 @@ fn dispatch_cli_application_surface_inner(
             }
         };
         let handshake =
-            tracedecay::daemon::handshake_for_current_client(project, None, false, false)?;
+            tracedecay::daemon::handshake_for_current_client(project.clone(), None, false, false)?;
         let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
         // A cold daemon answers the mounting refusal while the project open
         // still warms in the background. The compatibility tool path rides
@@ -560,7 +560,11 @@ fn dispatch_cli_application_surface_inner(
             }
             tokio::time::sleep(delay).await;
         };
-        print_cli_application_surface(result, requested_format == RequestedOutputFormat::Json)
+        print_cli_application_surface(
+            project.as_deref(),
+            result,
+            requested_format == RequestedOutputFormat::Json,
+        )
     })
 }
 
@@ -636,6 +640,7 @@ async fn dispatch_cli_retained(
         response_handle_root.as_deref(),
         &execution,
     )?;
+    account_tool_result(dispatch.project_path.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
     print_tool_output(&result.value, raw_json);
     tool_result_process_outcome(&result.value, tool_name)
@@ -696,6 +701,7 @@ async fn dispatch_cli_source_edit(
         &tool_args,
         outcome,
     )?;
+    account_tool_result(project.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
     print_tool_output(&result.value, raw_json);
     tool_result_process_outcome(&result.value, tool_name)
@@ -769,7 +775,11 @@ fn cli_response_handle_root(project: Option<&Path>) -> Result<Option<PathBuf>> {
 
 const OWNER_MOUNT_RESEND_DELAY: Duration = Duration::from_millis(250);
 
+/// Prints one settled application-surface call through the renderer its MCP
+/// call uses. `--json` keeps the whole canonical envelope on stdout; the
+/// beside-result trailer and footer go to stderr on every format.
 fn print_cli_application_surface(
+    project: Option<&Path>,
     result: ApplicationSurfaceInvocationResult,
     raw_json: bool,
 ) -> Result<()> {
@@ -778,16 +788,17 @@ fn print_cli_application_surface(
         .as_ref()
         .err()
         .map(|problem| format!("{}: {}", problem.problem.code, problem.problem.message));
+    let response_handle_root = cli_response_handle_root(project)?;
+    let mut rendered = tracedecay::mcp::tools::render_application_surface_result(
+        response_handle_root.as_deref(),
+        &result,
+    )?;
+    account_tool_result(project, &mut rendered);
     if raw_json {
         print!("{}", crate::cli::output::json::json_line(&result.result)?);
+        print_beside_result_blocks(&rendered.value);
     } else {
-        let view = crate::cli::output::view::CanonicalHumanView::from_application_result(
-            result.operation.as_str(),
-            &result.binding_id,
-            &result.result,
-        )?;
-        let rendered = crate::cli::output::markdown::render(view);
-        println!("{}", rendered.as_str());
+        print_tool_output(&rendered.value, false);
     }
     if application_problem.is_some() {
         std::io::stdout().flush()?;
@@ -1042,9 +1053,13 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
 fn print_tool_output(result_value: &Value, raw_json: bool) {
     println!("{}", rendered_tool_output(result_value, raw_json));
     if !raw_json {
-        for footer in token_accounting_footers(result_value) {
-            eprintln!("{footer}");
-        }
+        print_beside_result_blocks(result_value);
+    }
+}
+
+fn print_beside_result_blocks(result_value: &Value) {
+    for block in beside_result_blocks(result_value) {
+        eprintln!("{block}");
     }
 }
 
@@ -1063,21 +1078,23 @@ fn rendered_tool_output(result_value: &Value, raw_json: bool) -> String {
 /// Joins every payload `content[*].text` block in an MCP tool result,
 /// separated by a blank line. Handlers sometimes prepend a warning/notice block
 /// ahead of the real payload; printing only `content[0].text` would silently
-/// drop the payload. The daemon's separate token-accounting footer block is
-/// excluded (see [`token_accounting_footers`]): with `--format json` the
-/// payload block is the whole stdout document and a trailing footer would make
-/// it unparseable. Falls back to the empty string when no text blocks exist.
+/// drop the payload. The beside-result stale-graph trailer and token-accounting
+/// footer blocks are excluded (see [`beside_result_blocks`]): with
+/// `--format json` the payload block is the whole stdout document and a
+/// trailing block would make it unparseable. Falls back to the empty string
+/// when no text blocks exist.
 fn join_content_text(result_value: &Value) -> String {
     content_text_blocks(result_value)
-        .filter(|text| !is_token_accounting_footer(text))
+        .filter(|text| !is_beside_result_block(text))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-/// The daemon's token-accounting footer blocks, printed to stderr.
-fn token_accounting_footers(result_value: &Value) -> Vec<String> {
+/// The stale-graph trailer and token-accounting footer blocks, printed to
+/// stderr.
+fn beside_result_blocks(result_value: &Value) -> Vec<String> {
     content_text_blocks(result_value)
-        .filter(|text| is_token_accounting_footer(text))
+        .filter(|text| is_beside_result_block(text))
         .map(|text| text.trim().to_owned())
         .collect()
 }
@@ -1092,9 +1109,10 @@ fn content_text_blocks(result_value: &Value) -> impl Iterator<Item = &str> {
         .filter(|text| !text.is_empty())
 }
 
-fn is_token_accounting_footer(text: &str) -> bool {
-    text.trim_start()
-        .starts_with(TOKEN_ACCOUNTING_FOOTER_PREFIX)
+fn is_beside_result_block(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with(TOKEN_ACCOUNTING_FOOTER_PREFIX)
+        || text.starts_with(CODE_GRAPH_FRESHNESS_TRAILER_PREFIX)
 }
 
 /// Print a grouped list of every available tool. Tools annotated as

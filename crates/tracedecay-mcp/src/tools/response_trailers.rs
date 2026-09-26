@@ -12,6 +12,7 @@ use tracedecay_contracts::retrieval::{CodeGraphReadFreshnessV1, ServedCodeGraphG
 use super::ToolResult;
 
 pub const TOKEN_ACCOUNTING_FOOTER_PREFIX: &str = "tracedecay_metrics:";
+pub const CODE_GRAPH_FRESHNESS_TRAILER_PREFIX: &str = "code_graph_freshness:";
 
 /// Token estimate for one rendered result: reading its touched files raw
 /// versus the response it actually delivered.
@@ -24,6 +25,28 @@ pub struct ToolTokenAccounting {
 impl ToolTokenAccounting {
     pub fn net_saved_tokens(self) -> u64 {
         self.raw_file_tokens.saturating_sub(self.response_tokens)
+    }
+}
+
+/// What a typed envelope carries beside its body. Every typed renderer
+/// attaches it through [`ResponseTrailer::attach`], so each surface prints the
+/// same trailer and footer for the same envelope.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseTrailer<'a> {
+    /// Project files the answer read; the token-accounting footer prices
+    /// reading them raw.
+    pub touched_files: &'a [String],
+    /// The generation a code-graph read served; a stale seat adds the
+    /// `code_graph_freshness` trailer.
+    pub code_graph: Option<&'a ServedCodeGraphGenerationV1>,
+}
+
+impl ResponseTrailer<'_> {
+    pub fn attach(self, result: &mut ToolResult) {
+        result.touched_files = self.touched_files.to_vec();
+        if let Some(served) = self.code_graph {
+            append_code_graph_freshness(result, served);
+        }
     }
 }
 
@@ -51,7 +74,7 @@ pub fn append_code_graph_freshness(result: &mut ToolResult, served: &ServedCodeG
         "while source freshness remains unverified"
     };
     content.push(json!({"type": "text", "text": format!(
-        "\ncode_graph_freshness: stale, serving the last complete generation \
+        "\n{CODE_GRAPH_FRESHNESS_TRAILER_PREFIX} stale, serving the last complete generation \
          {generation} (sealed {age} ago) {remedy}; results may trail the live worktree"
     )}));
 }

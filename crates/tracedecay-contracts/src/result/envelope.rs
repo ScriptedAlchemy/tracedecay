@@ -138,9 +138,9 @@ impl<T> ApplicationEnvelope<T> {
             contract,
             request_id,
             scope,
+            code_graph: packet.temporal.served_code_graph(),
             outcome: ApplicationOutcome::Evidence(packet),
             touched_files: Vec::new(),
-            code_graph: None,
             analytics: None,
         }
     }

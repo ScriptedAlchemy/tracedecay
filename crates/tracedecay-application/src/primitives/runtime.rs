@@ -22,9 +22,9 @@ use tracedecay_contracts::retrieval::{
     OperationalRetrievalPort, PrimitiveFailureKind, PrimitiveInvocation, PrimitiveRequest,
     RetrievalPortContext, RetrievalPortOutcome, SessionRetrievalBudgetStageV1,
     SessionRetrievalStructuralRefusalV1, SourceReadPortContext, SourceReadPortOutcome,
-    SourceReadPrimitivePort, SourceRetrievalPort, SymbolGraphPage, SymbolGraphPortContext,
-    SymbolGraphPortOutcome, SymbolGraphPrimitivePort, TemporalRetrievalPort,
-    TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext,
+    SourceReadPrimitivePort, SourceRetrievalPort, SymbolGraphItem, SymbolGraphPage,
+    SymbolGraphPortContext, SymbolGraphPortOutcome, SymbolGraphPrimitivePort,
+    TemporalRetrievalPort, TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext,
     TestPrimitivePortOutcome,
 };
 use tracedecay_contracts::{
@@ -1299,7 +1299,7 @@ fn grep_context<'a>(
     }
 }
 
-fn symbol_outcome<T: Serialize>(
+fn symbol_outcome<T: Serialize + SymbolGraphItem>(
     access: &ProjectSourceAccessSnapshot,
     context: &RequestContext,
     operation: &ApplicationOperation,
@@ -1342,7 +1342,7 @@ fn symbol_outcome<T: Serialize>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn symbol_page<T: Serialize>(
+fn symbol_page<T: Serialize + SymbolGraphItem>(
     access: &ProjectSourceAccessSnapshot,
     context: &RequestContext,
     operation: &ApplicationOperation,
@@ -1357,6 +1357,7 @@ fn symbol_page<T: Serialize>(
     let continuation = page.next_cursor.clone();
     let temporal = symbol_temporal_state(&page, finished_at);
     let unsupported = !page.support_gaps.is_empty();
+    let touched_files = page.touched_files();
     let payload = value_or_problem!(serde_json::to_value(page), context, operation);
     let mut result = evidence_result(
         access,
@@ -1381,6 +1382,9 @@ fn symbol_page<T: Serialize>(
         temporal,
         partial,
     )?;
+    if let Ok(envelope) = &mut result {
+        envelope.touched_files = touched_files;
+    }
     if unsupported
         && let Ok(envelope) = &mut result
         && let ApplicationOutcome::Evidence(packet) = &mut envelope.outcome

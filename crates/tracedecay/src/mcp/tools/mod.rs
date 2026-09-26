@@ -18,7 +18,8 @@ pub(crate) use handlers::retained_catalog::{
 pub use handlers::{
     RetainedSurfaceExecution, ToolCallRegistryOptions, execute_graph_tool_surface,
     execute_retained_surface_tool, execute_work_tool_surface, execute_workflow_tool_surface,
-    handle_tool_call, handle_tool_call_with_registry_options, render_retained_execution,
+    handle_tool_call, handle_tool_call_with_registry_options, render_application_surface_result,
+    render_retained_execution,
 };
 pub(crate) use handlers::{compute_graph_tool_for_owner, graph_tool_error_problem};
 
