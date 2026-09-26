@@ -300,10 +300,10 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                     target: "tracedecay::feedback_advisory_cycle",
                     project_id = self.feedback_scope.project_id.as_str(),
                     worktree_id = self.feedback_scope.worktree_id.as_str(),
-                    %error,
+                    ?error,
                     "advisory feedback cycle execution failed"
                 );
-                LspRuntimeFailure::new("feedback-cycle-advisory-execution")
+                LspRuntimeFailure::new(error.lsp_failure_class())
             })?;
         if outcome.publication().is_some() {
             self.deliver_completed_publication(&pin.registration, &outcome);
