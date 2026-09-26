@@ -258,9 +258,27 @@ fn doctor_report_coverage_statement_is_truthful_about_unavailable_families() {
         }
     }
 
+    // An added family fails here by name, before the statement below.
+    assert_eq!(
+        report
+            .coverage()
+            .families()
+            .iter()
+            .map(|record| record.family())
+            .collect::<Vec<_>>(),
+        [
+            DoctorFindingFamilyV1::Advisory,
+            DoctorFindingFamilyV1::Configuration,
+            DoctorFindingFamilyV1::StorageRuntime,
+            DoctorFindingFamilyV1::Storage,
+            DoctorFindingFamilyV1::LanguageServer,
+            DoctorFindingFamilyV1::CodeIndex,
+            DoctorFindingFamilyV1::Observability,
+            DoctorFindingFamilyV1::Memory,
+        ]
+    );
     let statement = report.coverage().statement().statement();
-    // Eight families since retained memory became its own family; only
-    // configuration was wired here.
+    // Only configuration was wired here.
     assert_eq!(
         statement,
         "consulted 1/8 doctor finding families; unavailable: advisory(unwired), \
