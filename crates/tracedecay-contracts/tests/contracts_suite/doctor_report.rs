@@ -14,7 +14,8 @@ use tracedecay_contracts::{
     ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
     DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
     DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorReportComposerV1,
-    DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, HostConformanceV1,
+    DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1,
+    GitHubSourceDoctorPort, GitHubSourceReadV1, GitHubSourceStateV1, HostConformanceV1,
     HostIntegrationDoctorPort, HostIntegrationReadV1, OperationalAuditDoctorPort,
     OperationalAuditReadV1, OrphanStoreRecordV1, ProfileAuthorityReadV1, RemoteAuthorityReadV1,
     RemoteListenerReadV1, RemoteOperationalReadV1, RequestContext, RuntimeHealthDoctorPort,
@@ -63,6 +64,17 @@ impl HostIntegrationDoctorPort for StaticHost {
         &'a self,
         _context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, HostIntegrationReadV1> {
+        let read = self.0.clone();
+        Box::pin(async move { read })
+    }
+}
+
+struct StaticGitHubSource(GitHubSourceReadV1);
+impl GitHubSourceDoctorPort for StaticGitHubSource {
+    fn github_source<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, GitHubSourceReadV1> {
         let read = self.0.clone();
         Box::pin(async move { read })
     }
@@ -579,4 +591,62 @@ fn doctor_regression_unauthorized_read_maps_to_denied_not_absent() {
         .find(|f| f.family() == DoctorFindingFamilyV1::Configuration)
         .expect("configuration finding");
     assert_eq!(finding.state(), DoctorEvidenceStateV1::Denied);
+}
+
+/// The GitHub source finding renders the typed state with the one remedy
+/// authority status also prints.
+#[test]
+fn doctor_reports_an_anonymously_read_github_source_with_its_remedy() {
+    let ctx = context();
+    let anonymous = StaticGitHubSource(GitHubSourceReadV1::Observed {
+        repository: "rust-lang/log".to_owned(),
+        state: GitHubSourceStateV1::UnauthenticatedPublic,
+    });
+    let report = block_on(
+        DoctorReportComposerV1::new()
+            .with_github_source(&anonymous)
+            .compose(&ctx),
+    )
+    .expect("compose");
+    let advisory = report
+        .findings()
+        .filter(|finding| finding.family() == DoctorFindingFamilyV1::Advisory)
+        .map(|finding| (finding.state(), finding.coverage().statement().to_owned()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        advisory,
+        [(
+            DoctorEvidenceStateV1::Partial,
+            "GitHub source rust-lang/log: unauthenticated_public; reads are anonymous (60 requests/hour); run `gh auth login` or set GH_TOKEN to read with a credential".to_owned()
+        )]
+    );
+
+    let absent = StaticGitHubSource(GitHubSourceReadV1::Absent);
+    let bound = StaticGitHubSource(GitHubSourceReadV1::Observed {
+        repository: "rust-lang/log".to_owned(),
+        state: GitHubSourceStateV1::Bound,
+    });
+    for (port, expected) in [
+        (&absent, Vec::<String>::new()),
+        (
+            &bound,
+            vec!["GitHub source rust-lang/log: bound".to_owned()],
+        ),
+    ] {
+        let report = block_on(
+            DoctorReportComposerV1::new()
+                .with_github_source(port)
+                .compose(&ctx),
+        )
+        .expect("compose");
+        assert_eq!(
+            report
+                .findings()
+                .filter(|finding| finding.family() == DoctorFindingFamilyV1::Advisory)
+                .filter(|finding| finding.coverage().statement().starts_with("GitHub source"))
+                .map(|finding| finding.coverage().statement().to_owned())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 }

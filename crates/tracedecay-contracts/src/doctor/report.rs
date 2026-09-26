@@ -19,14 +19,15 @@ use crate::storage::findings::truncate_at_char_boundary;
 use super::sources::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
     CodeIndexMountReadV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
-    DoctorStorageFamilyReadV1, DoctorStorageIncompleteReasonV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, LanguageServerDoctorPort, LanguageServerReadV1, ObservabilityDoctorPort,
-    ObservabilityReadV1, OperationalAuditDoctorPort, ProfileAuthorityReadV1,
-    RemoteOperationalReadV1, ResidentMemoryDoctorPort, ResidentMemoryReadV1,
-    RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort, advisory_feedback_findings,
-    code_index_finding, configuration_finding, host_integration_finding, ingest_refusal_finding,
-    language_server_finding, observability_finding, operational_audit_findings,
-    resident_memory_findings, runtime_health_finding,
+    DoctorStorageFamilyReadV1, DoctorStorageIncompleteReasonV1, GitHubSourceDoctorPort,
+    HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
+    LanguageServerReadV1, ObservabilityDoctorPort, ObservabilityReadV1, OperationalAuditDoctorPort,
+    ProfileAuthorityReadV1, RemoteOperationalReadV1, ResidentMemoryDoctorPort,
+    ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
+    advisory_feedback_findings, code_index_finding, configuration_finding, github_source_finding,
+    host_integration_finding, ingest_refusal_finding, language_server_finding,
+    observability_finding, operational_audit_findings, resident_memory_findings,
+    runtime_health_finding,
 };
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
@@ -416,6 +417,7 @@ pub struct DoctorReportComposerV1<'a> {
     operational_audit: Option<&'a dyn OperationalAuditDoctorPort>,
     host: Option<&'a dyn HostIntegrationDoctorPort>,
     advisory_feedback: Option<&'a dyn AdvisoryFeedbackDoctorPort>,
+    github_source: Option<&'a dyn GitHubSourceDoctorPort>,
     language_server: Option<&'a dyn LanguageServerDoctorPort>,
     code_index: Option<&'a dyn CodeIndexMountDoctorPort>,
     observability: Option<&'a dyn ObservabilityDoctorPort>,
@@ -463,6 +465,13 @@ impl<'a> DoctorReportComposerV1<'a> {
     #[must_use]
     pub fn with_advisory_feedback(mut self, port: &'a dyn AdvisoryFeedbackDoctorPort) -> Self {
         self.advisory_feedback = Some(port);
+        self
+    }
+
+    /// Wire the observed GitHub source (Advisory family).
+    #[must_use]
+    pub fn with_github_source(mut self, port: &'a dyn GitHubSourceDoctorPort) -> Self {
+        self.github_source = Some(port);
         self
     }
 
@@ -651,7 +660,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         context: &RequestContext,
     ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
     {
-        if self.host.is_none() && self.advisory_feedback.is_none() {
+        if self.host.is_none() && self.advisory_feedback.is_none() && self.github_source.is_none() {
             return unwired_family(DoctorFindingFamilyV1::Advisory);
         }
         let mut entries = Vec::new();
@@ -682,6 +691,16 @@ impl<'a> DoctorReportComposerV1<'a> {
                 entries.push(DoctorReportEntryV1::new(finding, None)?);
             }
             consultations.push(consultation);
+        }
+        if let Some(port) = self.github_source {
+            // A project without a GitHub origin is absent, not unhealthy.
+            match github_source_finding(&port.github_source(context).await)? {
+                Some(finding) => {
+                    entries.push(DoctorReportEntryV1::new(finding, None)?);
+                    consultations.push(DoctorFamilyConsultationV1::Consulted);
+                }
+                None => consultations.push(unavailable(DoctorFamilyUnavailableReasonV1::Absent)),
+            }
         }
         Ok((entries, strongest_consultation(consultations)?))
     }

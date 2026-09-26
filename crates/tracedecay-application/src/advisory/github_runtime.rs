@@ -63,8 +63,8 @@ pub use decoder::{
 };
 pub use discovery::{
     GitHubDiscoveryControlV1, GitHubExactCommitDiscoveryOutcomeV1, GitHubExactCommitPullRequestV1,
-    GitHubPullRequestDiscoveryKindV1, GitHubSourceStateV1, GitHubSourceStatusV1,
-    discover_exact_commit_pull_request_v1, github_source_status_v1, record_github_source_status_v1,
+    GitHubPullRequestDiscoveryKindV1, GitHubSourceStatusV1, discover_exact_commit_pull_request_v1,
+    github_source_state_v1, github_source_status_v1, record_github_source_status_v1,
 };
 pub use dto::{
     GitHubActionsCheckRunOutputV1, GitHubActionsCheckRunV1, GitHubActionsCheckSuiteRefV1,
