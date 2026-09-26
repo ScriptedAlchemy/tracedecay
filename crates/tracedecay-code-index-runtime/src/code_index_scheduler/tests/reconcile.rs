@@ -6156,6 +6156,23 @@ async fn readiness_wait_reaches_ready_exactly_when_the_held_graph_publishes() {
         last.code_graph_serving,
         Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Pending)
     );
+    let held_graph_ready = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::GraphReady,
+            Duration::from_millis(50),
+        )
+        .await
+        .expect("freshness read");
+    assert!(
+        matches!(
+            held_graph_ready,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::TimedOut {
+                last: Some(_)
+            }
+        ),
+        "a held graph cannot be graph_ready: {held_graph_ready:?}"
+    );
 
     let waiter = registry.clone();
     let root = fixture.path().to_path_buf();
@@ -6191,6 +6208,21 @@ async fn readiness_wait_reaches_ready_exactly_when_the_held_graph_publishes() {
     assert_eq!(
         freshness.latest_generation_id.as_deref(),
         Some(published.generation_id.as_str())
+    );
+    let graph_ready = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::GraphReady,
+            Duration::from_millis(50),
+        )
+        .await
+        .expect("freshness read");
+    assert!(
+        matches!(
+            graph_ready,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+        ),
+        "{graph_ready:?}"
     );
     registry.shutdown().await;
 }

@@ -151,10 +151,12 @@ impl CodeIndexOwnerSignalsV1 {
 impl CodeIndexSchedulerRegistryV1 {
     /// Sweep the source witness now and post a wake for any proven change,
     /// so later freshness reads describe the source as of this call. An
-    /// unmounted root has nothing to sweep; its mount reconciles.
+    /// unmounted root has nothing to sweep; its mount reconciles. Without
+    /// `sweep_source` only the publication park is checked.
     async fn request_fresh_now(
         &self,
         project_root: &Path,
+        sweep_source: bool,
     ) -> Result<(), CodeIndexFreshSweepRefusedV1> {
         let Ok(canonical) = canonical_existing_identity(project_root) else {
             return Ok(());
@@ -166,6 +168,9 @@ impl CodeIndexSchedulerRegistryV1 {
             };
             if Self::publication_authority_reset(worktree).is_some() {
                 return Err(CodeIndexFreshSweepRefusedV1::PublicationParked);
+            }
+            if !sweep_source {
+                return Ok(());
             }
             (
                 std::sync::Arc::clone(&worktree.scheduler),
@@ -195,7 +200,8 @@ impl CodeIndexSchedulerRegistryV1 {
     /// The wait first proves freshness against the source as it is now: the
     /// bounded Git/stat/content probe either refreshes the verified watermark
     /// or posts the wake for a proven change, so a reading taken after it
-    /// cannot report an edit the scheduler has not yet seen as fresh. An
+    /// cannot report an edit the scheduler has not yet seen as fresh.
+    /// `graph_ready` does not depend on freshness and skips that probe. An
     /// unmounted root is waited through: a mount that lands inside the budget
     /// reconciles the source as of that mount. Dropping the future abandons
     /// the wait; a wake the probe posted is ordinary demand.
@@ -209,7 +215,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
         // The probe can take the scheduler mutex; the caller's budget bounds
         // it, and an unproven source cannot be reported as reached.
-        match tokio::time::timeout_at(deadline, self.request_fresh_now(project_root)).await {
+        let sweep_source = target != CodeIndexReadinessTargetV1::GraphReady;
+        match tokio::time::timeout_at(deadline, self.request_fresh_now(project_root, sweep_source))
+            .await
+        {
             Ok(Err(CodeIndexFreshSweepRefusedV1::PublicationParked)) => {
                 return Ok(CodeIndexReadinessWaitReadV1::Unreachable {
                     reason: "code_index_publication_parked".to_owned(),
