@@ -451,7 +451,7 @@ pub async fn handle_status(
     output["github_source"] = match github_source_status_v1(ctx.project_root()) {
         Some(source) => serde_json::to_value(&source)?,
         None => json!({
-            "state": "not_observed",
+            "state": "absent",
             "reason": "the checkout has no GitHub origin, or its advisory owner has not mounted in this daemon",
         }),
     };

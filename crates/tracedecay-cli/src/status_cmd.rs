@@ -488,7 +488,7 @@ async fn handle_status_command_within(
         .unwrap_or_default();
     let github_source: Option<GitHubSourceStatusV1> = daemon_status
         .get("github_source")
-        .filter(|source| source.get("state") != Some(&Value::from("not_observed")))
+        .filter(|source| source.get("state") != Some(&Value::from("absent")))
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
