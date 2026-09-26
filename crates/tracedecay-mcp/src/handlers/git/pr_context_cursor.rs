@@ -6,11 +6,11 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
+use tracedecay_temporal_query::cursor::SessionCursorAuthenticator;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::execution::BindingDigest;
-use tracedecay_temporal_query::ports::SessionCursorAuthenticator;
-use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 use tracedecay_temporal_query::snapshot::{
     KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
 };
@@ -404,7 +404,7 @@ mod tests {
     use super::*;
     use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
-    use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
+    use tracedecay_temporal_query::cursor::InMemoryCursorAuthenticator;
 
     fn cursor_key() -> SignedCursorKeyRefV1 {
         SignedCursorKeyRefV1 {

@@ -23,10 +23,6 @@ use super::hydration::{
     TemporalHydrationPort,
 };
 use super::paging::{CandidatePageSink, PageKey, PageRequest, PageStatus, TemporalRecordPageSink};
-use super::ports::{
-    InMemoryCursorAuthenticator, PortFuture, SummarySourceRecord, TemporalPortError,
-    TemporalReadPort, TemporalRecord, TemporalSnapshotRequest,
-};
 use super::ranking::{DiversityLimits, RankingCandidate, RankingError};
 use super::resolution::summary::SummarySourceState;
 use super::resolution::types::{
@@ -41,6 +37,10 @@ use super::{
     TemporalKernelError, TemporalKernelRequest, execute_temporal_candidate_export,
     execute_temporal_kernel, hydrate_temporal_candidate_selection,
 };
+use crate::cursor::InMemoryCursorAuthenticator;
+use crate::execution::TemporalPortError;
+use crate::paging::{PortFuture, SummarySourceRecord, TemporalReadPort, TemporalRecord};
+use crate::snapshot::TemporalSnapshotRequest;
 use crate::test_support::block_on;
 
 struct FakeReadPort {
@@ -78,7 +78,7 @@ impl FakeReadPort {
 impl TemporalReadPort for FakeReadPort {
     fn produce_candidate_page_for_scope<'a>(
         &'a self,
-        _scope: &'a super::ports::TemporalRetrievalScope,
+        _scope: &'a super::snapshot::TemporalRetrievalScope,
         snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         request: PageRequest,
@@ -124,7 +124,7 @@ impl TemporalReadPort for FakeReadPort {
 
     fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
-        _scope: &'a super::ports::TemporalRetrievalScope,
+        _scope: &'a super::snapshot::TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         candidates: &'a [RankingCandidate],
         request: PageRequest,
@@ -625,7 +625,7 @@ fn root_wide_export_reuses_the_exact_prepared_candidate_cohort() {
         .expect("participant");
         request.snapshot = TemporalExecutionSnapshot::new_authorized(
             request.snapshot.request().clone().with_retrieval_scope(
-                super::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+                super::snapshot::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
             ),
             request.snapshot.watermarks(),
             request.snapshot.versions().clone(),

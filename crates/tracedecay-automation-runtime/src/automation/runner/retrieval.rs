@@ -42,8 +42,7 @@ use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionFreshnessPolicy, SessionRequestBinding, SessionRetrievalConfiguration,
     SessionRetrievalOutcome, SessionRetrievalScope, SessionRetrievalService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionPort,
-    SessionTemporalQuery,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalQuery,
 };
 use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_temporal_query::TemporalKernelResult;
@@ -95,51 +94,6 @@ pub trait AutomationSessionRetrieval: Send + Sync {
     fn anchor_session_id(&self) -> &SessionId;
 
     fn retrieve(&self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_>;
-}
-
-impl<'a, A, P, E> AuthorizedAutomationSessionRetrieval<'a, A, P, E> {
-    pub fn new(
-        service: &'a SessionRetrievalService<A, P, E>,
-        context: &'a RequestContext,
-        binding: &'a SessionRequestBinding,
-        anchor_session_id: SessionId,
-    ) -> Self {
-        Self {
-            service,
-            context,
-            binding,
-            anchor_session_id,
-        }
-    }
-}
-
-impl<A, P, E> AutomationSessionRetrieval for AuthorizedAutomationSessionRetrieval<'_, A, P, E>
-where
-    A: SessionScopeAuthorizer + Send + Sync,
-    P: SessionTemporalExecutionPort + Send + Sync,
-    E: VersionedTokenEstimator + Send + Sync,
-{
-    fn anchor_session_id(&self) -> &SessionId {
-        &self.anchor_session_id
-    }
-
-    fn retrieve(&self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_> {
-        Box::pin(async move {
-            accept_automation_temporal_outcome(
-                self.service
-                    .retrieve(self.context, self.binding, query)
-                    .await,
-            )
-        })
-    }
-}
-
-/// Adapter for an already-authorized application retrieval service.
-pub struct AuthorizedAutomationSessionRetrieval<'a, A, P, E> {
-    service: &'a SessionRetrievalService<A, P, E>,
-    context: &'a RequestContext,
-    binding: &'a SessionRequestBinding,
-    anchor_session_id: SessionId,
 }
 
 struct ProductionAutomationSessionRetrieval {
@@ -733,6 +687,7 @@ mod authority_tests {
     use tempfile::tempdir;
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+    use tracedecay_lcm::LcmGrepSort;
     use tracedecay_store::StoreShardIdV1;
 
     use super::*;
@@ -879,6 +834,99 @@ mod authority_tests {
                 panic!("expected typed rejection, got CompleteZero")
             }
         }
+    }
+
+    fn outcome_label(outcome: &AutomationTemporalRetrieval) -> String {
+        match outcome {
+            AutomationTemporalRetrieval::Complete(_) => "complete".to_owned(),
+            AutomationTemporalRetrieval::CompleteZero => "complete_zero".to_owned(),
+            AutomationTemporalRetrieval::Rejected(reason) => (*reason).to_owned(),
+            AutomationTemporalRetrieval::StructuralRefusal(refusal) => format!("{refusal:?}"),
+        }
+    }
+
+    /// The production authorizer admits the forensic request the runner builds,
+    /// so a bounded request reaches the registered store, while a candidate
+    /// workspace past the ranker ceiling is refused before execution.
+    #[tokio::test]
+    async fn production_retrieval_admits_bounded_requests_and_refuses_oversized_workspaces() {
+        let directory = tempdir().expect("temporary profile");
+        let project_id = ProjectId::new("project.automation.bounded").expect("project id");
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            directory.path().join("profile"),
+            directory.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered test runtime");
+        let database = runtime.project_database_arc().expect("project database");
+        let shard = database.binding().shard_id.clone();
+        let profile_identity = FixtureProfileIdentity::new(
+            directory.path().join("profile"),
+            shard.brain_id.clone(),
+            shard.profile_id.clone(),
+        );
+        let retrieval = ProductionAutomationSessionRetrieval {
+            database,
+            identity: project_automation_identity(&shard, &profile_identity, &project_id)
+                .expect("project identity"),
+            anchor_session_id: SessionId::new("session.automation.bounded").expect("session id"),
+        };
+
+        let bounded = retrieve_automation_session_evidence(
+            &retrieval,
+            "bounded automation evidence",
+            LcmScope::All,
+            AutomationEvidenceFilters {
+                provider: "cursor",
+                session_id: None,
+                include_summaries: true,
+                evidence_limit: 5,
+                include_recent_sessions: false,
+                recent_sessions_limit: 1,
+                role: None,
+                start_time: None,
+                end_time: None,
+                sort: LcmGrepSort::Relevance,
+            },
+        )
+        .await
+        .expect("bounded request");
+
+        let oversized = SessionTemporalQuery::new(
+            SessionId::new("session.automation.bounded").expect("session id"),
+            Some("cursor".to_owned()),
+            "oversized automation evidence",
+            None,
+            TemporalModeV1::Forensic,
+            RetrievalGrainV1::LogicalMessage,
+            1,
+            DiversityLimits {
+                per_logical_message: 1,
+                per_turn: 1,
+                per_session: 1,
+                per_source: 1,
+                per_evidence_role: 1,
+            },
+            ContextBudget {
+                max_bytes: AUTOMATION_SESSION_MAX_BYTES,
+                max_tokens: AUTOMATION_SESSION_MAX_BYTES / 4,
+                estimator_version: AUTOMATION_SESSION_ESTIMATOR_VERSION.to_string(),
+            },
+        )
+        .expect("oversized query")
+        .with_execution_limits(ExecutionLimits {
+            candidate_total_bytes: ExecutionLimits::default().candidate_total_bytes + 1,
+            ..ExecutionLimits::default()
+        });
+        let refused = retrieval.retrieve(oversized).await;
+        assert_eq!(
+            (outcome_label(&bounded), outcome_label(&refused)),
+            (
+                "complete_zero".to_owned(),
+                "BudgetExhausted { stage: RequestCandidateBytes, accounting: None }".to_owned(),
+            )
+        );
     }
 
     #[tokio::test]

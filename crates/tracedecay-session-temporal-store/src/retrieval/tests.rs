@@ -18,22 +18,24 @@ use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::execution::{
     BindingDigest, ExecutionControl, ExecutionLimits, await_controlled,
 };
+use tracedecay_temporal_query::execution::{ReadBudgetAccounting, TemporalPortError};
 use tracedecay_temporal_query::paging::{
     CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidateReadState, PageLimits, PageRequest,
     PageStatus,
 };
-use tracedecay_temporal_query::plan_temporal_candidates;
-use tracedecay_temporal_query::ports::{
-    ReadBudgetAccounting, TemporalAuthorizedRoot, TemporalPortError, TemporalRecord,
-    TemporalRetrievalScope, TemporalSnapshotRequest, begin_prepared_candidate_pull,
-    commit_prepared_candidate_pull,
+use tracedecay_temporal_query::paging::{
+    TemporalRecord, begin_prepared_candidate_pull, commit_prepared_candidate_pull,
 };
+use tracedecay_temporal_query::plan_temporal_candidates;
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
 use tracedecay_temporal_query::snapshot::{
     KernelVersions, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
     TemporalParticipantGeneration, TemporalParticipantManifest, TemporalPreparedCandidateCohort,
     TemporalSourceAccess, TemporalWatermarks,
+};
+use tracedecay_temporal_query::snapshot::{
+    TemporalAuthorizedRoot, TemporalRetrievalScope, TemporalSnapshotRequest,
 };
 
 mod relation_graph_tests;

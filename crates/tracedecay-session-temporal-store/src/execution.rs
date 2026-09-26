@@ -26,10 +26,9 @@ use tracedecay_query::retrieval::evidence_lanes::{
 };
 use tracedecay_temporal_query::context::{ContextBudget, VersionedTokenEstimator};
 use tracedecay_temporal_query::execution::ExecutionLimits;
-use tracedecay_temporal_query::ports::{
-    BudgetObservation, ReadBudgetAccounting, TemporalSnapshotRequest,
-};
+use tracedecay_temporal_query::execution::{BudgetObservation, ReadBudgetAccounting};
 use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -400,7 +399,7 @@ impl AuthorizedTaskSessionExecutionRequestV1 {
             let snapshot = temporal.snapshot_request();
             let exact_session = matches!(
                 snapshot.retrieval_scope(),
-                tracedecay_temporal_query::ports::TemporalRetrievalScope::Session(session_id)
+                tracedecay_temporal_query::snapshot::TemporalRetrievalScope::Session(session_id)
                     if session_id == binding.source().session_id()
             );
             if !exact_session

@@ -35,9 +35,9 @@ use tracedecay_temporal_query::context::{
 };
 use tracedecay_temporal_query::cursor::CursorError;
 use tracedecay_temporal_query::execution::{BindingDigest, ExecutionLimits};
-use tracedecay_temporal_query::ports::TemporalRetrievalScope;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_temporal_query::resolution::{SummaryLineageRejection, SummaryOmission};
+use tracedecay_temporal_query::snapshot::TemporalRetrievalScope;
 use tracedecay_temporal_query::snapshot::{
     KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
 };
@@ -554,7 +554,7 @@ impl Drop for PendingExecution {
         self.dropped_after_cancel.store(
             matches!(
                 self.control.checkpoint(),
-                Err(tracedecay_temporal_query::ports::TemporalPortError::Cancelled)
+                Err(tracedecay_temporal_query::execution::TemporalPortError::Cancelled)
             ),
             Ordering::SeqCst,
         );

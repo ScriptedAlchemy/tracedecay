@@ -9,12 +9,12 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_domain::{SessionId, SignedCursorKeyRefV1};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_temporal_query::execution::BindingDigest;
-use tracedecay_temporal_query::ports::{TemporalAuthorizedRoot, TemporalRetrievalScope};
 use tracedecay_temporal_query::snapshot::{
     MAX_TEMPORAL_PARTICIPANTS, TemporalParticipantAuthorization, TemporalParticipantGeneration,
     TemporalParticipantManifest, TemporalPreparedCandidateCohort, TemporalSourceAccess,
     TemporalWatermarks,
 };
+use tracedecay_temporal_query::snapshot::{TemporalAuthorizedRoot, TemporalRetrievalScope};
 
 use super::execution::{
     AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
@@ -525,9 +525,9 @@ mod tests {
     use tracedecay_temporal_query::candidates::CandidateChannel;
     use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
     use tracedecay_temporal_query::execution::{ExecutionControl, ExecutionLimits};
-    use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
     use tracedecay_temporal_query::ranking::DiversityLimits;
     use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
+    use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 
     fn root(project_id: Option<&str>) -> TemporalAuthorizedRoot {
         match project_id {

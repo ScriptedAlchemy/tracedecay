@@ -683,10 +683,6 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn profile_registry(&self) -> &RegisteredGlobalDb {
         self.profile_registry.as_ref()
     }
-
-    pub fn canonical_project_key(project_path: &std::path::Path) -> String {
-        RegisteredGlobalDb::canonical_project_key(project_path)
-    }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

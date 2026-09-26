@@ -6,11 +6,11 @@ use tracedecay_domain::{
 };
 
 use super::super::execution::ExecutionControl;
-use super::super::ports::TemporalPortError;
 use super::types::{
     ResolutionAssertion, ResolutionCheckpoint, ResolutionLineageEdge, ResolutionLineageEdgeKind,
     ResolutionOccurrence, ResolvedOccurrence, TemporalResolution,
 };
+use crate::execution::TemporalPortError;
 
 fn checkpoint(
     control: &ExecutionControl,

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::path_safety::canonical_root_identity as canonical_temp_path;
@@ -208,7 +209,7 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
         .expect("project should be registered");
     assert_eq!(
         record.canonical_root,
-        HostAdmissionTestRuntimeV1::canonical_project_key(&fx.main),
+        RegisteredGlobalDb::canonical_project_key(&fx.main),
         "canonical_root must stay pinned to the primary checkout, not the worktree that just touched it"
     );
     assert_eq!(
@@ -228,7 +229,7 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
         .expect("linked worktree must expose a git common dir");
     let expected_alias = format!(
         "git-common-dir:{}",
-        HostAdmissionTestRuntimeV1::canonical_project_key(&git_common_dir)
+        RegisteredGlobalDb::canonical_project_key(&git_common_dir)
     );
     assert!(
         context
@@ -275,7 +276,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
             .expect("stale row should exist");
         assert_eq!(
             stale.canonical_root,
-            HostAdmissionTestRuntimeV1::canonical_project_key(&fx.worktree),
+            RegisteredGlobalDb::canonical_project_key(&fx.worktree),
             "fixture setup should have produced the stale (bug) state"
         );
         drop(db);
@@ -311,7 +312,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         .expect("project should still be registered");
     assert_eq!(
         healed.canonical_root,
-        HostAdmissionTestRuntimeV1::canonical_project_key(&fx.main),
+        RegisteredGlobalDb::canonical_project_key(&fx.main),
         "a stale worktree-pinned canonical_root must heal back to the primary checkout on touch"
     );
     assert_eq!(healed.display_root, fx.main.to_string_lossy());

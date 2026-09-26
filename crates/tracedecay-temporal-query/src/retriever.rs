@@ -17,13 +17,13 @@ use tracedecay_domain::{
 use super::context::VersionedTokenEstimator;
 use super::context::assembly::assemble_context_with_frames_controlled;
 use super::hydration::{TemporalHydrationPort, hydrate_selected};
-use super::ports::TemporalPortError;
 use super::snapshot::{TemporalParticipantGeneration, TemporalSourceAccess};
 use super::{
     TemporalCandidateExport, TemporalHydratedResult, TemporalKernelError, TemporalKernelRequest,
     TemporalKernelResult, check_control, map_context_error, map_hydration_error,
     public_summary_omissions, temporal_context_frames,
 };
+use crate::execution::TemporalPortError;
 
 impl TemporalCandidateExport {
     /// Project this frozen temporal page into the canonical compact retrieval

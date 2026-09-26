@@ -569,7 +569,9 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     global_db
         .append_profile_analytics_event_for_test(&tracedecay_global_db::AnalyticsEventInsert {
             provider: "codex".to_string(),
-            project_id: HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root()),
+            project_id: tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(
+                cg.project_root(),
+            ),
             session_id: Some("skill-writer-analytics".to_string()),
             timestamp: 1_715_000_111,
             event_kind: "tool".to_string(),

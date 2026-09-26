@@ -5,7 +5,8 @@ use tracedecay_domain::{
     SummarySourceHorizonV1, TemporalValidityV1, UtcMicros,
 };
 
-use tracedecay_temporal_query::ports::{SummarySourceRecord, TemporalPortError, TemporalRecord};
+use tracedecay_temporal_query::execution::TemporalPortError;
+use tracedecay_temporal_query::paging::{SummarySourceRecord, TemporalRecord};
 use tracedecay_temporal_query::resolution::{
     ResolutionAssertion, ResolutionEvidence, ResolutionOccurrence, SummarySourceState,
     ValidatedAuthorization,

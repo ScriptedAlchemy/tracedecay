@@ -143,7 +143,7 @@ where
         if binding.cancellation().is_cancelled() || context.cancellation().is_cancelled() {
             control.cancel();
         }
-        let snapshot_request = tracedecay_temporal_query::ports::TemporalSnapshotRequest::new(
+        let snapshot_request = tracedecay_temporal_query::snapshot::TemporalSnapshotRequest::new(
             query.session_id.clone(),
             root_digest,
             request_digest,
@@ -356,7 +356,7 @@ fn map_task_session_execution_error(
 mod tests {
     use tracedecay_domain::CursorManifestLimitKindV1;
     use tracedecay_temporal_query::TemporalKernelError;
-    use tracedecay_temporal_query::ports::TemporalPortError;
+    use tracedecay_temporal_query::execution::TemporalPortError;
 
     use super::*;
 

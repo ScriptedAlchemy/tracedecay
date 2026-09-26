@@ -12,8 +12,8 @@ use tracedecay_domain::{
 };
 
 use super::hydration::{HydratedPayload, UnavailableHydration};
-use super::ports::TemporalPortError;
 use super::resolution::summary::SummaryOmission;
+use crate::execution::TemporalPortError;
 
 const CANONICAL_CONTEXT_FORMAT: &str = "tracedecay.compact_context.v1";
 const MAX_CONTEXT_RECORDS: usize = 64;

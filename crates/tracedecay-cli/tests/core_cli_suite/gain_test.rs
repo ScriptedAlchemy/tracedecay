@@ -1,6 +1,7 @@
 use std::fs;
 
 use tempfile::TempDir;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 async fn open_isolated_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
@@ -70,7 +71,7 @@ async fn savings_project_filters_canonicalize_read_side() {
     let runtime = open_isolated_runtime(&tmp).await;
     let project_dir = tmp.path().join("project");
     fs::create_dir(&project_dir).unwrap();
-    let canonical_project = HostAdmissionTestRuntimeV1::canonical_project_key(&project_dir);
+    let canonical_project = RegisteredGlobalDb::canonical_project_key(&project_dir);
     let project_with_trailing_slash = format!("{}/", project_dir.display());
 
     runtime
@@ -98,7 +99,7 @@ async fn record_savings_canonicalizes_project_path_on_write() {
     let project_dir = tmp.path().join("project");
     fs::create_dir(&project_dir).unwrap();
     let raw_project = format!("{}/", project_dir.display());
-    let canonical_project = HostAdmissionTestRuntimeV1::canonical_project_key(&project_dir);
+    let canonical_project = RegisteredGlobalDb::canonical_project_key(&project_dir);
 
     runtime
         .record_savings_for_test(&raw_project, "tracedecay_context", 3000, 400, 86_400)

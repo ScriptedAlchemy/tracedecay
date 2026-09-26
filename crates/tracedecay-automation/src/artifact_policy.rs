@@ -1,4 +1,3 @@
-use crate::AutomationRunRecord;
 use crate::backend::AgentTaskKind;
 
 #[derive(Debug, Clone, Copy)]
@@ -11,11 +10,8 @@ pub struct TaskArtifactPolicy {
 }
 
 impl TaskArtifactPolicy {
-    pub fn next_actions<R>(self, record: &R) -> Vec<&'static str>
-    where
-        R: AutomationRunRecord + ?Sized,
-    {
-        if record.accepted_count() > 0 {
+    pub fn next_actions(self, accepted_count: usize) -> Vec<&'static str> {
+        if accepted_count > 0 {
             self.accepted_next_actions.to_vec()
         } else {
             self.rejected_next_actions.to_vec()

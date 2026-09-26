@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_project::project::TraceDecayOpenOptions;
 #[cfg(unix)]
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
@@ -59,7 +60,7 @@ pub async fn register_global_project(home: &Path, project: &Path) {
     let runtime = HostAdmissionTestRuntimeV1::profile(home.join(".tracedecay"))
         .await
         .unwrap();
-    let canonical = HostAdmissionTestRuntimeV1::canonical_project_key(project);
+    let canonical = RegisteredGlobalDb::canonical_project_key(project);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canonical.hash(&mut hasher);
     let project_id = format!("test_{:016x}", hasher.finish());

@@ -5,10 +5,10 @@ use serde::{Serialize, Serializer};
 use tracedecay_domain::{CompactContextBundleV1, ContextOmissionReasonV1, HydrationStateV1};
 
 use super::super::execution::ExecutionControl;
-use super::super::ports::TemporalPortError;
 use super::super::resolution::summary::SummaryOmission;
 use super::estimation::{TOKEN_SCAN_CHUNK_BYTES, TokenSummary};
 use super::{ContextError, ContextPayload, MAX_CONTEXT_OUTPUT_BYTES, TokenPolicy};
+use crate::execution::TemporalPortError;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireMeasure {
     pub bytes: u64,

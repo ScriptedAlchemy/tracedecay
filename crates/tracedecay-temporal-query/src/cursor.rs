@@ -6,10 +6,15 @@ use tracedecay_domain::{
     SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
 };
 
-use super::ports::{
-    CursorKeyError, CursorSignature, SessionCursorAuthenticator, TemporalRetrievalScope,
+use super::snapshot::{TemporalExecutionSnapshot, TemporalRetrievalScope};
+
+mod authentication;
+
+#[cfg(test)]
+pub(crate) use authentication::MAX_CURSOR_SECRET_BYTES;
+pub use authentication::{
+    CursorKeyError, CursorSignature, InMemoryCursorAuthenticator, SessionCursorAuthenticator,
 };
-use super::snapshot::TemporalExecutionSnapshot;
 
 const CURSOR_FORMAT_VERSION: &str = "3";
 const MAX_CURSOR_PAYLOAD_HEX_BYTES: usize = 2 * 65_536;
@@ -470,11 +475,10 @@ mod tests {
 
     use super::*;
     use crate::candidates::CandidateChannel;
+    use crate::cursor::{CursorKeyError, CursorSignature, SessionCursorAuthenticator};
     use crate::execution::BindingDigest;
-    use crate::ports::{
-        CursorKeyError, CursorSignature, SessionCursorAuthenticator, TemporalSnapshotRequest,
-    };
     use crate::ranking::RankingCandidate;
+    use crate::snapshot::TemporalSnapshotRequest;
     use crate::snapshot::{
         KernelVersions, MAX_TEMPORAL_PARTICIPANTS, TemporalExecutionSnapshot,
         TemporalParticipantAuthorization, TemporalParticipantGeneration,

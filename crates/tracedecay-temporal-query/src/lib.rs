@@ -4,7 +4,6 @@ pub mod cursor;
 pub mod execution;
 pub mod hydration;
 pub mod paging;
-pub mod ports;
 pub mod ranking;
 pub mod resolution;
 mod retriever;
@@ -28,14 +27,14 @@ use self::context::{
     CompactContext, ContextBudget, ContextError, TemporalContextFrames, VersionedTokenEstimator,
 };
 use self::cursor::{
-    CursorError, CursorPosition, StableSortKey, encode_cursor_position, verify_cursor_position,
+    CursorError, CursorPosition, SessionCursorAuthenticator, StableSortKey, encode_cursor_position,
+    verify_cursor_position,
 };
-use self::execution::ExecutionLimits;
+use self::execution::{ExecutionLimits, TemporalPortError};
 use self::hydration::{HydrationBatch, HydrationError, TemporalHydrationPort};
-use self::paging::{CandidateReadState, PageKey, PageLimits, PageStatus, TemporalRecordReadState};
-use self::ports::{
-    SessionCursorAuthenticator, TemporalPortError, TemporalReadPort, TemporalRecord,
-    TemporalRecordBatch, TemporalRetrievalScope, pull_candidate_page, pull_temporal_record_page,
+use self::paging::{
+    CandidateReadState, PageKey, PageLimits, PageStatus, TemporalReadPort, TemporalRecord,
+    TemporalRecordBatch, TemporalRecordReadState, pull_candidate_page, pull_temporal_record_page,
 };
 use self::ranking::{
     DiversityLimits, RankedCandidate, RankingCandidate, RankingError, rank_candidates,
@@ -48,7 +47,7 @@ use self::resolution::summary::{
 use self::resolution::types::{
     ResolutionLineageEdge, ResolutionLineageEdgeKind, ResolvedOccurrence, TemporalResolution,
 };
-use self::snapshot::TemporalExecutionSnapshot;
+use self::snapshot::{TemporalExecutionSnapshot, TemporalRetrievalScope};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemporalKernelRequest {
@@ -1028,10 +1027,10 @@ mod scope_tests {
 
     use super::execution::ExecutionControl;
     use super::hydration::HydrationBatch;
-    use super::ports::TemporalRetrievalScope;
     use super::resolution::summary::{
         SummaryLineageEligibility, SummaryLineageRejection, SummaryOmission, SummarySourceState,
     };
+    use super::snapshot::TemporalRetrievalScope;
     use super::{evaluate_summaries_for_scope, public_summary_omissions, temporal_context_frames};
 
     fn anchor(value: &str) -> RetrievalAnchorId {

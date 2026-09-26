@@ -2,6 +2,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay_lcm::LcmStorageKind;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
@@ -1648,7 +1649,7 @@ async fn hook_analytics_import_is_incremental_and_idempotent() {
     assert!(providers.contains(&"hook_claude"));
     assert!(providers.contains(&"hook_codex"));
     assert!(providers.contains(&"hook_cursor"));
-    let expected_project = HostAdmissionTestRuntimeV1::canonical_project_key(tmp.path());
+    let expected_project = RegisteredGlobalDb::canonical_project_key(tmp.path());
     assert!(
         events
             .iter()

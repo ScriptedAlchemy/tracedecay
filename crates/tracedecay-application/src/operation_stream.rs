@@ -33,9 +33,10 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
+use tracedecay_temporal_query::cursor::InMemoryCursorAuthenticator;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::execution::BindingDigest;
-use tracedecay_temporal_query::ports::{InMemoryCursorAuthenticator, TemporalSnapshotRequest};
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 use tracedecay_temporal_query::snapshot::{
     KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
 };

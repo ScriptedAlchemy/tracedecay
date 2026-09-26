@@ -13,9 +13,8 @@ use crate::support::{
 #[cfg(feature = "test-transport")]
 use serde_json::Value;
 #[cfg(feature = "test-transport")]
-use tracedecay_global_db::AnalyticsEventInsert;
+use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 #[cfg(feature = "test-transport")]
-use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
@@ -214,7 +213,7 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
 #[tokio::test]
 async fn analytics_section_filter_returns_only_the_requested_section() {
     let fixture = production_composition_fixture().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let timestamp = current_timestamp() - 60;
     fixture
         .harness
@@ -555,7 +554,7 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
 #[tokio::test]
 async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_retired_events() {
     let fixture = production_composition_fixture().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let timestamp = current_timestamp() - 60;
     let events = [
         tool_call_event(&project_id, "tracedecay_grep", "ok", timestamp),
@@ -728,7 +727,7 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
 #[tokio::test]
 async fn analytics_keeps_host_unavailable_public_routes_out_of_internal_calls() {
     let fixture = production_composition_fixture().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let timestamp = current_timestamp() - 60;
     let event = tool_call_event(
         &project_id,
@@ -791,7 +790,7 @@ async fn analytics_keeps_host_unavailable_public_routes_out_of_internal_calls() 
 #[tokio::test]
 async fn analytics_aggregates_sections_before_any_event_sample_cap() {
     let fixture = production_composition_fixture().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let timestamp = current_timestamp() - 60;
 
     let events = vec![
@@ -901,7 +900,7 @@ fn active_window_events(project_id: &str, now: i64) -> Vec<AnalyticsEventInsert>
 #[tokio::test]
 async fn analytics_keeps_foreign_and_stale_events_out_of_the_active_window() {
     let fixture = production_composition_fixture().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let now = current_timestamp();
     fixture
         .harness
@@ -946,7 +945,7 @@ async fn analytics_keeps_foreign_and_stale_events_out_of_the_active_window() {
 #[tokio::test]
 async fn analytics_scope_all_counts_foreign_project_events_and_keeps_project_facts() {
     let fixture = production_composition_fixture().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let now = current_timestamp();
     fixture
         .harness
@@ -1006,7 +1005,7 @@ async fn analytics_scope_all_counts_foreign_project_events_and_keeps_project_fac
 #[tokio::test]
 async fn analytics_clamps_window_days_and_applies_the_clamped_window() {
     let fixture = production_composition_fixture().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let now = current_timestamp();
     fixture
         .harness
@@ -1082,7 +1081,7 @@ async fn analytics_clamps_window_days_and_applies_the_clamped_window() {
 #[tokio::test]
 async fn analytics_limits_top_tools_to_the_ten_highest_call_counts() {
     let fixture = production_composition_fixture().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let timestamp = current_timestamp() - 60;
     let mut events = Vec::new();
     for index in 0..11 {

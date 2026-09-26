@@ -356,11 +356,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub fn canonical_project_key(project_path: &Path) -> String {
-        RegisteredGlobalDb::canonical_project_key(project_path)
-    }
-
-    #[doc(hidden)]
     pub fn profile_root_for_test(&self) -> &Path {
         &self.profile_root
     }

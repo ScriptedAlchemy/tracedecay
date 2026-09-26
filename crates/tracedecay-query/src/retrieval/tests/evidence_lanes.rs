@@ -16,8 +16,8 @@ use tracedecay_domain::{
     WorkProductEventSequenceV1, WorkProductSourceWatermarkV1,
 };
 use tracedecay_temporal_query::execution::BindingDigest;
-use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 use tracedecay_temporal_query::snapshot::{
     KernelVersions, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
     TemporalParticipantGeneration, TemporalParticipantManifest, TemporalSourceAccess,

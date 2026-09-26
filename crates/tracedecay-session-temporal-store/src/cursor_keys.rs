@@ -15,7 +15,7 @@ use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
 use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, engine::params};
 use tracedecay_temporal_query::cursor::{CURSOR_CLOCK_SKEW_MICROS, CURSOR_LIFETIME_MICROS};
-use tracedecay_temporal_query::ports::{
+use tracedecay_temporal_query::cursor::{
     CursorKeyError, CursorSignature, InMemoryCursorAuthenticator, SessionCursorAuthenticator,
 };
 use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;

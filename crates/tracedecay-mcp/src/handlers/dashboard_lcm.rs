@@ -905,13 +905,13 @@ fn retrieval_query(
     .with_execution_limits(execution_limits)
     .with_retrieval_scope(retrieval_scope);
     Some(query.with_semantic_filter(
-        tracedecay_temporal_query::ports::TemporalCandidateFilterV1 {
+        tracedecay_temporal_query::snapshot::TemporalCandidateFilterV1 {
             source,
             include_summaries: true,
             roles,
             start_time: time_range.start_time,
             end_time: time_range.end_time,
-            ..tracedecay_temporal_query::ports::TemporalCandidateFilterV1::default()
+            ..tracedecay_temporal_query::snapshot::TemporalCandidateFilterV1::default()
         },
     ))
 }

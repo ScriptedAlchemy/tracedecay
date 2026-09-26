@@ -24,11 +24,12 @@ use tracedecay_lcm::payload::{
 use tracedecay_lcm::{LcmStorageKind, raw};
 use tracedecay_store::{derive_canonical_projection, message_metadata_with_envelope};
 use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::execution::TemporalPortError;
 use tracedecay_temporal_query::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
     HydrationSink, TemporalHydrationPort,
 };
-use tracedecay_temporal_query::ports::{TemporalPortError, TemporalRetrievalScope};
+use tracedecay_temporal_query::snapshot::TemporalRetrievalScope;
 use tracedecay_temporal_query::snapshot::{TemporalExecutionSnapshot, TemporalSourceAccess};
 
 use super::operations::CanonicalPublicationManifest;
@@ -1489,12 +1490,11 @@ mod tests {
 
     use super::*;
     use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use tracedecay_temporal_query::execution::TemporalPortError;
     use tracedecay_temporal_query::execution::{BindingDigest, ExecutionLimits};
-    use tracedecay_temporal_query::ports::{
-        TemporalAuthorizedRoot, TemporalPortError, TemporalSnapshotRequest,
-    };
     use tracedecay_temporal_query::resolution::ValidatedAuthorization;
     use tracedecay_temporal_query::snapshot::{KernelVersions, TemporalWatermarks};
+    use tracedecay_temporal_query::snapshot::{TemporalAuthorizedRoot, TemporalSnapshotRequest};
 
     struct RegisteredHydrationRead {
         read: DatabaseEngineReadSnapshot,
@@ -2460,7 +2460,7 @@ mod tests {
     fn authorized_snapshot(anchor: &RetrievalAnchorRecord) -> TemporalExecutionSnapshot {
         authorized_snapshot_for_scope(
             anchor,
-            tracedecay_temporal_query::ports::TemporalRetrievalScope::Session(
+            tracedecay_temporal_query::snapshot::TemporalRetrievalScope::Session(
                 SessionId::new("session-1").expect("session"),
             ),
         )
@@ -2469,13 +2469,13 @@ mod tests {
     fn authorized_root_snapshot(anchor: &RetrievalAnchorRecord) -> TemporalExecutionSnapshot {
         authorized_snapshot_for_scope(
             anchor,
-            tracedecay_temporal_query::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+            tracedecay_temporal_query::snapshot::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
         )
     }
 
     fn authorized_snapshot_for_scope(
         anchor: &RetrievalAnchorRecord,
-        scope: tracedecay_temporal_query::ports::TemporalRetrievalScope,
+        scope: tracedecay_temporal_query::snapshot::TemporalRetrievalScope,
     ) -> TemporalExecutionSnapshot {
         TemporalExecutionSnapshot::new_authorized(
             TemporalSnapshotRequest::new(

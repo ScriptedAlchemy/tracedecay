@@ -30,8 +30,8 @@ use tracedecay_sessions::runtime::{
     SessionRecord, SessionSearchScope,
 };
 use tracedecay_temporal_query::context::ContextBudget;
-use tracedecay_temporal_query::ports::TemporalCandidateFilterV1;
 use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::snapshot::TemporalCandidateFilterV1;
 use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
 
 use super::session_refresh::{

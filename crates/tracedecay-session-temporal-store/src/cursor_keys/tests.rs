@@ -5,7 +5,7 @@ use tracedecay_contracts::now_micros;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::{IntoParams, params};
-use tracedecay_temporal_query::ports::SessionCursorAuthenticator;
+use tracedecay_temporal_query::cursor::SessionCursorAuthenticator;
 
 use super::{SessionTemporalCursorKeyProvider, SessionTemporalCursorKeyProviderError};
 use crate::SessionTemporalAccess;

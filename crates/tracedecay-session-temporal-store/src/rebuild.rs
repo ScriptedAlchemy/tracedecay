@@ -8,7 +8,7 @@ use tracedecay_store::{
     SessionStoreResult,
 };
 use tracedecay_temporal_query::execution::ExecutionControl;
-use tracedecay_temporal_query::ports::TemporalPortError;
+use tracedecay_temporal_query::execution::TemporalPortError;
 
 use super::projection::{canonical_parent_message_resolver, validate_final_projection_receipt};
 use super::query::{

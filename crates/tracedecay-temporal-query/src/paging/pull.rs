@@ -6,18 +6,17 @@ use std::pin::Pin;
 use serde::Serialize;
 use tracedecay_domain::{LogicalCopyRecordV1, SessionSummaryRecordV1};
 
-use super::{TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest};
-use crate::candidates::{CandidateChannel, CandidatePlan};
-use crate::execution::{ExecutionLimits, await_controlled};
-use crate::paging::{
+use super::{
     BoundedPage, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidatePageSink, CandidateReadState,
     PageRequest, PageStatus, RECORD_READ_BUDGET, ReadBudgetResources, ReadState,
     TemporalRecordPageSink, TemporalRecordReadState,
 };
+use crate::candidates::{CandidateChannel, CandidatePlan};
+use crate::execution::{ExecutionLimits, TemporalPortError, await_controlled};
 use crate::ranking::RankingCandidate;
 use crate::resolution::summary::SummarySourceState;
 use crate::resolution::types::{ResolutionAssertion, ResolutionOccurrence};
-use crate::snapshot::TemporalExecutionSnapshot;
+use crate::snapshot::{TemporalExecutionSnapshot, TemporalRetrievalScope, TemporalSnapshotRequest};
 
 const MAX_READ_ITEM_BYTES: usize = 8 * 1024 * 1024;
 
