@@ -30,19 +30,18 @@ use super::types::{
 };
 use super::{
     LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_FRESH_TAIL_COUNT,
-    LCM_DEFAULT_SUMMARY_FAN_IN, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LCM_SCHEMA_VERSION,
-    LcmConfigStatus, LcmContentRange, LcmContentSlice, LcmDagDepthStatus, LcmDagStatus,
-    LcmDescribeExternalPayload, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeSourceOverview,
-    LcmDescribeSummaryNode, LcmDescribeTarget, LcmError, LcmExpandQueryBudget,
-    LcmExpandQueryContextBlock, LcmExpandQueryMatch, LcmExpandQueryPagination,
-    LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt, LcmExpandRequest,
-    LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget, LcmExpandedSummarySource,
-    LcmGcConfig, LcmGrepFilters, LcmGrepHit, LcmGrepRequest, LcmGrepSort, LcmLoadSessionMessage,
-    LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage, LcmRawMessageOverview,
-    LcmRecentSession, LcmReplayMessage, LcmReplaySummaryNode, LcmScope, LcmSessionReplayRequest,
-    LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmStorageKind, LcmStoreStatus,
-    LcmSummaryConvergenceStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview, dag,
-    gc, maintenance, payload, raw, schema, util,
+    LCM_DEFAULT_SUMMARY_FAN_IN, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmConfigStatus,
+    LcmContentRange, LcmContentSlice, LcmDagDepthStatus, LcmDagStatus, LcmDescribeExternalPayload,
+    LcmDescribeRequest, LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode,
+    LcmDescribeTarget, LcmError, LcmExpandQueryBudget, LcmExpandQueryContextBlock,
+    LcmExpandQueryMatch, LcmExpandQueryPagination, LcmExpandQueryRequest, LcmExpandQueryResponse,
+    LcmExpandQuerySynthesisPrompt, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination,
+    LcmExpandTarget, LcmExpandedSummarySource, LcmGcConfig, LcmGrepFilters, LcmGrepHit,
+    LcmGrepRequest, LcmGrepSort, LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest,
+    LcmRawMessage, LcmRawMessageOverview, LcmRecentSession, LcmReplayMessage, LcmReplaySummaryNode,
+    LcmScope, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef, LcmStatus,
+    LcmStorageKind, LcmStoreStatus, LcmSummaryConvergenceStatus, LcmSummaryExpansion,
+    LcmSummaryNode, LcmSummaryNodeOverview, dag, gc, maintenance, payload, raw, schema, util,
 };
 
 const MAX_PAGE_LIMIT: usize = 100;
@@ -359,9 +358,7 @@ pub async fn status(
     deep: bool,
     gc_config: &LcmGcConfig,
 ) -> Result<LcmStatus, LcmError> {
-    let schema_version = schema::schema_version(conn)
-        .await
-        .unwrap_or(LCM_SCHEMA_VERSION);
+    let schema_version = schema::schema_version(conn).await?;
     if !lcm_table_exists(conn, "lcm_raw_messages").await? {
         return Ok(empty_status(schema_version, gc_config));
     }

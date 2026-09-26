@@ -10,7 +10,7 @@ mod types;
 pub use refresh::{
     SessionRefreshConfiguration, SessionRefreshDigest, SessionRefreshHandle, SessionRefreshOutcome,
     SessionRefreshRequestError, SessionRefreshSchedulerError, SessionRefreshService,
-    SessionRefreshTarget,
+    SessionRefreshTarget, SessionRefreshUnavailable,
 };
 pub use refresh_service::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
