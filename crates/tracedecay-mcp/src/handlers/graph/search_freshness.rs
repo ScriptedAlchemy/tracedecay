@@ -158,6 +158,13 @@ pub(super) fn search_freshness(
     if let Some(reason) = reason.as_deref() {
         let _ = write!(summary, " unavailable={reason}");
     }
+    let parked = match worktree {
+        WorktreeFreshnessSourceV1::Worktree(state) => state
+            .parked
+            .clone()
+            .filter(|parked| !parked.retries_on_wake),
+        WorktreeFreshnessSourceV1::NotMounted | WorktreeFreshnessSourceV1::Unattached => None,
+    };
     PrimitiveSearchFreshnessV1 {
         state: PrimitiveFreshnessStateV1::PossiblyStale,
         indexing: Some(PrimitiveIndexingStateV1 {
@@ -168,6 +175,7 @@ pub(super) fn search_freshness(
             rebuild_in_flight,
             stale_lanes,
             reason,
+            parked,
         }),
     }
 }
@@ -178,6 +186,11 @@ pub(super) fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String 
     let mut lines = format!("freshness: {}\n", freshness.state.as_str());
     if let Some(indexing) = &freshness.indexing {
         let _ = writeln!(lines, "indexing: {}", indexing.summary);
+        if let Some(parked) = &indexing.parked {
+            let _ = writeln!(lines, "parked: {}", parked.reason);
+            let _ = writeln!(lines, "remedy: {}", parked.remediation);
+            lines.push_str("retryable: false\n");
+        }
     }
     lines
 }
@@ -185,7 +198,8 @@ pub(super) fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String 
 #[cfg(test)]
 mod tests {
     use tracedecay_contracts::code_index_freshness::{
-        CodeIndexBuildProgressV1, CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
+        CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1, CodeIndexFreshnessCoverageV1,
+        CodeIndexStalenessStateV1,
     };
 
     use super::*;
@@ -334,5 +348,48 @@ mod tests {
         );
         assert_eq!(indexing.reason.as_deref(), Some("generation_unavailable"));
         assert!(indexing.stale_lanes.is_empty());
+    }
+
+    #[test]
+    fn a_terminal_park_is_rendered_with_its_remedy_and_no_retry() {
+        let park = |retries_on_wake| {
+            WorktreeFreshnessSourceV1::Worktree(Box::new(CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/fixture".to_owned(),
+                staleness_state: Some(CodeIndexStalenessStateV1::Parked),
+                parked: Some(CodeIndexConvergenceParkedV1 {
+                    reason: "source unreadable".to_owned(),
+                    blocked_reason: None,
+                    remediation: "fix it, then run `tracedecay sync`".to_owned(),
+                    parked_at_micros: 1,
+                    observed_passes: 1,
+                    retries_on_wake,
+                }),
+                ..CodeIndexWorktreeFreshnessV1::default()
+            }))
+        };
+        let unavailable = |worktree| {
+            search_freshness(
+                ServedGenerationV1::Unavailable {
+                    reason: "generation_unverified",
+                },
+                &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
+                &worktree,
+            )
+        };
+
+        assert_eq!(
+            freshness_lines(&unavailable(park(false))),
+            "freshness: possibly_stale\n\
+             indexing: state=parked rebuild_in_flight=false served_generation=none unavailable=generation_unverified\n\
+             parked: source unreadable\n\
+             remedy: fix it, then run `tracedecay sync`\n\
+             retryable: false\n"
+        );
+        let rechecked = unavailable(park(true));
+        assert_eq!(
+            rechecked.indexing.and_then(|indexing| indexing.parked),
+            None,
+            "a park every wake re-checks is not terminal"
+        );
     }
 }

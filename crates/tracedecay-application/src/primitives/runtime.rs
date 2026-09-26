@@ -12,6 +12,7 @@ use std::sync::{Arc, LazyLock};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_contracts::retrieval::grep_analysis::{
     AstGrepAuthorityV1, ComplexityAuthorityV1, DependencyDepthAuthorityV1, GrepAnalysisProblemV1,
     LexicalGrepAuthorityV1, PrimitiveCoverageV1, PrimitiveOutcomeV1, PrimitivePortContextV1,
@@ -28,13 +29,14 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOperation, ApplicationOutcome,
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
-    CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
-    CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, Omission,
-    OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination,
-    PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext,
-    RequestId, ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
+    ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
+    AuthorityReceipt, CancellationContext, CancellationObservation, CancellationStage,
+    CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState,
+    Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState,
+    LegalAction, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
+    OperationTermination, PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission,
+    RequestContext, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic,
+    TemporalState,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
 use tracedecay_lsp::SearchedTsconfig;
@@ -138,6 +140,19 @@ pub type ManagedTestRunCurrentIdentityFuture<'a> = Pin<
 
 pub trait ManagedTestRunCurrentScopePort: Send + Sync {
     fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_>;
+}
+
+pub type CodeIndexConvergenceParkFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<CodeIndexConvergenceParkedV1>> + Send + 'a>>;
+
+/// The convergence park status and doctor read for a mounted worktree.
+pub trait CodeIndexConvergenceParkPortV1: Send + Sync {
+    /// The park recorded for `project_root` that no ordinary wake retries,
+    /// so only the operator's remedy can let the index converge.
+    fn terminal_convergence_park<'a>(
+        &'a self,
+        project_root: &'a Path,
+    ) -> CodeIndexConvergenceParkFuture<'a>;
 }
 
 // The extended-primitive wire pairs live at the application boundary
@@ -296,6 +311,7 @@ pub struct OwnedPrimitiveRuntime {
     admitted_project_root: PathBuf,
     test_runs: CanonicalManagedTestRunReader,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
+    convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
     capacity: PrimitiveCapacity,
 }
 
@@ -434,10 +450,81 @@ impl OwnedPrimitiveRuntime {
                 let Some(_permit) = self.capacity.try_acquire() else {
                     return saturated(&context, &invocation.operation);
                 };
-                dispatch_admitted(self, invocation, context, observed_at).await
+                let reads_code_index = reads_code_index(&invocation.request);
+                let result = dispatch_admitted(self, invocation, context, observed_at).await?;
+                match result {
+                    Err(refusal)
+                        if reads_code_index
+                            && refusal.problem.kind == ApplicationProblemKind::Unavailable
+                            && refusal.problem.retryable =>
+                    {
+                        self.parked_refusal(refusal).await
+                    }
+                    result => Ok(result),
+                }
             },
             label = "usecases.primitives.execute"
         ))
+    }
+}
+
+impl OwnedPrimitiveRuntime {
+    /// A code-index read refused as retryable while the worktree is parked
+    /// would be retried forever: nothing converges until the operator acts.
+    /// The park's remedy and cause replace the generic refusal; the remedy
+    /// leads so a long cause is what the diagnostic bound cuts.
+    async fn parked_refusal(&self, refusal: ApplicationProblemEnvelope) -> PrimitiveResult<Value> {
+        let Some(parked) = self
+            .convergence_park
+            .terminal_convergence_park(&self.admitted_project_root)
+            .await
+        else {
+            return Ok(Err(refusal));
+        };
+        let message = safe_problem_message(&format!(
+            "The code index for this worktree is parked; remedy: {}; cause: {}",
+            parked.remediation, parked.reason
+        ));
+        Ok(Err(ApplicationProblemEnvelope::new(
+            refusal.contract,
+            refusal.request_id,
+            ApplicationProblem::code_index_parked(message),
+        )?))
+    }
+}
+
+/// Whether the request is answered from the worktree's code index, so a
+/// parked index is the reason it cannot be served.
+const fn reads_code_index(request: &PrimitiveRequest) -> bool {
+    match request {
+        PrimitiveRequest::SymbolSearch(_)
+        | PrimitiveRequest::ExactSymbol(_)
+        | PrimitiveRequest::SignatureSearch(_)
+        | PrimitiveRequest::Implementations(_)
+        | PrimitiveRequest::TypeHierarchy(_)
+        | PrimitiveRequest::Callers(_)
+        | PrimitiveRequest::Callees(_)
+        | PrimitiveRequest::Impact(_)
+        | PrimitiveRequest::SourceRead(_)
+        | PrimitiveRequest::TestMap(_)
+        | PrimitiveRequest::AffectedFileTests(_)
+        | PrimitiveRequest::LexicalGrep(_)
+        | PrimitiveRequest::AstGrep(_)
+        | PrimitiveRequest::DependencyDepth(_)
+        | PrimitiveRequest::QualifiedName(_)
+        | PrimitiveRequest::CallChain(_)
+        | PrimitiveRequest::FileDependents(_)
+        | PrimitiveRequest::SourceLines(_)
+        | PrimitiveRequest::SourceBody(_)
+        | PrimitiveRequest::SourceOutline(_)
+        | PrimitiveRequest::ModuleApi(_)
+        | PrimitiveRequest::HealthDelta(_) => true,
+        PrimitiveRequest::Complexity(_)
+        | PrimitiveRequest::SessionLookup(_)
+        | PrimitiveRequest::HealthRead(_)
+        | PrimitiveRequest::StorageStatus(_)
+        | PrimitiveRequest::DiagnosticsRead(_)
+        | PrimitiveRequest::RecentTestResults(_) => false,
     }
 }
 
@@ -522,6 +609,7 @@ pub fn open_primitive_project_runtime(
     admitted_root_uri: String,
     operation_events: OperationEventAuthority,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
+    convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
 ) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {
     scope.validate()?;
     let admitted_project_root = validate_admitted_root_uri(&admitted_root_uri)?;
@@ -570,6 +658,7 @@ pub fn open_primitive_project_runtime(
         admitted_project_root,
         test_runs: CanonicalManagedTestRunReader::new(operation_events),
         test_run_scope,
+        convergence_park,
         capacity: PrimitiveCapacity::new(MAX_CONCURRENT_PRIMITIVES),
     });
     Ok(PrimitiveProjectRuntime { database, dispatch })

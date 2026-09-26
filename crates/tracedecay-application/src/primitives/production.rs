@@ -22,9 +22,9 @@ use url::Url;
 
 use super::concrete::AuthenticatedSymbolGraphCursorAdapter;
 use super::runtime::{
-    DiagnosticPrimitiveRecord, DiagnosticsPrimitiveResult, ManagedTestRunCurrentIdentity,
-    ManagedTestRunCurrentIdentityFuture, ManagedTestRunCurrentScopePort, PrimitiveProjectRuntime,
-    open_primitive_project_runtime,
+    CodeIndexConvergenceParkPortV1, DiagnosticPrimitiveRecord, DiagnosticsPrimitiveResult,
+    ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
+    ManagedTestRunCurrentScopePort, PrimitiveProjectRuntime, open_primitive_project_runtime,
 };
 use super::symbol_graph::SymbolGraphCursorPort;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
@@ -605,6 +605,7 @@ pub struct ProductionPrimitiveCodeAuthoritiesV1 {
     pub ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     pub code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     pub diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    pub convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
 }
 
 pub struct ProductionPrimitiveOpenRequestV1 {
@@ -615,6 +616,7 @@ pub struct ProductionPrimitiveOpenRequestV1 {
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
     operation_events: OperationEventAuthority,
@@ -638,6 +640,7 @@ impl ProductionPrimitiveOpenRequestV1 {
             temporal,
             code_index: code.code_index,
             diagnostic_identity: code.diagnostic_identity,
+            convergence_park: code.convergence_park,
             access,
             admitted_root_uri,
             operation_events,
@@ -658,6 +661,7 @@ pub async fn open_production_primitive_runtime(
         temporal,
         code_index,
         diagnostic_identity,
+        convergence_park,
         access,
         admitted_root_uri,
         operation_events,
@@ -736,6 +740,7 @@ pub async fn open_production_primitive_runtime(
         admitted_root_uri,
         operation_events,
         test_run_scope,
+        convergence_park,
     )
 }
 
