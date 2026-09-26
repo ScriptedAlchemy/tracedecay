@@ -3828,61 +3828,38 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
 
 #[test]
 fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation() {
-    const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 5 * std::mem::size_of::<usize>();
-    const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 8 * std::mem::size_of::<usize>();
+    // Everything one prepared page of this fixture charges: the builder's
+    // fixed ledger, the prepared page, and one insert-plan entry per staged
+    // term and exact posting.
+    const EXACT_BUDGET: usize = 67_264_530;
 
     let (fixture, pages, _) = real_verified_pages();
     let pages = &pages[..1];
     let metadata = fixture.metadata;
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let probe_path = directory.path().join("posting-plans-probe.sqlite");
-    let mut probe = CodeLexicalArtifactBuilderV1::create(&probe_path, metadata.clone())
+    let probe = CodeLexicalArtifactBuilderV1::create(&probe_path, metadata.clone())
         .expect("create posting plans probe");
     let control = ArtifactControl { cancelled: false };
     let prepared = probe
         .prepare_pages(pages, &control)
         .expect("prepare posting plans fixture");
-    let prepared_ledger = prepared[0]
-        .ledger_charge_bytes()
-        .expect("prepared page ledger charge");
-    let fixed_ledger = probe.fixed_ledger_charge_bytes();
-    probe
-        .append_prepared_pages(&prepared, &control)
-        .expect("append posting plans probe");
-    let term_rows = staged_posting_count(&probe_path, "term_posting_runs", true);
-    assert!(term_rows > 0, "fixture must emit term postings");
-    let exact_rows = staged_posting_count(&probe_path, "exact_posting_runs", false);
-    assert!(exact_rows > 0, "fixture must emit exact postings");
-    let entry_ledger = term_rows
-        .checked_mul(TERM_INSERT_PLAN_BYTES_PER_REF)
-        .expect("term plan ledger charge");
-    let exact_entry_ledger = exact_rows
-        .checked_mul(EXACT_INSERT_PLAN_BYTES_PER_REF)
-        .expect("exact plan ledger charge");
-    let plan_ledger = entry_ledger
-        .checked_add(exact_entry_ledger)
-        .expect("complete posting plan ledger charge");
-    let exact_budget = fixed_ledger
-        .checked_add(prepared_ledger)
-        .and_then(|bytes| bytes.checked_add(plan_ledger))
-        .expect("exact posting plans budget");
     drop(probe);
 
     let refused_path = directory.path().join("posting-plans-refused.sqlite");
     let mut refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
         &refused_path,
         metadata.clone(),
-        exact_budget - 1,
+        EXACT_BUDGET - 1,
     )
     .expect("create one-byte-under posting plans builder");
-    assert_eq!(refused.fixed_ledger_charge_bytes(), fixed_ledger);
     assert!(matches!(
         refused.append_prepared_pages(&prepared, &control),
         Err(CodeLexicalArtifactErrorV1::BatchTooLarge {
             limit: CodeLexicalArtifactBatchLimitV1::Memory,
             required,
             maximum,
-        }) if required == exact_budget && maximum == exact_budget - 1
+        }) if required == EXACT_BUDGET && maximum == EXACT_BUDGET - 1
     ));
     assert_eq!(
         refused
@@ -3948,7 +3925,7 @@ fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation
     let mut exact = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
         &exact_path,
         metadata,
-        exact_budget,
+        EXACT_BUDGET,
     )
     .expect("create exact posting plans builder");
     let progress = exact

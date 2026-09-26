@@ -1150,9 +1150,10 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
 /// that run between them.
 ///
 /// Fails if a reader pays the cold open on the request path again, or if the
-/// sweep steps the warmed serving engine down so the next read must reopen.
+/// sweep steps the warmed serving engine down so the next read is refused as
+/// warming.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn graph_reads_during_engine_warm_up_are_typed_pending_and_share_one_open() {
+async fn graph_reads_during_engine_warm_up_are_typed_pending_and_warmed_reads_survive_sweeps() {
     use tracedecay_code_index::graph_projection::{
         CodeGraphProjectionError, CodeGraphProjectionStore,
     };
@@ -1169,11 +1170,9 @@ async fn graph_reads_during_engine_warm_up_are_typed_pending_and_share_one_open(
             Arc::new(AtomicBool::new(false)),
         )
         .expect("seal the code graph");
-    let store = CodeGraphProjectionStore::from_verified_snapshot(
-        snapshot.clone(),
-        fixture.generation_id.clone(),
-    )
-    .expect("projection store over the sealed snapshot");
+    let store =
+        CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
+            .expect("projection store over the sealed snapshot");
     let sweep = || async {
         fixture
             .registry
@@ -1187,49 +1186,43 @@ async fn graph_reads_during_engine_warm_up_are_typed_pending_and_share_one_open(
             .expect("staging release sweep");
     };
     sweep().await;
-    assert_eq!(
-        snapshot.serving_engine_resident(),
-        Ok(false),
-        "the sweep steps an unwarmed idle generation down"
-    );
 
-    let started = Instant::now();
-    let pending = store.interactive_reader_with_cancellation(
-        &fixture.generation_id,
-        Arc::new(tracedecay_graph_db::NeverCancelled),
-    );
-    assert!(
+    let read = || {
+        store.interactive_reader_with_cancellation(
+            &fixture.generation_id,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+    };
+    let is_warming = |outcome: &Result<_, CodeGraphProjectionError>| {
         matches!(
-            &pending,
+            outcome,
             Err(CodeGraphProjectionError::Unavailable(detail)) if detail.contains("warming")
-        ),
-        "a read before the warm must be the typed warming answer, got {pending:?}"
+        )
+    };
+    let started = Instant::now();
+    let pending = read();
+    assert!(
+        is_warming(&pending),
+        "a read of a swept, unwarmed generation must be the typed warming answer, got {pending:?}"
     );
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "the warming answer must not wait on the engine open"
     );
-    assert_eq!(
-        snapshot.serving_engine_resident(),
-        Ok(false),
-        "a refused read must not open the engine itself"
+    let still_pending = read();
+    assert!(
+        is_warming(&still_pending),
+        "a refused read must not open the engine for the next one, got {still_pending:?}"
     );
 
     store.warm_serving_engine().expect("background warm");
-    for _ in 0..3 {
-        store
-            .interactive_reader_with_cancellation(
-                &fixture.generation_id,
-                Arc::new(tracedecay_graph_db::NeverCancelled),
-            )
-            .expect("a warmed generation serves reads");
+    for round in 0..3 {
+        read().unwrap_or_else(|error| {
+            panic!("round {round}: the warmed generation must serve after the sweep: {error:?}")
+        });
         sweep().await;
-        assert_eq!(
-            snapshot.serving_engine_resident(),
-            Ok(true),
-            "the sweep must leave the warmed serving engine open for the next read"
-        );
     }
+    read().expect("the last sweep must leave the warmed serving engine open for the next read");
 }
 
 /// Stage 1 of `docs/plans/tracedecay-v2/40`: cold activation decodes the sealed
