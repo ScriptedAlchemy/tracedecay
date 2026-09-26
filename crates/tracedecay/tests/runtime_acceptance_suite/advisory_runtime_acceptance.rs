@@ -641,11 +641,30 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
         current_start_line: Some(2),
         current_line: Some(2),
     };
+    let reply_body = "Agreed, the second call can reuse it.";
+    let reply_seed = GitHubReviewAnchorSeedV1 {
+        comment_id: GitHubReviewCommentIdV1::new("3556767426").unwrap(),
+        author_node_id: "MDQ6VXNlcjE=".to_owned(),
+        body_digest: ManifestDigest::new(format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(reply_body))
+        ))
+        .unwrap(),
+        retained_body: reply_body.to_owned(),
+        safe_url: "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767426"
+            .to_owned(),
+        ..seed.clone()
+    };
     let batch = authority
-        .resolve_many(&request, &[seed, second_seed])
+        .resolve_many(&request, &[seed, second_seed, reply_seed])
         .await
         .expect("canonical body anchors");
-    assert_eq!(batch.len(), 2);
+    assert_eq!(batch.len(), 3);
+    assert_eq!(
+        batch[2].original, batch[0].original,
+        "a reply on the same lines shares the code anchor"
+    );
+    assert_ne!(batch[2].body_anchor, batch[0].body_anchor);
     assert_eq!(
         batch[0].original.span,
         Some(SourceSpan {
