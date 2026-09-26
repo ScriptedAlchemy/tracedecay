@@ -1,11 +1,13 @@
-//! Immutable session/Git evidence projected into verified graph generations.
+//! Session/Git evidence: branch and worktree activity spans and commit
+//! attributions, recorded per session.
 //!
-//! Commit/session evidence and branch/worktree spans are not relational rows.
-//! A complete [`GitEvidenceProjectionV1`] is published atomically through the
-//! project graph runtime and every query is evaluated from its verified
-//! snapshot. SQLite retains only resumable-history receipts and watermarks.
+//! Every span and commit attribution is a durable row keyed by its session in
+//! the project sessions store ([`rows`]), written in the transaction that
+//! observed it and read through indexed lookups. The projection generation is
+//! metadata over those rows, so neither writes nor reads scale with the
+//! number of sessions a project has accumulated.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::sha256_hex;
@@ -32,14 +34,10 @@ const MESSAGE_WORKTREE_KEYS: [&str; 9] = [
     "hermes_session_worktree",
 ];
 
-/// Receipt schema version. This schema owns only convergence receipts and
-/// watermarks; Git evidence itself remains in the verified graph authority.
-pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 5;
-/// Projector revision this build publishes. It is part of the generation
-/// identity, so a graph-shape change (index entities, relation keys,
-/// projection metadata) re-publishes an unchanged projection under a distinct
-/// generation instead of colliding with the previous shape's rows.
-pub const GIT_EVIDENCE_PROJECTOR_REVISION: &str = "session-git-evidence-projector.v2";
+/// Schema version of the Git evidence rows, convergence receipts and
+/// watermarks. A store recorded at any other version is refused with a typed
+/// reset; nothing converts an older shape.
+pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 6;
 pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 // The scope value type and session cap are owned by the LCM engine crate so
@@ -169,7 +167,9 @@ pub struct CommitSessionRecord {
     pub evidence_message_id: Option<String>,
 }
 
-/// Canonical, complete input to one immutable graph generation.
+/// Every stored span and commit attribution at once: the complete-scan oracle
+/// the bounded row reads must answer identically.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitEvidenceProjectionV1 {
@@ -178,6 +178,7 @@ pub struct GitEvidenceProjectionV1 {
     commit_sessions: Vec<CommitSessionRecord>,
 }
 
+#[cfg(test)]
 impl GitEvidenceProjectionV1 {
     #[hotpath::measure(label = "sessions.git_correlation.projection_new")]
     pub fn new(
@@ -220,7 +221,7 @@ impl GitEvidenceProjectionV1 {
         let span_ids = spans
             .iter()
             .map(|span| span.span_id.as_str())
-            .collect::<HashSet<_>>();
+            .collect::<std::collections::HashSet<_>>();
         if commit_sessions.iter().any(|record| {
             record
                 .span_id
@@ -251,9 +252,8 @@ impl GitEvidenceProjectionV1 {
         &self.commit_sessions
     }
 
-    /// Evaluates the query over the complete in-memory projection. Bounded
-    /// production reads go through the indexed graph view
-    /// ([`GitEvidenceGraphView`]), which feeds the same aggregation
+    /// Evaluates the query over every row. Bounded production reads go
+    /// through [`rows::GitEvidenceView`], which feeds the same aggregation
     /// helpers only the rows that can contribute to the result.
     #[hotpath::measure(label = "sessions.git_correlation.sessions_for")]
     pub fn sessions_for(
@@ -924,7 +924,7 @@ fn span_observation_from_metadata(
     })
 }
 
-/// Installs only relational receipts used by bounded history convergence.
+/// Installs the Git evidence rows, convergence receipts and watermarks.
 #[hotpath::measure(label = "sessions.git_correlation.ensure_schema", future = true)]
 pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
@@ -939,22 +939,10 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
             key TEXT PRIMARY KEY,
             value INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE TABLE IF NOT EXISTS git_evidence_publication_outbox (
-            receipt_id TEXT PRIMARY KEY CHECK(length(receipt_id) > 0),
-            publication_prefix TEXT NOT NULL CHECK(length(publication_prefix) > 0),
-            evidence_json TEXT NOT NULL CHECK(length(evidence_json) > 0),
-            created_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE INDEX IF NOT EXISTS idx_git_evidence_publication_outbox_pending
-            ON git_evidence_publication_outbox(created_at, receipt_id);
-        CREATE TRIGGER IF NOT EXISTS git_evidence_publication_outbox_immutable
-        BEFORE UPDATE ON git_evidence_publication_outbox
-        BEGIN
-            SELECT RAISE(ABORT, 'Git evidence publication receipt is immutable');
-        END;",
+        );",
     )
     .await?;
+    conn.execute_batch(rows::GIT_EVIDENCE_ROWS_SCHEMA).await?;
     backfill::history_progress::install_final_schema(conn).await?;
     backfill::history_failures::install_final_schema(conn).await?;
     conn.execute(
@@ -965,6 +953,32 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     )
     .await?;
     Ok(())
+}
+
+/// The Git correlation schema version an existing store recorded, `None` for
+/// a store that never installed it.
+pub async fn recorded_git_correlation_schema_version(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<Option<i64>, GitCorrelationError> {
+    let mut tables = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_schema_migrations'",
+            (),
+        )
+        .await?;
+    if tables.next().await?.is_none() {
+        return Ok(None);
+    }
+    let mut rows = conn
+        .query(
+            "SELECT version FROM session_schema_migrations WHERE name = ?1",
+            params![MIGRATION_NAME],
+        )
+        .await?;
+    rows.next()
+        .await?
+        .map(|row| row.get(0).map_err(GitCorrelationError::from))
+        .transpose()
 }
 
 #[hotpath::measure(label = "sessions.git_correlation.read_meta", future = true)]
@@ -1211,14 +1225,11 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 mod attribution;
 mod backfill;
 mod convergence;
-mod publication_outbox;
+pub mod rows;
 mod store;
-#[cfg(test)]
-pub(crate) use attribution::publish_graph_evidence_controlled;
 pub use attribution::{
     ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
-    graph_evidence_publication_key, match_commit_to_spans, publish_graph_evidence,
-    publish_transcript_graph_evidence, rebuild_pre_index_git_evidence,
+    match_commit_to_spans, stable_backfill_span,
 };
 pub use backfill::run_backfill;
 pub use backfill::{
@@ -1229,23 +1240,18 @@ pub use backfill::{
     run_bounded_history_index_page, window_branch_segments,
 };
 pub use convergence::{GitEvidencePass, GitEvidencePassOutcome, converge_git_evidence_pass};
-pub use publication_outbox::{
-    enqueue_git_evidence_publication, pending_git_evidence_publication_count,
-    replay_pending_git_evidence_publications,
+pub use rows::{
+    GitEvidenceBatch, GitEvidenceGeneration, GitEvidenceView, GitEvidenceWrite, GitEvidenceWriter,
+    open_git_evidence_view,
 };
 pub use store::{
     AnalyticsSessionTimestamp, AnalyticsSessionTimestampSource, GitCorrelationSessionStore,
-    GitCorrelationWriteTxn, GitEvidenceGraphHead, GitEvidenceGraphView, GitEvidenceProjectionStore,
-    build_git_evidence_manifest_checked, git_evidence_generation_id,
-    git_evidence_projection_identity, open_git_evidence_graph_view,
-    publish_git_evidence_projection, recover_git_evidence_projection,
+    GitCorrelationWriteTxn,
 };
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod graph_view_tests;
-#[cfg(test)]
-pub(crate) mod test_support;
+mod rows_view_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

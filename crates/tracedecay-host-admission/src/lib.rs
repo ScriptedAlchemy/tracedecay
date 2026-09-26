@@ -37,7 +37,8 @@ use tracedecay_sessions::observation::{
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_sessions::runtime::git_correlation::{
-    canonical_observation_git_evidence, enqueue_git_evidence_publication,
+    DEFAULT_SPAN_MERGE_GAP_SECS, GitEvidenceBatch, GitEvidenceWriter,
+    canonical_observation_git_evidence,
 };
 
 mod authorities;
@@ -1051,12 +1052,13 @@ async fn publish_canonical_git_evidence(
     let Some(repository_provenance) = repository_provenance else {
         return Ok(());
     };
-    let mut publications = Vec::new();
+    let mut batch = GitEvidenceBatch {
+        merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+        ..GitEvidenceBatch::default()
+    };
     for outcome in outcomes {
         let CaptureObservationOutcome::Persisted {
-            outcome: persisted,
-            sanitized_record,
-            ..
+            sanitized_record, ..
         } = outcome
         else {
             continue;
@@ -1066,33 +1068,27 @@ async fn publish_canonical_git_evidence(
             repository_provenance.admitted_project_root(),
         )
         .map_err(classify_git_evidence_error)?;
-        if commit_records.is_empty() && span_observations.is_empty() {
-            continue;
-        }
-        publications.push((
-            format!(
-                "canonical-observation:{}",
-                persisted.receipt().observation().observation_id().as_str()
-            ),
-            commit_records,
-            span_observations,
-        ));
+        batch.commits.extend(commit_records);
+        batch.observations.extend(span_observations);
     }
-    if publications.is_empty() {
+    if batch.commits.is_empty() && batch.observations.is_empty() {
         return Ok(());
     }
     let transaction = database.begin_write_transaction().await.map_err(|error| {
-        tracing::warn!(%error, "canonical Git evidence outbox transaction failed");
-        HostAdmissionOutcome::retained_unavailable("git_evidence_outbox_unavailable")
+        tracing::warn!(%error, "canonical Git evidence transaction failed");
+        HostAdmissionOutcome::retained_unavailable("git_evidence_write_unavailable")
     })?;
-    for (prefix, commit_records, span_observations) in &publications {
-        enqueue_git_evidence_publication(&transaction, prefix, commit_records, span_observations)
-            .await
-            .map_err(classify_git_evidence_error)?;
-    }
+    let mut writer = GitEvidenceWriter::open(&transaction)
+        .await
+        .map_err(classify_git_evidence_error)?;
+    writer
+        .apply(batch)
+        .await
+        .map_err(classify_git_evidence_error)?;
+    writer.finish().await.map_err(classify_git_evidence_error)?;
     transaction.commit().await.map_err(|error| {
-        tracing::warn!(%error, "canonical Git evidence outbox commit failed");
-        HostAdmissionOutcome::retained_unavailable("git_evidence_outbox_unavailable")
+        tracing::warn!(%error, "canonical Git evidence commit failed");
+        HostAdmissionOutcome::retained_unavailable("git_evidence_write_unavailable")
     })?;
     Ok(())
 }
@@ -1100,9 +1096,8 @@ async fn publish_canonical_git_evidence(
 fn classify_git_evidence_error(
     error: tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
 ) -> HostAdmissionOutcome {
-    tracing::warn!(%error, "canonical Git evidence publication failed");
-    let mut outcome =
-        HostAdmissionOutcome::retained_unavailable("git_evidence_publication_unavailable");
+    tracing::warn!(%error, "canonical Git evidence write failed");
+    let mut outcome = HostAdmissionOutcome::retained_unavailable("git_evidence_write_unavailable");
     outcome.cause = Some(error.to_string());
     outcome
 }

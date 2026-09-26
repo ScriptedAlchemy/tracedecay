@@ -5,29 +5,27 @@ use tracedecay_lcm::payload::PayloadFileRollback;
 use tracedecay_lcm::raw;
 
 use super::super::git_correlation::{
-    CommitSessionRecord, SpanObservation, enqueue_git_evidence_publication,
+    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GitEvidenceBatch, GitEvidenceWriter,
+    SpanObservation,
 };
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
 use super::super::shared::{durable_project_path_key, path_identity_key};
 use super::codex_goal_reconciliation::find_preceding_codex_goal_response;
 use super::types::{TranscriptBatch, TranscriptPersistenceError};
 
-/// Exact Git evidence staged atomically with one transcript write.
+/// Git evidence recorded atomically with one transcript write.
 #[derive(Debug, Clone, Copy)]
 pub struct TranscriptGitEvidence<'a> {
-    publication_prefix: &'a str,
     commit_records: &'a [CommitSessionRecord],
     span_observations: &'a [SpanObservation],
 }
 
 impl<'a> TranscriptGitEvidence<'a> {
     pub const fn new(
-        publication_prefix: &'a str,
         commit_records: &'a [CommitSessionRecord],
         span_observations: &'a [SpanObservation],
     ) -> Self {
         Self {
-            publication_prefix,
             commit_records,
             span_observations,
         }
@@ -452,7 +450,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     /// Atomically commits parsed transcript rows, the parse cursor, and the
-    /// exact receipt needed to publish derived Git evidence after commit.
+    /// Git evidence derived from the batch, in the same transaction.
     #[hotpath::skip]
     pub async fn persist_transcript_batch_with_git_evidence_result(
         &self,
@@ -470,7 +468,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             )
         {
             return Err(TranscriptPersistenceError::storage(
-                "stage transcript git evidence",
+                "record transcript git evidence",
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "transcript Git evidence requires ProjectSessions authority",
@@ -567,17 +565,25 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                     "staged transcript message count exceeded the write batch",
                 ));
             }
-            if let Some(evidence) = git_evidence {
-                enqueue_git_evidence_publication(
-                    &transaction,
-                    evidence.publication_prefix,
-                    evidence.commit_records,
-                    evidence.span_observations,
-                )
-                .await
-                .map_err(|error| {
-                    TranscriptPersistenceError::storage("stage transcript git evidence", error)
-                })?;
+            if let Some(evidence) = git_evidence
+                && (!evidence.commit_records.is_empty() || !evidence.span_observations.is_empty())
+            {
+                let record = |error| {
+                    TranscriptPersistenceError::storage("record transcript git evidence", error)
+                };
+                let mut writer = GitEvidenceWriter::open(&transaction)
+                    .await
+                    .map_err(record)?;
+                writer
+                    .apply(GitEvidenceBatch {
+                        observations: evidence.span_observations.to_vec(),
+                        commits: evidence.commit_records.to_vec(),
+                        merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+                        ..GitEvidenceBatch::default()
+                    })
+                    .await
+                    .map_err(record)?;
+                writer.finish().await.map_err(record)?;
             }
             set_parse_offset(&transaction, parse_offset_path, parse_offset).await?;
             Ok(())

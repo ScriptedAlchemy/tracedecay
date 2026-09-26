@@ -9,9 +9,7 @@ use tracedecay_store::{
 
 use tracedecay_global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
 use tracedecay_sessions::runtime::TranscriptGitEvidence;
-use tracedecay_sessions::runtime::git_correlation::{
-    CommitSessionRecord, GitCorrelationSessionStore, SpanObservation,
-};
+use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
 use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 
 /// Transcript-store adapter over an already-open authoritative
@@ -146,45 +144,18 @@ where
                 messages,
                 expected_offset,
                 next_offset,
-            } => {
-                self.db()
-                    .persist_transcript_batch_with_git_evidence_result(
-                        &session,
-                        &messages,
-                        &cursor_key,
-                        expected_offset,
-                        next_offset,
-                        TranscriptGitEvidence::new(
-                            "transcript-git-evidence",
-                            commit_records,
-                            span_observations,
-                        ),
-                    )
-                    .await
-                    .map_err(|error| Self::persistence_error(&cursor_path, error))?;
-
-                // Only a registered ProjectSessions authority can hold pending
-                // git-evidence publications, and the replay refuses any other
-                // scope by design. A user-scope (profile) transcript has no
-                // project to correlate against, so replaying there is not
-                // merely empty work, it turns every full profile-scoped batch
-                // into a "git correlation requires registered ProjectSessions
-                // authority" failure after the rows are already committed.
-                if GitCorrelationSessionStore::require_project_sessions_authority(self.db())
-                    .is_err()
-                {
-                    return Ok(());
-                }
-
-                self.db()
-                    .replay_pending_git_evidence_publications()
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| TranscriptStoreError::Storage {
-                        operation: "publish transcript git evidence",
-                        source: Box::new(error),
-                    })
-            }
+            } => self
+                .db()
+                .persist_transcript_batch_with_git_evidence_result(
+                    &session,
+                    &messages,
+                    &cursor_key,
+                    expected_offset,
+                    next_offset,
+                    TranscriptGitEvidence::new(commit_records, span_observations),
+                )
+                .await
+                .map_err(|error| Self::persistence_error(&cursor_path, error)),
         }
     }
 }

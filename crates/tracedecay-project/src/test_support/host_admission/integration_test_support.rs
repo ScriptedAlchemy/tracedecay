@@ -165,7 +165,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         git: &dyn tracedecay_sessions::runtime::git_correlation::GitReflogSource,
     ) -> std::result::Result<
-        tracedecay_global_db::GitEvidenceConvergenceOutcome,
+        tracedecay_sessions::runtime::git_correlation::GitEvidencePassOutcome,
         tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {

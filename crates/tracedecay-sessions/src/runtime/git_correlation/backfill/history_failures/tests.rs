@@ -4,7 +4,6 @@ use std::time::Duration;
 use tracedecay_runtime_core::db::engine::{
     QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior,
 };
-use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 
 use super::*;
 use crate::observation::ObservationCancellation;
@@ -42,20 +41,6 @@ impl GitCorrelationSessionStore for TestStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(GitCorrelationError::from)
-    }
-
-    fn git_evidence_publication_lock(
-        &self,
-    ) -> Result<std::sync::Arc<std::sync::Mutex<()>>, GitCorrelationError> {
-        Err(GitCorrelationError::Unavailable(
-            "failure receipt tests do not mount graph evidence".to_owned(),
-        ))
-    }
-
-    fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
-        Err(GitCorrelationError::Unavailable(
-            "failure receipt tests do not mount graph evidence".to_owned(),
-        ))
     }
 }
 

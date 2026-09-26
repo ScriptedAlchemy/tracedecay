@@ -25,7 +25,7 @@ use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceIdentityV1, RefId, RelationEdgeKindV1, SourceSpan,
     SymbolOccurrenceId, UtcMicros, canonical_sha256,
 };
-use tracedecay_graph_db::{GraphCancellation, GraphNamespace};
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_store::{ObservationProjectionStore, ObservationReplayRequest, ObservationStore};
 
 use super::{
@@ -37,9 +37,8 @@ use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation,
 };
 use tracedecay_sessions::runtime::git_correlation::{
-    CommitRelationFilter, GitEvidenceGraphHead, GitRefFilter, SessionGitCorrelationHit,
-    SessionsForQuery, git_evidence_projection_identity, normalize_worktree,
-    open_git_evidence_graph_view,
+    CommitRelationFilter, GitRefFilter, SessionGitCorrelationHit, SessionsForQuery,
+    normalize_worktree,
 };
 
 const MAX_ACTIVE_SESSIONS_V1: usize = 32;
@@ -476,21 +475,12 @@ impl ProductionProximityEvidenceAuthorityV1 {
         // The legacy path column is only a bounded lookup hint. Exact identity
         // was already admitted by typed project/repository/worktree scope, and
         // saved-generation content is rechecked before publication.
-        let projection =
-            git_evidence_projection_identity(GraphNamespace::new("project").ok()?).ok()?;
-        // A never-published, legacy, or unreadable head yields no proximity
-        // evidence. Branch scope retains separately registered worktrees.
-        let GitEvidenceGraphHead::Indexed(view) = open_git_evidence_graph_view(
-            self.sessions.project_graph_runtime()?,
-            &projection,
-            Arc::clone(&cancellation),
-        )
-        .ok()?
-        else {
-            return None;
-        };
-        let hits = view
-            .sessions_for(
+        // Unrecorded or unreadable Git evidence yields no proximity evidence.
+        // Branch scope retains separately registered worktrees.
+        let sessions =
+            tracedecay_global_db::GlobalDbGitCorrelationStore::new(self.sessions.clone());
+        let (hits, presence) = sessions
+            .sessions_for_with_relation_and_presence(
                 &SessionsForQuery {
                     git_ref: GitRefFilter::Branch(
                         request
@@ -506,7 +496,11 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 },
                 CommitRelationFilter::Produced,
             )
+            .await
             .ok()?;
+        if !presence.projection_available {
+            return None;
+        }
         if hits.len() == MAX_ACTIVE_SESSIONS_V1 {
             omissions.insert(FeedbackProximityOmissionV1::ActiveSessionLimit);
         }

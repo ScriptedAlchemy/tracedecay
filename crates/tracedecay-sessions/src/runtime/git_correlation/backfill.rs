@@ -5,8 +5,9 @@ use tracedecay_capture::normalize_timestamp_secs;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 #[cfg(test)]
-use super::attribution::{attribute_commits, publish_graph_evidence};
-use super::attribution::{publish_graph_evidence_controlled, stable_backfill_span};
+use super::attribution::attribute_commits;
+use super::attribution::stable_backfill_span;
+use super::rows::{GitEvidenceBatch, GitEvidenceWriter};
 use super::store::GitCorrelationSessionStore;
 
 use super::{
@@ -424,7 +425,7 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 /// provider/session timestamps (via [`AnalyticsSessionTimestampSource`]);
 /// branch data is never assumed present. `git` supplies the reflog/log
 /// subprocess surface. A broken repo or session is counted and skipped; the
-/// derived evidence publishes as one generation.
+/// derived evidence lands in one transaction.
 ///
 /// When `opts.dry_run` is set no rows are written; the returned counts reflect
 /// what *would* have been written.
@@ -452,9 +453,20 @@ where
         stats.spans_written = derived.spans.len();
         stats.commits_attributed = derived.commits.len();
     } else if !derived.spans.is_empty() || !derived.commits.is_empty() {
-        (stats.spans_written, stats.commits_attributed) = session_store
-            .publish_graph_evidence_owned("git-backfill".to_owned(), derived.spans, derived.commits)
+        let transaction = session_store.open_write_transaction().await?;
+        let mut writer = GitEvidenceWriter::open(&transaction).await?;
+        let written = writer
+            .apply(GitEvidenceBatch {
+                spans: derived.spans,
+                commits: derived.commits,
+                merge_gap_secs: opts.merge_gap_secs,
+                ..GitEvidenceBatch::default()
+            })
             .await?;
+        writer.finish().await?;
+        GitCorrelationWriteTxn::commit(transaction).await?;
+        stats.spans_written = written.spans_changed;
+        stats.commits_attributed = written.commits_changed;
     }
     crate::runtime::pipeline_metrics::record_git_backfill(
         stats.sessions_scanned,
@@ -464,8 +476,8 @@ where
 }
 
 /// Session-history evidence derived for every session past the durable
-/// frontier. Nothing is written: the convergence pass publishes it in its one
-/// generation and only then advances the frontier to `settled_through`.
+/// frontier. Nothing is written: the convergence pass writes it and advances
+/// the frontier to `settled_through` in one transaction.
 #[derive(Debug)]
 pub struct CollectedBackfill {
     pub spans: Vec<SessionGitSpan>,
@@ -502,7 +514,7 @@ where
             .await?
             .unwrap_or(0),
     };
-    // The whole backlog in one read: it all folds into one generation, and a
+    // The whole backlog in one read: it all lands in one transaction, and a
     // bounded page would repeat the grouped session scan once per page.
     let page = session_activity_page_after(
         &snapshot,

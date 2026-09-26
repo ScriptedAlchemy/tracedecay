@@ -37,7 +37,6 @@ tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-capture = { path = "../tracedecay-capture" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-framing = { path = "../tracedecay-framing" }
-tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-lcm = { path = "../tracedecay-lcm" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
@@ -56,9 +55,6 @@ tempfile = "3"
 # Declaring the same path dependency with the feature keeps it out of the lib
 # build while feature unification supplies it to every test target here.
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
-# The live git-attribution test publishes evidence through the hermetic
-# in-memory verified snapshot (`VerifiedGraphSnapshot::memory`).
-tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 
 [[bench]]
 name = "host_transcript_io"
@@ -66,8 +62,4 @@ harness = false
 
 [[bench]]
 name = "cursor_dispatch_model"
-harness = false
-
-[[bench]]
-name = "git_evidence_bounded_reads"
 harness = false

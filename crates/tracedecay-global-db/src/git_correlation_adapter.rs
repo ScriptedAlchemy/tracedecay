@@ -2,61 +2,31 @@
 //!
 //! Session backfill/query logic depends on the port; this module owns the
 //! concrete registered-database binding, authority checks, and high-level
-//! façade methods.
+//! façade methods. Git evidence lives in the project sessions store's own
+//! rows, so every read and write goes through its registered database.
 
 use std::borrow::Borrow;
-use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::collections::BTreeSet;
 
-use tokio::sync::{Semaphore, oneshot};
-use tracedecay_graph_db::{GraphNamespace, NeverCancelled};
-use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::{
-    RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, VerifiedGraphRuntimePortV1,
-    VerifiedGraphRuntimeWeakProxyV1,
-};
-#[cfg(test)]
-use tracedecay_sessions::runtime::git_correlation::recover_git_evidence_projection;
+use crate::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use tracedecay_sessions::runtime::git_correlation::{
-    AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BackfillStats, BoundedBackfillOutcome,
-    BoundedGitControl, CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth,
-    CorrelationIndexPresence, GitCorrelationError, GitCorrelationSessionStore,
-    GitEvidenceGraphView, GitEvidenceProjectionStore, GitHistoryIndexFrontier, GitReflogSource,
+    AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BoundedBackfillOutcome, BoundedGitControl,
+    CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
+    GitCorrelationError, GitCorrelationSessionStore, GitCorrelationWriteTxn, GitEvidenceBatch,
+    GitEvidencePassOutcome, GitEvidenceWriter, GitReflogSource, GitScopeFilter,
     SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
-    converge_git_evidence_pass, git_evidence_projection_identity, open_git_evidence_graph_view,
-    pending_git_evidence_publication_count, read_meta_value, rebuild_pre_index_git_evidence,
-    replay_pending_git_evidence_publications, run_bounded_history_index_page,
+    converge_git_evidence_pass, open_git_evidence_view, read_meta_value,
+    run_bounded_history_index_page,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::git_correlation::{
-    AnalyticsSessionTimestampSource, run_backfill,
+    AnalyticsSessionTimestampSource, BackfillStats, run_backfill,
 };
 
-const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
-const GIT_EVIDENCE_PUBLICATION_ADMISSION: usize = 1;
-
-type GitEvidencePublicationLock = Mutex<()>;
-
-struct GitEvidencePublicationAuthority {
-    lock: Arc<GitEvidencePublicationLock>,
-    admission: Arc<Semaphore>,
-}
-
-struct GitEvidencePublicationAuthorityRoutes {
-    lock: Weak<GitEvidencePublicationLock>,
-    admission: Weak<Semaphore>,
-}
-
-static GIT_EVIDENCE_PUBLICATION_AUTHORITIES: OnceLock<
-    Mutex<BTreeMap<String, GitEvidencePublicationAuthorityRoutes>>,
-> = OnceLock::new();
-
-/// Git evidence recorded for a bounded set of sessions, bound to the verified
+/// Git evidence recorded for a bounded set of sessions, bound to the
 /// generation that served it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitSessionEvidence {
@@ -65,256 +35,29 @@ pub struct GitSessionEvidence {
     pub commits: Vec<CommitSessionRecord>,
 }
 
-/// Receipt of one production convergence pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitEvidenceConvergenceStats {
-    /// Transcript receipts the pass folded into its generation and settled.
-    pub settled_receipts: usize,
-    /// Receipts still pending after the pass: evidence staged while it ran.
-    /// `None` means that count failed after the pass committed progress.
-    pub pending_publications: Option<u64>,
-    pub backfill: BackfillStats,
-    /// Durable retained-history frontier after the pass.
-    pub frontier: GitHistoryIndexFrontier,
-    /// Whether the pass published a generation. A pass whose fold changes
-    /// nothing publishes nothing.
-    pub published: bool,
-    /// The verified head predated the indexed projector; this pass replaced it
-    /// and rewound the history frontier so backfill republishes from Git.
-    pub rebuilt_pre_index_head: bool,
-}
-
-impl GitEvidenceConvergenceStats {
-    /// Whether this pass durably changed Git evidence or its session frontier.
-    pub fn committed_progress(&self) -> bool {
-        self.rebuilt_pre_index_head
-            || self.published
-            || self.settled_receipts > 0
-            || self.backfill.committed_progress()
+fn require_project_sessions(database: &RegisteredGlobalDb) -> Result<(), GitCorrelationError> {
+    if matches!(
+        &database.binding().shard_id.scope,
+        StoreShardScopeV1::ProjectSessions { .. }
+    ) {
+        Ok(())
+    } else {
+        Err(GitCorrelationError::Db(
+            "git correlation requires registered ProjectSessions authority".to_owned(),
+        ))
     }
 }
 
-/// Truthful result of one bounded convergence attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GitEvidenceConvergenceOutcome {
-    Complete(GitEvidenceConvergenceStats),
-    Partial {
-        progress: GitEvidenceConvergenceStats,
-        later_failure: GitCorrelationError,
-    },
-}
-
-impl GitEvidenceConvergenceOutcome {
-    pub const fn stats(&self) -> &GitEvidenceConvergenceStats {
-        match self {
-            Self::Complete(stats)
-            | Self::Partial {
-                progress: stats, ..
-            } => stats,
-        }
+impl RegisteredGlobalDb {
+    /// Concrete registered-database entry point for callers with a scoped
+    /// borrow. The registered authority implements the session-store port
+    /// directly, so host-admission futures retain their original lifetime.
+    pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
+        &self,
+        git: &G,
+    ) -> Result<GitEvidencePassOutcome, GitCorrelationError> {
+        converge_git_evidence_pass(self, git).await
     }
-
-    pub const fn later_failure(&self) -> Option<&GitCorrelationError> {
-        match self {
-            Self::Complete(_) => None,
-            Self::Partial { later_failure, .. } => Some(later_failure),
-        }
-    }
-
-    pub fn committed_progress(&self) -> bool {
-        self.stats().committed_progress()
-    }
-}
-
-fn settle_git_evidence_convergence(
-    progress: GitEvidenceConvergenceStats,
-    later_failure: Option<GitCorrelationError>,
-) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError> {
-    match later_failure {
-        Some(later_failure) if progress.committed_progress() => {
-            Ok(GitEvidenceConvergenceOutcome::Partial {
-                progress,
-                later_failure,
-            })
-        }
-        Some(error) => Err(error),
-        None => Ok(GitEvidenceConvergenceOutcome::Complete(progress)),
-    }
-}
-
-fn shared_git_evidence_publication_authority(
-    runtime: &VerifiedGraphRuntimeWeakProxyV1,
-) -> Result<Arc<GitEvidencePublicationAuthority>, String> {
-    let identity = serde_json::to_string(&(
-        runtime.relational_binding(),
-        runtime.relational_verified_locator(),
-    ))
-    .map_err(|error| format!("encode Git evidence graph runtime identity: {error}"))?;
-    shared_git_evidence_publication_authority_for_identity(identity)
-}
-
-fn shared_git_evidence_publication_authority_for_identity(
-    identity: String,
-) -> Result<Arc<GitEvidencePublicationAuthority>, String> {
-    let registry = GIT_EVIDENCE_PUBLICATION_AUTHORITIES.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut authorities = registry
-        .lock()
-        .map_err(|_| "Git evidence publication authority registry is poisoned".to_owned())?;
-    authorities
-        .retain(|_, routes| routes.lock.strong_count() > 0 || routes.admission.strong_count() > 0);
-    if let Some(routes) = authorities.get_mut(&identity)
-        && let Some(lock) = routes.lock.upgrade()
-    {
-        let admission = routes
-            .admission
-            .upgrade()
-            .unwrap_or_else(|| Arc::new(Semaphore::new(GIT_EVIDENCE_PUBLICATION_ADMISSION)));
-        routes.admission = Arc::downgrade(&admission);
-        return Ok(Arc::new(GitEvidencePublicationAuthority {
-            lock,
-            admission,
-        }));
-    }
-    let authority = Arc::new(GitEvidencePublicationAuthority {
-        lock: Arc::new(Mutex::new(())),
-        admission: Arc::new(Semaphore::new(GIT_EVIDENCE_PUBLICATION_ADMISSION)),
-    });
-    authorities.insert(
-        identity,
-        GitEvidencePublicationAuthorityRoutes {
-            lock: Arc::downgrade(&authority.lock),
-            admission: Arc::downgrade(&authority.admission),
-        },
-    );
-    Ok(authority)
-}
-
-async fn publish_owned_git_evidence<T>(
-    publication_authority: Arc<GitEvidencePublicationAuthority>,
-    operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
-    operation: impl FnOnce(&GitEvidencePublicationLock) -> Result<T, GitCorrelationError>
-    + Send
-    + 'static,
-) -> Result<T, GitCorrelationError>
-where
-    T: Send + 'static,
-{
-    let permit = Arc::clone(&publication_authority.admission)
-        .acquire_owned()
-        .await
-        .map_err(|_| {
-            GitCorrelationError::Unavailable(
-                "Git evidence publication admission is closed".to_owned(),
-            )
-        })?;
-    let publication_lock = Arc::clone(&publication_authority.lock);
-    let (result_tx, result_rx) = oneshot::channel();
-    // Keep private owners alive after every registered facade and caller-side
-    // receiver has been dropped, until this wrapper joins its blocking child.
-    let retained_operation_task_owner = Arc::clone(&operation_task_owner);
-    if !operation_task_owner.retain(async move {
-        let blocking_child = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            operation(publication_lock.as_ref())
-        });
-        let joined = blocking_child.await;
-        if let Err(detached) = result_tx.send(joined) {
-            match detached {
-                Ok(Err(error)) => {
-                    tracing::error!(
-                        event = "git_evidence_operation_detached_failed",
-                        error = %error,
-                        "detached Git evidence operation returned a domain error while lifecycle ownership settled it"
-                    );
-                }
-                Err(error) => {
-                    tracing::error!(
-                        event = "git_evidence_operation_detached_join_failed",
-                        error = %error,
-                        panic = error.is_panic(),
-                        "detached Git evidence operation failed while lifecycle ownership settled it"
-                    );
-                }
-                Ok(Ok(_)) => {}
-            }
-        }
-        drop(retained_operation_task_owner);
-    }) {
-        return Err(GitCorrelationError::Unavailable(
-            "Git evidence operation settlement admission is closed".to_owned(),
-        ));
-    }
-    let joined = result_rx
-        .await
-        .map_err(|_| GitCorrelationError::Cancelled)?;
-    settle_git_evidence_blocking_join(joined)?
-}
-
-fn settle_git_evidence_blocking_join<T>(
-    joined: Result<T, tokio::task::JoinError>,
-) -> Result<T, GitCorrelationError> {
-    match joined {
-        Ok(outcome) => Ok(outcome),
-        Err(error) => match error.try_into_panic() {
-            Ok(panic) => std::panic::resume_unwind(panic),
-            Err(_) => Err(GitCorrelationError::Cancelled),
-        },
-    }
-}
-
-async fn converge_session_git_evidence<S, G>(
-    session_store: &S,
-    git: &G,
-) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError>
-where
-    S: GitCorrelationSessionStore,
-    G: GitReflogSource + ?Sized,
-{
-    session_store.require_project_sessions_authority()?;
-    // The pass merges onto the recovered head, which a pre-index generation
-    // cannot serve, so its rebuild comes first.
-    let rebuilt_pre_index_head = rebuild_pre_index_git_evidence(session_store).await?;
-    let outcome = match converge_git_evidence_pass(session_store, git).await {
-        Ok(outcome) => outcome,
-        Err(error) if rebuilt_pre_index_head => {
-            return settle_git_evidence_convergence(
-                GitEvidenceConvergenceStats {
-                    settled_receipts: 0,
-                    pending_publications: None,
-                    backfill: BackfillStats::default(),
-                    // The rebuild rewound the frontier to the first session.
-                    frontier: GitHistoryIndexFrontier {
-                        activity_timestamp: 0,
-                        source_rowid: 0,
-                    },
-                    published: false,
-                    rebuilt_pre_index_head,
-                },
-                Some(error),
-            );
-        }
-        Err(error) => return Err(error),
-    };
-    let pass = outcome.pass;
-    let mut later_failure = outcome.later_failure;
-    let pending_publications = match pending_git_evidence_publication_count(session_store).await {
-        Ok(pending) => Some(pending),
-        Err(error) => {
-            later_failure.get_or_insert(error);
-            None
-        }
-    };
-    settle_git_evidence_convergence(
-        GitEvidenceConvergenceStats {
-            settled_receipts: pass.settled_receipts,
-            pending_publications,
-            backfill: pass.backfill,
-            frontier: pass.frontier,
-            published: pass.published,
-            rebuilt_pre_index_head,
-        },
-        later_failure,
-    )
 }
 
 /// Adapter over an already-open project-sessions database.
@@ -329,27 +72,6 @@ where
 /// cross such a boundary.
 pub struct GlobalDbGitCorrelationStore<D> {
     db: D,
-    graph_runtime: Option<VerifiedGraphRuntimeWeakProxyV1>,
-    graph_publication_authority: Option<Result<Arc<GitEvidencePublicationAuthority>, String>>,
-    operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
-}
-
-impl RegisteredGlobalDb {
-    /// Concrete registered-database entry point for callers with a scoped
-    /// borrow. The registered authority implements the session-store port
-    /// directly, so host-admission futures retain their original lifetime.
-    pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
-        &self,
-        git: &G,
-    ) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError> {
-        converge_session_git_evidence(self, git).await
-    }
-
-    pub async fn replay_pending_git_evidence_publications(
-        &self,
-    ) -> Result<usize, GitCorrelationError> {
-        replay_pending_git_evidence_publications(self).await
-    }
 }
 
 impl<D> GlobalDbGitCorrelationStore<D>
@@ -357,68 +79,15 @@ where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
     pub fn new(db: D) -> Self {
-        let graph_runtime = db.borrow().project_graph_runtime().cloned();
-        let graph_publication_authority = graph_runtime
-            .as_ref()
-            .map(shared_git_evidence_publication_authority);
-        let operation_task_owner = db.borrow().operation_task_owner();
-        Self {
-            db,
-            graph_runtime,
-            graph_publication_authority,
-            operation_task_owner,
-        }
+        Self { db }
     }
 
     fn db(&self) -> &RegisteredGlobalDb {
         self.db.borrow()
     }
 
-    fn owned_publication_authority(
-        &self,
-    ) -> Result<
-        (
-            VerifiedGraphRuntimeWeakProxyV1,
-            Arc<GitEvidencePublicationAuthority>,
-            Arc<RuntimeOperationTaskOwnerV1>,
-        ),
-        GitCorrelationError,
-    > {
-        self.require_project_sessions_authority()?;
-        let runtime = self.graph_runtime.clone().ok_or_else(|| {
-            GitCorrelationError::Unavailable(
-                "registered project graph runtime is not mounted".to_owned(),
-            )
-        })?;
-        let publication_authority = match &self.graph_publication_authority {
-            Some(Ok(authority)) => Arc::clone(authority),
-            Some(Err(detail)) => {
-                return Err(GitCorrelationError::Unavailable(detail.clone()));
-            }
-            None => {
-                return Err(GitCorrelationError::Unavailable(
-                    "registered project graph runtime is not mounted".to_owned(),
-                ));
-            }
-        };
-        Ok((
-            runtime,
-            publication_authority,
-            Arc::clone(&self.operation_task_owner),
-        ))
-    }
-
     pub fn require_project_sessions_authority(&self) -> Result<(), GitCorrelationError> {
-        if matches!(
-            &self.db().binding().shard_id.scope,
-            StoreShardScopeV1::ProjectSessions { .. }
-        ) {
-            Ok(())
-        } else {
-            Err(GitCorrelationError::Db(
-                "git correlation requires registered ProjectSessions authority".to_string(),
-            ))
-        }
+        require_project_sessions(self.db())
     }
 
     #[hotpath::measure(label = "global_db.git_correlation.read_snapshot", future = true)]
@@ -439,73 +108,45 @@ where
             .map_err(|error| GitCorrelationError::Db(error.to_string()))
     }
 
+    /// Records one hook-route observation into its session's span rows.
     #[hotpath::measure(label = "global_db.git_correlation.record_span", future = true)]
     pub async fn record_span_observation(
         &self,
         observation: &SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64, GitCorrelationError> {
-        let (changed, _) = self
-            .publish_transcript_graph_evidence_owned(
-                "hook-route-span".to_owned(),
-                vec![observation.clone()],
-                Vec::new(),
+        self.require_project_sessions_authority()?;
+        let transaction = self.open_write_transaction().await?;
+        let mut writer = GitEvidenceWriter::open(&transaction).await?;
+        let written = writer
+            .apply(GitEvidenceBatch {
+                observations: vec![observation.clone()],
                 merge_gap_secs,
-            )
+                ..GitEvidenceBatch::default()
+            })
             .await?;
-        i64::try_from(changed).map_err(|_| {
-            GitCorrelationError::Contract(
-                "Git evidence span publication count exceeds i64".to_owned(),
-            )
+        writer.finish().await?;
+        GitCorrelationWriteTxn::commit(transaction).await?;
+        i64::try_from(written.spans_changed).map_err(|_| {
+            GitCorrelationError::Contract("Git evidence span write count exceeds i64".to_owned())
         })
     }
 
-    /// Recovers the complete projection: every span and commit payload is
-    /// decoded and the generation identity re-derived. Production reads use
-    /// the bounded [`Self::git_evidence_graph_view`].
-    ///
-    /// `Ok(None)` means the projection has never published a verified head:
-    /// the project has no recorded Git evidence yet.
-    #[cfg(test)]
-    pub fn git_evidence_projection(
-        &self,
-    ) -> Result<Option<GitEvidenceProjectionStore>, GitCorrelationError> {
-        let identity =
-            git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
-        recover_git_evidence_projection(
-            self.graph_runtime()?,
-            &identity,
-            Arc::new(AtomicBool::new(false)),
-        )
-    }
-
-    /// Opens the bounded, generation-bound query view without decoding any
-    /// span or commit payload. `Ok(None)` is the never-published empty start;
-    /// a pre-index head is typed unavailable until convergence rebuilds it.
-    #[hotpath::measure(label = "global_db.git_correlation.graph_view")]
-    pub fn git_evidence_graph_view(
-        &self,
-    ) -> Result<Option<GitEvidenceGraphView>, GitCorrelationError> {
-        let identity =
-            git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
-        open_git_evidence_graph_view(self.graph_runtime()?, &identity, Arc::new(NeverCancelled))?
-            .into_indexed()
-    }
-
-    /// The verified generation and every span and commit attribution recorded
-    /// for `session_ids`, hydrated per session through the bounded view.
-    /// `Ok(None)` is the never-published empty start.
-    #[hotpath::measure(label = "global_db.git_correlation.session_evidence")]
-    pub fn git_evidence_for_sessions(
+    /// The generation and every span and commit attribution recorded for
+    /// `session_ids`. `Ok(None)` means no evidence was ever recorded.
+    #[hotpath::measure(label = "global_db.git_correlation.session_evidence", future = true)]
+    pub async fn git_evidence_for_sessions(
         &self,
         session_ids: &BTreeSet<String>,
     ) -> Result<Option<GitSessionEvidence>, GitCorrelationError> {
-        let Some(view) = self.git_evidence_graph_view()? else {
+        self.require_project_sessions_authority()?;
+        let snapshot = self.read_snapshot().await?;
+        let Some(view) = open_git_evidence_view(&snapshot).await? else {
             return Ok(None);
         };
-        let (spans, commits) = view.session_evidence(session_ids)?;
+        let (spans, commits) = view.session_evidence(session_ids).await?;
         Ok(Some(GitSessionEvidence {
-            generation: view.verified_snapshot().generation().as_str().to_owned(),
+            generation: view.generation().generation_id(),
             spans,
             commits,
         }))
@@ -526,21 +167,15 @@ where
         run_backfill(self, analytics_events, git, opts).await
     }
 
-    #[hotpath::measure(label = "global_db.git_correlation.replay_publications", future = true)]
-    pub async fn replay_pending_git_evidence_publications(
-        &self,
-    ) -> Result<usize, GitCorrelationError> {
-        replay_pending_git_evidence_publications(self).await
-    }
-
-    /// Folds every pending transcript receipt and every retained session past
-    /// the history frontier into at most one published generation.
+    /// Derives evidence for every retained session past the history frontier
+    /// and appends it, with the commit attribution it enables, in one
+    /// transaction.
     #[hotpath::measure(label = "global_db.git_correlation.converge", future = true)]
     pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,
-    ) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError> {
-        converge_session_git_evidence(self, git).await
+    ) -> Result<GitEvidencePassOutcome, GitCorrelationError> {
+        converge_git_evidence_pass(self, git).await
     }
 
     #[hotpath::measure(label = "global_db.git_correlation.bounded_history", future = true)]
@@ -556,11 +191,12 @@ where
     pub async fn correlation_index_health(
         &self,
     ) -> Result<CorrelationIndexHealth, GitCorrelationError> {
+        self.require_project_sessions_authority()?;
         let snapshot = self.read_snapshot().await?;
         let backfill_watermark = read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
-        Ok(match self.git_evidence_graph_view()? {
+        Ok(match open_git_evidence_view(&snapshot).await? {
             Some(view) => view.health(backfill_watermark),
-            // Never published: truthfully report the projection as absent
+            // Never recorded: truthfully report the projection as absent
             // instead of failing the health read.
             None => CorrelationIndexHealth {
                 projection_available: false,
@@ -573,8 +209,8 @@ where
         })
     }
 
-    /// Executes the query and derives presence from the same generation-bound
-    /// view, so both answers describe one verified generation.
+    /// Executes the query and derives presence from the same snapshot, so
+    /// both answers describe one generation.
     #[hotpath::measure(
         label = "global_db.git_correlation.sessions_for_with_presence",
         future = true
@@ -585,13 +221,13 @@ where
         relation: CommitRelationFilter,
     ) -> Result<(Vec<SessionGitCorrelationHit>, CorrelationIndexPresence), GitCorrelationError>
     {
+        self.require_project_sessions_authority()?;
         let snapshot = self.read_snapshot().await?;
         let backfill_watermark = read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
-        Ok(match self.git_evidence_graph_view()? {
+        Ok(match open_git_evidence_view(&snapshot).await? {
             Some(view) => {
-                let presence = view.presence(backfill_watermark);
-                let results = view.sessions_for(query, relation)?;
-                (results, presence)
+                let results = view.sessions_for(query, relation).await?;
+                (results, view.presence(backfill_watermark))
             }
             None => (
                 Vec::new(),
@@ -613,30 +249,38 @@ where
         query: &SessionsForQuery,
         relation: CommitRelationFilter,
     ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
-        match self.git_evidence_graph_view()? {
-            Some(view) => view.sessions_for(query, relation),
+        self.require_project_sessions_authority()?;
+        let snapshot = self.read_snapshot().await?;
+        match open_git_evidence_view(&snapshot).await? {
+            Some(view) => view.sessions_for(query, relation).await,
             // No evidence has ever been recorded, so no session correlates.
             None => Ok(Vec::new()),
         }
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::measure(label = "global_db.git_correlation.session_ids")]
-    pub fn session_ids_for_scope(
+    /// The sessions a Git scope selects. A store that never recorded
+    /// evidence cannot prove that no durable session matches, so it answers
+    /// typed unavailable rather than an empty set.
+    #[hotpath::measure(label = "global_db.git_correlation.scope_session_ids", future = true)]
+    pub async fn session_ids_for_scope(
         &self,
-        filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
-    ) -> Result<std::collections::BTreeSet<(String, String)>, GitCorrelationError> {
-        // No published evidence: a valid scope truthfully matches no session.
-        let Some(view) = self.git_evidence_graph_view()? else {
-            return Ok(std::collections::BTreeSet::new());
+        filter: &GitScopeFilter,
+        maximum: Option<usize>,
+    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
+        self.require_project_sessions_authority()?;
+        if filter.is_empty() {
+            return Ok(None);
+        }
+        let snapshot = self.read_snapshot().await?;
+        let Some(view) = open_git_evidence_view(&snapshot).await? else {
+            return Err(GitCorrelationError::Unavailable(
+                "Git evidence has not been recorded for this project".to_owned(),
+            ));
         };
-        view.session_ids_for_scope(filter)?
-            .map(|ids| ids.into_iter().collect())
-            .ok_or_else(|| {
-                GitCorrelationError::Unavailable(
-                    "Git evidence scope could not be resolved".to_owned(),
-                )
-            })
+        match maximum {
+            Some(maximum) => view.session_ids_for_scope_bounded(filter, maximum).await,
+            None => view.session_ids_for_scope(filter).await,
+        }
     }
 }
 
@@ -664,82 +308,6 @@ where
     async fn open_write_transaction(&self) -> Result<Self::WriteTxn<'_>, GitCorrelationError> {
         GlobalDbGitCorrelationStore::open_write_transaction(self).await
     }
-
-    fn publish_graph_evidence_owned(
-        &self,
-        publication_prefix: String,
-        new_spans: Vec<SessionGitSpan>,
-        new_commits: Vec<CommitSessionRecord>,
-    ) -> impl Future<Output = Result<(usize, usize), GitCorrelationError>> + Send {
-        let publication_authority = self.owned_publication_authority();
-        async move {
-            let (runtime, publication_authority, operation_task_owner) = publication_authority?;
-            publish_owned_git_evidence(
-                publication_authority,
-                operation_task_owner,
-                move |publication_lock| {
-                    GitEvidenceProjectionStore::publish_graph_evidence_with_runtime(
-                        &runtime,
-                        publication_lock,
-                        &publication_prefix,
-                        &new_spans,
-                        &new_commits,
-                        Arc::new(AtomicBool::new(false)),
-                    )
-                },
-            )
-            .await
-        }
-    }
-
-    fn publish_transcript_graph_evidence_owned(
-        &self,
-        publication_prefix: String,
-        observations: Vec<SpanObservation>,
-        new_commits: Vec<CommitSessionRecord>,
-        merge_gap_secs: i64,
-    ) -> impl Future<Output = Result<(usize, usize), GitCorrelationError>> + Send {
-        let publication_authority = self.owned_publication_authority();
-        async move {
-            let (runtime, publication_authority, operation_task_owner) = publication_authority?;
-            publish_owned_git_evidence(
-                publication_authority,
-                operation_task_owner,
-                move |publication_lock| {
-                    GitEvidenceProjectionStore::publish_transcript_graph_evidence_with_runtime(
-                        &runtime,
-                        publication_lock,
-                        &publication_prefix,
-                        &observations,
-                        &new_commits,
-                        merge_gap_secs,
-                    )
-                },
-            )
-            .await
-        }
-    }
-
-    fn git_evidence_publication_lock(&self) -> Result<Arc<Mutex<()>>, GitCorrelationError> {
-        match &self.graph_publication_authority {
-            Some(Ok(authority)) => Ok(Arc::clone(&authority.lock)),
-            Some(Err(detail)) => Err(GitCorrelationError::Unavailable(detail.clone())),
-            None => Err(GitCorrelationError::Unavailable(
-                "registered project graph runtime is not mounted".to_owned(),
-            )),
-        }
-    }
-
-    fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
-        self.graph_runtime
-            .as_ref()
-            .map(|runtime| runtime as &dyn VerifiedGraphRuntimePortV1)
-            .ok_or_else(|| {
-                GitCorrelationError::Unavailable(
-                    "registered project graph runtime is not mounted".to_owned(),
-                )
-            })
-    }
 }
 
 impl GitCorrelationSessionStore for RegisteredGlobalDb {
@@ -751,16 +319,7 @@ impl GitCorrelationSessionStore for RegisteredGlobalDb {
         Self: 'txn;
 
     fn require_project_sessions_authority(&self) -> Result<(), GitCorrelationError> {
-        if matches!(
-            &self.binding().shard_id.scope,
-            StoreShardScopeV1::ProjectSessions { .. }
-        ) {
-            Ok(())
-        } else {
-            Err(GitCorrelationError::Db(
-                "git correlation requires registered ProjectSessions authority".to_owned(),
-            ))
-        }
+        require_project_sessions(self)
     }
 
     #[hotpath::skip]
@@ -776,292 +335,21 @@ impl GitCorrelationSessionStore for RegisteredGlobalDb {
             .await
             .map_err(|error| GitCorrelationError::Db(error.to_string()))
     }
-
-    fn publish_graph_evidence_owned(
-        &self,
-        publication_prefix: String,
-        new_spans: Vec<SessionGitSpan>,
-        new_commits: Vec<CommitSessionRecord>,
-    ) -> impl Future<Output = Result<(usize, usize), GitCorrelationError>> + Send {
-        let publication_authority = self.require_project_sessions_authority().and_then(|()| {
-            let runtime = self.project_graph_runtime().cloned().ok_or_else(|| {
-                GitCorrelationError::Unavailable(
-                    "registered project graph runtime is not mounted".to_owned(),
-                )
-            })?;
-            let publication_authority = shared_git_evidence_publication_authority(&runtime)
-                .map_err(GitCorrelationError::Unavailable)?;
-            Ok((runtime, publication_authority, self.operation_task_owner()))
-        });
-        async move {
-            let (runtime, publication_authority, operation_task_owner) = publication_authority?;
-            publish_owned_git_evidence(
-                publication_authority,
-                operation_task_owner,
-                move |publication_lock| {
-                    GitEvidenceProjectionStore::publish_graph_evidence_with_runtime(
-                        &runtime,
-                        publication_lock,
-                        &publication_prefix,
-                        &new_spans,
-                        &new_commits,
-                        Arc::new(AtomicBool::new(false)),
-                    )
-                },
-            )
-            .await
-        }
-    }
-
-    fn publish_transcript_graph_evidence_owned(
-        &self,
-        publication_prefix: String,
-        observations: Vec<SpanObservation>,
-        new_commits: Vec<CommitSessionRecord>,
-        merge_gap_secs: i64,
-    ) -> impl Future<Output = Result<(usize, usize), GitCorrelationError>> + Send {
-        let publication_authority = self.require_project_sessions_authority().and_then(|()| {
-            let runtime = self.project_graph_runtime().cloned().ok_or_else(|| {
-                GitCorrelationError::Unavailable(
-                    "registered project graph runtime is not mounted".to_owned(),
-                )
-            })?;
-            let publication_authority = shared_git_evidence_publication_authority(&runtime)
-                .map_err(GitCorrelationError::Unavailable)?;
-            Ok((runtime, publication_authority, self.operation_task_owner()))
-        });
-        async move {
-            let (runtime, publication_authority, operation_task_owner) = publication_authority?;
-            publish_owned_git_evidence(
-                publication_authority,
-                operation_task_owner,
-                move |publication_lock| {
-                    GitEvidenceProjectionStore::publish_transcript_graph_evidence_with_runtime(
-                        &runtime,
-                        publication_lock,
-                        &publication_prefix,
-                        &observations,
-                        &new_commits,
-                        merge_gap_secs,
-                    )
-                },
-            )
-            .await
-        }
-    }
-
-    fn git_evidence_publication_lock(&self) -> Result<Arc<Mutex<()>>, GitCorrelationError> {
-        let runtime = self.project_graph_runtime().ok_or_else(|| {
-            GitCorrelationError::Unavailable(
-                "registered project graph runtime is not mounted".to_owned(),
-            )
-        })?;
-        shared_git_evidence_publication_authority(runtime)
-            .map(|authority| Arc::clone(&authority.lock))
-            .map_err(GitCorrelationError::Unavailable)
-    }
-
-    fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
-        self.project_graph_runtime()
-            .map(|runtime| runtime as &dyn VerifiedGraphRuntimePortV1)
-            .ok_or_else(|| {
-                GitCorrelationError::Unavailable(
-                    "registered project graph runtime is not mounted".to_owned(),
-                )
-            })
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        GitEvidenceConvergenceOutcome, GitEvidenceConvergenceStats, GlobalDbGitCorrelationStore,
-        publish_owned_git_evidence, settle_git_evidence_convergence,
-        shared_git_evidence_publication_authority_for_identity,
-    };
+    use super::GlobalDbGitCorrelationStore;
     use crate::{
         ParseOffset, TranscriptPersistenceError,
         tests::harness::{RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime},
     };
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex, mpsc};
-    use std::time::Duration;
-    use tempfile::TempDir;
-    use tokio::sync::Notify;
     use tracedecay_domain::ProjectId;
-    use tracedecay_graph_db::{
-        GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
-        GraphProjectionIdentity, GraphProjectorRevision, NeverCancelled, VerifiedGraphSnapshot,
-    };
-    use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
-    use tracedecay_runtime_core::db::{
-        Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
-        TestRuntimeProfileIdentityV1,
-    };
-    use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_sessions::runtime::SessionRecord;
     use tracedecay_sessions::runtime::git_correlation::{
-        AUTO_BACKFILL_WATERMARK_KEY, CommitRelationFilter, GIT_EVIDENCE_PROJECTOR_REVISION,
-        GitCorrelationError, GitCorrelationWriteTxn, GitEvidenceProjectionV1,
-        GitHistoryIndexFrontier, GitRefFilter, GitReflogSource, GitScopeFilter, SessionGitSpan,
-        SessionsForQuery, SpanObservation, SpanSource, SystemGit,
-        build_git_evidence_manifest_checked, git_evidence_generation_id,
-        git_evidence_projection_identity, write_meta_value,
+        CommitRelationFilter, GitCorrelationError, GitRefFilter, GitScopeFilter, SessionsForQuery,
+        SpanObservation, SpanSource, SystemGit,
     };
-    use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
-
-    const BLOCKING_GRAPH_TEST_DEADLINE: Duration = Duration::from_secs(5);
-
-    struct BlockingGitEvidenceRuntime {
-        binding: StoreRuntimeBindingV1,
-        locator: VerifiedStoreLocatorV1,
-        snapshot: Mutex<Option<VerifiedGraphSnapshot>>,
-        snapshot_release: Mutex<Option<mpsc::Receiver<()>>>,
-        snapshot_started: Notify,
-        fail_publication: bool,
-        publication_failed: AtomicBool,
-    }
-
-    impl VerifiedGraphRuntimePortV1 for BlockingGitEvidenceRuntime {
-        fn relational_binding(&self) -> &StoreRuntimeBindingV1 {
-            &self.binding
-        }
-
-        fn relational_verified_locator(&self) -> &VerifiedStoreLocatorV1 {
-            &self.locator
-        }
-
-        fn cancel_reconciliation(&self) {}
-
-        fn publish_verified_manifest(
-            &self,
-            manifest: &GraphGenerationManifest,
-            _idempotency_key: GraphIdempotencyKey,
-            _cancelled: Arc<AtomicBool>,
-        ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-            if self.fail_publication {
-                self.publication_failed.store(true, Ordering::Release);
-                return Err(GraphDbError::unavailable(
-                    "injected detached Git evidence publication failure",
-                ));
-            }
-            let snapshot =
-                VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))?;
-            *self.snapshot.lock().unwrap() = Some(snapshot.clone());
-            Ok(snapshot)
-        }
-
-        fn reconcile_verified_manifest(
-            &self,
-            manifest: &GraphGenerationManifest,
-            idempotency_key: GraphIdempotencyKey,
-        ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-            self.publish_verified_manifest(
-                manifest,
-                idempotency_key,
-                Arc::new(AtomicBool::new(false)),
-            )
-        }
-
-        fn verified_snapshot(
-            &self,
-            projection: &GraphProjectionIdentity,
-            read_control: FactReadControl,
-        ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
-            if let Some(release) = self.snapshot_release.lock().unwrap().take() {
-                self.snapshot_started.notify_one();
-                release
-                    .recv_timeout(BLOCKING_GRAPH_TEST_DEADLINE)
-                    .map_err(|_| GraphDbError::DeadlineExceeded)?;
-            }
-            if read_control.interrupted() {
-                return Err(GraphDbError::Cancelled);
-            }
-            Ok(self
-                .snapshot
-                .lock()
-                .unwrap()
-                .as_ref()
-                .filter(|snapshot| snapshot.projection() == projection)
-                .cloned())
-        }
-    }
-
-    struct GitEvidenceRuntimeFixture {
-        _root: TempDir,
-        _registered: RegisteredGlobalDbTestRuntime,
-        _graph_database: Database,
-        runtime: Arc<BlockingGitEvidenceRuntime>,
-        store: GlobalDbGitCorrelationStore<crate::RegisteredGlobalDbLeaseV1>,
-        operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
-    }
-
-    impl GitEvidenceRuntimeFixture {
-        async fn open(
-            label: &str,
-            snapshot_release: mpsc::Receiver<()>,
-            fail_publication: bool,
-        ) -> Self {
-            let root = tempfile::tempdir().unwrap();
-            let project_id = ProjectId::new(format!("project.git-evidence-{label}")).unwrap();
-            let profile_root = root.path().join("profile");
-            let project_root = root.path().join("project");
-            let registered = RegisteredGlobalDbTestRuntime::project(
-                &profile_root,
-                &project_root,
-                project_id.clone(),
-            )
-            .await
-            .unwrap();
-            let database = registered.project_database_arc().unwrap();
-            let shard = &database.binding().shard_id;
-            let profile_identity =
-                TestRuntimeProfileIdentityV1::new(shard.brain_id.clone(), shard.profile_id.clone());
-            let graph_path = root.path().join("project-graph.db");
-            let graph_authority =
-                DatabaseAuthority::acquire_test(&graph_path, "Git evidence runtime fixture")
-                    .unwrap();
-            let (graph_database, _) =
-                Database::publish_registered_test_runtime_for_profile_identity(
-                    &graph_path,
-                    &graph_authority,
-                    TestDatabaseRuntimeMode::Initialize,
-                    profile_identity,
-                    TestDatabaseRuntimeScope::Project { project_id },
-                )
-                .await
-                .unwrap();
-            let runtime = Arc::new(BlockingGitEvidenceRuntime {
-                binding: graph_database.registered_binding().clone(),
-                locator: graph_database.registered_verified_locator().clone(),
-                snapshot: Mutex::new(None),
-                snapshot_release: Mutex::new(Some(snapshot_release)),
-                snapshot_started: Notify::new(),
-                fail_publication,
-                publication_failed: AtomicBool::new(false),
-            });
-            let graph_runtime: Arc<dyn VerifiedGraphRuntimePortV1> = runtime.clone();
-            graph_database
-                .bind_memory_graph_runtime(graph_runtime)
-                .unwrap();
-            assert!(
-                database
-                    .bind_project_graph_runtime(graph_database.memory_graph_runtime().unwrap())
-                    .is_ok(),
-                "bind Git evidence graph runtime"
-            );
-            let operation_task_owner = database.operation_task_owner();
-            let store = GlobalDbGitCorrelationStore::new(database);
-            Self {
-                _root: root,
-                _registered: registered,
-                _graph_database: graph_database,
-                runtime,
-                store,
-                operation_task_owner,
-            }
-        }
-    }
 
     fn span_observation(ts: i64) -> SpanObservation {
         SpanObservation {
@@ -1075,143 +363,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn publication_authority_registry_is_exact_identity_scoped() {
-        let first = shared_git_evidence_publication_authority_for_identity(
-            "git-evidence-lock-test:shared".to_owned(),
-        )
-        .unwrap();
-        let same = shared_git_evidence_publication_authority_for_identity(
-            "git-evidence-lock-test:shared".to_owned(),
-        )
-        .unwrap();
-        let foreign = shared_git_evidence_publication_authority_for_identity(
-            "git-evidence-lock-test:foreign".to_owned(),
-        )
-        .unwrap();
-
-        assert!(Arc::ptr_eq(&first.lock, &same.lock));
-        assert!(Arc::ptr_eq(&first.admission, &same.admission));
-        assert!(!Arc::ptr_eq(&first.lock, &foreign.lock));
-
-        let retained_lock = Arc::clone(&first.lock);
-        drop(first);
-        drop(same);
-        let rebound = shared_git_evidence_publication_authority_for_identity(
-            "git-evidence-lock-test:shared".to_owned(),
-        )
-        .unwrap();
-        assert!(
-            Arc::ptr_eq(&retained_lock, &rebound.lock),
-            "a synchronous lock holder must keep the canonical publication lock"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn publication_admission_precedes_blocking_child_spawn() {
-        let authority = shared_git_evidence_publication_authority_for_identity(
-            "git-evidence-admission-test".to_owned(),
-        )
-        .unwrap();
-        let held = Arc::clone(&authority.admission)
-            .acquire_owned()
-            .await
-            .unwrap();
-        let operation_task_owner = Arc::new(RuntimeOperationTaskOwnerV1::new());
-        let started = Arc::new(AtomicBool::new(false));
-        let operation_started = Arc::clone(&started);
-        let publication =
-            publish_owned_git_evidence(authority, Arc::clone(&operation_task_owner), move |_| {
-                operation_started.store(true, Ordering::Release);
-                Ok(())
-            });
-        tokio::pin!(publication);
-        tokio::select! {
-            result = &mut publication => {
-                panic!("publication bypassed held admission: {result:?}");
-            }
-            _ = tokio::task::yield_now() => {}
-        }
-        assert!(
-            !started.load(Ordering::Acquire),
-            "blocking child must not spawn before Git publication admission"
-        );
-
-        drop(held);
-        publication.await.unwrap();
-        operation_task_owner.shutdown().await.unwrap();
-    }
-
-    #[test]
-    fn later_failure_returns_committed_partial_convergence() {
-        let progress = GitEvidenceConvergenceStats {
-            settled_receipts: 1,
-            pending_publications: Some(0),
-            backfill: Default::default(),
-            frontier: GitHistoryIndexFrontier {
-                activity_timestamp: 0,
-                source_rowid: 0,
-            },
-            published: true,
-            rebuilt_pre_index_head: false,
-        };
-        let failure = GitCorrelationError::Unavailable("git log failed".to_owned());
-
-        let outcome = settle_git_evidence_convergence(progress.clone(), Some(failure.clone()))
-            .expect("committed work must be returned as partial progress");
-
-        assert_eq!(
-            outcome,
-            GitEvidenceConvergenceOutcome::Partial {
-                progress,
-                later_failure: failure,
-            }
-        );
-        assert!(outcome.committed_progress());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn span_observation_recovery_merge_and_cas_leave_current_thread_runtime_live() {
-        let (release, blocked) = mpsc::channel();
-        let fixture = GitEvidenceRuntimeFixture::open("current-thread", blocked, false).await;
-        let runtime = Arc::clone(&fixture.runtime);
-        let holder = tokio::spawn(async move {
-            runtime.snapshot_started.notified().await;
-            release.send(()).is_ok()
-        });
-
-        assert_eq!(
-            fixture
-                .store
-                .record_span_observation(&span_observation(10), 5)
-                .await,
-            Ok(1)
-        );
-        assert!(holder.await.unwrap());
-        assert_eq!(
-            fixture
-                .store
-                .record_span_observation(&span_observation(12), 5)
-                .await,
-            Ok(1)
-        );
-
-        let projection = fixture
-            .store
-            .git_evidence_projection()
-            .unwrap()
-            .expect("verified Git evidence");
-        assert_eq!(projection.projection().spans().len(), 1);
-        assert_eq!(projection.projection().spans()[0].first_ts, 10);
-        assert_eq!(projection.projection().spans()[0].last_ts, 12);
-    }
-
-    fn released_snapshot_gate() -> mpsc::Receiver<()> {
-        let (release, blocked) = mpsc::channel();
-        release.send(()).unwrap();
-        blocked
-    }
-
     fn branch_query(branch: &str) -> SessionsForQuery {
         SessionsForQuery {
             git_ref: GitRefFilter::Branch(branch.to_owned()),
@@ -1221,294 +372,118 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn bounded_reads_answer_from_the_indexed_view_and_match_full_recovery() {
-        let fixture =
-            GitEvidenceRuntimeFixture::open("indexed-reads", released_snapshot_gate(), false).await;
+    /// Hook-route observations land in the project store's own rows, and
+    /// every read (health, presence, sessions_for, scope, session evidence)
+    /// answers from the same generation.
+    #[tokio::test]
+    async fn recorded_spans_are_read_back_through_every_facade() {
+        let root = tempfile::tempdir().unwrap();
+        let registered = RegisteredGlobalDbTestRuntime::project(
+            root.path().join("profile"),
+            root.path().join("project"),
+            ProjectId::new("project.git-evidence-rows").unwrap(),
+        )
+        .await
+        .unwrap();
+        let store = GlobalDbGitCorrelationStore::new(registered.project_database_arc().unwrap());
+
+        let unrecorded = store.correlation_index_health().await.unwrap();
+        assert!(!unrecorded.projection_available);
+        assert!(matches!(
+            store
+                .session_ids_for_scope(
+                    &GitScopeFilter {
+                        branch: Some("main".to_owned()),
+                        worktree: None,
+                        commit: None,
+                    },
+                    None,
+                )
+                .await,
+            Err(GitCorrelationError::Unavailable(_))
+        ));
+
         assert_eq!(
-            fixture
-                .store
+            store
                 .record_span_observation(&span_observation(10), 5)
                 .await,
             Ok(1)
         );
-        let full = fixture
-            .store
-            .git_evidence_projection()
-            .unwrap()
-            .expect("published evidence");
-        let health = fixture.store.correlation_index_health().await.unwrap();
-        assert_eq!(health, full.health(None));
+        assert_eq!(
+            store
+                .record_span_observation(&span_observation(12), 5)
+                .await,
+            Ok(1)
+        );
+        assert_eq!(
+            store
+                .record_span_observation(&span_observation(12), 5)
+                .await,
+            Ok(0),
+            "a repeated observation changes no row"
+        );
+
+        let health = store.correlation_index_health().await.unwrap();
         assert!(health.projection_available);
         assert_eq!((health.span_count, health.commit_count), (1, 0));
+        assert_eq!(
+            health.source_watermark.as_deref(),
+            Some("git-evidence-sequence:2")
+        );
 
-        let (hits, presence) = fixture
-            .store
+        let (hits, presence) = store
             .sessions_for_with_relation_and_presence(
                 &branch_query("main"),
                 CommitRelationFilter::Produced,
             )
             .await
             .unwrap();
-        assert_eq!(presence, full.presence(None));
         assert!(presence.spans_present && !presence.commits_present);
-        assert_eq!(
-            hits,
-            full.sessions_for_with_relation(&branch_query("main"), CommitRelationFilter::Produced)
-        );
+        assert_eq!(presence.generation, health.generation);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session_id, "session.git-evidence-runtime");
+        assert_eq!((hits[0].first_ts, hits[0].last_ts), (Some(10), Some(12)));
         assert_eq!(
-            fixture
-                .store
+            store
                 .sessions_for_with_relation(&branch_query("elsewhere"), CommitRelationFilter::All)
                 .await
                 .unwrap(),
             Vec::new()
         );
         assert_eq!(
-            fixture
-                .store
-                .session_ids_for_scope(&GitScopeFilter {
-                    branch: Some("main".to_owned()),
-                    worktree: Some("/repo".to_owned()),
-                    commit: None,
-                })
+            store
+                .session_ids_for_scope(
+                    &GitScopeFilter {
+                        branch: Some("main".to_owned()),
+                        worktree: Some("/repo".to_owned()),
+                        commit: None,
+                    },
+                    None,
+                )
+                .await
                 .unwrap(),
-            std::collections::BTreeSet::from([(
+            Some(vec![(
                 "codex".to_owned(),
                 "session.git-evidence-runtime".to_owned()
             )])
         );
-    }
-
-    /// Git with no branch switches: every session window is one `main` segment.
-    struct SingleBranchGit;
-
-    impl GitReflogSource for SingleBranchGit {
-        fn reflog(&self, _worktree: &std::path::Path) -> Option<String> {
-            Some(String::new())
-        }
-
-        fn current_branch(&self, _worktree: &std::path::Path) -> Option<String> {
-            Some("main".to_owned())
-        }
-
-        fn commit_reference_exists(
-            &self,
-            _worktree: &std::path::Path,
-            _reference: &str,
-        ) -> Result<bool, GitCorrelationError> {
-            Ok(true)
-        }
-
-        fn commit_log(
-            &self,
-            _worktree: &std::path::Path,
-            _branch: &str,
-            _since: i64,
-        ) -> Option<String> {
-            Some(String::new())
-        }
-    }
-
-    /// The pre-index projector's generation for `projection`: projection
-    /// metadata records only the watermark, under the pre-index identity.
-    fn pre_index_manifest(projection: &GitEvidenceProjectionV1) -> GraphGenerationManifest {
-        let identity =
-            git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
-        let current =
-            GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
-        let mut manifest =
-            build_git_evidence_manifest_checked(identity, projection, &current, &|| Ok(()))
-                .unwrap();
-        let pre_index =
-            GraphProjectorRevision::try_from("session-git-evidence-projector.v1".to_owned())
-                .unwrap();
-        manifest.generation = git_evidence_generation_id(projection, &pre_index).unwrap();
-        for entity in &mut manifest.entities {
-            if entity.identity.as_str() == "projection:session-git-evidence" {
-                entity
-                    .properties
-                    .retain(|name, _| name.as_str() == "projection-record");
-            }
-        }
-        manifest
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn convergence_rebuilds_a_pre_index_head_from_session_history() {
-        let fixture =
-            GitEvidenceRuntimeFixture::open("pre-index-head", released_snapshot_gate(), false)
-                .await;
-        let repo = fixture._root.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let init = std::process::Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&repo)
-            .status()
-            .unwrap();
-        assert!(init.success());
-        let repo_path = repo.to_string_lossy().into_owned();
-        assert!(
-            fixture
-                .store
-                .db()
-                .upsert_session(&SessionRecord {
-                    provider: "codex".to_owned(),
-                    session_id: "session.rebuilt".to_owned(),
-                    project_key: repo_path.clone(),
-                    project_path: repo_path.clone(),
-                    title: None,
-                    started_at: Some(1_000),
-                    ended_at: Some(2_000),
-                    transcript_path: None,
-                    metadata_json: None,
-                    parent_session_id: None,
-                    is_subagent: false,
-                    agent_id: None,
-                    parent_tool_use_id: None,
-                })
-                .await
-        );
-
-        // A store whose evidence never changes again: the pre-index head holds
-        // rows no session history reproduces, and the frontier is past every
-        // retained session.
-        let stale = GitEvidenceProjectionV1::new(
-            "pre-index-watermark",
-            vec![SessionGitSpan {
-                span_id: "span.pre-index".to_owned(),
-                provider: "codex".to_owned(),
-                session_id: "session.pre-index".to_owned(),
-                thread_id: None,
-                branch: Some("main".to_owned()),
-                worktree: repo_path.clone(),
-                first_ts: 100,
-                last_ts: 200,
-                event_count: 2,
-                source: SpanSource::Backfill,
-            }],
-            Vec::new(),
-        )
-        .unwrap();
-        let pre_index = pre_index_manifest(&stale);
-        fixture
-            .runtime
-            .publish_verified_manifest(
-                &pre_index,
-                GraphIdempotencyKey::new("pre-index-head").unwrap(),
-                Arc::new(AtomicBool::new(false)),
-            )
-            .unwrap();
-        let transaction = fixture.store.open_write_transaction().await.unwrap();
-        write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, 10_000)
-            .await
-            .unwrap();
-        GitCorrelationWriteTxn::commit(transaction).await.unwrap();
-
-        let refused = fixture
-            .store
-            .sessions_for_with_relation(&branch_query("main"), CommitRelationFilter::All)
-            .await;
-        assert!(
-            matches!(&refused, Err(GitCorrelationError::Unavailable(detail))
-                if detail.contains("predates the indexed projector")),
-            "{refused:?}"
-        );
-
-        let convergence = fixture
-            .store
-            .converge_session_git_evidence(&SingleBranchGit)
-            .await
-            .unwrap();
-        assert_eq!(convergence.later_failure(), None);
-        assert!(convergence.stats().rebuilt_pre_index_head);
-        assert_eq!(convergence.stats().backfill.sessions_scanned, 1);
-
-        let hits = fixture
-            .store
-            .sessions_for_with_relation(&branch_query("main"), CommitRelationFilter::All)
-            .await
-            .unwrap();
-        assert_eq!(
-            hits.iter()
-                .map(|hit| hit.session_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["session.rebuilt"],
-            "the head is republished from session history, not converted"
-        );
-        let health = fixture.store.correlation_index_health().await.unwrap();
-        assert!(health.projection_available);
-        assert_eq!((health.span_count, health.commit_count), (1, 0));
-        assert_ne!(
-            health.generation.as_deref(),
-            Some(pre_index.generation.as_str())
-        );
-
-        let settled = fixture
-            .store
-            .converge_session_git_evidence(&SingleBranchGit)
-            .await
-            .unwrap();
-        assert!(!settled.stats().rebuilt_pre_index_head);
-        assert_eq!(settled.stats().backfill.sessions_scanned, 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn cancelled_one_worker_span_caller_is_joined_before_owner_shutdown() {
-        let (release, blocked) = mpsc::channel();
-        let fixture =
-            GitEvidenceRuntimeFixture::open("one-worker-cancellation", blocked, true).await;
-        let GitEvidenceRuntimeFixture {
-            _root,
-            _registered,
-            _graph_database,
-            runtime,
-            store,
-            operation_task_owner,
-        } = fixture;
-        let caller = tokio::spawn(async move {
-            store
-                .record_span_observation(&span_observation(20), 5)
-                .await
-        });
-        runtime.snapshot_started.notified().await;
-
-        caller.abort();
-        assert!(caller.await.unwrap_err().is_cancelled());
-        operation_task_owner.begin_shutdown();
-        let shutdown = tokio::spawn({
-            let operation_task_owner = Arc::clone(&operation_task_owner);
-            async move { operation_task_owner.shutdown().await }
-        });
-        tokio::task::yield_now().await;
-        assert!(
-            !shutdown.is_finished(),
-            "operation-owner shutdown must retain the blocked Git publication"
-        );
-
-        release.send(()).unwrap();
-        shutdown
+        let evidence = store
+            .git_evidence_for_sessions(&std::collections::BTreeSet::from([
+                "session.git-evidence-runtime".to_owned(),
+            ]))
             .await
             .unwrap()
-            .expect("operation-owner shutdown joins detached Git publication");
-        assert!(
-            runtime.publication_failed.load(Ordering::Acquire),
-            "detached domain failure must occur before shutdown reports settlement"
-        );
+            .unwrap();
+        assert_eq!(Some(evidence.generation), health.generation);
+        assert_eq!(evidence.spans.len(), 1);
+        assert_eq!(evidence.commits, Vec::new());
     }
 
     #[tokio::test]
-    async fn profile_sessions_authority_cannot_replay_or_backfill_project_git_evidence() {
+    async fn profile_sessions_authority_cannot_record_project_git_evidence() {
         let harness = RegisteredGlobalDbHarness::open("git-correlation-profile-isolation").await;
         let store = GlobalDbGitCorrelationStore::new(harness.registered.clone());
 
-        assert!(matches!(
-            store.replay_pending_git_evidence_publications().await,
-            Err(GitCorrelationError::Db(message))
-                if message.contains("ProjectSessions")
-        ));
         assert!(matches!(
             store.converge_session_git_evidence(&SystemGit).await,
             Err(GitCorrelationError::Db(message))
@@ -1539,7 +514,6 @@ mod tests {
                 ParseOffset::default(),
                 ParseOffset::default(),
                 tracedecay_sessions::runtime::TranscriptGitEvidence::new(
-                    "profile-git-evidence",
                     &[],
                     &[SpanObservation {
                         provider: "codex".to_owned(),
@@ -1557,7 +531,7 @@ mod tests {
         assert!(matches!(
             error,
             TranscriptPersistenceError::Storage { operation, source }
-                if operation == "stage transcript git evidence"
+                if operation == "record transcript git evidence"
                     && source.to_string().contains("ProjectSessions")
         ));
         assert!(

@@ -83,16 +83,6 @@ impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowInde
             crate::runtime::git_correlation::GitCorrelationError::Unavailable(authority) => {
                 Self::Db(authority)
             }
-            crate::runtime::git_correlation::GitCorrelationError::Cancelled => {
-                Self::AuthorityUnavailable {
-                    authority: "Git evidence request was cancelled",
-                }
-            }
-            crate::runtime::git_correlation::GitCorrelationError::BudgetExhausted => {
-                Self::AuthorityUnavailable {
-                    authority: "Git evidence request exhausted its budget",
-                }
-            }
         }
     }
 }

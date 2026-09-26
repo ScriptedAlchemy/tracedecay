@@ -5,8 +5,6 @@ pub enum GitCorrelationError {
     Contract(String),
     Corrupt(String),
     Unavailable(String),
-    Cancelled,
-    BudgetExhausted,
 }
 
 impl std::fmt::Display for GitCorrelationError {
@@ -17,17 +15,10 @@ impl std::fmt::Display for GitCorrelationError {
                 formatter.write_str(message)
             }
             Self::Corrupt(message) => {
-                write!(formatter, "Git evidence projection is corrupt: {message}")
+                write!(formatter, "Git evidence rows are corrupt: {message}")
             }
             Self::Unavailable(message) => {
-                write!(
-                    formatter,
-                    "Git evidence projection is unavailable: {message}"
-                )
-            }
-            Self::Cancelled => formatter.write_str("Git evidence operation was cancelled"),
-            Self::BudgetExhausted => {
-                formatter.write_str("Git evidence operation exhausted its budget")
+                write!(formatter, "Git evidence is unavailable: {message}")
             }
         }
     }
@@ -44,34 +35,5 @@ impl From<tracedecay_runtime_core::db::engine::Error> for GitCorrelationError {
 impl From<serde_json::Error> for GitCorrelationError {
     fn from(error: serde_json::Error) -> Self {
         Self::Corrupt(error.to_string())
-    }
-}
-
-impl From<tracedecay_graph_db::GraphDbError> for GitCorrelationError {
-    fn from(error: tracedecay_graph_db::GraphDbError) -> Self {
-        use tracedecay_graph_db::GraphDbError;
-
-        match error {
-            GraphDbError::Cancelled => Self::Cancelled,
-            GraphDbError::BudgetExhausted { .. } | GraphDbError::DeadlineExceeded => {
-                Self::BudgetExhausted
-            }
-            GraphDbError::InvalidRequest { message } => Self::Contract(message),
-            GraphDbError::Corrupt { message }
-            | GraphDbError::ResetRequired { message }
-            | GraphDbError::DurabilityUncertain { message }
-            | GraphDbError::ProjectionMismatch { message, .. }
-            | GraphDbError::GenerationMismatch { message, .. } => Self::Corrupt(message),
-            GraphDbError::Conflict { context } => {
-                Self::Unavailable(format!("Git evidence publication conflict {context}"))
-            }
-            GraphDbError::Unavailable { message }
-            | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),
-            error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
-            | GraphDbError::SealedRevisionIncompatible { .. }) => {
-                Self::Unavailable(error.to_string())
-            }
-            GraphDbError::Closed => Self::Unavailable("graph store is closed".to_owned()),
-        }
     }
 }

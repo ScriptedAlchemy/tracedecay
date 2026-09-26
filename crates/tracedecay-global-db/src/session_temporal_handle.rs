@@ -10,7 +10,6 @@ use std::path::Path;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, IntoParams, Rows};
-use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_session_temporal_store::relations::{
     SessionRelationGraphStore, SessionRelationScope,
 };
@@ -86,9 +85,5 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDb {
     ) -> Result<(SessionRelationScope, SessionRelationGraphStore), TraceDecayError> {
         let (scope, graph, _, _) = self.session_relation_graph()?;
         Ok((scope.clone(), SessionRelationGraphStore::new(graph.clone())))
-    }
-
-    fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1> {
-        RegisteredGlobalDb::project_graph_runtime(self)
     }
 }

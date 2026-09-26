@@ -328,8 +328,8 @@ pub struct DashboardStateCompositionV1 {
     pub profile_code_index_worker_settings:
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
-    /// Daemon-owned typed read over the verified session-git-evidence graph
-    /// projection. Loom's git sources report unavailable without it.
+    /// Daemon-owned typed read over the session Git evidence rows. Loom's git
+    /// sources report unavailable without it.
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     /// Daemon-wide Delivery projection over exact registered project targets.
     /// The adapter owns application admission and provider/store access; HTTP
@@ -462,8 +462,8 @@ pub struct DashboardState {
     /// Daemon-owned canonical session retrieval authority used by LCM browse
     /// routes. Those routes never retain or open a session database.
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
-    /// Daemon-owned typed read over the verified session-git-evidence graph
-    /// projection, serving Loom's session↔commit and branch/worktree sources.
+    /// Daemon-owned typed read over the session Git evidence rows, serving
+    /// Loom's session↔commit and branch/worktree sources.
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     /// Daemon-wide Delivery projection over exact registered project targets.
     pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,

@@ -559,12 +559,10 @@ impl RegisteredGlobalDbHarness {
             .await
             .expect("publish daemon test runtime")
             .into_parts();
-        let (database, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
-            database_owner,
-            Arc::new(tracedecay_runtime_core::RuntimeOperationTaskOwnerV1::new()),
-        )
-        .await
-        .expect("daemon admission");
+        let (database, convergence) =
+            RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database_owner)
+                .await
+                .expect("daemon admission");
         let registered = database.issue_lease().expect("issue daemon test lease");
         (
             Self {

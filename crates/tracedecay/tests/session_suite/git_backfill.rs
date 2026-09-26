@@ -434,8 +434,8 @@ fn incremental_git(repo: &Path) -> FakeGit {
 /// One production convergence pass that must settle without a later failure.
 async fn converge(db: &HostAdmissionTestRuntimeV1, git: &FakeGit) -> BackfillStats {
     let outcome = db.converge_git_evidence_for_test(git).await.unwrap();
-    assert_eq!(outcome.later_failure(), None);
-    outcome.stats().backfill.clone()
+    assert_eq!(outcome.later_failure, None);
+    outcome.pass.backfill
 }
 
 #[tokio::test]
@@ -534,14 +534,14 @@ async fn project_host_admission_drain_bootstraps_retained_git_evidence() {
 /// Rowid half of the durable history frontier, mirrored like the watermark.
 const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
 
-/// A catch-up of a thousand retained sessions converges in one pass that
-/// publishes one generation. Each pass used to publish a full-projection
-/// generation per session and stop after a 50-session page, reporting deferred
-/// work, so the history scheduler re-ran it for as long as the daemon lived
-/// and never reached the next history window.
+/// A catch-up of thousands of retained sessions converges in one pass that
+/// installs one metadata generation over the appended rows. Git evidence used
+/// to be one whole-projection manifest capped at 4 MB (about 1,300 sessions)
+/// and republished per session, so a catch-up this size never settled and the
+/// history scheduler re-ran it for as long as the daemon lived.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn large_catch_up_converges_in_one_pass_and_then_stays_settled() {
-    const SESSIONS: i64 = 1_000;
+    const SESSIONS: i64 = 5_000;
     let (_base, repo, _main, _feature) = build_repo();
     let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("db tmpdir: {e}"));
     let project_id = ProjectId::new("project.git-backfill-catch-up").unwrap();
@@ -572,34 +572,39 @@ async fn large_catch_up_converges_in_one_pass_and_then_stays_settled() {
     let scope = ObservationScopeV1::Project { project_id };
 
     let first = db.converge_git_evidence_for_test(&SystemGit).await.unwrap();
-    assert_eq!(first.later_failure(), None);
-    let receipt = first.stats();
+    assert_eq!(first.later_failure, None);
+    let receipt = first.pass;
     assert_eq!(
         receipt.frontier,
         GitHistoryIndexFrontier {
-            activity_timestamp: T_BASE + 59_970,
-            source_rowid: 1_000,
+            activity_timestamp: T_BASE + 299_970,
+            source_rowid: 5_000,
         },
         "the receipt's frontier is the last session's (activity, rowid)"
     );
-    assert_eq!(receipt.backfill.sessions_scanned, 1_000);
+    assert_eq!(receipt.backfill.sessions_scanned, 5_000);
     assert_eq!(receipt.backfill.skipped_git_error, 0);
-    assert_eq!(receipt.pending_publications, Some(0));
-    assert!(receipt.published);
+    let generation = receipt
+        .generation
+        .expect("the catch-up installs one generation");
+    assert_eq!(
+        generation.sequence, 1,
+        "the whole catch-up is one metadata publication"
+    );
     assert_eq!(
         db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 59_970)
+        Some(T_BASE + 299_970)
     );
     assert_eq!(
         db.git_correlation_meta_for_test(GIT_HISTORY_ROWID_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(1_000)
+        Some(5_000)
     );
     let settled = db.git_correlation_health_for_test().await.unwrap();
-    assert_eq!(settled.span_count, 1_000);
+    assert_eq!(settled.span_count, 5_000);
     // Time-overlap attribution: the main commits at T_BASE + 100 and + 700
     // fall within the merge gap of the first 32 and 42 sessions.
     assert_eq!(settled.commit_count, 74);
