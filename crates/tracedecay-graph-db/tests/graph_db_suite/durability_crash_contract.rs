@@ -302,13 +302,17 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
         self.cas_attempts += 1;
         if self.fail_next_cas {
             self.fail_next_cas = false;
-            return Err(GraphPublicationStoreErrorV1::Infrastructure);
+            return Err(GraphPublicationStoreErrorV1::Infrastructure(
+                "injected compare-and-swap failure".to_owned(),
+            ));
         }
         let record = self
             .records
             .get(&request.publication_key)
             .cloned()
-            .ok_or(GraphPublicationStoreErrorV1::Infrastructure)?;
+            .ok_or_else(|| {
+                GraphPublicationStoreErrorV1::Infrastructure("unstaged test publication".to_owned())
+            })?;
         if self.heads.get(&request.publication_key.projection)
             != request.expected_prior_head.as_ref()
         {

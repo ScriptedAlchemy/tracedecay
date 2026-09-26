@@ -161,12 +161,11 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn run_incremental_git_backfill_for_test(
+    pub async fn converge_git_evidence_for_test(
         &self,
         git: &dyn tracedecay_sessions::runtime::git_correlation::GitReflogSource,
-        limit_sessions: usize,
     ) -> std::result::Result<
-        tracedecay_sessions::runtime::git_correlation::BackfillStats,
+        tracedecay_global_db::GitEvidenceConvergenceOutcome,
         tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {
@@ -175,7 +174,24 @@ impl HostAdmissionTestRuntimeV1 {
             )
         })?;
         tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
-            .run_incremental_backfill(git, limit_sessions)
+            .converge_session_git_evidence(git)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn git_correlation_health_for_test(
+        &self,
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::git_correlation::CorrelationIndexHealth,
+        tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
+    > {
+        let database = self.project_database_for_test().map_err(|error| {
+            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                error.to_string(),
+            )
+        })?;
+        tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
+            .correlation_index_health()
             .await
     }
 

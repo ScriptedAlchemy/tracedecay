@@ -13,8 +13,12 @@ pub enum GraphPublicationStoreErrorV1 {
     InvalidRequest(#[from] StorageRuntimeContractErrorV1),
     #[error("graph publication interrupted: {0:?}")]
     Interrupted(RuntimeInterruptionV1),
-    #[error("graph publication persistence is unavailable")]
-    Infrastructure,
+    #[error("graph publication persistence is unavailable: {0}")]
+    Infrastructure(String),
+    /// The operation's commit grant refused the commit: the context already
+    /// committed once, or the probe's arbitration denied it.
+    #[error("graph publication commit refused by the operation's commit grant")]
+    CommitRefused,
     #[error("graph publication persistence is corrupt: {0}")]
     Corrupt(String),
 }
@@ -57,6 +61,18 @@ impl<'a> GraphPublicationOperationContextV1<'a> {
     /// `DeadlineExceeded` can be attributed to the operation that armed it.
     pub fn deadline_id(&self) -> &str {
         self.probe.deadline_identity().deadline_id.as_str()
+    }
+
+    /// A context over the same probe with an unspent commit grant, for an
+    /// operation that commits more than once (superseded-replay retirement
+    /// commits per retired replay and per cleanup finalization). The probe
+    /// still arbitrates every commit.
+    #[must_use]
+    pub fn next_commit(&self) -> Self {
+        Self {
+            probe: self.probe,
+            commit_started: AtomicBool::new(false),
+        }
     }
 
     pub fn try_begin_verified_commit(&self) -> bool {

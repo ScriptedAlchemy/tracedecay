@@ -25,13 +25,12 @@ use tracedecay_sessions::runtime::git_correlation::recover_git_evidence_projecti
 use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BackfillStats, BoundedBackfillOutcome,
     BoundedGitControl, CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth,
-    CorrelationIndexPresence, DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT, GitCorrelationError,
-    GitCorrelationSessionStore, GitEvidenceGraphView, GitEvidenceProjectionStore, GitReflogSource,
+    CorrelationIndexPresence, GitCorrelationError, GitCorrelationSessionStore,
+    GitEvidenceGraphView, GitEvidenceProjectionStore, GitHistoryIndexFrontier, GitReflogSource,
     SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
-    git_evidence_projection_identity, open_git_evidence_graph_view,
+    converge_git_evidence_pass, git_evidence_projection_identity, open_git_evidence_graph_view,
     pending_git_evidence_publication_count, read_meta_value, rebuild_pre_index_git_evidence,
-    replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
-    run_bounded_history_index_page, run_incremental_backfill, run_incremental_backfill_outcome,
+    replay_pending_git_evidence_publications, run_bounded_history_index_page,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::git_correlation::{
@@ -66,17 +65,20 @@ pub struct GitSessionEvidence {
     pub commits: Vec<CommitSessionRecord>,
 }
 
-/// Typed result of one bounded production convergence pass.
+/// Receipt of one production convergence pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitEvidenceConvergenceStats {
-    pub replayed_publications: usize,
-    /// Known pending receipt count after replay. `None` means that authority
-    /// failed after another phase had already committed progress.
+    /// Transcript receipts the pass folded into its generation and settled.
+    pub settled_receipts: usize,
+    /// Receipts still pending after the pass: evidence staged while it ran.
+    /// `None` means that count failed after the pass committed progress.
     pub pending_publications: Option<u64>,
     pub backfill: BackfillStats,
-    /// Conservative signal: a full page means another retained-history page
-    /// may exist and callers must not describe this pass as fully drained.
-    pub backfill_page_saturated: bool,
+    /// Durable retained-history frontier after the pass.
+    pub frontier: GitHistoryIndexFrontier,
+    /// Whether the pass published a generation. A pass whose fold changes
+    /// nothing publishes nothing.
+    pub published: bool,
     /// The verified head predated the indexed projector; this pass replaced it
     /// and rewound the history frontier so backfill republishes from Git.
     pub rebuilt_pre_index_head: bool,
@@ -86,7 +88,8 @@ impl GitEvidenceConvergenceStats {
     /// Whether this pass durably changed Git evidence or its session frontier.
     pub fn committed_progress(&self) -> bool {
         self.rebuilt_pre_index_head
-            || self.replayed_publications > 0
+            || self.published
+            || self.settled_receipts > 0
             || self.backfill.committed_progress()
     }
 }
@@ -262,77 +265,56 @@ fn settle_git_evidence_blocking_join<T>(
 async fn converge_session_git_evidence<S, G>(
     session_store: &S,
     git: &G,
-    backfill_session_limit: usize,
-    publication_replay_limit: usize,
 ) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
     G: GitReflogSource + ?Sized,
 {
     session_store.require_project_sessions_authority()?;
-    if backfill_session_limit == 0 {
-        return Err(GitCorrelationError::InvalidArgument(
-            "Git evidence convergence backfill limit must be positive".to_owned(),
-        ));
-    }
-    if publication_replay_limit == 0 {
-        return Err(GitCorrelationError::InvalidArgument(
-            "Git evidence convergence replay limit must be positive".to_owned(),
-        ));
-    }
-    // Replay and backfill both merge onto the recovered head, which a
-    // pre-index generation cannot serve, so its rebuild comes first.
+    // The pass merges onto the recovered head, which a pre-index generation
+    // cannot serve, so its rebuild comes first.
     let rebuilt_pre_index_head = rebuild_pre_index_git_evidence(session_store).await?;
-    let unsettled = |replayed_publications, pending_publications| GitEvidenceConvergenceStats {
-        replayed_publications,
-        pending_publications,
-        backfill: BackfillStats::default(),
-        backfill_page_saturated: false,
-        rebuilt_pre_index_head,
-    };
-    let replay = match replay_pending_git_evidence_publications_outcome(
-        session_store,
-        publication_replay_limit,
-    )
-    .await
-    {
-        Ok(replay) => replay,
-        Err(error) => return settle_git_evidence_convergence(unsettled(0, None), Some(error)),
-    };
-    let replayed_publications = replay.replayed_publications;
-    let pending_publications = match pending_git_evidence_publication_count(session_store).await {
-        Ok(pending) => Some(pending),
-        Err(error) => {
+    let outcome = match converge_git_evidence_pass(session_store, git).await {
+        Ok(outcome) => outcome,
+        Err(error) if rebuilt_pre_index_head => {
             return settle_git_evidence_convergence(
-                unsettled(replayed_publications, None),
+                GitEvidenceConvergenceStats {
+                    settled_receipts: 0,
+                    pending_publications: None,
+                    backfill: BackfillStats::default(),
+                    // The rebuild rewound the frontier to the first session.
+                    frontier: GitHistoryIndexFrontier {
+                        activity_timestamp: 0,
+                        source_rowid: 0,
+                    },
+                    published: false,
+                    rebuilt_pre_index_head,
+                },
                 Some(error),
             );
         }
+        Err(error) => return Err(error),
     };
-    if let Some(later_failure) = replay.later_failure {
-        return settle_git_evidence_convergence(
-            unsettled(replayed_publications, pending_publications),
-            Some(later_failure),
-        );
-    }
-    let backfill_outcome =
-        match run_incremental_backfill_outcome(session_store, git, backfill_session_limit).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return settle_git_evidence_convergence(
-                    unsettled(replayed_publications, pending_publications),
-                    Some(error),
-                );
-            }
-        };
-    let progress = GitEvidenceConvergenceStats {
-        replayed_publications,
-        pending_publications,
-        backfill_page_saturated: backfill_outcome.stats.sessions_scanned == backfill_session_limit,
-        backfill: backfill_outcome.stats,
-        rebuilt_pre_index_head,
+    let pass = outcome.pass;
+    let mut later_failure = outcome.later_failure;
+    let pending_publications = match pending_git_evidence_publication_count(session_store).await {
+        Ok(pending) => Some(pending),
+        Err(error) => {
+            later_failure.get_or_insert(error);
+            None
+        }
     };
-    settle_git_evidence_convergence(progress, backfill_outcome.later_failure)
+    settle_git_evidence_convergence(
+        GitEvidenceConvergenceStats {
+            settled_receipts: pass.settled_receipts,
+            pending_publications,
+            backfill: pass.backfill,
+            frontier: pass.frontier,
+            published: pass.published,
+            rebuilt_pre_index_head,
+        },
+        later_failure,
+    )
 }
 
 /// Adapter over an already-open project-sessions database.
@@ -359,21 +341,14 @@ impl RegisteredGlobalDb {
     pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,
-        backfill_session_limit: usize,
-        publication_replay_limit: usize,
     ) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError> {
-        converge_session_git_evidence(self, git, backfill_session_limit, publication_replay_limit)
-            .await
+        converge_session_git_evidence(self, git).await
     }
 
     pub async fn replay_pending_git_evidence_publications(
         &self,
     ) -> Result<usize, GitCorrelationError> {
-        replay_pending_git_evidence_publications(
-            self,
-            DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT,
-        )
-        .await
+        replay_pending_git_evidence_publications(self).await
     }
 }
 
@@ -551,41 +526,21 @@ where
         run_backfill(self, analytics_events, git, opts).await
     }
 
-    #[hotpath::measure(
-        label = "global_db.git_correlation.incremental_backfill",
-        future = true
-    )]
-    pub async fn run_incremental_backfill<G: GitReflogSource + ?Sized>(
-        &self,
-        git: &G,
-        limit_sessions: usize,
-    ) -> Result<BackfillStats, GitCorrelationError> {
-        run_incremental_backfill(self, git, limit_sessions).await
-    }
-
     #[hotpath::measure(label = "global_db.git_correlation.replay_publications", future = true)]
     pub async fn replay_pending_git_evidence_publications(
         &self,
     ) -> Result<usize, GitCorrelationError> {
-        replay_pending_git_evidence_publications(
-            self,
-            DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT,
-        )
-        .await
+        replay_pending_git_evidence_publications(self).await
     }
 
-    /// Replays already-committed transcript publications first, then advances
-    /// exactly one retained-history page. Both budgets are explicit so startup
-    /// and admission never turn historical convergence into an unbounded wait.
+    /// Folds every pending transcript receipt and every retained session past
+    /// the history frontier into at most one published generation.
     #[hotpath::measure(label = "global_db.git_correlation.converge", future = true)]
     pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,
-        backfill_session_limit: usize,
-        publication_replay_limit: usize,
     ) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError> {
-        converge_session_git_evidence(self, git, backfill_session_limit, publication_replay_limit)
-            .await
+        converge_session_git_evidence(self, git).await
     }
 
     #[hotpath::measure(label = "global_db.git_correlation.bounded_history", future = true)]
@@ -947,9 +902,10 @@ mod tests {
     use tracedecay_sessions::runtime::SessionRecord;
     use tracedecay_sessions::runtime::git_correlation::{
         AUTO_BACKFILL_WATERMARK_KEY, CommitRelationFilter, GIT_EVIDENCE_PROJECTOR_REVISION,
-        GitCorrelationError, GitCorrelationWriteTxn, GitEvidenceProjectionV1, GitRefFilter,
-        GitReflogSource, GitScopeFilter, SessionGitSpan, SessionsForQuery, SpanObservation,
-        SpanSource, SystemGit, build_git_evidence_manifest_checked, git_evidence_generation_id,
+        GitCorrelationError, GitCorrelationWriteTxn, GitEvidenceProjectionV1,
+        GitHistoryIndexFrontier, GitRefFilter, GitReflogSource, GitScopeFilter, SessionGitSpan,
+        SessionsForQuery, SpanObservation, SpanSource, SystemGit,
+        build_git_evidence_manifest_checked, git_evidence_generation_id,
         git_evidence_projection_identity, write_meta_value,
     };
     use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
@@ -1189,10 +1145,14 @@ mod tests {
     #[test]
     fn later_failure_returns_committed_partial_convergence() {
         let progress = GitEvidenceConvergenceStats {
-            replayed_publications: 1,
+            settled_receipts: 1,
             pending_publications: Some(0),
             backfill: Default::default(),
-            backfill_page_saturated: false,
+            frontier: GitHistoryIndexFrontier {
+                activity_timestamp: 0,
+                source_rowid: 0,
+            },
+            published: true,
             rebuilt_pre_index_head: false,
         };
         let failure = GitCorrelationError::Unavailable("git log failed".to_owned());
@@ -1459,7 +1419,7 @@ mod tests {
 
         let convergence = fixture
             .store
-            .converge_session_git_evidence(&SingleBranchGit, 50, 50)
+            .converge_session_git_evidence(&SingleBranchGit)
             .await
             .unwrap();
         assert_eq!(convergence.later_failure(), None);
@@ -1488,7 +1448,7 @@ mod tests {
 
         let settled = fixture
             .store
-            .converge_session_git_evidence(&SingleBranchGit, 50, 50)
+            .converge_session_git_evidence(&SingleBranchGit)
             .await
             .unwrap();
         assert!(!settled.stats().rebuilt_pre_index_head);
@@ -1550,7 +1510,7 @@ mod tests {
                 if message.contains("ProjectSessions")
         ));
         assert!(matches!(
-            store.converge_session_git_evidence(&SystemGit, 1, 1).await,
+            store.converge_session_git_evidence(&SystemGit).await,
             Err(GitCorrelationError::Db(message))
                 if message.contains("ProjectSessions")
         ));
