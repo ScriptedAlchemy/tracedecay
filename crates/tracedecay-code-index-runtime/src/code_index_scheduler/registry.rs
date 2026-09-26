@@ -696,6 +696,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// admits this optional decode after verified-head recovery.
     complete_generation_requested: Arc<AtomicBool>,
     complete_generation_requested_changed: tokio::sync::watch::Sender<bool>,
+    memory_retry: Arc<MemoryRefusalRetryV1>,
     /// Source-freshness state is independent from scheduler build state so
     /// readiness probes remain available throughout a long publication.
     source_freshness: super::SourceFreshnessFenceV1,
@@ -852,9 +853,8 @@ const CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1: &str = "indexing this w
 /// does.
 const CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1: &str = "the native code graph \
      was refused because daemon memory reached its admission watermark; exact and lexical \
-     search keep serving; free memory or raise the daemon's memory limit, then run \
-     `tracedecay daemon restart` to rebuild the graph (a source change that seals a new \
-     generation also retries it)";
+     search keep serving, and the graph retries on its own once retained memory is given \
+     back or RSS falls (a source change that seals a new generation also retries it)";
 
 /// Remediation when the derived publication was already deleted and rebuilt
 /// once in this mount and is corrupt again. The daemon deletes and rebuilds a
@@ -1368,6 +1368,10 @@ struct PendingWakeStateV1 {
 #[derive(Default)]
 struct MemoryRefusalRetryV1 {
     delay_secs: AtomicU64,
+    /// Work is parked on resident memory. A reader's wake cannot help until
+    /// memory is given back or the delay elapses, so readers do not wake the
+    /// worker meanwhile.
+    waiting: AtomicBool,
 }
 
 impl MemoryRefusalRetryV1 {
@@ -1388,6 +1392,7 @@ impl MemoryRefusalRetryV1 {
             0 => Self::FIRST_DELAY_SECS,
             delay => delay,
         });
+        self.waiting.store(true, Ordering::Release);
         let pending_wake = Arc::downgrade(pending_wake);
         let wake = Arc::downgrade(wake);
         tokio::spawn(async move {
@@ -1404,6 +1409,17 @@ impl MemoryRefusalRetryV1 {
 
     fn reset(&self) {
         self.delay_secs.store(0, Ordering::Release);
+        self.waiting.store(false, Ordering::Release);
+    }
+
+    /// A memory pass is re-checking; readers may wake the worker again once
+    /// it lands.
+    fn retrying(&self) {
+        self.waiting.store(false, Ordering::Release);
+    }
+
+    fn waiting(&self) -> bool {
+        self.waiting.load(Ordering::Acquire)
     }
 }
 

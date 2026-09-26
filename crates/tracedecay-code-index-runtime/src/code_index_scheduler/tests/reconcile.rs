@@ -18,8 +18,9 @@ use tracedecay_domain::{
     SensitivityLevelV1, UtcMicros, WorktreeId,
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-    sampled_process_resident_bytes_v1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentOwnerBytesV1,
+    ResidentOwnerKindV1, ResidentOwnerReleaseV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1,
+    ResidentOwnerV1, ResidentOwnersV1, sampled_process_resident_bytes_v1,
 };
 
 use super::{
@@ -8440,7 +8441,7 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
 /// ceiling must therefore degrade only graph capability instead of withholding
 /// the generation from every query surface.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
+async fn resident_memory_graph_refusal_serves_text_and_retries_when_memory_is_given_back() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
@@ -8470,7 +8471,9 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
     };
     super::super::graph_activation::set_injected_resident_memory_refusal(&worktree_id, true);
 
-    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let owners = Arc::new(ResidentOwnersV1::new(Duration::from_mins(10)));
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
+        .with_resident_owners(Arc::clone(&owners));
     registry
         .mount_worktree(
             test_project_id(),
@@ -8522,9 +8525,9 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
             "text serving must not turn the refused graph into strict graph readiness: {other:?}"
         ),
     }
-    // The refused generation never re-attempts its graph in this daemon, so
-    // `indexing` here was indefinite (issue #2057's restart after an
-    // interrupted build). It must read as a typed park naming the way out.
+    // While memory stays short the refusal reads as a typed park, not an
+    // indefinite `indexing` (issue #2057's restart after an interrupted
+    // build).
     assert_eq!(
         freshness.staleness_state,
         Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Parked),
@@ -8535,26 +8538,37 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
         parked.blocked_reason,
         Some(tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::ResidentMemory)
     );
-    assert!(
-        parked.remediation.contains("`tracedecay daemon restart`"),
-        "the park must name the operator command: {parked:?}"
-    );
-    assert!(!parked.retries_on_wake);
+    assert!(parked.retries_on_wake);
 
+    // Memory comes back: the injected refusal lifts and another worktree's
+    // decode is shed. No restart and no source change follow.
     super::super::graph_activation::set_injected_resident_memory_refusal(&worktree_id, false);
-    registry.shutdown().await;
-
-    let restarted = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
-    restarted
-        .mount_worktree(
-            test_project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
+    let idle_owner: Arc<dyn ResidentOwnerV1> = Arc::new(IdleDecodeOwner {
+        held: std::sync::atomic::AtomicBool::new(true),
+    });
+    let _idle_registration = owners
+        .register(
+            ResidentOwnerScopeV1 {
+                project_id: ProjectId::new("project.other").expect("project id"),
+                worktree_id: WorktreeId::new("worktree.other").expect("worktree id"),
+            },
+            ResidentOwnerKindV1::DecodedGeneration,
+            Arc::downgrade(&idle_owner),
         )
-        .await
-        .expect("remount after memory is available");
-    wait_for_dashboard_ready(&restarted, fixture.path()).await;
-    let freshness = restarted
+        .expect("register idle owner");
+    // Shedding frees only the unprotected owner: this worktree keeps its
+    // seated generation, so only the refused graph's own retry can seat it.
+    let released = owners.shed(4_096, Instant::now());
+    assert_eq!(
+        released
+            .iter()
+            .map(|release| release.generation_id.as_str())
+            .collect::<Vec<_>>(),
+        ["generation.v1.other"]
+    );
+
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let freshness = registry
         .dashboard_freshness(fixture.path())
         .await
         .expect("mounted worktree freshness");
@@ -8563,10 +8577,10 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
         Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready)
     );
     assert!(freshness.parked.is_none(), "{freshness:?}");
-    let serving = restarted
+    let serving = registry
         .latest_complete_serving_for_scope(&scope)
         .await
-        .expect("the restarted daemon serves the generation");
+        .expect("the same daemon serves the generation");
     assert_eq!(
         serving
             .generation()
@@ -8576,7 +8590,35 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
         1,
         "`alpha` is the fixture's one symbol"
     );
-    restarted.shutdown().await;
+    registry.shutdown().await;
+}
+
+/// Another worktree's decode, not serving and so sheddable.
+struct IdleDecodeOwner {
+    held: std::sync::atomic::AtomicBool,
+}
+
+impl ResidentOwnerV1 for IdleDecodeOwner {
+    fn sample(&self) -> Option<ResidentOwnerSampleV1> {
+        self.held
+            .load(std::sync::atomic::Ordering::Acquire)
+            .then(|| ResidentOwnerSampleV1 {
+                generation_id: CodeGenerationId::new("generation.v1.other").expect("generation id"),
+                bytes: ResidentOwnerBytesV1::Measured(4_096),
+                last_used: Instant::now(),
+                serving: false,
+            })
+    }
+
+    fn release(&self) -> ResidentOwnerReleaseV1 {
+        if self.held.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            ResidentOwnerReleaseV1::Released {
+                bytes: ResidentOwnerBytesV1::Measured(4_096),
+            }
+        } else {
+            ResidentOwnerReleaseV1::Empty
+        }
+    }
 }
 
 /// A benign Git metadata rewrite after a clean graph-off seal must trigger one

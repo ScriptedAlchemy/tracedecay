@@ -1987,6 +1987,25 @@ impl LatestCodeTextGenerationV1 {
         }
     }
 
+    /// Return a graph refused for resident memory to `Pending`, so the next
+    /// pass activates it again. Other refusals are configuration or terminal
+    /// verdicts and stay.
+    pub(super) fn retry_resident_memory_graph_refusal(&self) -> bool {
+        let mut state = self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let refused_for_memory = matches!(
+            *state,
+            CodeGraphActivationStateV1::Refused(reason)
+                if reason == super::graph_activation::RESIDENT_MEMORY_GRAPH_REFUSAL_REASON
+        );
+        if refused_for_memory {
+            *state = CodeGraphActivationStateV1::Pending;
+        }
+        refused_for_memory
+    }
+
     fn refuse_graph_activation(&self, reason: &'static str) {
         let mut state = self
             .graph_activation
