@@ -79,6 +79,20 @@ pub(super) struct InteractiveCatalogCache {
     /// can prove concurrent readers share one scan. The scan may run on a
     /// background thread, hence an atomic.
     scan_builds: std::sync::atomic::AtomicUsize,
+    /// [`InteractiveCatalog::retained_bytes`] of the ready catalog, measured
+    /// once when it is built.
+    ready_bytes: std::sync::atomic::AtomicU64,
+}
+
+/// Outcome of asking a store to give back its interactive catalog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeGraphCatalogReleaseV1 {
+    /// The ready catalog was dropped; the next catalog read rebuilds it.
+    Released { bytes: u64 },
+    /// A build or a reader holds the catalog state; ask again later.
+    Busy,
+    /// No ready catalog was held.
+    NotReady,
 }
 
 /// Seeds per batch traversal, under the store's `MAX_BATCH_TRAVERSAL_STARTS`
@@ -92,6 +106,36 @@ impl InteractiveCatalogCache {
             state: RwLock::new(InteractiveCatalogState::Cold),
             build: Mutex::new(()),
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
+            ready_bytes: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Bytes the ready catalog holds, or `None` when none is ready.
+    pub(super) fn ready_bytes(&self) -> Option<u64> {
+        match self.state.try_read() {
+            Ok(state) if matches!(&*state, InteractiveCatalogState::Ready(_)) => {
+                Some(self.ready_bytes.load(std::sync::atomic::Ordering::Acquire))
+            }
+            Ok(_) | Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => None,
+        }
+    }
+
+    /// Return a ready catalog to cold. Never waits on a build or a reader.
+    pub(super) fn release(&self) -> CodeGraphCatalogReleaseV1 {
+        let Ok(_build) = self.build.try_lock() else {
+            return CodeGraphCatalogReleaseV1::Busy;
+        };
+        let Ok(mut state) = self.state.try_write() else {
+            return CodeGraphCatalogReleaseV1::Busy;
+        };
+        if !matches!(&*state, InteractiveCatalogState::Ready(_)) {
+            return CodeGraphCatalogReleaseV1::NotReady;
+        }
+        *state = InteractiveCatalogState::Cold;
+        CodeGraphCatalogReleaseV1::Released {
+            bytes: self
+                .ready_bytes
+                .swap(0, std::sync::atomic::Ordering::AcqRel),
         }
     }
 }
@@ -1175,6 +1219,10 @@ impl CodeGraphInteractiveReader {
         }
         match result {
             Ok(catalog) => {
+                self.catalog.ready_bytes.store(
+                    catalog.retained_bytes(),
+                    std::sync::atomic::Ordering::Release,
+                );
                 *state = InteractiveCatalogState::Ready(catalog);
                 Ok(())
             }

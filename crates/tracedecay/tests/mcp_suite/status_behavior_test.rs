@@ -171,6 +171,31 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert_eq!(compact["server"]["errors"], 0);
     assert!(compact["server"].get("worktree_mismatch").is_none());
 
+    let worktree_id = &compact["code_index_freshness"]["worktree"]["worktree_id"];
+    let generation_id = &compact["graph_statistics"]["generation_id"];
+    let memory = &compact["memory"];
+    assert_eq!(memory["status"], "nominal", "{memory}");
+    assert_eq!(memory["idle_window_seconds"], 600, "{memory}");
+    assert_eq!(
+        memory["shed_order"],
+        json!([
+            "superseded_generation",
+            "decoded_generation",
+            "graph_engine"
+        ])
+    );
+    assert_eq!(memory["unmeasured_owners"], 0, "{memory}");
+    assert_eq!(
+        memory["owners"]
+            .as_array()
+            .expect("memory owners")
+            .iter()
+            .map(|owner| owner_row(owner, worktree_id, generation_id))
+            .collect::<Vec<_>>(),
+        serving_owner_rows(),
+        "{memory}"
+    );
+
     for key in [
         "branch_diagnostics",
         "storage_health",
@@ -224,6 +249,23 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
         json!(u64::from(std::process::id()))
     );
 
+    // Each resident owner renders as one JSON bullet under the memory status;
+    // its bytes and idle time are live measurements, so the bullet is read
+    // back through the same identity projection as the JSON rows.
+    let markdown = markdown
+        .lines()
+        .map(|line| match line.strip_prefix("- ") {
+            Some(owner) => {
+                let owner: Value = serde_json::from_str(owner).expect("owner bullet JSON");
+                format!("- {}\n", owner_row(&owner, worktree_id, generation_id))
+            }
+            None => format!("{line}\n"),
+        })
+        .collect::<String>();
+    let owner_bullets = serving_owner_rows()
+        .iter()
+        .map(|row| format!("- {row}\n"))
+        .collect::<String>();
     assert_eq!(
         markdown,
         format!(
@@ -231,6 +273,8 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
              **active_branch:** status-proof\n\
              **code_index_freshness.status:** current\n\
              **graph_statistics:** {{6 field(s)}}\n\
+             **memory.status:** nominal\n\
+             {owner_bullets}\
              **project_root:** {root}\n\
              **retrieval_serving.status:** serving\n\
              **schema_convergence.status:** completed\n\
@@ -238,6 +282,33 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
              **serving_branch:** status-proof\n"
         )
     );
+}
+
+/// A resident owner reduced to what identifies it. Every owner on a fresh
+/// profile belongs to the one sealed worktree and generation; `measured`
+/// holds exactly when the owner reported a byte count.
+fn owner_row(owner: &Value, worktree_id: &Value, generation_id: &Value) -> Value {
+    assert_eq!(&owner["worktree_id"], worktree_id, "{owner}");
+    assert_eq!(&owner["generation_id"], generation_id, "{owner}");
+    assert_eq!(
+        owner["measured"].as_bool(),
+        Some(owner["bytes"].is_u64()),
+        "{owner}"
+    );
+    json!({
+        "kind": owner["kind"],
+        "measured": owner["measured"],
+        "protected": owner["protected"],
+    })
+}
+
+/// The sealed worktree retains its serving decode and its graph engine, both
+/// sized by their owners and protected while the worktree is in use.
+fn serving_owner_rows() -> Vec<Value> {
+    vec![
+        json!({ "kind": "decoded_generation", "measured": true, "protected": true }),
+        json!({ "kind": "graph_engine", "measured": true, "protected": true }),
+    ]
 }
 
 /// Opt-in diagnostics after the host sweeps on an empty isolated home.
