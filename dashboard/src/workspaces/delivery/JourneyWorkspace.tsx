@@ -31,6 +31,7 @@ import {
 import { CompactRail, TransitField } from './TransitField.tsx';
 import { buildTransit } from './transit.ts';
 import { ProjectionLedger, laneStateDetail, overviewReadState } from './ProjectionLedger.tsx';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 
 /**
  * Delivery · journey mode. One pull request read left to right over the eight
@@ -84,7 +85,7 @@ function JourneyBody({
         <nav aria-label="Journey breadcrumb" className="flex min-w-0 items-center gap-2 font-mono text-3xs">
           <span className="text-text-muted">{project?.label ?? row.project_id}</span>
           <span aria-hidden className="text-text-muted">·</span>
-          <span className="text-text-secondary">#{row.pull_request.pull_request_id}</span>
+          <span className="text-text-secondary">{pullRequestNumberLabel(row.pull_request)}</span>
           <span aria-hidden className="text-text-muted">·</span>
           <span className="truncate font-sans text-xs text-text-primary">{title}</span>
         </nav>

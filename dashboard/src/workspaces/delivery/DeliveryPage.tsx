@@ -23,6 +23,7 @@ import {
 } from './deliveryLocation.ts';
 import { edgesFor, filterInbox, projectFor } from './inboxFilter.ts';
 import { providerServes } from './evidence.ts';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { buildUmbrellas } from './umbrella.ts';
 import { InboxWorkspace } from './InboxWorkspace.tsx';
 import { UmbrellaWorkspace } from './UmbrellaWorkspace.tsx';
@@ -104,11 +105,11 @@ function headerNote(
     case 'journey':
       return selected === null
         ? 'select a pull request to open its journey'
-        : `${selected.project_id} · #${selected.pull_request.pull_request_id} · time is X, source is Y`;
+        : `${selected.project_id} · ${pullRequestNumberLabel(selected.pull_request)} · time is X, source is Y`;
     case 'review':
       return selected === null
         ? 'select a pull request to open its review workspace'
-        : `${selected.project_id} · #${selected.pull_request.pull_request_id} · exact threads, checks, identity`;
+        : `${selected.project_id} · ${pullRequestNumberLabel(selected.pull_request)} · exact threads, checks, identity`;
     default: {
       const unhandled: never = location.mode;
       return unhandled;

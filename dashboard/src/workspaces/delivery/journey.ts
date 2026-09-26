@@ -21,6 +21,7 @@ import {
   type EvidenceGrade,
   type SourceClass,
 } from './evidence.ts';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { checkStatusKind, compareHref, latestObservation } from './review.ts';
 
 /**
@@ -386,7 +387,7 @@ export function buildJourney(
     );
     if (item === undefined) {
       gaps.push(
-        `Pull request #${selection.row.pull_request.pull_request_id} is not among the ${pullRequestsValue.items.length} head-bound provider items (retained ${pullRequestsValue.total_retained}${pullRequestsValue.truncated ? ', truncated' : ''}).`,
+        `Pull request ${pullRequestNumberLabel(selection.row.pull_request)} is not among the ${pullRequestsValue.items.length} head-bound provider items (retained ${pullRequestsValue.total_retained}${pullRequestsValue.truncated ? ', truncated' : ''}).`,
       );
     } else {
       const identityObservation = item.operations.find(
@@ -402,8 +403,8 @@ export function buildJourney(
         label: item.identity?.title ?? item.label,
         detail:
           item.identity === null
-            ? `#${item.pull_request_id} · identity not served`
-            : `#${item.pull_request_id} · ${item.identity.draft ? 'draft · ' : ''}${item.identity.state} · +${item.identity.additions} −${item.identity.deletions} · ${item.identity.changed_files} files`,
+            ? `${pullRequestNumberLabel(item)} · identity not served`
+            : `${pullRequestNumberLabel(item)} · ${item.identity.draft ? 'draft · ' : ''}${item.identity.state} · +${item.identity.additions} −${item.identity.deletions} · ${item.identity.changed_files} files`,
         source: 'pull_request',
         grade: item.identity === null ? 'unavailable' : 'exact',
         at: observedAt,

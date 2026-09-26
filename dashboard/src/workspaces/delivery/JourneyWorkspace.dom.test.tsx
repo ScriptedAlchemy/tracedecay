@@ -1,7 +1,7 @@
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { INBOX, OVERVIEW_ALPHA, OVERVIEW_LOCAL_ONLY } from '../../test/deliveryFixtures.ts';
+import { HEAD_ALPHA, INBOX, OVERVIEW_ALPHA, OVERVIEW_LOCAL_ONLY } from '../../test/deliveryFixtures.ts';
 import { PR_42, PR_43, renderDelivery } from '../../test/renderDelivery.tsx';
 
 afterEach(() => {
@@ -36,6 +36,38 @@ describe('JourneyWorkspace', () => {
     expect(screen.getByRole('button', { name: 'Start review' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Back to inbox' })).toBeTruthy();
     expect(screen.getByRole('navigation', { name: 'Journey breadcrumb' }).textContent).toContain('#42');
+  });
+
+  it('names the pull request by its repository number, never the provider internal id', async () => {
+    const row = INBOX.pull_requests[0]!;
+    const pullRequest = {
+      ...row.pull_request,
+      pull_request_id: '4596824491',
+      identity: { ...row.pull_request.identity!, number: 741 },
+    };
+    renderDelivery(
+      { ...INBOX, pull_requests: [{ ...row, pull_request: pullRequest }, ...INBOX.pull_requests.slice(1)] },
+      {
+        route: `/delivery?mode=journey&pr=${PR_42}`,
+        overview: {
+          ...OVERVIEW_ALPHA,
+          pull_requests: {
+            state: 'ready',
+            value: {
+              expected_head_commit: HEAD_ALPHA,
+              retained_head_commit: HEAD_ALPHA,
+              total_retained: 1,
+              truncated: false,
+              items: [pullRequest],
+            },
+          },
+        },
+      },
+    );
+    await screen.findByRole('list', { name: 'Delivery transit' });
+    const breadcrumb = screen.getByRole('navigation', { name: 'Journey breadcrumb' }).textContent;
+    expect(breadcrumb).toContain('#741');
+    expect(document.body.textContent).not.toContain('4596824491');
   });
 
   it('keeps undated membership records off the axis and prints their basis grade', async () => {

@@ -9930,6 +9930,12 @@
         "draft": {
           "type": "boolean"
         },
+        "number": {
+          "description": "The pull request's number in its repository (`#741`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "state": {
           "$ref": "#/$defs/DeliveryPullRequestStateV1"
         },
@@ -9938,6 +9944,7 @@
         }
       },
       "required": [
+        "number",
         "title",
         "state",
         "draft",
@@ -10050,6 +10057,7 @@
           "type": "string"
         },
         "pull_request_id": {
+          "description": "The provider's internal id. Display names a pull request by its\nidentity `number`.",
           "type": "string"
         }
       },

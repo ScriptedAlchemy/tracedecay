@@ -392,6 +392,7 @@ fn github_stack_layer(
         items: vec![],
         quarantined: Vec::new(),
         pull_request: Some(GitHubPullRequestSnapshotV1 {
+            number: 1,
             title: "stack layer fixture".to_owned(),
             state: GitHubPullRequestStateV1::Open,
             draft: false,

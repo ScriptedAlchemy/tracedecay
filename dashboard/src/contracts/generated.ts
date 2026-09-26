@@ -2046,6 +2046,7 @@ export const DeliveryPullRequestIdentityV1Schema = z.object({
   changed_files: z.number().int().safe().min(0),
   deletions: z.number().int().safe().min(0),
   draft: z.boolean(),
+  number: z.number().int().safe().min(0),
   state: z.lazy(() => DeliveryPullRequestStateV1Schema),
   title: z.string(),
 });

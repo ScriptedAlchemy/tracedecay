@@ -4,6 +4,7 @@ import { Corners } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
 import { microsToIso } from './deliveryChrome.tsx';
 import { gradeDash, gradeLabel } from './evidence.ts';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { layoutLanes, threadPath, LANE_GUTTER, type LaneBar, type LaneBead, type LaneZoom } from './lanes.ts';
 import { AttentionBeacon, AttentionLegend, GradeLegend, HatchDefs, UnevaluatedGlyph, useMeasuredSize } from './rendererMarks.tsx';
 import { attentionCode, headJoin, headJoinSentence, observationWindow, UNCORRELATED_SENTENCE } from './rendererModel.ts';
@@ -38,7 +39,7 @@ function barLabel(bar: LaneBar): string {
   const window = observationWindow(row);
   const unevaluated = unevaluatedCount(bar);
   return [
-    `Pull request #${row.pull_request.pull_request_id} · ${title}`,
+    `Pull request ${pullRequestNumberLabel(row.pull_request)} · ${title}`,
     window === null ? 'no observation time served' : `observed ${stamp(window.start)} → ${stamp(window.end)} UTC · ${bar.beads.length} observations`,
     active.length === 0 ? 'no active attention' : `active attention ${active.join(', ')}`,
     ...(unevaluated === 0 ? [] : [`${unevaluated} attention source${unevaluated === 1 ? '' : 's'} not evaluated`]),
@@ -329,7 +330,7 @@ export function LaneField({
                       <Bead key={`${bead.kind}:${index}`} bead={bead} y={bar.y} showCode={showCodes} lift={lifts[index] ?? 0} />
                     ))}
                     <text x={bar.x0 + width + 8} y={bar.y + 3.5} fontSize="10" fontFamily="var(--font-mono)" fill="var(--raw-graph-text)">
-                      {`#${bar.row.pull_request.pull_request_id}`}
+                      {pullRequestNumberLabel(bar.row.pull_request)}
                       <tspan fillOpacity="0.6">
                         {bar.undated ? ' · no observation time served' : bar.hollow ? ' · not joined' : ''}
                       </tspan>

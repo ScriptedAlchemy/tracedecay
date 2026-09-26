@@ -263,6 +263,7 @@ fn delivery_http_admission_pull_request(
         provider: ProviderId::new("github").unwrap(),
         pull_request_id: GitHubPullRequestIdV1::new(id).unwrap(),
         identity: Some(ProjectDeliveryPullRequestIdentityV1 {
+            number: 42,
             title: format!("Pull request {id}"),
             state: ProjectDeliveryPullRequestStateV1::Open,
             draft: false,

@@ -45,6 +45,7 @@ function pullRequestRow(
       provider: 'github',
       pull_request_id: number,
       identity: {
+        number: Number(number),
         title,
         state: 'open',
         draft: false,
@@ -167,6 +168,7 @@ export const INBOX: DeliveryInboxV1 = {
         provider: 'github',
         pull_request_id: '43',
         identity: {
+          number: 43,
           title: 'Persist retry backoff',
           state: 'open',
           draft: true,

@@ -19,6 +19,7 @@ import { cn } from '../../ui/cn.ts';
 import { ControlLink, GradeMark, IdentityRow, microsToIso, shortSha } from './deliveryChrome.tsx';
 import type { DeliveryLocation, DeliveryLocationPatch } from './deliveryLocation.ts';
 import { providerOutcomeKind } from './evidence.ts';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { laneServes, laneStateKind, projectionLaneState, type LaneState } from './journey.ts';
 import { laneStateDetail } from './ProjectionLedger.tsx';
 import {
@@ -180,7 +181,7 @@ export function IdentityPanel({ model, row }: { model: ReviewModel; row: Deliver
         <ProjectionGap state={pullRequests.state} className="mt-2" />
       ) : (
         <p className="mt-2 text-3xs text-text-muted">
-          Pull request #{row.pull_request.pull_request_id} is not among the {pullRequests.value.items.length}{' '}
+          Pull request {pullRequestNumberLabel(row.pull_request)} is not among the {pullRequests.value.items.length}{' '}
           head-bound provider items.
         </p>
       )}

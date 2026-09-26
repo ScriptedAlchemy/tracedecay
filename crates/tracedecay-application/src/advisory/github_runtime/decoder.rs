@@ -284,6 +284,7 @@ where
             (false, _) => return None,
         };
         let snapshot = GitHubPullRequestSnapshotV1 {
+            number: response.number,
             title,
             state,
             draft: response.draft,
