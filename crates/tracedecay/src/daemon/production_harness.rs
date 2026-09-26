@@ -1587,6 +1587,9 @@ mod journey_test_support;
 mod delivery_read_gate_journey_test;
 
 #[cfg(test)]
+mod advisory_cycle_language_journey_test;
+
+#[cfg(test)]
 mod generation_retention_test;
 
 #[cfg(test)]
