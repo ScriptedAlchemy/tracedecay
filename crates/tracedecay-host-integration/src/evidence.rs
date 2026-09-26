@@ -561,6 +561,7 @@ pub fn native_host_edit_stop_conformance_evidence_from_embedded_assets(
         HostKindV1::KimiCode,
         HostKindV1::OpenCode,
         HostKindV1::Pi,
+        HostKindV1::FactoryDroid,
     ]
     .into_iter()
     .filter_map(|host| stock_host_native_fixture_evidence_from_embedded_assets(assets, host))
