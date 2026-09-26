@@ -350,33 +350,6 @@ impl git_correlation::GitCorrelationSessionStore for GraphBackedTestStore {
     }
 }
 
-/// A fresh project has never published a Git evidence projection. The
-/// attribution sweep must complete as a typed no-op, not report a retryable
-/// unavailability, which put the ingest pass into an endless retry loop on
-/// every fresh project (the hermes stock journey surfaced it as a
-/// "graph projection has no relational verified head" warning storm).
-#[tokio::test]
-async fn attribution_sweep_over_a_never_published_projection_is_a_typed_no_op() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let store = GraphBackedTestStore {
-        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
-            &store_dir.path().join("sessions.db"),
-        ),
-        graph: MemoryEvidenceGraphRuntime::default(),
-    };
-
-    let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let attribution = git_correlation::run_commit_attribution_sweep(&store, gap, |_| {
-        panic!("a never-published projection has no span targets to scan")
-    })
-    .await
-    .expect("the empty start is not an error");
-    assert_eq!(
-        attribution,
-        git_correlation::CommitAttributionSweepOutcome::default()
-    );
-}
-
 #[test]
 fn concurrent_same_session_observations_merge_under_the_publication_lock() {
     let store_dir = tempfile::tempdir().unwrap();

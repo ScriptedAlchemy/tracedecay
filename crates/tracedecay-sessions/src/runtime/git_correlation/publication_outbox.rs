@@ -6,9 +6,6 @@ use super::{
     SpanObservation, digest_bytes,
 };
 
-/// Maximum exact receipts replayed by one startup or host-admission pass.
-pub const DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT: usize = 32;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GitEvidencePublicationPayloadV1 {
@@ -17,20 +14,21 @@ struct GitEvidencePublicationPayloadV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingGitEvidencePublicationV1 {
+pub(super) struct PendingGitEvidencePublicationV1 {
     receipt_id: String,
     publication_prefix: String,
     payload: GitEvidencePublicationPayloadV1,
     evidence_json: String,
 }
 
-/// Replay progress retained when a later receipt cannot be published or
-/// settled. `replayed_publications` counts verified graph publications, even
-/// when their receipt remains for idempotent settlement after restart.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitEvidencePublicationReplayOutcome {
-    pub replayed_publications: usize,
-    pub later_failure: Option<GitCorrelationError>,
+impl PendingGitEvidencePublicationV1 {
+    pub(super) fn span_observations(&self) -> &[SpanObservation] {
+        &self.payload.span_observations
+    }
+
+    pub(super) fn commit_records(&self) -> &[CommitSessionRecord] {
+        &self.payload.commit_records
+    }
 }
 
 /// Stages exact graph-publication material in the caller's raw transcript
@@ -96,27 +94,18 @@ pub async fn enqueue_git_evidence_publication(
     Ok(Some(receipt_id))
 }
 
-async fn read_pending_git_evidence_publications(
+/// Every durable receipt not yet settled, oldest first. A convergence pass
+/// folds them all into one generation, so reading a bounded page would only
+/// defer the rest to further full-projection publications.
+pub(super) async fn read_pending_git_evidence_publications(
     conn: &(impl QueryExecutor + ?Sized),
-    limit: usize,
 ) -> Result<Vec<PendingGitEvidencePublicationV1>, GitCorrelationError> {
-    if limit == 0 {
-        return Err(GitCorrelationError::InvalidArgument(
-            "Git evidence publication replay limit must be positive".to_owned(),
-        ));
-    }
-    let limit = i64::try_from(limit).map_err(|_| {
-        GitCorrelationError::InvalidArgument(
-            "Git evidence publication replay limit is too large".to_owned(),
-        )
-    })?;
     let mut rows = conn
         .query(
             "SELECT receipt_id, publication_prefix, evidence_json
              FROM git_evidence_publication_outbox
-             ORDER BY created_at ASC, receipt_id ASC
-             LIMIT ?1",
-            params![limit],
+             ORDER BY created_at ASC, receipt_id ASC",
+            params![],
         )
         .await?;
     let mut pending = Vec::new();
@@ -157,114 +146,85 @@ pub async fn pending_git_evidence_publication_count<S: GitCorrelationSessionStor
     })
 }
 
-/// Replays bounded exact receipts and deletes each receipt only after its
-/// verified graph publication succeeds. A crash between those two commit
-/// points safely republishes the content-addressed generation.
+/// Publishes every pending receipt in one generation and settles them. A
+/// crash between the publication and the settlement republishes nothing: the
+/// replayed evidence already merges into the head unchanged.
 #[hotpath::measure(
     label = "sessions.git_correlation.publication_outbox.replay",
     future = true
 )]
 pub async fn replay_pending_git_evidence_publications<S: GitCorrelationSessionStore>(
     session_store: &S,
-    limit: usize,
 ) -> Result<usize, GitCorrelationError> {
-    let outcome = replay_pending_git_evidence_publications_outcome(session_store, limit).await?;
-    match outcome.later_failure {
-        Some(error) => Err(error),
-        None => Ok(outcome.replayed_publications),
-    }
-}
-
-/// Replays receipts without discarding verified publications when settlement
-/// of that receipt or a later receipt fails.
-#[hotpath::measure(
-    label = "sessions.git_correlation.publication_outbox.replay_outcome",
-    future = true
-)]
-pub async fn replay_pending_git_evidence_publications_outcome<S: GitCorrelationSessionStore>(
-    session_store: &S,
-    limit: usize,
-) -> Result<GitEvidencePublicationReplayOutcome, GitCorrelationError> {
     session_store.require_project_sessions_authority()?;
     let snapshot = session_store.read_snapshot().await?;
-    let pending = read_pending_git_evidence_publications(&snapshot, limit).await?;
+    let pending = read_pending_git_evidence_publications(&snapshot).await?;
     drop(snapshot);
-    let mut replayed = 0_usize;
-    for receipt in pending {
-        let PendingGitEvidencePublicationV1 {
-            receipt_id,
-            publication_prefix,
-            payload:
-                GitEvidencePublicationPayloadV1 {
-                    commit_records,
-                    span_observations,
-                },
-            evidence_json,
-        } = receipt;
-        if let Err(error) = session_store
-            .publish_transcript_graph_evidence_owned(
-                publication_prefix.clone(),
-                span_observations,
-                commit_records,
-                super::DEFAULT_SPAN_MERGE_GAP_SECS,
-            )
-            .await
-        {
-            return Ok(GitEvidencePublicationReplayOutcome {
-                replayed_publications: replayed,
-                later_failure: Some(error),
-            });
-        }
-        replayed = replayed.saturating_add(1);
-        let settlement = async {
-            let transaction = session_store.open_write_transaction().await?;
-            let deleted = transaction
-                .execute(
-                "DELETE FROM git_evidence_publication_outbox
-                 WHERE receipt_id = ?1 AND publication_prefix = ?2 AND evidence_json = ?3",
-                params![
-                    receipt_id.as_str(),
-                    publication_prefix.as_str(),
-                    evidence_json.as_str()
-                ],
-                )
-                .await?;
-            if deleted == 0 {
-                let mut rows = transaction
-                    .query(
-                    "SELECT publication_prefix, evidence_json
-                     FROM git_evidence_publication_outbox WHERE receipt_id = ?1",
-                        params![receipt_id.as_str()],
-                    )
-                    .await?;
-                if let Some(row) = rows.next().await? {
-                    let stored_prefix = row.get::<String>(0)?;
-                    let stored_json = row.get::<String>(1)?;
-                    return Err(GitCorrelationError::Corrupt(format!(
-                        "Git evidence publication receipt changed before settlement: prefix_match={}, payload_match={}",
-                        stored_prefix == publication_prefix,
-                        stored_json == evidence_json,
-                    )));
-                }
-            } else if deleted != 1 {
-                return Err(GitCorrelationError::Corrupt(
-                    "Git evidence publication receipt settlement deleted multiple rows".to_owned(),
-                ));
-            }
-            GitCorrelationWriteTxn::commit(transaction).await
-        }
-        .await;
-        if let Err(error) = settlement {
-            return Ok(GitEvidencePublicationReplayOutcome {
-                replayed_publications: replayed,
-                later_failure: Some(error),
-            });
-        }
+    if pending.is_empty() {
+        return Ok(0);
     }
-    Ok(GitEvidencePublicationReplayOutcome {
-        replayed_publications: replayed,
-        later_failure: None,
-    })
+    session_store
+        .publish_transcript_graph_evidence_owned(
+            "git-evidence-replay".to_owned(),
+            pending
+                .iter()
+                .flat_map(|receipt| receipt.span_observations().iter().cloned())
+                .collect(),
+            pending
+                .iter()
+                .flat_map(|receipt| receipt.commit_records().iter().cloned())
+                .collect(),
+            super::DEFAULT_SPAN_MERGE_GAP_SECS,
+        )
+        .await?;
+    let transaction = session_store.open_write_transaction().await?;
+    for receipt in &pending {
+        settle_git_evidence_publication(&transaction, receipt).await?;
+    }
+    GitCorrelationWriteTxn::commit(transaction).await?;
+    Ok(pending.len())
+}
+
+/// Deletes one receipt whose evidence the verified head now holds, refusing a
+/// receipt whose stored material changed since it was read.
+pub(super) async fn settle_git_evidence_publication(
+    transaction: &(impl Executor + ?Sized),
+    receipt: &PendingGitEvidencePublicationV1,
+) -> Result<(), GitCorrelationError> {
+    let deleted = transaction
+        .execute(
+            "DELETE FROM git_evidence_publication_outbox
+             WHERE receipt_id = ?1 AND publication_prefix = ?2 AND evidence_json = ?3",
+            params![
+                receipt.receipt_id.as_str(),
+                receipt.publication_prefix.as_str(),
+                receipt.evidence_json.as_str()
+            ],
+        )
+        .await?;
+    if deleted == 0 {
+        let mut rows = transaction
+            .query(
+                "SELECT publication_prefix, evidence_json
+                 FROM git_evidence_publication_outbox WHERE receipt_id = ?1",
+                params![receipt.receipt_id.as_str()],
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let stored_prefix = row.get::<String>(0)?;
+            let stored_json = row.get::<String>(1)?;
+            return Err(GitCorrelationError::Corrupt(format!(
+                "Git evidence publication receipt changed before settlement: prefix_match={}, payload_match={}",
+                stored_prefix == receipt.publication_prefix,
+                stored_json == receipt.evidence_json,
+            )));
+        }
+    } else if deleted != 1 {
+        return Err(GitCorrelationError::Corrupt(
+            "Git evidence publication receipt settlement deleted multiple rows".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -280,7 +240,7 @@ mod tests {
 
     use super::{
         enqueue_git_evidence_publication, pending_git_evidence_publication_count,
-        replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
+        replay_pending_git_evidence_publications,
     };
     use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
     use crate::runtime::git_correlation::{
@@ -417,7 +377,7 @@ mod tests {
         );
         graph.fail_next_publication();
         assert!(
-            replay_pending_git_evidence_publications(&store, 8)
+            replay_pending_git_evidence_publications(&store)
                 .await
                 .is_err()
         );
@@ -432,7 +392,7 @@ mod tests {
 
         let restarted = TestStore::open(&database, Arc::clone(&graph));
         assert_eq!(
-            replay_pending_git_evidence_publications(&restarted, 8)
+            replay_pending_git_evidence_publications(&restarted)
                 .await
                 .unwrap(),
             1
@@ -445,7 +405,7 @@ mod tests {
         );
         assert_eq!(graph.successful_publications(), 1);
         assert_eq!(
-            replay_pending_git_evidence_publications(&restarted, 8)
+            replay_pending_git_evidence_publications(&restarted)
                 .await
                 .unwrap(),
             0
@@ -468,7 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn later_replay_failure_returns_prior_durable_publication_progress() {
+    async fn pending_receipts_publish_as_one_generation_and_settle_together() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("sessions.db");
         let graph = Arc::new(MemoryEvidenceGraphRuntime::default());
@@ -477,7 +437,7 @@ mod tests {
             .await
             .unwrap();
 
-        for suffix in ["a", "b"] {
+        for suffix in ["a", "b", "c"] {
             let mut observation = span();
             observation.session_id = format!("session-{suffix}");
             let transaction = store.open_write_transaction().await.unwrap();
@@ -492,30 +452,51 @@ mod tests {
             transaction.commit().await.unwrap();
         }
 
-        graph.fail_after_successful_publications(1);
-        let partial = replay_pending_git_evidence_publications_outcome(&store, 8)
-            .await
-            .unwrap();
-        assert_eq!(partial.replayed_publications, 1);
-        assert!(partial.later_failure.is_some());
+        graph.fail_next_publication();
+        assert!(
+            replay_pending_git_evidence_publications(&store)
+                .await
+                .is_err()
+        );
         assert_eq!(
             pending_git_evidence_publication_count(&store)
                 .await
                 .unwrap(),
-            1
+            3,
+            "a failed publication settles no receipt"
         );
 
         assert_eq!(
-            replay_pending_git_evidence_publications(&store, 8)
+            replay_pending_git_evidence_publications(&store)
                 .await
                 .unwrap(),
-            1
+            3
         );
         assert_eq!(
             pending_git_evidence_publication_count(&store)
                 .await
                 .unwrap(),
             0
+        );
+        assert_eq!(graph.successful_publications(), 1);
+        let projection = crate::runtime::git_correlation::recover_git_evidence_projection(
+            graph.as_ref(),
+            &crate::runtime::git_correlation::git_evidence_projection_identity(
+                tracedecay_graph_db::GraphNamespace::new("project").unwrap(),
+            )
+            .unwrap(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap()
+        .expect("replayed projection");
+        assert_eq!(
+            projection
+                .projection()
+                .spans()
+                .iter()
+                .map(|span| span.session_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["session-a", "session-b", "session-c"])
         );
     }
 }
