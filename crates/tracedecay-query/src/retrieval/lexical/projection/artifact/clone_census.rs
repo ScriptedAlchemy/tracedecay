@@ -293,9 +293,9 @@ pub(super) mod tests {
     use super::super::clone_codec::{digest_key, encode_clone_eligibility, encode_clone_payload};
     use super::*;
     use rusqlite::params;
-    use std::sync::Arc;
     use tracedecay_code_extraction::{
-        CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1, ExtractedCloneBodyV1,
+        CloneBodyTokenizationStatusV1, CloneTokenStreamV1, ConservativeCloneTokenV1,
+        ExtractedCloneBodyV1,
     };
     use tracedecay_code_index::clones::CloneBodyPayloadV1;
     use tracedecay_domain::{NodeKind, SourceSpan};
@@ -342,6 +342,9 @@ pub(super) mod tests {
     }
 
     pub(in super::super) fn payload(seed: usize) -> CloneBodyPayloadV1 {
+        let texts = (0..8)
+            .map(|index| format!("token_{seed}_{index}"))
+            .collect::<Vec<_>>();
         let body = ExtractedCloneBodyV1 {
             logical_path: format!("src/body_{seed}.rs"),
             language: "rust".to_owned(),
@@ -356,14 +359,13 @@ pub(super) mod tests {
             eligibility: CloneBodyEligibilityV1::Eligible,
             tokenization_status: CloneBodyTokenizationStatusV1::Complete,
             tokenization_issues: Vec::new(),
-            conservative_tokens: Arc::from(
-                (0..8)
-                    .map(|index| ConservativeCloneTokenV1::Syntax {
-                        syntax_kind: "identifier".into(),
-                        text: format!("token_{seed}_{index}").into(),
-                    })
-                    .collect::<Vec<_>>(),
-            ),
+            conservative_tokens: CloneTokenStreamV1::from_tokens(texts.iter().map(|text| {
+                ConservativeCloneTokenV1::Syntax {
+                    syntax_kind: "identifier",
+                    text,
+                }
+            }))
+            .expect("stream"),
             rename_normalization_revision: None,
             rename_status: CloneBodyRenameStatusV1::UnsupportedLanguage,
             rename_issues: Vec::new(),

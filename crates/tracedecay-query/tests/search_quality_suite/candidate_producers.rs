@@ -1831,9 +1831,12 @@ fn selected_block_finds_both_containment_directions_without_indexing_subtrees() 
         .fingerprint_stream(equal.occurrence.eligibility)
         .expect("equal fingerprint stream")
         .tokens;
+    let equal_views = equal_tokens.iter().collect::<Vec<_>>();
     let start = source_tokens
-        .windows(equal_tokens.len())
-        .position(|window| window == equal_tokens)
+        .iter()
+        .collect::<Vec<_>>()
+        .windows(equal_views.len())
+        .position(|window| window == equal_views)
         .expect("selected statement block in source body");
     let selection = CloneSelectedBlockV1::from_payload(
         &source.payload,
@@ -3906,7 +3909,7 @@ fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation
     // Everything one prepared page of this fixture charges: the builder's
     // fixed ledger, the prepared page, and one insert-plan entry per staged
     // term and exact posting.
-    const EXACT_BUDGET: usize = 67_263_718;
+    const EXACT_BUDGET: usize = 67_263_107;
 
     let (fixture, pages, _) = real_verified_pages();
     let pages = &pages[..1];

@@ -4,16 +4,13 @@ use tracedecay_code_extraction::ClojureExtractor;
 use tracedecay_code_extraction::PerlExtractor;
 use tracedecay_code_extraction::{
     CloneBodyEligibilityV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
-    ConservativeCloneTokenV1, LanguageExtractor, MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
-    MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1, PythonExtractor, RustExtractor, TypeScriptExtractor,
+    CloneTokenStreamV1, ConservativeCloneTokenV1, LanguageExtractor,
+    MAX_AUTOMATIC_CLONE_BODY_BYTES_V1, MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1, PythonExtractor,
+    RustExtractor, TypeScriptExtractor,
 };
 use tracedecay_domain::NodeKind;
 
-fn tokens(
-    extractor: &dyn LanguageExtractor,
-    path: &str,
-    source: &str,
-) -> Vec<ConservativeCloneTokenV1> {
+fn tokens(extractor: &dyn LanguageExtractor, path: &str, source: &str) -> CloneTokenStreamV1 {
     let artifact = extractor.extract_artifact(path, source);
     assert!(
         artifact.result.errors.is_empty(),
@@ -26,7 +23,7 @@ fn tokens(
         "{:?}",
         artifact.result.nodes
     );
-    artifact.clone_bodies[0].conservative_tokens.to_vec()
+    artifact.clone_bodies[0].conservative_tokens.clone()
 }
 
 #[test]
@@ -94,7 +91,7 @@ fn syntax_tokens_keep_comment_markers_inside_literals_and_javascript_asi_boundar
     let literal_text = literal
         .iter()
         .filter_map(|token| match token {
-            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_ref()),
+            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text),
             ConservativeCloneTokenV1::StructureStart { .. }
             | ConservativeCloneTokenV1::StructureEnd { .. } => None,
         })
@@ -328,16 +325,13 @@ fn clone_bodies_bind_to_method_and_stable_arrow_occurrences() {
 }
 
 #[test]
-fn extracted_token_kinds_borrow_the_grammar_table_without_changing_the_wire_shape() {
+fn extracted_streams_hold_grammar_kinds_by_number_without_changing_the_wire_shape() {
     let source = "pub fn publish(input: &str) -> bool {\n    let trimmed = input.trim();\n    let ready = !trimmed.is_empty();\n    let flagged = trimmed.starts_with('!');\n    let long = trimmed.len() > 4;\n    ready && long && !flagged\n}\n";
     let emitted = tokens(&RustExtractor, "borrowed.rs", source);
     assert_eq!(emitted.len(), 92);
     let texts: Vec<&str> = emitted
         .iter()
-        .filter_map(|token| match token {
-            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_ref()),
-            _ => None,
-        })
+        .filter_map(ConservativeCloneTokenV1::text)
         .collect();
     assert_eq!(
         texts.join(" "),
@@ -345,32 +339,25 @@ fn extracted_token_kinds_borrow_the_grammar_table_without_changing_the_wire_shap
          let flagged = trimmed . starts_with ( '!' ) ; let long = trimmed . len ( ) > 4 ; \
          ready && long && ! flagged }"
     );
-    for token in &emitted {
-        let kind = match token {
-            ConservativeCloneTokenV1::StructureStart { syntax_kind }
-            | ConservativeCloneTokenV1::StructureEnd { syntax_kind }
-            | ConservativeCloneTokenV1::Syntax { syntax_kind, .. } => syntax_kind,
-        };
-        assert!(
-            matches!(kind, std::borrow::Cow::Borrowed(_)),
-            "extraction owned the grammar kind {kind:?}: one heap allocation per emitted token"
-        );
-    }
-
-    let encoded = serde_json::to_string(&emitted[0]).expect("token encodes");
+    // 92 token codes plus one text code for each of the 17 identifiers and
+    // literals, those 17 texts (95 bytes) and their 17 ends, and the 56-byte
+    // stream header. Owning a 48-byte enum per token was 4,416 bytes before
+    // any text.
     assert_eq!(
-        encoded, r#"{"kind":"structure_start","syntax_kind":"block"}"#,
-        "the persisted clone-token shape changed"
+        emitted.token_retained_bytes(),
+        56 + (92 + 17) * 4 + 95 + 17 * 4
     );
-    let decoded: ConservativeCloneTokenV1 = serde_json::from_str(&encoded).expect("token decodes");
-    assert_eq!(decoded, emitted[0]);
-    let decoded_kind = match &decoded {
-        ConservativeCloneTokenV1::StructureStart { syntax_kind }
-        | ConservativeCloneTokenV1::StructureEnd { syntax_kind }
-        | ConservativeCloneTokenV1::Syntax { syntax_kind, .. } => syntax_kind,
-    };
+
+    let encoded = serde_json::to_string(&emitted).expect("stream encodes");
     assert!(
-        matches!(decoded_kind, std::borrow::Cow::Owned(_)),
-        "a page read back from disk must own its kind, not borrow a grammar table it never saw"
+        encoded.starts_with(r#"[{"kind":"structure_start","syntax_kind":"block"},"#),
+        "the persisted clone-token shape changed: {encoded}"
+    );
+    let decoded: CloneTokenStreamV1 = serde_json::from_str(&encoded).expect("stream decodes");
+    assert_eq!(decoded, emitted);
+    assert_eq!(
+        decoded.token_retained_bytes(),
+        emitted.token_retained_bytes(),
+        "a stream read back from disk resolves its kinds to the same grammar numbers"
     );
 }

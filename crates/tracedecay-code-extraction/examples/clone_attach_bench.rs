@@ -98,7 +98,7 @@ fn main() {
                     }
                 }
                 counts.conservative_tokens += body.conservative_tokens.len() as u64;
-                if let Some(tokens) = body.rename_tokens.as_deref() {
+                if let Some(tokens) = body.rename_tokens.as_ref() {
                     counts.rename_tokens += tokens.len() as u64;
                     counts.rename_replaced +=
                         std::iter::zip(body.conservative_tokens.iter(), tokens.iter())
