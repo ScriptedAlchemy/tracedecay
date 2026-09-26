@@ -22,7 +22,10 @@ use tracedecay_sessions::runtime::hosts::hermes::{
 use tracedecay_sessions::runtime::source::TranscriptIngestStats;
 use tracedecay_sessions::runtime::{SessionProvider, SessionRecord};
 
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
+use crate::common::{
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK, canonical_existing_path, spawn_tracedecay_daemon,
+    tracedecay_command_with_home,
+};
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, durable_table_count,
     mark_test_project, observation_source_cursor, open_project_session_db,
@@ -1509,5 +1512,93 @@ async fn hermes_zeroblob_content_is_covered_without_payload_leak() {
             .await
             .len(),
         1
+    );
+}
+
+/// Hermes' plugin syncs every turn into the profile conversation store with no
+/// project: `tracedecay tool` runs from outside any project, so the daemon
+/// serves it on the projectless route. The turn must land in the profile LCM
+/// store that user-scope LCM reads answer from.
+#[cfg(unix)]
+#[test]
+fn projectless_hermes_turn_sync_lands_in_the_user_scope_lcm_store() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let outside = tmp.path().join("general-chat");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let home = canonical_existing_path(&home);
+    let _daemon = spawn_tracedecay_daemon(&home);
+    let run_tool = |name: &str, arguments: serde_json::Value| -> serde_json::Value {
+        let output = tracedecay_command_with_home(&home)
+            .current_dir(&outside)
+            .args(["tool", name, "--json", "--args"])
+            .arg(arguments.to_string())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap_or_else(|error| panic!("run `tracedecay tool {name}`: {error}"));
+        assert!(
+            output.status.success(),
+            "`tracedecay tool {name}` failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("`tracedecay tool {name}` JSON: {error}"));
+        let text = result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("`tracedecay tool {name}` text: {result}"));
+        serde_json::from_str(text)
+            .unwrap_or_else(|error| panic!("`tracedecay tool {name}` payload: {error}; {text}"))
+    };
+
+    let ingest = run_tool(
+        "tracedecay_hook_runtime",
+        json!({
+            "action": "ingest_transcript",
+            "provider": "hermes",
+            "session_id": "hermes-profile-turn",
+            "user_scope": true,
+            "messages": [{
+                "id": "hermes-profile-turn:1",
+                "role": "user",
+                "content": "Remember the quartz lighthouse rota for Tuesday",
+            }],
+            "format": "json",
+        }),
+    );
+    assert_eq!(ingest["status"], "committed", "{ingest}");
+    assert_eq!(ingest["messages_upserted"], 1, "{ingest}");
+
+    let described = run_tool(
+        "tracedecay_lcm_describe",
+        json!({
+            "provider": "hermes",
+            "session_id": "hermes-profile-turn",
+            "storage_scope": "user",
+            "format": "json",
+        }),
+    );
+    let description = &described["outcome"]["value"]["payload"]["description"];
+    let raw_messages = description["raw_messages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("described raw messages: {described}"))
+        .iter()
+        .map(|message| {
+            (
+                message["message_id"].as_str().unwrap_or_default(),
+                message["role"].as_str().unwrap_or_default(),
+                message["content_preview"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        raw_messages,
+        [(
+            "hermes-profile-turn:1",
+            "user",
+            "Remember the quartz lighthouse rota for Tuesday"
+        )],
+        "{described}"
     );
 }
