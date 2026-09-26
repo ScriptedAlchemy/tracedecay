@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Ad-hoc sign one tracedecay executable as dev.tracedecay.cli.
 #
-# Used when a build bypasses scripts/macos-sign-linker.sh
-# (CARGO_TARGET_<triple>_LINKER). install.sh and `tracedecay update` share
-# this policy. A Developer ID or other team signature is left unchanged.
+# Used when a build bypasses scripts/macos-sign-linker.sh or
+# scripts/macos-rustc-wrapper.sh. install.sh and `tracedecay update` share
+# this policy and run it on the final installed file, after release strip
+# has already rewritten a link-time ad-hoc identifier. A Developer ID or
+# other team signature is left unchanged.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then

@@ -1,6 +1,14 @@
 [build]
 # Keep this portable. On this machine and in CI, `target` is repo-local.
 target-dir = "target"
+# Signs the tracedecay executable again after rustc returns. The apple
+# linker below signs during the link, which is too early: release builds
+# implicitly pass `-C strip=debuginfo` (no profile in Cargo.toml sets
+# `strip`, and nothing in a release build requests debuginfo), and rustc
+# then runs `rust-objcopy`. On Mach-O that regenerates the ad-hoc
+# identifier from the deps filename. Off Darwin the script execs rustc
+# and returns. See the apple target comment.
+rustc-workspace-wrapper = "scripts/macos-rustc-wrapper.sh"
 
 [env]
 # Disable C/C++ assertions in vendored tree-sitter grammars so that grammar
@@ -65,8 +73,13 @@ rustflags = ["-C", "split-debuginfo=unpacked"]
 # which ad-hoc signs the product binary as `dev.tracedecay.cli`. The linker
 # default identifier is the hashed deps filename (`tracedecay-<hash>`), so
 # TCC treats every rebuild as a new app. The wrapper forwards to `cc`, or to
-# `TRACEDECAY_MACOS_LD` when that is set. `CARGO_TARGET_<triple>_LINKER`
-# replaces the wrapper; sign the built binary with
+# `TRACEDECAY_MACOS_LD` when that is set. That signature does not survive
+# release strip; `build.rustc-workspace-wrapper` signs the same file again
+# after rustc returns, and that is the file `cargo build` / `cargo install`
+# copies into place. `install.sh` and `tracedecay update` sign the installed
+# file after the archive checksum check. Replacing
+# `CARGO_TARGET_<triple>_LINKER` or `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`
+# bypasses these hooks; sign the final binary with
 # `scripts/macos-stable-codesign.sh`. Release jobs do not Apple-sign; a
 # Developer ID signature is left untouched by install and update.
 [target.aarch64-apple-darwin]
