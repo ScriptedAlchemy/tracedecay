@@ -44,6 +44,13 @@ pub(crate) enum HostLifecycleResult {
         command: String,
         remediation: String,
     },
+    /// A tracked host whose CLI is not installed. Nothing was attempted: the
+    /// operator either installs the CLI or stops tracking the host.
+    PendingHostCli { detail: String },
+    /// `uninstall` of a tracked host whose CLI is not installed: the profile
+    /// stops tracking it, and the host-owned registration stays for the host
+    /// to remove.
+    Untracked { detail: String },
     /// Nothing was attempted for this host.
     Skipped {
         reason: HostSkipReason,
@@ -67,7 +74,7 @@ pub(crate) enum HostSkipReason {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostFailureCause {
-    /// A tracked or explicitly requested host whose CLI is not installed.
+    /// An explicitly requested, untracked host whose CLI is not installed.
     HostCliNotInstalled,
     /// The lifecycle ran and failed.
     LifecycleFailed,
@@ -134,23 +141,50 @@ fn host_lifecycle_error(
     }
 }
 
-/// A missing host CLI is a skip only for a host TraceDecay merely detected
-/// from leftover config; for a tracked or named host it is a failure.
+/// How a host entered a lifecycle pass, which decides what a missing host
+/// CLI means for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostSelection {
+    /// The profile tracks the host.
+    Tracked,
+    /// Named on the command line, not tracked.
+    Named,
+    /// Only leftover TraceDecay config was detected.
+    Detected,
+}
+
+impl HostSelection {
+    fn of(agent_id: &str, tracked: &[String], explicitly_scoped: bool) -> Self {
+        if tracked.iter().any(|id| id == agent_id) {
+            Self::Tracked
+        } else if explicitly_scoped {
+            Self::Named
+        } else {
+            Self::Detected
+        }
+    }
+}
+
+/// A missing host CLI skips a merely detected host, waits on the operator
+/// for a tracked one, and fails an untracked host the command named.
 fn settle_host_lifecycle(
     result: std::result::Result<HostLifecycleResult, HostLifecycleError>,
-    leftover_only: bool,
+    selection: HostSelection,
 ) -> HostLifecycleResult {
     match result {
         Ok(result) => result,
-        Err(HostLifecycleError::HostCliNotInstalled(error)) if leftover_only => {
-            HostLifecycleResult::Skipped {
+        Err(HostLifecycleError::HostCliNotInstalled(error)) => match selection {
+            HostSelection::Detected => HostLifecycleResult::Skipped {
                 reason: HostSkipReason::HostCliNotInstalled,
                 detail: error.to_string(),
-            }
-        }
-        Err(HostLifecycleError::HostCliNotInstalled(error)) => HostLifecycleResult::Failed {
-            cause: HostFailureCause::HostCliNotInstalled,
-            detail: error.to_string(),
+            },
+            HostSelection::Tracked => HostLifecycleResult::PendingHostCli {
+                detail: error.to_string(),
+            },
+            HostSelection::Named => HostLifecycleResult::Failed {
+                cause: HostFailureCause::HostCliNotInstalled,
+                detail: error.to_string(),
+            },
         },
         Err(HostLifecycleError::Failed(error)) => HostLifecycleResult::Failed {
             cause: HostFailureCause::LifecycleFailed,
@@ -192,7 +226,7 @@ impl HostLifecycleSummary {
         })
     }
 
-    fn line(&self, result: &HostLifecycleResult) -> String {
+    fn line(&self, agent_id: &str, result: &HostLifecycleResult) -> String {
         match result {
             HostLifecycleResult::Applied if self.dry_run => "previewed".to_string(),
             HostLifecycleResult::Applied => match self.operation {
@@ -206,6 +240,19 @@ impl HostLifecycleSummary {
                 command,
                 remediation,
             } => format!("pending operator action: `{command}`\n      {remediation}"),
+            HostLifecycleResult::PendingHostCli { detail } => format!(
+                "pending operator action: install the {agent_id} CLI, or run \
+                 `tracedecay uninstall --agent {agent_id}` to stop tracking it\n      {detail}"
+            ),
+            HostLifecycleResult::Untracked { detail } => format!(
+                "{}; the host CLI is not installed, so its host-owned registration was left \
+                 in place ({detail})",
+                if self.dry_run {
+                    "would stop tracking"
+                } else {
+                    "no longer tracked"
+                }
+            ),
             HostLifecycleResult::Skipped {
                 reason: HostSkipReason::HostCliNotInstalled,
                 detail,
@@ -235,7 +282,7 @@ impl HostLifecycleSummary {
         if !self.hosts.is_empty() {
             eprintln!("\nAgent {} summary:", operation_verb(self.operation));
             for (id, result) in &self.hosts {
-                eprintln!("  {id}: {}", self.line(result));
+                eprintln!("  {id}: {}", self.line(id, result));
             }
         }
         let failed: Vec<&str> = self
@@ -253,11 +300,13 @@ impl HostLifecycleSummary {
                 ),
             });
         }
-        if self
-            .hosts
-            .iter()
-            .any(|(_, result)| matches!(result, HostLifecycleResult::PendingOperatorAction { .. }))
-        {
+        if self.hosts.iter().any(|(_, result)| {
+            matches!(
+                result,
+                HostLifecycleResult::PendingOperatorAction { .. }
+                    | HostLifecycleResult::PendingHostCli { .. }
+            )
+        }) {
             Ok(HostLifecycleCompletion::PendingOperatorAction)
         } else {
             Ok(HostLifecycleCompletion::Complete)
@@ -415,11 +464,27 @@ pub(crate) async fn handle_host_lifecycle_command(
                 result = Err(error.into());
             }
         }
-        let leftover_only = !explicitly_scoped && !tracked_before_pass.contains(agent_id);
-        let result = settle_host_lifecycle(result, leftover_only);
+        let result = match settle_host_lifecycle(
+            result,
+            HostSelection::of(agent_id, &tracked_before_pass, explicitly_scoped),
+        ) {
+            // The pending step names this very uninstall as the way to stop
+            // tracking, so it must not need the missing CLI.
+            HostLifecycleResult::PendingHostCli { detail }
+                if operation == HostBundleCliOperation::Uninstall
+                    && options.component.is_none() =>
+            {
+                HostLifecycleResult::Untracked { detail }
+            }
+            result => result,
+        };
         let applied = matches!(result, HostLifecycleResult::Applied);
-        let converged =
-            applied || matches!(result, HostLifecycleResult::PendingOperatorAction { .. });
+        let converged = applied
+            || matches!(
+                result,
+                HostLifecycleResult::PendingOperatorAction { .. }
+                    | HostLifecycleResult::Untracked { .. }
+            );
         summary.record(agent_id, result);
         if !converged || options.dry_run {
             continue;
@@ -1266,7 +1331,10 @@ async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
             &lifecycle_root,
             &context,
         );
-        summary.record(id, settle_host_lifecycle(result, !tracked.contains(id)));
+        summary.record(
+            id,
+            settle_host_lifecycle(result, HostSelection::of(id, tracked, false)),
+        );
     }
     Ok(summary)
 }
@@ -1281,7 +1349,7 @@ mod tests {
 
     use super::{
         CatalogHostComponentRegistrationAuthority, ComponentSetApplyContext,
-        HostBundleCliOperation, HostLifecycleResult, apply_canonical_component_set,
+        HostBundleCliOperation, HostLifecycleResult, HostSelection, apply_canonical_component_set,
         broker_codex_daemon_automation_project, canonical_host_component_set,
         canonical_host_component_set_with_tracedecay_bin, component_is_not_applicable,
         component_mutation_still_requires_yes, component_set_request,
@@ -1387,31 +1455,56 @@ mod tests {
     }
 
     #[test]
-    fn missing_host_cli_skips_only_a_leftover_host() {
+    fn missing_host_cli_skips_detected_waits_on_tracked_and_fails_named() {
+        let tracked = ["kiro".to_string()];
+        assert_eq!(
+            HostSelection::of("kiro", &tracked, false),
+            HostSelection::Tracked
+        );
+        assert_eq!(
+            HostSelection::of("kiro", &tracked, true),
+            HostSelection::Tracked
+        );
+        assert_eq!(HostSelection::of("kiro", &[], true), HostSelection::Named);
+        assert_eq!(
+            HostSelection::of("kiro", &[], false),
+            HostSelection::Detected
+        );
+
         assert!(matches!(
-            super::settle_host_lifecycle(Err(cli_missing()), true),
+            super::settle_host_lifecycle(Err(cli_missing()), HostSelection::Detected),
             HostLifecycleResult::Skipped {
                 reason: super::HostSkipReason::HostCliNotInstalled,
                 ..
             }
         ));
         assert!(matches!(
-            super::settle_host_lifecycle(Err(cli_missing()), false),
+            super::settle_host_lifecycle(Err(cli_missing()), HostSelection::Tracked),
+            HostLifecycleResult::PendingHostCli { .. }
+        ));
+        assert!(matches!(
+            super::settle_host_lifecycle(Err(cli_missing()), HostSelection::Named),
             HostLifecycleResult::Failed {
                 cause: super::HostFailureCause::HostCliNotInstalled,
                 ..
             }
         ));
-        let attempted = tracedecay_domain::errors::TraceDecayError::Config {
+        let attempted = || tracedecay_domain::errors::TraceDecayError::Config {
             message: "verify failed".to_string(),
         };
-        assert!(matches!(
-            super::settle_host_lifecycle(Err(attempted.into()), true),
-            HostLifecycleResult::Failed {
-                cause: super::HostFailureCause::LifecycleFailed,
-                ..
-            }
-        ));
+        for selection in [
+            HostSelection::Tracked,
+            HostSelection::Named,
+            HostSelection::Detected,
+        ] {
+            assert!(matches!(
+                super::settle_host_lifecycle(Err(attempted().into()), selection),
+                HostLifecycleResult::Failed {
+                    cause: super::HostFailureCause::LifecycleFailed,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -1429,7 +1522,7 @@ mod tests {
         summary.record("cline", HostLifecycleResult::Applied);
         summary.record(
             "kiro",
-            super::settle_host_lifecycle(Err(cli_missing()), true),
+            super::settle_host_lifecycle(Err(cli_missing()), HostSelection::Detected),
         );
         assert_eq!(
             summary.finish().unwrap(),
