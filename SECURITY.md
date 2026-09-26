@@ -61,7 +61,7 @@ Outbound connections are limited to:
 
 | Destination | Purpose | Auth | Failure mode |
 |-------------|---------|------|-------------|
-| `api.github.com` | Check for releases and, for explicitly configured review sources, verify and perform repository reads | Public requests by default; optional read-only credential from the OS keyring | Public checks are best effort; configured private access fails closed when credentials or permissions cannot be verified |
+| `api.github.com` | Check for releases, discover the pull request for a checkout whose `origin` is on GitHub, and read its reviews and checks | The local GitHub login (`GH_TOKEN`, `gh auth token`, or the git credential helper) when present, anonymous otherwise; optional read-only credential from the OS keyring for configured private sources | Public checks are best effort; an anonymous read GitHub refuses is reported as `denied_no_credential`; configured private access fails closed when credentials or permissions cannot be verified |
 | `github.com` | Download binary during `tracedecay upgrade` | None (public releases) | Error shown to user |
 | `huggingface.co` and Hugging Face artifact hosts | Download missing, revision-pinned semantic-model artifacts when semantic auto-download is enabled | None | Semantic retrieval reports model acquisition state or failure; exact, lexical, and graph retrieval remain available |
 | `tracedecay-counter.enzinol.workers.dev` | Aggregate token-savings counter | None | Silently ignored |
@@ -78,7 +78,11 @@ SHA-256 digests before publication, and can be disabled with `HF_HUB_OFFLINE`.
 ### Credentials and secrets
 
 TraceDecay does not require credentials for its default local and public
-repository behavior. A user may explicitly configure a private GitHub review
+repository behavior. When `GH_TOKEN`, a `gh` login, or a git credential helper
+login for `https://github.com` exists, GitHub reads for the checkout's `origin`
+use it; the token is read into zeroizing memory per use and never stored. The
+git credential helper is asked only for `protocol=https`/`host=github.com`, with
+terminal prompts disabled. A user may explicitly configure a private GitHub review
 source with `access = "os_keyring"` and keyring service/account locators. The
 secret remains in the operating-system keyring; configuration stores only its
 locator. The daemon reads it into zeroizing memory, sends it only to GitHub

@@ -1,31 +1,34 @@
-//! Read-only GitHub credential authority backed by the user's existing `gh`
-//! CLI login.
+//! Read-only GitHub credential authority backed by the user's existing local
+//! GitHub login.
 //!
 //! An unauthenticated GitHub client is allowed 60 requests per hour. The same
-//! requests carrying the token that `gh auth token` already holds are allowed
-//! 5,000 per hour. This module turns that local login into a
-//! [`GitHubReadOnlyCredentialAuthorityV1`] so public-repository reads stop
-//! burning the anonymous budget, without `TraceDecay` ever storing, logging, or
-//! persisting a token byte.
+//! requests carrying a token the user already holds are allowed 5,000 per
+//! hour. The token is taken, in order, from `GH_TOKEN`, from `gh auth token`,
+//! and from the git credential helper for `https://github.com`. This module
+//! turns that local login into a [`GitHubReadOnlyCredentialAuthorityV1`] so
+//! reads stop burning the anonymous budget, without `TraceDecay` ever storing,
+//! logging, or persisting a token byte.
 //!
 //! # Token handling
 //!
 //! * Token bytes exist only inside [`Zeroizing`] containers and the
 //!   [`GitHubReadOnlyCredentialSecretV1`] newtype, which itself derives neither
 //!   `Debug` nor Serde.
-//! * The probe is invoked as an argv array, never a shell string, with
-//!   `stdin` and `stderr` both `Stdio::null()` so provider diagnostics can
-//!   never reach a `TraceDecay` log.
-//! * Every failure mode - `gh` absent, not logged in, non-zero exit, empty or
-//!   oversized or non-UTF-8 output, a hung child, a poisoned lock - degrades to
-//!   "no credential", never to an error. The caller then reads anonymously.
+//! * Each probe is invoked as an argv array, never a shell string, with
+//!   `stderr` as `Stdio::null()` so provider diagnostics can never reach a
+//!   `TraceDecay` log. The git credential probe writes only the fixed
+//!   `protocol`/`host` request to `stdin` and runs with terminal prompts
+//!   disabled, so it can never block on a user.
+//! * Every failure mode - no login, non-zero exit, empty or oversized or
+//!   non-UTF-8 output, a hung child, a poisoned lock - degrades to "no
+//!   credential", never to an error. The caller then reads anonymously.
 //! * Under `cfg(test)` and the `test-transport` feature the default source is
 //!   a stub that returns `None`, so no test build can spawn `gh` or observe a
 //!   developer's real login.
 
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(any(test, feature = "test-transport")))]
-use std::io::Read;
+use std::io::{Read, Write};
 #[cfg(not(any(test, feature = "test-transport")))]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -47,6 +50,15 @@ const GH_EXECUTABLE_V1: &str = "gh";
 /// Exact argv passed to `GH_EXECUTABLE_V1`.
 #[cfg(not(any(test, feature = "test-transport")))]
 const GH_AUTH_TOKEN_ARGV_V1: [&str; 2] = ["auth", "token"];
+/// Environment variable `gh` itself reads its token from.
+#[cfg(not(any(test, feature = "test-transport")))]
+const GH_TOKEN_ENV_V1: &str = "GH_TOKEN";
+/// Exact argv asking the git credential helper for a stored GitHub login.
+#[cfg(not(any(test, feature = "test-transport")))]
+const GIT_CREDENTIAL_FILL_ARGV_V1: [&str; 2] = ["credential", "fill"];
+/// The only request the git credential probe ever sends.
+#[cfg(not(any(test, feature = "test-transport")))]
+const GIT_CREDENTIAL_GITHUB_REQUEST_V1: &[u8] = b"protocol=https\nhost=github.com\n\n";
 /// Upper bound on accepted token bytes, matching the secret newtype's own cap.
 /// Compiled with the production probe, and with unit tests that share the cap.
 #[cfg(any(test, not(feature = "test-transport")))]
@@ -70,17 +82,20 @@ pub trait GhCliTokenSourceV1: Send + Sync {
     fn token(&self) -> Option<Zeroizing<String>>;
 }
 
-/// Production source: runs `gh auth token` as a bounded child process.
+/// Production source: `GH_TOKEN`, then `gh auth token`, then the git
+/// credential helper, the latter two as bounded child processes.
 ///
 /// Absent from every test build, so a test cannot construct the one type that
-/// can spawn a provider probe.
+/// can read the environment or spawn a provider probe.
 #[cfg(not(any(test, feature = "test-transport")))]
-pub struct GhAuthTokenCommandSourceV1;
+pub struct LocalGitHubLoginTokenSourceV1;
 
 #[cfg(not(any(test, feature = "test-transport")))]
-impl GhCliTokenSourceV1 for GhAuthTokenCommandSourceV1 {
+impl GhCliTokenSourceV1 for LocalGitHubLoginTokenSourceV1 {
     fn token(&self) -> Option<Zeroizing<String>> {
-        probe_gh_auth_token_v1()
+        env_github_token_v1()
+            .or_else(probe_gh_auth_token_v1)
+            .or_else(probe_git_credential_v1)
     }
 }
 
@@ -96,14 +111,62 @@ impl GhCliTokenSourceV1 for NullGhCliTokenSourceV1 {
 }
 
 #[cfg(not(any(test, feature = "test-transport")))]
+fn env_github_token_v1() -> Option<Zeroizing<String>> {
+    let token = Zeroizing::new(std::env::var(GH_TOKEN_ENV_V1).ok()?);
+    let trimmed = Zeroizing::new(token.trim().to_owned());
+    (!trimmed.is_empty() && trimmed.len() <= MAX_GH_TOKEN_BYTES_V1).then_some(trimmed)
+}
+
+#[cfg(not(any(test, feature = "test-transport")))]
 fn probe_gh_auth_token_v1() -> Option<Zeroizing<String>> {
-    let mut child = Command::new(GH_EXECUTABLE_V1)
-        .args(GH_AUTH_TOKEN_ARGV_V1)
-        .stdin(Stdio::null())
+    let mut command = Command::new(GH_EXECUTABLE_V1);
+    command.args(GH_AUTH_TOKEN_ARGV_V1).stdin(Stdio::null());
+    let output = run_bounded_probe_v1(command, None)?;
+    let text = Zeroizing::new(String::from_utf8(output.to_vec()).ok()?);
+    let trimmed = Zeroizing::new(text.trim().to_owned());
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// The `password` a git credential helper stores for `https://github.com`.
+#[cfg(not(any(test, feature = "test-transport")))]
+fn probe_git_credential_v1() -> Option<Zeroizing<String>> {
+    let mut command = Command::new("git");
+    command
+        .args(GIT_CREDENTIAL_FILL_ARGV_V1)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env_remove("GIT_ASKPASS")
+        .env_remove("SSH_ASKPASS")
+        .stdin(Stdio::piped());
+    let output = run_bounded_probe_v1(command, Some(GIT_CREDENTIAL_GITHUB_REQUEST_V1))?;
+    let text = Zeroizing::new(String::from_utf8(output.to_vec()).ok()?);
+    let password = text
+        .lines()
+        .find_map(|line| line.strip_prefix("password="))?;
+    let password = Zeroizing::new(password.trim().to_owned());
+    (!password.is_empty()).then_some(password)
+}
+
+/// Runs one local credential probe to completion within
+/// [`MAX_GH_PROBE_DURATION_V1`], returning its stdout on success.
+#[cfg(not(any(test, feature = "test-transport")))]
+fn run_bounded_probe_v1(mut command: Command, input: Option<&[u8]>) -> Option<Zeroizing<Vec<u8>>> {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    if let Some(input) = input {
+        let written = child
+            .stdin
+            .take()
+            .is_some_and(|mut stdin| stdin.write_all(input).is_ok());
+        if !written {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    }
     let deadline = Instant::now() + MAX_GH_PROBE_DURATION_V1;
     let status = loop {
         match child.try_wait() {
@@ -126,12 +189,7 @@ fn probe_gh_auth_token_v1() -> Option<Zeroizing<String>> {
         .take(MAX_GH_TOKEN_BYTES_V1 as u64 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    if bytes.len() > MAX_GH_TOKEN_BYTES_V1 {
-        return None;
-    }
-    let text = Zeroizing::new(String::from_utf8(bytes.to_vec()).ok()?);
-    let trimmed = Zeroizing::new(text.trim().to_owned());
-    (!trimmed.is_empty()).then_some(trimmed)
+    (bytes.len() <= MAX_GH_TOKEN_BYTES_V1).then_some(bytes)
 }
 
 fn default_gh_cli_token_source_v1() -> Arc<dyn GhCliTokenSourceV1> {
@@ -141,7 +199,7 @@ fn default_gh_cli_token_source_v1() -> Arc<dyn GhCliTokenSourceV1> {
     }
     #[cfg(not(any(test, feature = "test-transport")))]
     {
-        Arc::new(GhAuthTokenCommandSourceV1)
+        Arc::new(LocalGitHubLoginTokenSourceV1)
     }
 }
 

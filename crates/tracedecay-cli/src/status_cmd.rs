@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -5,6 +6,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
+use tracedecay_application::advisory::github_runtime::{
+    GitHubPullRequestDiscoveryKindV1, GitHubSourceStateV1, GitHubSourceStatusV1,
+};
 use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
@@ -179,6 +183,43 @@ fn compact_status_tool_args() -> Value {
         "include_session_ingest": false,
         "include_staleness": false,
     })
+}
+
+/// One status line naming how the project's GitHub source is read, followed
+/// by the operator remedy when it is not credential-bound.
+fn github_source_line(source: &GitHubSourceStatusV1) -> String {
+    let state = match source.state {
+        GitHubSourceStateV1::Bound => "bound",
+        GitHubSourceStateV1::UnauthenticatedPublic => "unauthenticated_public",
+        GitHubSourceStateV1::DeniedNoCredential => "denied_no_credential",
+    };
+    let discovery = match (source.pull_request_discovery, source.pull_request) {
+        (GitHubPullRequestDiscoveryKindV1::Found, Some(number)) => format!(
+            "PR #{number} found (head {})",
+            source
+                .head_repository
+                .as_deref()
+                .unwrap_or(&source.repository)
+        ),
+        (kind, _) => format!("PR discovery {}", pull_request_discovery_label(kind)),
+    };
+    let mut line = format!("GitHub {}: {state} · {discovery}", source.repository);
+    if let Some(remedy) = &source.remedy {
+        let _ = write!(line, "\n  remedy: {remedy}");
+    }
+    line
+}
+
+const fn pull_request_discovery_label(kind: GitHubPullRequestDiscoveryKindV1) -> &'static str {
+    match kind {
+        GitHubPullRequestDiscoveryKindV1::Found => "found",
+        GitHubPullRequestDiscoveryKindV1::NotFound => "not_found",
+        GitHubPullRequestDiscoveryKindV1::Ambiguous => "ambiguous",
+        GitHubPullRequestDiscoveryKindV1::RateLimited => "rate_limited",
+        GitHubPullRequestDiscoveryKindV1::Denied => "denied",
+        GitHubPullRequestDiscoveryKindV1::Unavailable => "unavailable",
+        GitHubPullRequestDiscoveryKindV1::NotAttempted => "not_attempted",
+    }
 }
 
 fn schema_convergence_line(finding: &SchemaConvergenceFindingV1) -> String {
@@ -449,6 +490,12 @@ async fn handle_status_command_within(
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_default();
+    let github_source: Option<GitHubSourceStatusV1> = daemon_status
+        .get("github_source")
+        .filter(|source| source.get("state") != Some(&Value::from("not_observed")))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
     let show_online = stdout_is_terminal && upload_enabled;
     // The worldwide counter and country flags are decoration served from the
     // local cache: the render below never waits on the network. When a cache
@@ -507,6 +554,9 @@ async fn handle_status_command_within(
                     println!("{}", schema_convergence_line(finding));
                 }
             }
+        }
+        if let Some(source) = &github_source {
+            println!("{}", github_source_line(source));
         }
     });
 

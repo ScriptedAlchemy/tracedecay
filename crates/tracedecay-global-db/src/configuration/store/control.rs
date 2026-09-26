@@ -4,9 +4,9 @@ use super::activation::latest_component_activation_states;
 use super::audit::{audit_from_transaction, insert_dry_run_audit_event};
 use super::mutation::{
     build_configuration_commit, commit_configuration_transaction, commit_direct_in_transaction,
-    current_state_from_transaction, derived_identifier, map_protected_change_snapshot_error,
-    map_store_error, replay_control_receipt, result_revision_id, rollback_redacted_changes,
-    validate_apply_request, validate_plan_evidence,
+    current_state_from_transaction, derived_identifier, map_store_error,
+    protected_change_snapshot_v1, replay_control_receipt, result_revision_id,
+    rollback_redacted_changes, validate_apply_request, validate_plan_evidence,
 };
 use super::read::{read_change_plan_from_executor, read_revision_from_executor};
 use super::write::insert_change_plan;
@@ -240,10 +240,8 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                     &request.idempotency_key,
                     &request.operation_digest,
                 )?;
-                let snapshot = current
-                    .snapshot
-                    .apply_protected_change(change, &next_revision_id)
-                    .map_err(map_protected_change_snapshot_error)?;
+                let snapshot =
+                    protected_change_snapshot_v1(&current.snapshot, change, &next_revision_id)?;
                 let sealed_target =
                     StoredConfigurationProtectedOperationV1::from(&record.operation);
                 let (commit, sealed_target_reference) = build_configuration_commit(

@@ -252,7 +252,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
         seed: &GitHubReviewAnchorSeedV1,
         stored: StoredGitHubAnchorV1,
     ) -> Option<GitHubCanonicalReviewAnchorsV1> {
-        if !same_original_locator(&stored.seed, seed) {
+        if !same_code_location(&stored.seed, seed) {
             return None;
         }
         let original = stored.anchors.original;
@@ -936,12 +936,11 @@ fn body_sanitization_receipt(
     .ok()
 }
 
-fn same_original_locator(
-    left: &GitHubReviewAnchorSeedV1,
-    right: &GitHubReviewAnchorSeedV1,
-) -> bool {
-    left.comment_id == right.comment_id
-        && left.path == right.path
+/// The code anchor is keyed by location alone, so every comment on the same
+/// original lines (a reply thread) shares it; the per-comment author, body,
+/// and URL anchors are derived from each comment's own seed.
+fn same_code_location(left: &GitHubReviewAnchorSeedV1, right: &GitHubReviewAnchorSeedV1) -> bool {
+    left.path == right.path
         && left.original_commit_id == right.original_commit_id
         && left.original_start_line == right.original_start_line
         && left.original_line == right.original_line

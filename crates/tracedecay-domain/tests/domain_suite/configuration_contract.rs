@@ -1,12 +1,14 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::configuration::{
-    AccessRuleId, AuthorityRef, CapabilityResolutionContextV1, ConfigurationGrantId,
-    ConfigurationGrantReceiptId, ConfigurationIdempotencyKey, ConfigurationMutationEffectV1,
+    AccessRuleId, AuthorityRef, CandidateDispositionV1, CapabilityResolutionContextV1,
+    ConfigurationCandidateV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
+    ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationEffectV1,
     ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
-    ConfigurationMutationSinkV1, ConfigurationRevisionId, RuleEffect, ScopeAccessRule,
-    ScopeAccessSubjectV1, ScopeSourceBinding, SourceBindingId, SourceKindV1, UserProfileId,
-    resolve_restrictive_capabilities,
+    ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
+    ConfigurationValueV1, ProtectedChange, RuleEffect, SOURCE_BINDINGS_SETTING_KEY,
+    ScopeAccessRule, ScopeAccessSubjectV1, ScopeSourceBinding, SettingKey, SourceBindingId,
+    SourceKindV1, UserProfileId, resolve_restrictive_capabilities,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, CapabilityId, LocatorDigest, ProjectId, UtcMicros,
@@ -39,6 +41,56 @@ fn projectless_hermes_binding_cannot_be_reused_for_other_source_kinds() {
         AuthorityRef::ProjectlessHermes(id::<UserProfileId>("profile.hermes")),
     );
     assert!(invalid.is_err(), "only projectless Hermes is representable");
+}
+
+/// A bound source whose id sorts before an existing binding lands in
+/// canonical order, so the resulting snapshot validates.
+#[test]
+fn bind_source_inserts_in_canonical_binding_order() {
+    let project = AuthorityRef::Project(id::<ProjectId>("project.bind-order"));
+    let daemon = ScopeSourceBinding::new(
+        id::<SourceBindingId>("binding.tracedecay-daemon.project-open"),
+        SourceKindV1::Cursor,
+        locator_digest('a'),
+        project.clone(),
+    )
+    .unwrap();
+    let github = ScopeSourceBinding::new(
+        id::<SourceBindingId>("binding.github.rust-lang-log"),
+        SourceKindV1::GitHub,
+        locator_digest('b'),
+        project,
+    )
+    .unwrap();
+    let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).unwrap();
+    let snapshot = ConfigurationSnapshotV1::new(
+        BTreeMap::from([(
+            key.clone(),
+            ConfigurationValueV1::SourceBindings(vec![daemon.clone()]),
+        )]),
+        BTreeMap::from([(
+            key.clone(),
+            vec![ConfigurationCandidateV1 {
+                layer: ConfigurationLayerIdV1::Default,
+                revision_id: id::<ConfigurationRevisionId>("configuration.revision.bind-base"),
+                disposition: CandidateDispositionV1::Winning,
+                safe_reason: None,
+            }],
+        )]),
+    )
+    .unwrap();
+
+    let bound = snapshot
+        .apply_protected_change(
+            &ProtectedChange::BindSource(github.clone()),
+            &id::<ConfigurationRevisionId>("configuration.revision.bind-order"),
+        )
+        .expect("an out-of-order binding id still binds");
+
+    assert_eq!(
+        bound.effective_values.get(&key),
+        Some(&ConfigurationValueV1::SourceBindings(vec![github, daemon]))
+    );
 }
 
 #[test]

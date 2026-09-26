@@ -9,9 +9,10 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::advisory::github_runtime::{
     ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
     GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
-    ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
-    discover_exact_commit_pull_request_v1, public_repository_read_credential_v1,
-    resolve_registered_github_read_only_credential_v1,
+    GitHubSourceStatusV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
+    RegisteredGitHubReadOnlyCredentialV1, discover_exact_commit_pull_request_v1,
+    github_repository_from_remote_v1, public_repository_read_credential_v1,
+    record_github_source_status_v1, resolve_registered_github_read_only_credential_v1,
 };
 use tracedecay_application::advisory::{
     AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
@@ -125,7 +126,7 @@ struct ProjectOpenAdvisoryFeedbackCycleV1 {
     producer: Arc<ProjectOpenScoutProducerV1>,
     root_uri: String,
     feedback_scope: FeedbackScopeV1,
-    github_pull_request_id: Option<GitHubPullRequestIdV1>,
+    github_review_read: Option<(GitHubPullRequestIdV1, GitHubReviewReadOperationV1)>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
     proximity_read: FeedbackProximityReadRuntimeV1,
     hook_config_root: std::path::PathBuf,
@@ -266,47 +267,46 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 );
                 LspRuntimeFailure::new("feedback-cycle-advisory-operation")
             })?;
-        let outcome = pin
-            .registration
-            .runtime()
-            .run_once(
-                &invocation.context,
-                AdvisoryCycleControl {
-                    operation,
-                    deadline,
-                },
-                AdvisoryCycleRequest {
-                    feedback: invocation.request,
-                    github: self.github_pull_request_id.clone().map(|pull_request_id| {
-                        GitHubReviewReadRequestV1 {
-                            operation:
-                                GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
-                            scope: self.feedback_scope.clone(),
-                            pull_request_id,
-                        }
-                    }),
-                    ci,
-                    proximity: Some(ProximityEvaluationRequestV1 {
-                        scope: self.feedback_scope.clone(),
-                        observed_at,
-                    }),
-                    validity: tracedecay_contracts::AdvisoryFindingValidityWindowV1 {
-                        valid_at: observed_at,
-                        expires_at,
+        let outcome =
+            pin.registration
+                .runtime()
+                .run_once(
+                    &invocation.context,
+                    AdvisoryCycleControl {
+                        operation,
+                        deadline,
                     },
-                },
-            )
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    target: "tracedecay::feedback_advisory_cycle",
-                    project_id = self.feedback_scope.project_id.as_str(),
-                    worktree_id = self.feedback_scope.worktree_id.as_str(),
-                    ?error,
-                    "advisory feedback cycle execution failed"
-                );
-                LspRuntimeFailure::new(error.lsp_failure_class())
-            })?;
+                    AdvisoryCycleRequest {
+                        feedback: invocation.request,
+                        github: self.github_review_read.clone().map(
+                            |(pull_request_id, operation)| GitHubReviewReadRequestV1 {
+                                operation,
+                                scope: self.feedback_scope.clone(),
+                                pull_request_id,
+                            },
+                        ),
+                        ci,
+                        proximity: Some(ProximityEvaluationRequestV1 {
+                            scope: self.feedback_scope.clone(),
+                            observed_at,
+                        }),
+                        validity: tracedecay_contracts::AdvisoryFindingValidityWindowV1 {
+                            valid_at: observed_at,
+                            expires_at,
+                        },
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        target: "tracedecay::feedback_advisory_cycle",
+                        project_id = self.feedback_scope.project_id.as_str(),
+                        worktree_id = self.feedback_scope.worktree_id.as_str(),
+                        ?error,
+                        "advisory feedback cycle execution failed"
+                    );
+                    LspRuntimeFailure::new(error.lsp_failure_class())
+                })?;
         if outcome.publication().is_some() {
             self.deliver_completed_publication(&pin.registration, &outcome);
         }
@@ -1639,9 +1639,16 @@ async fn register_production_advisory_owner(
     let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
         (remote.github, Some(remote.github_source_access), remote.ci)
     });
-    let github_pull_request_id = github
-        .as_ref()
-        .map(|github| github.target.pull_request_id.clone());
+    // GitHub's GraphQL API refuses anonymous reads, so an anonymously read
+    // public repository ingests its review comments through REST.
+    let github_review_read = github.as_ref().map(|github| {
+        let operation = if github.credential.is_anonymous() {
+            GitHubReviewReadOperationV1::RestListPullRequestReviewComments
+        } else {
+            GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
+        };
+        (github.target.pull_request_id.clone(), operation)
+    });
     let ci_discovery_config = ci_config.clone();
     let (ci_retained, ci_code_anchors) =
         production_ci_observation_stores(invocation, project_root, state, &feedback_scope)?;
@@ -1742,7 +1749,7 @@ async fn register_production_advisory_owner(
         producer,
         root_uri: state.admitted_root_uri.clone(),
         feedback_scope: feedback_scope.clone(),
-        github_pull_request_id,
+        github_review_read,
         ci_discovery_config,
         proximity_read,
         hook_config_root: state.graph.hook_store_layout().data_root.clone(),
@@ -1861,8 +1868,8 @@ async fn register_production_advisory_owner(
 /// checkout as its own project-open component, before and independent of the
 /// feedback/advisory owners whose mounts can stay deferred behind a sealed
 /// code-index generation. A provider mount gate is retained as a typed
-/// Delivery answer so the dashboard can tell "configure a token" apart from
-/// "broken" even while the advisory chain never mounts.
+/// Delivery answer so the dashboard can tell an unmountable provider apart
+/// from a broken one even while the advisory chain never mounts.
 async fn register_project_delivery_read_authority(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -2168,7 +2175,7 @@ fn resolve_production_github_provider_access(
     let Some(remote_url) = tracedecay_runtime_core::git::git_remote_url(project_root) else {
         return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
     };
-    let Some((owner, repository)) = super::github_repository_from_remote(&remote_url) else {
+    let Some((owner, repository)) = github_repository_from_remote_v1(&remote_url) else {
         return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
     };
     let profile_id = &state.session_db.binding().shard_id.profile_id;
@@ -2177,11 +2184,12 @@ fn resolve_production_github_provider_access(
         &owner,
         &repository,
     ) {
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public => {
+        // A repository the profile does not name is read as the `origin`
+        // project-open bound: with the local GitHub login when there is one,
+        // anonymously otherwise.
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public
+        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
             public_repository_read_credential_v1(&owner, &repository)
-        }
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
-            return Err(ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured);
         }
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => {
             return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
@@ -2336,6 +2344,14 @@ async fn discover_production_pull_request(
         }
         _ => None,
     };
+    let source = GitHubSourceStatusV1::observed(owner, repository, credential, discovery.as_ref());
+    tracing::info!(
+        event = "github_source",
+        state = ?source.state,
+        repository = %source.repository,
+        project = %project_root.display(),
+    );
+    record_github_source_status_v1(project_root, source);
     match &discovery {
         Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)) => tracing::info!(
             event = "github_pull_request_discovery",

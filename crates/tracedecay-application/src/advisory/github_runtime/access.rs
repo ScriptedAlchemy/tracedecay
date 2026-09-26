@@ -3,10 +3,13 @@ use tracedecay_contracts::feedback::{
     GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1, feedback_surface_operation,
 };
 use tracedecay_contracts::{AuthorizationRequest, ResolvedScope, now_micros};
-use tracedecay_domain::configuration::SourceKindV1;
-use tracedecay_domain::{LocatorDigest, canonical_sha256};
+use tracedecay_domain::configuration::{
+    AuthorityRef, ScopeSourceBinding, SourceBindingId, SourceKindV1,
+};
+use tracedecay_domain::feedback::GitHubPullRequestIdV1;
+use tracedecay_domain::{LocatorDigest, ProjectId, canonical_sha256};
 
-use super::{GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1};
+use super::{GitHubProviderLifecycleV1, GitHubRepositoryTargetV1, GitHubSourceAccessAuthorityV1};
 use crate::advisory::ci_runtime::{CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1};
 use crate::source_authorization::{
     ProjectSourceAccessOutcome, project_source_access_snapshot_for_request,
@@ -151,6 +154,10 @@ where
     }
 }
 
+/// Identifier of the one daemon-owned GitHub binding derived from a
+/// checkout's `origin` remote.
+pub const DAEMON_GITHUB_ORIGIN_SOURCE_BINDING_ID: &str = "binding.tracedecay-daemon.github-origin";
+
 fn github_source_locator(repository_owner: &str, repository_name: &str) -> Option<LocatorDigest> {
     if repository_owner.is_empty() || repository_name.is_empty() {
         return None;
@@ -162,4 +169,64 @@ fn github_source_locator(repository_owner: &str, repository_name: &str) -> Optio
     ))
     .ok()?;
     LocatorDigest::new(digest.as_str()).ok()
+}
+
+/// The daemon-owned GitHub source binding for `owner/repository`, the
+/// repository GitHub reads for this project are authorized against.
+pub fn daemon_owned_github_source_binding_v1(
+    project_id: &ProjectId,
+    repository_owner: &str,
+    repository_name: &str,
+) -> Option<ScopeSourceBinding> {
+    ScopeSourceBinding::new(
+        SourceBindingId::new(DAEMON_GITHUB_ORIGIN_SOURCE_BINDING_ID).ok()?,
+        SourceKindV1::GitHub,
+        github_source_locator(repository_owner, repository_name)?,
+        AuthorityRef::Project(project_id.clone()),
+    )
+    .ok()
+}
+
+/// `(owner, repository)` of a `github.com` remote URL, or `None` for any
+/// other host, credential-bearing URL, or path shape.
+pub fn github_repository_from_remote_v1(remote: &str) -> Option<(String, String)> {
+    let (owner, repository) = if let Ok(url) = url::Url::parse(remote) {
+        if (url.scheme() != "https" && url.scheme() != "ssh")
+            || !url.host_str()?.eq_ignore_ascii_case("github.com")
+            || url.password().is_some()
+            || (url.scheme() == "https" && !url.username().is_empty())
+            || (url.scheme() == "ssh" && url.username() != "git")
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        let segments = url.path_segments()?.collect::<Vec<_>>();
+        if segments.len() != 2 {
+            return None;
+        }
+        (segments[0].to_owned(), segments[1].to_owned())
+    } else {
+        let remote = remote.strip_prefix("git@github.com:")?;
+        let mut segments = remote.split('/');
+        let owner = segments.next()?;
+        let repository = segments.next()?;
+        if segments.next().is_some() {
+            return None;
+        }
+        (owner.to_owned(), repository.to_owned())
+    };
+    let repository = repository
+        .strip_suffix(".git")
+        .unwrap_or(&repository)
+        .to_owned();
+    let target = GitHubRepositoryTargetV1 {
+        owner,
+        repository,
+        pull_request_number: 1,
+        pull_request_id: GitHubPullRequestIdV1::new("1").ok()?,
+    };
+    target
+        .validate()
+        .then_some((target.owner, target.repository))
 }

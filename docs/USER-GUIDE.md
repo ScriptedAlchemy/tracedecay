@@ -880,6 +880,27 @@ receives ordinary request metadata, including the connection source address and
 the TraceDecay user agent. A timeout or unavailable service means release
 metadata is unavailable, not that no update exists.
 
+### GitHub source and pull-request discovery
+
+`tracedecay init`, and every later project open, binds the GitHub repository
+of the checkout's `origin` remote as the project's GitHub source
+(`binding.tracedecay-daemon.github-origin` in `scope.source_bindings.v1`). The
+binding follows `origin` when the remote changes. A GitHub binding you added
+yourself for another repository is left in place: a project has exactly one
+GitHub source.
+
+Reads use the first credential available, in this order: `GH_TOKEN`, the
+`gh auth token` login, then the git credential helper's stored login for
+`https://github.com`. TraceDecay never stores the token. `tracedecay status`
+reports how the source is read, the pull-request discovery outcome for the
+checkout's exact head, and a remedy when there is one:
+
+| `github_source` state | Meaning |
+|---|---|
+| `bound` | A credential authorizes the reads. |
+| `unauthenticated_public` | No credential was found, so the repository is read anonymously as a public repository. That allows 60 requests per hour. Discovery uses the REST issue search's `head:` qualifier, which also finds fork-headed pull requests. |
+| `denied_no_credential` | No credential was found and GitHub refused the anonymous read: the repository is private or absent. Run `gh auth login`, or set `GH_TOKEN` to a token with read access, then reopen the project. |
+
 ### Private GitHub review sources
 
 An explicitly configured private GitHub review source can use an optional

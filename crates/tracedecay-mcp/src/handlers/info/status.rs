@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessCoverageV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
@@ -447,6 +448,13 @@ pub async fn handle_status(
         ready_serving_source.is_some_and(|source| source.current_source_verified),
     );
     output["code_index_freshness"] = code_index_freshness;
+    output["github_source"] = match github_source_status_v1(ctx.project_root()) {
+        Some(source) => serde_json::to_value(&source)?,
+        None => json!({
+            "state": "not_observed",
+            "reason": "the checkout has no GitHub origin, or its advisory owner has not mounted in this daemon",
+        }),
+    };
     if include_storage_health {
         let mut storage_health = serde_json::to_value(
             hotpath::future!(

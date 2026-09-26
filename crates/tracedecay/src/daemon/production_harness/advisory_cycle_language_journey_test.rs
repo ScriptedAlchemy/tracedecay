@@ -63,7 +63,7 @@ async fn typescript_only_checkout_runs_the_pull_request_advisory_cycle() {
             "remote",
             "add",
             "origin",
-            "https://github.com/tracedecay-fixture/typescript-admission.git",
+            "https://git.example.invalid/tracedecay-fixture/typescript-admission.git",
         ],
     );
     git(&project, &["add", "."]);

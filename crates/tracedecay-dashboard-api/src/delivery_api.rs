@@ -1624,15 +1624,12 @@ fn delivery_projections(outcome: ProjectDeliveryReadOutcomeV1) -> DeliverySource
     }
 }
 
-/// The exact project-open gate, rendered so a reader can tell "configure a
-/// token" apart from "broken".
+/// The exact project-open gate, rendered so a reader can tell an
+/// unmountable provider apart from a broken one.
 fn provider_mount_gate_reason(gate: ProjectDeliveryProviderMountGateV1) -> &'static str {
     match gate {
         ProjectDeliveryProviderMountGateV1::NoGitRemote => {
             "the admitted checkout has no recognizable GitHub remote, so no provider read can be mounted"
-        }
-        ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured => {
-            "no GitHub read-only credential is configured for this profile and repository. Configure a token (or register the repository as public) to mount provider reads"
         }
         ProjectDeliveryProviderMountGateV1::GitHubAccessRefused => {
             "the configured GitHub credential was refused for this repository (missing, rejected, or write-capable), so provider reads stay unmounted"
@@ -2504,16 +2501,14 @@ mod tests {
     #[test]
     fn provider_mount_gate_serves_an_actionable_reason_distinct_from_broken() {
         let gated = delivery_projections(ProjectDeliveryReadOutcomeV1::NotMounted {
-            gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+            gate: ProjectDeliveryProviderMountGateV1::NoGitRemote,
         });
         let DeliveryProjectionV1::Unavailable { reason, .. } = gated.pull_requests else {
             panic!("a gated mount must project as typed unavailable");
         };
         assert!(
-            // Case-insensitive: the contract is that the gate names the step,
-            // not where the sentence happens to break around it.
-            reason.to_ascii_lowercase().contains("configure a token"),
-            "the credential gate must tell the reader what to do: {reason}"
+            reason.contains("no recognizable GitHub remote"),
+            "the gate must name why no provider read mounted: {reason}"
         );
 
         let generic = delivery_projections(ProjectDeliveryReadOutcomeV1::Unavailable);
@@ -2526,7 +2521,7 @@ mod tests {
         };
         assert_ne!(
             reason, generic_reason,
-            "a missing credential must be distinguishable from a broken authority"
+            "a missing remote must be distinguishable from a broken authority"
         );
 
         let refused = delivery_projections(ProjectDeliveryReadOutcomeV1::NotMounted {

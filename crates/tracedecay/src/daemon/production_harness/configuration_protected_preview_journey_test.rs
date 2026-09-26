@@ -10,12 +10,15 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_contracts::ConfigurationProtectedPreviewRequestV1;
-use tracedecay_domain::configuration::{
-    AccessRuleId, AuthorityRef, ConfigurationRevisionId, ProtectedChange, RuleEffect,
-    ScopeAccessRule, ScopeAccessSubjectV1, SourceBindingId, SourceKindV1,
+use tracedecay_contracts::{
+    ConfigurationProtectedApplyRequestV1, ConfigurationProtectedPreviewRequestV1,
 };
-use tracedecay_domain::{CapabilityId, ManifestDigest};
+use tracedecay_domain::configuration::{
+    AccessRuleId, AuthorityRef, ConfigurationIdempotencyKey, ConfigurationRevisionId,
+    ProtectedChange, ProtectedChangePlan, RuleEffect, ScopeAccessRule, ScopeAccessSubjectV1,
+    ScopeSourceBinding, SourceBindingId, SourceKindV1,
+};
+use tracedecay_domain::{CapabilityId, LocatorDigest, ManifestDigest};
 
 use super::journey_test_support::{git, tool_answer};
 use super::*;
@@ -201,29 +204,25 @@ async fn protected_preview_redacts_the_change_and_refuses_stale_or_invalid_input
         &[ACCESS_RULE_ID, DENIED_CAPABILITY],
     );
 
+    // Apply refuses to unbind a binding the snapshot does not hold, so the
+    // preview must refuse with apply's typed reason instead of issuing a plan
+    // apply would reject.
     let unbind = ProtectedChange::UnbindSource {
         binding_id: SourceBindingId::new(ABSENT_BINDING_ID).expect("binding identity"),
     };
-    let unbind_digest = unbind
-        .compute_digest()
-        .expect("unbind digest")
-        .as_str()
-        .to_owned();
-    assert_ne!(
-        access_digest, unbind_digest,
-        "the two submitted changes must not share a digest"
-    );
     let (refused, unbound) =
         call_preview(&harness, &project, preview_arguments(&unbind, &revision)).await;
-    assert!(!refused, "unbind preview was refused: {unbound}");
-    assert_redacted_plan(
+    assert!(
+        refused,
+        "an absent-binding unbind must be refused: {unbound}"
+    );
+    assert_problem(
         &unbound,
-        revision.as_str(),
-        "scope.source_bindings.v1",
-        "source_unbind",
-        before_digest.as_str(),
-        &unbind_digest,
-        &[ABSENT_BINDING_ID],
+        "stale",
+        "configuration.stale",
+        "The configuration preview is stale",
+        "after_revalidate",
+        json!(["refresh"]),
     );
 
     let mut stale = preview_arguments(&access_rule, &revision);
@@ -270,6 +269,74 @@ async fn protected_preview_redacts_the_change_and_refuses_stale_or_invalid_input
         revision.as_str(),
         "protected preview must not commit a revision"
     );
+
+    harness.shutdown().await;
+}
+
+/// A GitHub source binding whose id sorts before the project-open binding
+/// previews and applies to the same outcome: both place it in canonical
+/// binding order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protected_bind_source_preview_and_apply_share_one_outcome() {
+    let isolation = TempDir::new().expect("journey isolation");
+    let project = isolation.path().join("project");
+    initialize_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("production composition");
+    let graph = harness.server(&project).expect("project server").cg().await;
+    let project_id = graph
+        .configuration_runtime()
+        .configuration_target()
+        .project_id
+        .clone();
+    let revision = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("current configuration")
+        .revision_id()
+        .clone();
+    drop(graph);
+
+    let bind = ProtectedChange::BindSource(
+        ScopeSourceBinding::new(
+            SourceBindingId::new("binding.github.rust-lang-log").expect("binding identity"),
+            SourceKindV1::GitHub,
+            LocatorDigest::new(format!("sha256:{}", "d".repeat(64))).expect("locator digest"),
+            AuthorityRef::Project(project_id),
+        )
+        .expect("GitHub source binding"),
+    );
+    let (refused, preview) =
+        call_preview(&harness, &project, preview_arguments(&bind, &revision)).await;
+    assert!(!refused, "bind preview was refused: {preview}");
+    let plan: ProtectedChangePlan =
+        serde_json::from_value(preview["outcome"]["value"]["payload"].clone())
+            .expect("protected change plan");
+    let mut apply = serde_json::to_value(ConfigurationProtectedApplyRequestV1 {
+        plan_id: plan.plan_id,
+        expected_base_revision_id: revision,
+        operation_digest: plan.operation_digest,
+        idempotency_key: ConfigurationIdempotencyKey::new(
+            "configuration.bind-github-before-daemon",
+        )
+        .expect("idempotency key"),
+    })
+    .expect("protected apply arguments");
+    apply["format"] = json!("json");
+    let response = harness
+        .call_tool(&project, "tracedecay_configuration_protected_apply", apply)
+        .await
+        .expect("protected apply tools/call");
+    let (refused, applied) = tool_answer(&response);
+    assert!(
+        !refused,
+        "apply refused the plan its preview issued: {applied}"
+    );
+    assert_eq!(applied["outcome"]["outcome"], "effect", "{applied}");
 
     harness.shutdown().await;
 }

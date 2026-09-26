@@ -28,10 +28,11 @@ use super::{
     ConfigurationRegistry, ConfigurationRevisionId, ConfigurationRevisionRecordV1,
     ConfigurationSettlementAuthorityV1, ConfigurationSnapshotV1, ConfigurationStoreError,
     ConfigurationStoreResult, ConfigurationValueV1, DirectConfigurationMutation, Executor,
-    ManifestDigest, ProtectedChangePlan, ProtectedChangeSnapshotError, QueryExecutor,
-    RedactedConfigurationChangeV1, Row, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1,
-    ScopeRevalidationEvidenceV1, SettingKey, UtcMicros, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-    canonical_sha256, invalid_store_data, params, registry_default_candidate, unavailable_store,
+    ManifestDigest, ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
+    QueryExecutor, RedactedConfigurationChangeV1, Row, SOURCE_BINDINGS_SETTING_KEY,
+    ScopeControlOperationV1, ScopeRevalidationEvidenceV1, SettingKey, UtcMicros,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, canonical_sha256, invalid_store_data, params,
+    registry_default_candidate, unavailable_store,
 };
 
 pub(super) fn decode_stored_mutation_receipt(
@@ -368,9 +369,20 @@ pub(super) async fn commit_configuration_transaction_with_registry(
     Ok(commit.receipt.clone())
 }
 
-pub(super) fn map_protected_change_snapshot_error(
-    error: ProtectedChangeSnapshotError,
-) -> ConfigurationError {
+/// The one validator for a protected change: preview and apply both derive
+/// the candidate snapshot here, so a preview accepts exactly what apply
+/// commits and refuses with apply's typed reason.
+pub fn protected_change_snapshot_v1(
+    snapshot: &ConfigurationSnapshotV1,
+    change: &ProtectedChange,
+    revision_id: &ConfigurationRevisionId,
+) -> Result<ConfigurationSnapshotV1, ConfigurationError> {
+    snapshot
+        .apply_protected_change(change, revision_id)
+        .map_err(map_protected_change_snapshot_error)
+}
+
+fn map_protected_change_snapshot_error(error: ProtectedChangeSnapshotError) -> ConfigurationError {
     match error {
         ProtectedChangeSnapshotError::Stale => ConfigurationError::PlanStale,
         ProtectedChangeSnapshotError::Domain(error) => ConfigurationError::validation(error),

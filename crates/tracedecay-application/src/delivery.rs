@@ -357,7 +357,8 @@ pub enum ProjectDeliveryReadOutcomeV1 {
     },
     Denied,
     /// Project-open resolved no GitHub provider for this checkout; the exact
-    /// typed gate tells "configure a token" apart from "broken".
+    /// typed gate tells a checkout without a GitHub remote or with a refused
+    /// credential apart from a broken authority.
     NotMounted {
         gate: ProjectDeliveryProviderMountGateV1,
     },
@@ -370,9 +371,6 @@ pub enum ProjectDeliveryReadOutcomeV1 {
 pub enum ProjectDeliveryProviderMountGateV1 {
     /// The admitted checkout has no recognizable GitHub remote.
     NoGitRemote,
-    /// No GitHub read-only credential is configured for this profile and
-    /// repository, and the repository is not registered as public.
-    GitHubCredentialNotConfigured,
     /// A credential configuration exists but was refused (rejected, missing
     /// at resolution, or write-capable), so reads stay unmounted.
     GitHubAccessRefused,
@@ -954,9 +952,7 @@ fn delivery_inbox_provider(
             },
         ),
         ProjectDeliveryReadOutcomeV1::NotMounted {
-            gate:
-                ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured
-                | ProjectDeliveryProviderMountGateV1::NoGitRemote,
+            gate: ProjectDeliveryProviderMountGateV1::NoGitRemote,
         } => (
             ProjectDeliveryProviderStateV1::NotConfigured,
             None,
@@ -2240,7 +2236,7 @@ mod tests {
         GitHubGraphQlReadRequestV1, GitHubOfficialResponseDecoderV1, GitHubProviderLifecycleV1,
         GitHubReadNetworkMetadataV1, GitHubReadNetworkOutcomeV1, GitHubReadNetworkResponseV1,
         GitHubReadNetworkStatusV1, GitHubReadOnlyConnector, GitHubReadOnlyDescriptorSetV1,
-        GitHubReadOnlyNetworkAuthorityV1, GitHubReadOnlyRuntimeTransportV1,
+        GitHubReadOnlyNetworkAuthorityV1, GitHubReadOnlyRuntimeTransportV1, GitHubRestDescriptorV1,
         GitHubRestReadRequestV1, GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
         GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1,
     };
@@ -2721,7 +2717,7 @@ mod tests {
             },
         );
         not_configured.delivery = ProjectDeliveryReadOutcomeV1::NotMounted {
-            gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+            gate: ProjectDeliveryProviderMountGateV1::NoGitRemote,
         };
         let mut denied = inbox_source(
             "project.delivery-denied",
@@ -3120,7 +3116,7 @@ mod tests {
         let context = test_context(&scope);
         let handle = gated_project_delivery_read_handle_v1(
             scope.clone(),
-            ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+            ProjectDeliveryProviderMountGateV1::NoGitRemote,
         );
         let request = ProjectDeliveryReadRequestV1 {
             kind: ProjectDeliveryReadKindV1::Overview,
@@ -3135,7 +3131,7 @@ mod tests {
         assert_eq!(
             handle.read(&context, &request, &control).await,
             ProjectDeliveryReadOutcomeV1::NotMounted {
-                gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+                gate: ProjectDeliveryProviderMountGateV1::NoGitRemote,
             }
         );
 
@@ -3321,22 +3317,11 @@ mod tests {
         assert!(github_http_is_official(&GitHubHttpReadConfigV1::default()));
     }
 
-    struct ReviewThreadsNetwork(Vec<u8>);
+    /// Answers every read with one captured GitHub body.
+    struct CapturedReviewNetwork(Vec<u8>);
 
-    impl GitHubReadOnlyNetworkAuthorityV1 for ReviewThreadsNetwork {
-        fn get<'a>(
-            &'a self,
-            _context: &'a RequestContext,
-            _request: &'a GitHubRestReadRequestV1,
-        ) -> FeedbackPortFuture<'a, GitHubReadNetworkOutcomeV1> {
-            Box::pin(async { GitHubReadNetworkOutcomeV1::Unavailable })
-        }
-
-        fn query<'a>(
-            &'a self,
-            _context: &'a RequestContext,
-            _request: &'a GitHubGraphQlReadRequestV1,
-        ) -> FeedbackPortFuture<'a, GitHubReadNetworkOutcomeV1> {
+    impl CapturedReviewNetwork {
+        fn answer(&self) -> FeedbackPortFuture<'_, GitHubReadNetworkOutcomeV1> {
             let body = self.0.clone();
             Box::pin(async move {
                 GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
@@ -3350,6 +3335,24 @@ mod tests {
                     body,
                 })
             })
+        }
+    }
+
+    impl GitHubReadOnlyNetworkAuthorityV1 for CapturedReviewNetwork {
+        fn get<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubRestReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReadNetworkOutcomeV1> {
+            self.answer()
+        }
+
+        fn query<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubGraphQlReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReadNetworkOutcomeV1> {
+            self.answer()
         }
     }
 
@@ -3454,41 +3457,26 @@ mod tests {
         .unwrap()
     }
 
-    /// rust-lang/log#741 as GitHub served it, with the reply body replaced
-    /// by one the privacy sanitizer must refuse.
-    #[tokio::test]
-    async fn one_quarantined_review_body_leaves_the_rest_of_the_pull_request_published() {
-        let mut capture: serde_json::Value = serde_json::from_str(include_str!(
-            "advisory/fixtures/rust_lang_log_741_review_threads.graphql.json"
-        ))
-        .unwrap();
-        let mut response = capture["response"].take();
-        let mut comments = response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .flat_map(|thread| thread["comments"]["nodes"].as_array_mut().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(comments.len(), 3);
-        let reply = comments
-            .iter_mut()
-            .find(|comment| comment["databaseId"] == 4_069_777_906_u64)
-            .unwrap();
-        reply["bodyText"] = json!("vault_passphrase: ordinary-value\n  broken: [unclosed\n");
-
+    /// Refreshes one captured rust-lang/log#741 review read through the
+    /// production decoder, runtime transport, refresh coordinator and store,
+    /// then reads the Delivery pull-request lane.
+    async fn delivered_review_lane(
+        operation: GitHubReviewReadOperationV1,
+        response: &serde_json::Value,
+    ) -> (GitHubReviewRefreshOutcomeV1, ProjectDeliveryGitHubSourceV1) {
         let scope = FeedbackScopeV1 {
-            project_id: ProjectId::new("project.delivery-review-quarantine").unwrap(),
-            repository_id: RepositoryId::new("repository.delivery-review-quarantine").unwrap(),
-            worktree_id: WorktreeId::new("worktree.delivery-review-quarantine").unwrap(),
+            project_id: ProjectId::new("project.delivery-review-lane").unwrap(),
+            repository_id: RepositoryId::new("repository.delivery-review-lane").unwrap(),
+            worktree_id: WorktreeId::new("worktree.delivery-review-lane").unwrap(),
             branch_ref: "refs/heads/ci/msrv-build-vs-test".to_owned(),
             head_commit_id: CommitId::new("1a4b67cfc41237e673dafd0dfc414577f0b5d327").unwrap(),
         };
         let context = github_review_context(&scope);
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("delivery-review-quarantine.db");
+        let path = temp.path().join("delivery-review-lane.db");
         crate::register_test_schema_installer();
         let database_authority =
-            DatabaseAuthority::acquire_test(&path, "delivery-review-quarantine").unwrap();
+            DatabaseAuthority::acquire_test(&path, "delivery-review-lane").unwrap();
         let (database, _) = Database::publish_test_runtime(
             &path,
             &database_authority,
@@ -3513,11 +3501,14 @@ mod tests {
         .unwrap();
         let transport = GitHubReadOnlyRuntimeTransportV1::new(
             store.clone(),
-            ReviewThreadsNetwork(serde_json::to_vec(&response).unwrap()),
+            CapturedReviewNetwork(serde_json::to_vec(response).unwrap()),
             decoder,
         );
         let connector = GitHubReadOnlyConnector::new(
-            GitHubReadOnlyDescriptorSetV1::new(Vec::new()).unwrap(),
+            GitHubReadOnlyDescriptorSetV1::new(vec![GitHubRestDescriptorV1 {
+                operation: GitHubReviewReadOperationV1::RestListPullRequestReviewComments,
+            }])
+            .unwrap(),
             transport,
             NoRemap,
         )
@@ -3525,14 +3516,14 @@ mod tests {
         let coordinator =
             GitHubReviewRefreshCoordinatorV1::new(connector, store, ReadySourceAccess);
         let request = GitHubReviewReadRequestV1 {
-            operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+            operation,
             scope: scope.clone(),
             pull_request_id: GitHubPullRequestIdV1::new("2797381726").unwrap(),
         };
         let refresh = coordinator.refresh(&context, &request).await;
 
         let authority = ProjectDeliveryReadAuthorityV1 {
-            profile_id: UserProfileId::new("profile.delivery-review-quarantine").unwrap(),
+            profile_id: UserProfileId::new("profile.delivery-review-lane").unwrap(),
             scope: scope.clone(),
             github_reviews: ProjectGitHubReviewStoreV1::new(database.clone(), scope.clone())
                 .unwrap(),
@@ -3554,11 +3545,38 @@ mod tests {
         else {
             panic!("the delivery read must answer for its own scope");
         };
-        let ProjectDeliveryGitHubSourceV1::Ready { timeline } = snapshot.github_reviews else {
-            panic!(
-                "the pull-request lane must publish: {:?} after refresh {refresh:?}",
-                snapshot.github_reviews
-            );
+        (refresh, snapshot.github_reviews)
+    }
+
+    /// rust-lang/log#741 as GitHub served it, with the reply body replaced
+    /// by one the privacy sanitizer must refuse.
+    #[tokio::test]
+    async fn one_quarantined_review_body_leaves_the_rest_of_the_pull_request_published() {
+        let mut capture: serde_json::Value = serde_json::from_str(include_str!(
+            "advisory/fixtures/rust_lang_log_741_review_threads.graphql.json"
+        ))
+        .unwrap();
+        let mut response = capture["response"].take();
+        let mut comments = response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .flat_map(|thread| thread["comments"]["nodes"].as_array_mut().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(comments.len(), 3);
+        let reply = comments
+            .iter_mut()
+            .find(|comment| comment["databaseId"] == 4_069_777_906_u64)
+            .unwrap();
+        reply["bodyText"] = json!("vault_passphrase: ordinary-value\n  broken: [unclosed\n");
+
+        let (refresh, lane) = delivered_review_lane(
+            GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+            &response,
+        )
+        .await;
+        let ProjectDeliveryGitHubSourceV1::Ready { timeline } = lane else {
+            panic!("the pull-request lane must publish: {lane:?} after refresh {refresh:?}");
         };
         assert!(matches!(refresh, GitHubReviewRefreshOutcomeV1::Stored(_)));
         assert_eq!(
@@ -3580,6 +3598,33 @@ mod tests {
                 comment_id: GitHubReviewCommentIdV1::new("4069777906").unwrap(),
                 reason: GitHubReviewQuarantineReasonV1::PrivacySanitizer,
             }]
+        );
+    }
+
+    /// An anonymously read public repository ingests its review comments
+    /// through REST, which GitHub serves without a credential.
+    #[tokio::test]
+    async fn anonymous_rest_review_comments_publish_the_pull_request_lane() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "advisory/fixtures/rust_lang_log_741_review_comments.rest.json"
+        ))
+        .unwrap();
+
+        let (refresh, lane) = delivered_review_lane(
+            GitHubReviewReadOperationV1::RestListPullRequestReviewComments,
+            &capture["response"],
+        )
+        .await;
+        let ProjectDeliveryGitHubSourceV1::Ready { timeline } = lane else {
+            panic!("the pull-request lane must publish: {lane:?} after refresh {refresh:?}");
+        };
+        assert_eq!(
+            timeline
+                .review_items
+                .iter()
+                .map(|item| item.comment_id.as_str())
+                .collect::<Vec<_>>(),
+            ["4069686687", "4069691901", "4069777906"]
         );
     }
 

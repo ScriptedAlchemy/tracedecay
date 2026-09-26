@@ -23,6 +23,7 @@ use tracedecay_global_db::configuration::contracts::types::{
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationRollbackRequest,
     DirectConfigurationMutation, ResolvedSetting, SettingSummary,
 };
+use tracedecay_global_db::configuration::store::protected_change_snapshot_v1;
 
 /// One transport-neutral control-plane contract. CLI, MCP, HTTP, dashboard,
 /// and Doctor call this shape rather than rebuilding mutation semantics.
@@ -234,6 +235,7 @@ where
             if current.revision_id != expected_revision {
                 return Err(ConfigurationError::RevisionConflict);
             }
+            protected_change_snapshot_v1(&current.snapshot, &change, &current.revision_id)?;
             let current_authorization = self
                 .authorize_mutation(
                     &authority,
@@ -990,6 +992,86 @@ mod tests {
         assert_eq!(
             saved_plan.operation_digest,
             saved_operation.compute_digest().unwrap()
+        );
+    }
+
+    /// A preview answers exactly what apply's validator answers: a change
+    /// apply refuses gets no plan, and the refusal is apply's typed reason.
+    #[tokio::test]
+    async fn protected_dry_run_refuses_what_apply_refuses_with_the_same_reason() {
+        let revision_id: ConfigurationRevisionId = id("configuration.revision.parity");
+        let scope_digest = digest('a');
+        let policy_digest = policy_digest('b');
+        let snapshot =
+            ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default()).unwrap();
+        let store = Store {
+            current: ConfigurationCurrentStateV1 {
+                revision_id: revision_id.clone(),
+                snapshot: snapshot.clone(),
+            },
+            saved: Mutex::new(None),
+            replay: Mutex::new(None),
+        };
+        let authorization = Authorization {
+            current: CurrentConfigurationMutationAuthorizationV1 {
+                grant_revision: 1,
+                grant_digest: digest('c'),
+                scope_digest: scope_digest.clone(),
+                policy_epoch: 7,
+                policy_digest: policy_digest.clone(),
+            },
+        };
+        let authority = ConfigurationMutationAuthority {
+            receipt: ConfigurationMutationGrantReceiptV1::issue(
+                id::<ConfigurationGrantReceiptId>("configuration.grant-receipt.parity"),
+                id::<ConfigurationGrantId>("configuration.grant.parity"),
+                id::<ActorId>("actor.configuration.parity"),
+                ConfigurationMutationOperationV1::ProtectedDryRun,
+                scope_digest.clone(),
+                revision_id.clone(),
+                7,
+                policy_digest.clone(),
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+                None,
+                UtcMicros(1),
+                UtcMicros(100),
+            )
+            .unwrap(),
+        };
+        let registry = ConfigurationRegistry::core().unwrap();
+        let scope = Scope {
+            evidence: ScopeRevalidationEvidenceV1 {
+                resolved_scope_digest: scope_digest,
+                membership_digest: None,
+                authorization_policy_digest: policy_digest,
+                policy_epoch: 7,
+            },
+        };
+        let operations = ConfigurationControlPlaneOperations::new(
+            &registry,
+            &store,
+            &scope,
+            &authorization,
+            clock,
+        );
+        let unbind_absent = ProtectedChange::UnbindSource {
+            binding_id: id::<SourceBindingId>("binding.configuration.absent"),
+        };
+
+        let preview = operations
+            .dry_run_protected_change(authority, unbind_absent.clone(), revision_id.clone())
+            .await;
+
+        assert_eq!(preview, Err(ConfigurationError::PlanStale));
+        assert_eq!(
+            protected_change_snapshot_v1(&snapshot, &unbind_absent, &revision_id).map(|_| ()),
+            Err(ConfigurationError::PlanStale),
+            "apply's validator refuses the same change for the same reason"
+        );
+        assert!(
+            store.saved.lock().unwrap().is_none(),
+            "a refused preview persists no plan"
         );
     }
 

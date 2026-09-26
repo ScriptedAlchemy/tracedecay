@@ -1,0 +1,219 @@
+{
+  "capture": {
+    "captured_at": "2026-09-26T12:20:00Z",
+    "method": "GET",
+    "url": "https://api.github.com/repos/rust-lang/log/pulls/741/comments?per_page=100",
+    "authentication": "none",
+    "documentation": "https://docs.github.com/en/rest/pulls/comments#list-review-comments-on-a-pull-request"
+  },
+  "response": [
+    {
+      "url": "https://api.github.com/repos/rust-lang/log/pulls/comments/4069686687",
+      "pull_request_review_id": 5275645212,
+      "id": 4069686687,
+      "node_id": "PRRC_kwDOAarcas7ykn2f",
+      "diff_hunk": "@@ -123,12 +120,24 @@ jobs:\n         with:\n           components: clippy\n           toolchain: \"1.71\"\n+      - run: cargo run --verbose --manifest-path test_max_level_features/Cargo.toml\n+      - run: cargo run --verbose --manifest-path test_max_level_features/Cargo.toml --release\n+\n+  msrv-test:\n+    name: MSRV test\n+    runs-on: ubuntu-latest\n+    steps:\n+      - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # v6.0.2\n+        with:\n+          persist-credentials: false\n+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1\n+        with:\n+          components: clippy",
+      "path": ".github/workflows/main.yml",
+      "commit_id": "1a4b67cfc41237e673dafd0dfc414577f0b5d327",
+      "original_commit_id": "1a4b67cfc41237e673dafd0dfc414577f0b5d327",
+      "user": {
+        "login": "Thomasdezeeuw",
+        "id": 3159064,
+        "node_id": "MDQ6VXNlcjMxNTkwNjQ=",
+        "avatar_url": "https://avatars.githubusercontent.com/u/3159064?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/Thomasdezeeuw",
+        "html_url": "https://github.com/Thomasdezeeuw",
+        "followers_url": "https://api.github.com/users/Thomasdezeeuw/followers",
+        "following_url": "https://api.github.com/users/Thomasdezeeuw/following{/other_user}",
+        "gists_url": "https://api.github.com/users/Thomasdezeeuw/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/Thomasdezeeuw/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/Thomasdezeeuw/subscriptions",
+        "organizations_url": "https://api.github.com/users/Thomasdezeeuw/orgs",
+        "repos_url": "https://api.github.com/users/Thomasdezeeuw/repos",
+        "events_url": "https://api.github.com/users/Thomasdezeeuw/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/Thomasdezeeuw/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "I don't think we need Clippy here? Same for the msrv-check job.\n\n*[View changes since the review](https://triagebot.infra.rust-lang.org/gh-changes-since/rust-lang/log/741/8034743dd9d7f7583bd9a670271483d176130911..1a4b67cfc41237e673dafd0dfc414577f0b5d327)*",
+      "created_at": "2026-09-22T08:19:31Z",
+      "updated_at": "2026-09-22T08:26:05Z",
+      "html_url": "https://github.com/rust-lang/log/pull/741#discussion_r4069686687",
+      "pull_request_url": "https://api.github.com/repos/rust-lang/log/pulls/741",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/rust-lang/log/pulls/comments/4069686687"
+        },
+        "html": {
+          "href": "https://github.com/rust-lang/log/pull/741#discussion_r4069686687"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/rust-lang/log/pulls/741"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/rust-lang/log/pulls/comments/4069686687/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": null,
+      "original_start_line": null,
+      "start_side": null,
+      "line": 135,
+      "original_line": 135,
+      "side": "RIGHT",
+      "author_association": "COLLABORATOR",
+      "original_position": 39,
+      "position": 39,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/rust-lang/log/pulls/comments/4069691901",
+      "pull_request_review_id": 5275645212,
+      "id": 4069691901,
+      "node_id": "PRRC_kwDOAarcas7ykpH9",
+      "diff_hunk": "@@ -111,9 +108,9 @@ jobs:\n       - run: cargo build --verbose -Z minimal-versions --features \"kv kv_serde\"\n       - run: cargo build --verbose -Z minimal-versions --features \"kv kv_std\"\n       - run: cargo build --verbose -Z minimal-versions --features \"kv kv_sval kv_serde\"\n-\n-  msrv:\n-    name: MSRV\n+  \n+  msrv-check:\n+    name: MSRV build",
+      "path": ".github/workflows/main.yml",
+      "commit_id": "1a4b67cfc41237e673dafd0dfc414577f0b5d327",
+      "original_commit_id": "1a4b67cfc41237e673dafd0dfc414577f0b5d327",
+      "user": {
+        "login": "Thomasdezeeuw",
+        "id": 3159064,
+        "node_id": "MDQ6VXNlcjMxNTkwNjQ=",
+        "avatar_url": "https://avatars.githubusercontent.com/u/3159064?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/Thomasdezeeuw",
+        "html_url": "https://github.com/Thomasdezeeuw",
+        "followers_url": "https://api.github.com/users/Thomasdezeeuw/followers",
+        "following_url": "https://api.github.com/users/Thomasdezeeuw/following{/other_user}",
+        "gists_url": "https://api.github.com/users/Thomasdezeeuw/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/Thomasdezeeuw/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/Thomasdezeeuw/subscriptions",
+        "organizations_url": "https://api.github.com/users/Thomasdezeeuw/orgs",
+        "repos_url": "https://api.github.com/users/Thomasdezeeuw/repos",
+        "events_url": "https://api.github.com/users/Thomasdezeeuw/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/Thomasdezeeuw/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "Nit: the job short name is check, the display name is build and we're actually running of the test, probably want to make that consistent.\n\n*[View changes since the review](https://triagebot.infra.rust-lang.org/gh-changes-since/rust-lang/log/741/8034743dd9d7f7583bd9a670271483d176130911..1a4b67cfc41237e673dafd0dfc414577f0b5d327)*",
+      "created_at": "2026-09-22T08:20:15Z",
+      "updated_at": "2026-09-22T08:26:06Z",
+      "html_url": "https://github.com/rust-lang/log/pull/741#discussion_r4069691901",
+      "pull_request_url": "https://api.github.com/repos/rust-lang/log/pulls/741",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/rust-lang/log/pulls/comments/4069691901"
+        },
+        "html": {
+          "href": "https://github.com/rust-lang/log/pull/741#discussion_r4069691901"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/rust-lang/log/pulls/741"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/rust-lang/log/pulls/comments/4069691901/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": null,
+      "original_start_line": null,
+      "start_side": null,
+      "line": 113,
+      "original_line": 113,
+      "side": "RIGHT",
+      "author_association": "COLLABORATOR",
+      "original_position": 19,
+      "position": 19,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/rust-lang/log/pulls/comments/4069777906",
+      "pull_request_review_id": 5275761549,
+      "id": 4069777906,
+      "node_id": "PRRC_kwDOAarcas7yk-Hy",
+      "diff_hunk": "@@ -111,9 +108,9 @@ jobs:\n       - run: cargo build --verbose -Z minimal-versions --features \"kv kv_serde\"\n       - run: cargo build --verbose -Z minimal-versions --features \"kv kv_std\"\n       - run: cargo build --verbose -Z minimal-versions --features \"kv kv_sval kv_serde\"\n-\n-  msrv:\n-    name: MSRV\n+  \n+  msrv-check:\n+    name: MSRV build",
+      "path": ".github/workflows/main.yml",
+      "commit_id": "1a4b67cfc41237e673dafd0dfc414577f0b5d327",
+      "original_commit_id": "1a4b67cfc41237e673dafd0dfc414577f0b5d327",
+      "user": {
+        "login": "KodrAus",
+        "id": 6721458,
+        "node_id": "MDQ6VXNlcjY3MjE0NTg=",
+        "avatar_url": "https://avatars.githubusercontent.com/u/6721458?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/KodrAus",
+        "html_url": "https://github.com/KodrAus",
+        "followers_url": "https://api.github.com/users/KodrAus/followers",
+        "following_url": "https://api.github.com/users/KodrAus/following{/other_user}",
+        "gists_url": "https://api.github.com/users/KodrAus/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/KodrAus/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/KodrAus/subscriptions",
+        "organizations_url": "https://api.github.com/users/KodrAus/orgs",
+        "repos_url": "https://api.github.com/users/KodrAus/repos",
+        "events_url": "https://api.github.com/users/KodrAus/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/KodrAus/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "Fair 👍 I’ll clean these up",
+      "created_at": "2026-09-22T08:32:38Z",
+      "updated_at": "2026-09-22T08:32:39Z",
+      "html_url": "https://github.com/rust-lang/log/pull/741#discussion_r4069777906",
+      "pull_request_url": "https://api.github.com/repos/rust-lang/log/pulls/741",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/rust-lang/log/pulls/comments/4069777906"
+        },
+        "html": {
+          "href": "https://github.com/rust-lang/log/pull/741#discussion_r4069777906"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/rust-lang/log/pulls/741"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/rust-lang/log/pulls/comments/4069777906/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": null,
+      "original_start_line": null,
+      "start_side": null,
+      "line": 113,
+      "original_line": 113,
+      "side": "RIGHT",
+      "in_reply_to_id": 4069691901,
+      "author_association": "CONTRIBUTOR",
+      "original_position": 19,
+      "position": 19,
+      "subject_type": "line"
+    }
+  ]
+}
