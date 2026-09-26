@@ -4,7 +4,7 @@
 //! It selects one already-mounted worktree generation and translates the
 //! generic lane evidence into the typed application-operation records.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
@@ -1310,136 +1310,63 @@ fn check_dispatch_control(
     Ok(())
 }
 
-/// Visits canonical same-generation adjacency and stops as soon as `visit`
-/// reports that the shared candidate capacity is exhausted.
-///
-/// The Boolean return is false when adjacency remains unvisited, allowing the
-/// public coverage receipt to expose that remainder as unknown rather than
-/// claiming complete trait dispatch.
-fn visit_trait_dispatch_targets(
+/// One trait-dispatch expansion step over relation keys: `kinds` edges from
+/// every `seed` at once, `reverse` for incoming. `None` means the step hit the
+/// key ceiling, so dispatch is reported incomplete rather than guessed.
+fn dispatch_step(
     reader: &CodeGraphInteractiveReader,
-    callee: &CodeGraphSymbolRefV1,
-    scope: &tracedecay_contracts::CodeQueryScope,
+    seeds: &[CodeGraphSymbolRefV1],
+    kinds: &[RelationEdgeKindV1],
+    reverse: bool,
     budget: RetrievalBudget,
     control: &Arc<dyn RetrievalExecutionControl>,
-    mut visit: impl FnMut(
-        &tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1,
-    ) -> Result<bool, DispatchExpansionStop>,
-) -> Result<bool, DispatchExpansionStop> {
+) -> Result<Option<Vec<Vec<CodeGraphSymbolRefV1>>>, DispatchExpansionStop> {
     check_dispatch_control(control.as_ref(), budget)?;
-    let Some(callee_summary) = reader
+    let step = reader
+        .relation_keys(
+            seeds,
+            kinds,
+            reverse,
+            MAX_RELATION_CANDIDATE_KEYS.saturating_add(1),
+            graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
+        )
+        .map_err(|_| dispatch_read_stop(control.as_ref(), budget))?;
+    if step.truncated {
+        return Ok(None);
+    }
+    Ok(Some(
+        step.per_seed
+            .into_iter()
+            .map(|keys| keys.into_iter().map(|key| key.neighbor).collect())
+            .collect(),
+    ))
+}
+
+fn dispatch_summary(
+    reader: &CodeGraphInteractiveReader,
+    symbol: &CodeGraphSymbolRefV1,
+    budget: RetrievalBudget,
+    control: &Arc<dyn RetrievalExecutionControl>,
+) -> Result<tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1, DispatchExpansionStop>
+{
+    check_dispatch_control(control.as_ref(), budget)?;
+    reader
         .symbol_summary_for(
-            callee,
+            symbol,
             graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
         )
         .map_err(|_| dispatch_read_stop(control.as_ref(), budget))?
-    else {
-        return Ok(true);
-    };
-    let callee_name = callee_summary
+        .ok_or(DispatchExpansionStop::Unavailable)
+}
+
+fn summary_kind(
+    summary: &tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1,
+) -> Result<Option<NodeKind>, DispatchExpansionStop> {
+    summary
         .metadata
         .as_ref()
-        .ok_or(DispatchExpansionStop::Unavailable)?
-        .simple_name
-        .clone();
-    let relation_limit = MAX_RELATION_CANDIDATE_KEYS;
-    check_dispatch_control(control.as_ref(), budget)?;
-    let parent_batches = match reader.callers(
-        std::slice::from_ref(&callee_summary.occurrence),
-        &[RelationEdgeKindV1::Contains],
-        relation_limit,
-        graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
-    ) {
-        Ok(batches) => batches,
-        Err(
-            tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
-                ..
-            },
-        ) => return Ok(false),
-        Err(_) => return Err(dispatch_read_stop(control.as_ref(), budget)),
-    };
-    let mut traits = Vec::new();
-    for edge in parent_batches.into_iter().flatten() {
-        let metadata = edge
-            .neighbor
-            .metadata
-            .as_ref()
-            .ok_or(DispatchExpansionStop::Unavailable)?;
-        if matches!(
-            NodeKind::from_str(&metadata.kind),
-            Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
-        ) {
-            traits.push(edge.neighbor.occurrence);
-        }
-    }
-    if traits.is_empty() {
-        return Ok(true);
-    }
-    check_dispatch_control(control.as_ref(), budget)?;
-    let implementor_batches = match reader.callers(
-        &traits,
-        &[RelationEdgeKindV1::Implements],
-        relation_limit,
-        graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
-    ) {
-        Ok(batches) => batches,
-        Err(
-            tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
-                ..
-            },
-        ) => return Ok(false),
-        Err(_) => return Err(dispatch_read_stop(control.as_ref(), budget)),
-    };
-    let implementors = implementor_batches
-        .into_iter()
-        .flatten()
-        .map(|edge| edge.neighbor.occurrence)
-        .collect::<Vec<_>>();
-    if implementors.is_empty() {
-        return Ok(true);
-    }
-    check_dispatch_control(control.as_ref(), budget)?;
-    let child_batches = match reader.callees(
-        &implementors,
-        &[RelationEdgeKindV1::Contains],
-        relation_limit,
-        graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
-    ) {
-        Ok(batches) => batches,
-        Err(
-            tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
-                ..
-            },
-        ) => return Ok(false),
-        Err(_) => return Err(dispatch_read_stop(control.as_ref(), budget)),
-    };
-    for child in child_batches
-        .into_iter()
-        .flatten()
-        .map(|edge| edge.neighbor)
-    {
-        check_dispatch_control(control.as_ref(), budget)?;
-        let Some(metadata) = child.metadata.as_ref() else {
-            return Err(DispatchExpansionStop::Unavailable);
-        };
-        if !matches!(
-            NodeKind::from_str(&metadata.kind),
-            Some(NodeKind::Function | NodeKind::Method)
-        ) || metadata.simple_name != callee_name
-            || !child
-                .binding
-                .as_ref()
-                .and_then(|binding| binding.logical_path.as_deref())
-                .is_some_and(|path| path_is_in_code_query_scope(path, scope))
-        {
-            continue;
-        }
-        if !visit(&child)? {
-            return Ok(false);
-        }
-    }
-    check_dispatch_control(control.as_ref(), budget)?;
-    Ok(true)
+        .map(|metadata| NodeKind::from_str(&metadata.kind))
+        .ok_or(DispatchExpansionStop::Unavailable)
 }
 
 /// Appends the concrete impl methods reachable through each direct callee's
@@ -1447,6 +1374,10 @@ fn visit_trait_dispatch_targets(
 /// page and hydrate like every other relation. Dispatch keys follow the
 /// direct keys in canonical order; a trait fan-out past the key ceiling
 /// leaves the listing incomplete rather than claiming full dispatch.
+///
+/// Every callee's container comes from one batched relation-key step; only
+/// the distinct containers, and the callees and impl children under a trait,
+/// are read. A callee with no trait container costs no read at all.
 fn augment_callee_dispatch_keys(
     reader: &CodeGraphInteractiveReader,
     found: &mut GraphRelationKeysV1,
@@ -1454,38 +1385,119 @@ fn augment_callee_dispatch_keys(
     budget: RetrievalBudget,
     control: &Arc<dyn RetrievalExecutionControl>,
 ) -> Result<(), DispatchExpansionStop> {
-    let mut seen = found
+    if found.keys.is_empty() {
+        return Ok(());
+    }
+    let callees = found
         .keys
         .iter()
         .map(|key| key.symbol.clone())
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
+    let Some(containers) = dispatch_step(
+        reader,
+        &callees,
+        &[RelationEdgeKindV1::Contains],
+        true,
+        budget,
+        control,
+    )?
+    else {
+        found.complete = false;
+        return Ok(());
+    };
+    let mut is_trait = BTreeMap::<CodeGraphSymbolRefV1, bool>::new();
+    for container in containers.iter().flatten() {
+        if is_trait.contains_key(container) {
+            continue;
+        }
+        let kind = summary_kind(&dispatch_summary(reader, container, budget, control)?)?;
+        is_trait.insert(
+            container.clone(),
+            matches!(
+                kind,
+                Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+            ),
+        );
+    }
+    let mut seen = callees.iter().cloned().collect::<BTreeSet<_>>();
     let mut dispatch = Vec::new();
-    for callee in &found.keys {
-        let exhausted = visit_trait_dispatch_targets(
+    'callees: for (callee, containers) in found.keys.iter().zip(containers) {
+        let traits = containers
+            .into_iter()
+            .filter(|container| is_trait.get(container).copied().unwrap_or(false))
+            .collect::<Vec<_>>();
+        if traits.is_empty() {
+            continue;
+        }
+        let callee_summary = dispatch_summary(reader, &callee.symbol, budget, control)?;
+        let callee_name = callee_summary
+            .metadata
+            .as_ref()
+            .ok_or(DispatchExpansionStop::Unavailable)?
+            .simple_name
+            .clone();
+        let Some(implementors) = dispatch_step(
             reader,
-            &callee.symbol,
-            scope,
+            &traits,
+            &[RelationEdgeKindV1::Implements],
+            true,
             budget,
             control,
-            |target| {
-                let symbol = CodeGraphSymbolRefV1::for_occurrence(&target.occurrence)
-                    .map_err(|_| DispatchExpansionStop::Unavailable)?;
-                if seen.insert(symbol.clone()) {
-                    dispatch.push(RelationKeyV1 {
-                        symbol,
-                        edge_kind: RelationEdgeKindV1::Calls,
-                        dispatch_from: Some(callee.symbol.clone()),
-                        depth: callee.depth,
-                    });
-                }
-                Ok(found.keys.len() + dispatch.len() < MAX_RELATION_CANDIDATE_KEYS)
-            },
-        )?;
-        if !exhausted {
+        )?
+        else {
             found.complete = false;
             break;
+        };
+        let implementors = implementors.into_iter().flatten().collect::<Vec<_>>();
+        if implementors.is_empty() {
+            continue;
+        }
+        let Some(children) = dispatch_step(
+            reader,
+            &implementors,
+            &[RelationEdgeKindV1::Contains],
+            false,
+            budget,
+            control,
+        )?
+        else {
+            found.complete = false;
+            break;
+        };
+        for child in children.into_iter().flatten() {
+            if seen.contains(&child) {
+                continue;
+            }
+            let summary = dispatch_summary(reader, &child, budget, control)?;
+            let Some(metadata) = summary.metadata.as_ref() else {
+                return Err(DispatchExpansionStop::Unavailable);
+            };
+            if !matches!(
+                NodeKind::from_str(&metadata.kind),
+                Some(NodeKind::Function | NodeKind::Method)
+            ) || metadata.simple_name != callee_name
+                || !summary
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.logical_path.as_deref())
+                    .is_some_and(|path| path_is_in_code_query_scope(path, scope))
+            {
+                continue;
+            }
+            seen.insert(child.clone());
+            dispatch.push(RelationKeyV1 {
+                symbol: child,
+                edge_kind: RelationEdgeKindV1::Calls,
+                dispatch_from: Some(callee.symbol.clone()),
+                depth: callee.depth,
+            });
+            if found.keys.len() + dispatch.len() >= MAX_RELATION_CANDIDATE_KEYS {
+                found.complete = false;
+                break 'callees;
+            }
         }
     }
+    check_dispatch_control(control.as_ref(), budget)?;
     dispatch.sort_by(|left, right| {
         left.depth
             .cmp(&right.depth)

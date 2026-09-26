@@ -236,7 +236,7 @@ macro_rules! callable_code_service_method {
             ) {
                 return problem_envelope(context, operation, problem);
             }
-            evidence_envelope_with_async_publication_recheck(
+            let mut result = evidence_envelope_with_async_publication_recheck(
                 context,
                 operation,
                 &admission,
@@ -251,7 +251,13 @@ macro_rules! callable_code_service_method {
                     )
                 },
             )
-            .await
+            .await?;
+            if let Ok(envelope) = &mut result
+                && let Some(page) = envelope.outcome.payload()
+            {
+                envelope.touched_files = page.touched_files();
+            }
+            Ok(result)
         }
     };
 }

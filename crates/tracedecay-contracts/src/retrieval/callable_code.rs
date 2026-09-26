@@ -75,6 +75,56 @@ pub struct CodeQueryPage<T> {
     pub query_fallback: Option<QueryFallbackSubpayload>,
 }
 
+/// The project file a callable-code row was read from, when it names one.
+pub trait CodeQueryRow {
+    fn source_path(&self) -> Option<&str>;
+}
+
+impl<T: CodeQueryRow> CodeQueryPage<T> {
+    /// Project-relative files of the rows this page returned, once each.
+    pub fn touched_files(&self) -> Vec<String> {
+        let mut files = self
+            .items
+            .iter()
+            .filter_map(CodeQueryRow::source_path)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        files.sort();
+        files.dedup();
+        files
+    }
+}
+
+impl CodeQueryRow for ExactOccurrenceRecord {
+    fn source_path(&self) -> Option<&str> {
+        Some(&self.occurrence.path)
+    }
+}
+
+impl CodeQueryRow for LexicalOccurrenceRecord {
+    fn source_path(&self) -> Option<&str> {
+        Some(&self.occurrence.path)
+    }
+}
+
+impl CodeQueryRow for SourceMetadataRecord {
+    fn source_path(&self) -> Option<&str> {
+        Some(&self.path)
+    }
+}
+
+impl CodeQueryRow for CodeFacetRecord {
+    fn source_path(&self) -> Option<&str> {
+        None
+    }
+}
+
+impl CodeQueryRow for CodeTimelineRecord {
+    fn source_path(&self) -> Option<&str> {
+        None
+    }
+}
+
 impl<T> CodeQueryPage<T> {
     pub fn new(
         generation: CodeGenerationId,

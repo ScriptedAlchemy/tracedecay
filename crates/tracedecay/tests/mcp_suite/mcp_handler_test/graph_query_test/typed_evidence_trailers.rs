@@ -254,11 +254,11 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
         "src/walk.rs::Walk::read",
         "{payload:#}"
     );
-    // Six point reads: the seed `known`; the trait-dispatch check on its one
-    // callee (the callee's summary, its two incoming edges, and the impl that
-    // contains it); and the callee's summary for the page. Three fan-outs:
+    // Three point reads: the seed `known`; the container of its one callee,
+    // which the dispatch check finds in one batched step and reads to learn
+    // it is no trait; and the callee's summary for the page. Four fan-outs:
     // `known`'s call relations and their targets (one row each), then the
-    // callee's incoming edges (two rows).
+    // callee's incoming edges (two rows) and their `Contains` source (one).
     let cost = &payload["cost"];
     assert_eq!(
         (
@@ -267,17 +267,17 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
             &cost["adjacency_rows"],
         ),
         (
-            &json!({"graph_sealed": 6, "graph_staging": 0}),
-            &json!(3),
+            &json!({"graph_sealed": 3, "graph_staging": 0}),
             &json!(4),
+            &json!(5),
         ),
         "{payload:#}"
     );
     assert_eq!(
         cost_trailer(&texts),
         format!(
-            "\ntracedecay_cost: wall_us={} graph_sealed_reads=6 graph_staging_reads=0 \
-             adjacency_queries=3 adjacency_rows=4 bytes_hydrated={}",
+            "\ntracedecay_cost: wall_us={} graph_sealed_reads=3 graph_staging_reads=0 \
+             adjacency_queries=4 adjacency_rows=5 bytes_hydrated={}",
             cost["wall_micros"], cost["bytes_hydrated"]
         ),
         "the trailer renders the envelope's receipt"
@@ -290,8 +290,111 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
     )
     .await;
     assert!(
-        cost_trailer(&markdown).contains(" graph_sealed_reads=6 graph_staging_reads=0 "),
+        cost_trailer(&markdown).contains(" graph_sealed_reads=3 graph_staging_reads=0 "),
         "{markdown:?}"
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
+/// A callers read is metered on the same lease as every other graph read:
+/// one incoming fan-out over `Walk::read` (the call from `known` and the impl
+/// that contains it), both edges read to learn their kind, and the one
+/// caller they reach.
+#[tokio::test]
+async fn typed_callers_carry_their_read_cost() {
+    let fixture = trailer_fixture().await;
+    let target = call_production_tool(
+        &fixture,
+        "tracedecay_by_qualified_name",
+        json!({"qualified_name": "src/walk.rs::Walk::read", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("exact method");
+    let target: Value = serde_json::from_str(extract_text(&target.value)).unwrap();
+    let node_id = target[0]["node_id"].as_str().expect("node id").to_owned();
+
+    let texts = call(
+        &fixture,
+        "tracedecay_callers",
+        json!({"node_id": node_id, "maximum_depth": 1, "format": "json"}),
+    )
+    .await;
+    let payload: Value = serde_json::from_str(&texts[0]).unwrap();
+    let cost = &payload["cost"];
+    assert_eq!(
+        (
+            &cost["point_reads"],
+            &cost["adjacency_queries"],
+            &cost["adjacency_rows"],
+        ),
+        (
+            &json!({"graph_sealed": 3, "graph_staging": 0}),
+            &json!(1),
+            &json!(2),
+        ),
+        "{payload:#}"
+    );
+    assert_eq!(
+        cost_trailer(&texts),
+        format!(
+            "\ntracedecay_cost: wall_us={} graph_sealed_reads=3 graph_staging_reads=0 \
+             adjacency_queries=1 adjacency_rows=2 bytes_hydrated={}",
+            cost["wall_micros"], cost["bytes_hydrated"]
+        )
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
+/// Callable-code reads report the files of the rows they returned, so their
+/// responses end with the token-accounting footer like every other code read.
+#[tokio::test]
+async fn callable_code_reads_carry_their_files_and_the_accounting_footer() {
+    let fixture = trailer_fixture().await;
+    let search = call(
+        &fixture,
+        "tracedecay_code_symbol_search",
+        json!({
+            "query": "Walk",
+            "scope": {"path_prefix": null},
+            "lazy_index_ignored_dependencies": false,
+            "meta": {"projection": "evidence", "order": "source_position"},
+            "format": "json",
+        }),
+    )
+    .await;
+    let body = body_before_footer(&search, 672);
+    let payload: Value = serde_json::from_str(&body[0]).unwrap();
+    assert_eq!(
+        payload["touched_files"],
+        json!(["src/walk.rs", "src/lib.rs"]),
+        "{payload:#}"
+    );
+
+    let target = call_production_tool(
+        &fixture,
+        "tracedecay_by_qualified_name",
+        json!({"qualified_name": "src/lib.rs::known", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("exact function");
+    let target: Value = serde_json::from_str(extract_text(&target.value)).unwrap();
+    let node_id = target[0]["node_id"].as_str().expect("node id").to_owned();
+    let callees = call(
+        &fixture,
+        "tracedecay_callees",
+        json!({"node_id": node_id, "maximum_depth": 1, "format": "json"}),
+    )
+    .await;
+    let body = body_before_footer(&callees, 35);
+    let payload: Value = serde_json::from_str(&body[0]).unwrap();
+    assert_eq!(
+        payload["touched_files"],
+        json!(["src/walk.rs"]),
+        "{payload:#}"
     );
     shutdown_graph_fixture(fixture).await;
 }

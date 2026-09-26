@@ -35,8 +35,8 @@ use tracedecay_contracts::{
     Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState,
     LegalAction, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
     OperationTermination, PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission,
-    RequestContext, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic,
-    TemporalState,
+    RequestContext, RequestCostReceiptV1, RequestId, ResolvedScope, RetrievalEvidence,
+    RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::text::forward_slash_path;
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
@@ -1312,6 +1312,7 @@ fn symbol_outcome<T: Serialize + SymbolGraphItem>(
             page,
             finished_at,
             budget,
+            cost,
         } => symbol_page(
             access,
             context,
@@ -1320,12 +1321,14 @@ fn symbol_outcome<T: Serialize + SymbolGraphItem>(
             page,
             finished_at,
             budget,
+            cost,
             false,
         ),
         SymbolGraphPortOutcome::Partial {
             page,
             finished_at,
             budget,
+            cost,
         } => symbol_page(
             access,
             context,
@@ -1334,6 +1337,7 @@ fn symbol_outcome<T: Serialize + SymbolGraphItem>(
             page,
             finished_at,
             budget,
+            cost,
             true,
         ),
         SymbolGraphPortOutcome::Failed { failure, .. } => {
@@ -1351,6 +1355,7 @@ fn symbol_page<T: Serialize + SymbolGraphItem>(
     page: SymbolGraphPage<T>,
     finished_at: UtcMicros,
     budget: OperationBudgetUsage,
+    cost: Option<RequestCostReceiptV1>,
     partial: bool,
 ) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     let returned = page.items.len() as u64;
@@ -1385,6 +1390,7 @@ fn symbol_page<T: Serialize + SymbolGraphItem>(
     )?;
     if let Ok(envelope) = &mut result {
         envelope.touched_files = touched_files;
+        envelope.cost = cost;
     }
     if unsupported
         && let Ok(envelope) = &mut result
