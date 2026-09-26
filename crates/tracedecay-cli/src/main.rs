@@ -51,6 +51,7 @@ mod global;
 mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
+mod macos_codesign;
 mod monitor_cmd;
 mod product_runtime;
 mod project_cmd;

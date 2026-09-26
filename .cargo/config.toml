@@ -61,6 +61,20 @@ rustflags = ["-C", "split-debuginfo=unpacked"]
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "split-debuginfo=unpacked"]
 
+# Local macOS links of the tracedecay executable go through this wrapper,
+# which ad-hoc signs the product binary as `dev.tracedecay.cli`. The linker
+# default identifier is the hashed deps filename (`tracedecay-<hash>`), so
+# TCC treats every rebuild as a new app. The wrapper forwards to `cc`, or to
+# `TRACEDECAY_MACOS_LD` when that is set. `CARGO_TARGET_<triple>_LINKER`
+# replaces the wrapper; sign the built binary with
+# `scripts/macos-stable-codesign.sh`. Release jobs do not Apple-sign; a
+# Developer ID signature is left untouched by install and update.
+[target.aarch64-apple-darwin]
+linker = "scripts/macos-sign-linker.sh"
+
+[target.x86_64-apple-darwin]
+linker = "scripts/macos-sign-linker.sh"
+
 [alias]
 # Full Rust test suite. Requires cargo-nextest:
 # https://nexte.st/docs/installation/pre-built-binaries/

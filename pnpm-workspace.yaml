@@ -4,13 +4,19 @@ packages:
   - plugin/cursor-native-extension
   # pnpm's Cargo inventory walks every directory not pruned by a negated
   # pattern and treats each Cargo.toml it finds as a workspace to install.
-  # Test fixtures, eval corpora, mockups, and vendored crates are not install
-  # targets.
+  # Test fixtures, eval corpora, mockups, vendored crates, and local git
+  # worktrees are not install targets. Worktree checkouts
+  # (`.worktrees`, `.codex-worktrees`, `.claude-worktrees`, and
+  # `.claude/worktrees`) sit inside the repo and carry their own Cargo.toml.
   - "!crates/*/tests/fixtures/**"
   - "!evals/**"
   - "!mockups/**"
   - "!tests/fixtures/**"
   - "!vendor/**"
+  - "!.worktrees/**"
+  - "!.codex-worktrees/**"
+  - "!.claude-worktrees/**"
+  - "!.claude/worktrees/**"
 
 allowBuilds:
   esbuild: true
