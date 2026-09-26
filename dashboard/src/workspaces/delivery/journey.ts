@@ -1,4 +1,6 @@
 import type {
+  DeliveryAgentUsageRowV1,
+  DeliveryAgentUsageV1,
   DeliveryCiCheckV1,
   DeliveryCommitV1,
   DeliveryInboxPullRequestV1,
@@ -54,6 +56,7 @@ export type EpisodeRef =
   | { readonly kind: 'work_objective'; readonly workItemId: string }
   | { readonly kind: 'session'; readonly sessionId: string; readonly commitId: string }
   | { readonly kind: 'agent'; readonly agentId: string }
+  | { readonly kind: 'agent_usage'; readonly branch: string; readonly usage: DeliveryAgentUsageRowV1 }
   | { readonly kind: 'handoff'; readonly handoffId: string }
   | { readonly kind: 'commit'; readonly commit: DeliveryCommitV1 }
   | { readonly kind: 'pull_request'; readonly pullRequest: DeliveryPullRequestV1 }
@@ -102,7 +105,7 @@ export interface JourneyModel {
   readonly gaps: readonly string[];
 }
 
-/** The eight projections share one state ladder; only `value` differs. */
+/** The projections share one state ladder; only `value` differs. */
 type AnyProjection = DeliveryOverviewV1[keyof DeliveryOverviewV1];
 
 export function projectionLaneState(projection: AnyProjection, source: string): LaneState {
@@ -316,6 +319,27 @@ export function buildJourney(
     return null;
   });
 
+  const usageValue = projectionValue(overview.agent_usage);
+  const usageOnBranch = usageValue !== null && shortBranch(headBranch) === usageValue.branch;
+  const agentUsage: JourneyEpisode[] =
+    usageValue === null || !usageOnBranch
+      ? []
+      : usageValue.agents.map((usage) => ({
+          id: `agents:usage:${usage.provider}:${usage.agent ?? ''}`,
+          lane: 'agents',
+          label: usage.agent ?? `Unattributed ${usage.provider} sessions`,
+          detail: agentUsageDetail(usage),
+          source: 'agent',
+          // Sessions are placed on the branch by recorded Git spans, not by a
+          // join to this pull request's own identity.
+          grade: 'inferred',
+          at: null,
+          timeKind: 'undated',
+          status: null,
+          href: null,
+          ref: { kind: 'agent_usage', branch: usageValue.branch, usage },
+        }));
+
   const commitsValue = projectionValue(overview.commits);
   const commits: JourneyEpisode[] = (commitsValue?.items ?? []).map((commit) => ({
     id: `commits:${commit.commit}`,
@@ -482,11 +506,13 @@ export function buildJourney(
       sessions,
       'No session–Git relation is joined to this pull request; transcript provenance is not inferred.',
     ),
-    membershipLane(
-      'agents',
-      agents,
-      'No agent attribution or handoff token is joined to this pull request.',
-    ),
+    {
+      id: 'agents',
+      label: laneLabel('agents'),
+      source: laneSource('agents'),
+      state: agentLaneState(overview.agent_usage, usageValue, headBranch, agents.length > 0),
+      episodes: [...agents, ...agentUsage],
+    },
     projectionLane('commits', overview.commits, commits),
     projectionLane('pull_request', overview.pull_requests, pullRequest),
     projectionLane('reviews', overview.review_comments, reviews),
@@ -510,6 +536,58 @@ export function buildJourney(
   };
 }
 
+function shortBranch(ref: string): string {
+  return ref.replace(/^refs\/heads\//, '');
+}
+
+/** Tokens as the provider reported them: the total when every session sent
+ * one, else input plus output, and a lower bound whenever a session is
+ * missing usage. Nothing is estimated from transcript text. */
+export function agentTokenLabel(usage: DeliveryAgentUsageRowV1): string {
+  if (usage.sessions_with_usage === 0) return 'tokens not reported';
+  const { total_tokens, input_tokens, output_tokens } = usage.counters;
+  const tokens =
+    total_tokens ?? (input_tokens !== null && output_tokens !== null ? input_tokens + output_tokens : null);
+  if (tokens === null) return 'token counters incomplete';
+  const figure = `${tokens.toLocaleString('en-US')} tokens`;
+  if (usage.usage_complete) return figure;
+  return `≥${figure} (usage for ${usage.sessions_with_usage} of ${usage.sessions} sessions)`;
+}
+
+function agentUsageDetail(usage: DeliveryAgentUsageRowV1): string {
+  const sessions = `${usage.sessions} ${usage.sessions === 1 ? 'session' : 'sessions'}`;
+  return `${usage.provider} · ${sessions} · ${agentTokenLabel(usage)} · ${usage.tool_calls.toLocaleString('en-US')} tool calls`;
+}
+
+function agentLaneState(
+  projection: DeliveryOverviewV1['agent_usage'],
+  usage: DeliveryAgentUsageV1 | null,
+  headBranch: string,
+  hasMembership: boolean,
+): LaneState {
+  if (usage !== null && usage.branch !== shortBranch(headBranch)) {
+    return {
+      kind: 'unavailable',
+      detail: `Agent usage was read for the checkout's branch ${usage.branch}, not this pull request's head ${shortBranch(headBranch)}.`,
+      requiredAuthority: 'session-Git correlation index',
+    };
+  }
+  if (usage !== null && projection.state === 'partial') {
+    const reasons = [
+      usage.truncated ? 'the correlation read reached its session ceiling' : null,
+      usage.usage_coverage === 'complete'
+        ? null
+        : `provider usage coverage is ${usage.usage_coverage}, so token counts are lower bounds`,
+    ].filter((reason): reason is string => reason !== null);
+    return { kind: 'partial', detail: `Agent usage: ${reasons.join('; ')}` };
+  }
+  const projected = projectionLaneState(projection, 'Agent usage');
+  if (hasMembership && !laneServes(projected)) {
+    return { kind: 'served', detail: `Agent usage: ${projected.detail}` };
+  }
+  return projected;
+}
+
 function membershipLabel(ref: EpisodeRef): string {
   switch (ref.kind) {
     case 'work_objective':
@@ -520,6 +598,7 @@ function membershipLabel(ref: EpisodeRef): string {
       return `Agent ${ref.agentId}`;
     case 'handoff':
       return `Handoff ${ref.handoffId}`;
+    case 'agent_usage':
     case 'commit':
     case 'pull_request':
     case 'provider_observation':

@@ -652,7 +652,6 @@ fn admitted_provider(
             available_memory_mib: 512,
             catalog_digest: common::digest(common::SHA256_A),
         }],
-        privacy_constraints: BTreeSet::new(),
         configuration_digest: provider.configuration.digest.clone(),
         policy_revision: provider.policy.revision,
         policy_digest: provider.policy.digest.clone(),

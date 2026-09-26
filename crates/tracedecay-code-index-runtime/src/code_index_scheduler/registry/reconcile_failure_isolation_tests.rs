@@ -7,6 +7,8 @@
 //! which swings run to run on a shared machine.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -14,6 +16,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
 
 use super::super::{
     CodeIndexBuildProgressSlotStateV1, CodeIndexCadenceTriggerV1, CodeIndexDemandAdmissionV1,
@@ -57,6 +60,12 @@ struct Fixture {
 
 impl Fixture {
     async fn mount(project_id: &str) -> Self {
+        Self::mount_prepared(project_id, |_| {}).await
+    }
+
+    /// Mount after `prepare` has shaped the committed checkout, so the
+    /// mount's own first pass already runs over that shape.
+    async fn mount_prepared(project_id: &str, prepare: impl FnOnce(&Path)) -> Self {
         let root = TempDir::new().expect("fixture root");
         let project = root.path().join("project");
         fs::create_dir_all(project.join("src")).expect("create source root");
@@ -64,6 +73,7 @@ impl Fixture {
         run_git_in(&project, &["init", "-q", "-b", "main"]);
         run_git_in(&project, &["add", "."]);
         run_git_in(&project, &["commit", "-qm", "fixture"]);
+        prepare(&project);
 
         let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
         registry
@@ -552,6 +562,136 @@ async fn a_permanent_refusal_is_never_self_retried() {
     );
 
     fixture.registry.shutdown().await;
+}
+
+/// The stuck-after-init journey behind issue #2057: a cold build that fails
+/// the same way over unchanged source. Before the park, the restored arrival
+/// read as `indexing` indefinitely while every query wake rebuilt the whole
+/// worktree into the same refusal. An unreadable committed source file is a
+/// real input that reproduces it. The refusal must park typed with its exact
+/// cause, stop rebuilding on wakes that carry no new input, stay parked (not
+/// `indexing`) across a daemon restart, and converge once the operator fixes
+/// the file and runs the `tracedecay sync` the park names.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix() {
+    const PROJECT: &str = "project.reconcile-reproducing-failure";
+    const REASON: &str = "code-index repository status failed: code-index classification: \
+        IO error while writing blob or reading file metadata or changing filetype";
+    let set_model_mode = |project: &Path, mode: u32| {
+        fs::set_permissions(
+            project.join("src/model.rs"),
+            fs::Permissions::from_mode(mode),
+        )
+        .expect("set source mode");
+    };
+    let fixture = Fixture::mount_prepared(PROJECT, |project| {
+        fs::write(
+            project.join("src/model.rs"),
+            "pub struct Gamma;\npub fn delta() {}\n",
+        )
+        .expect("write source");
+        run_git_in(project, &["add", "."]);
+        run_git_in(project, &["commit", "-qm", "model"]);
+        set_model_mode(project, 0o000);
+    })
+    .await;
+    let counted = fixture
+        .install_fault(ReconcileFaultKindV1::Permanent, 0)
+        .await;
+
+    // Query admission posts an arrival without new input, as the stuck
+    // project's retrying callers did every few seconds.
+    for _ in 0..EXTERNAL_WAKE_ROUNDS {
+        fixture.wake_with_pending_arrival().await;
+        tokio::time::sleep(WAKE_ROUND_SPACING).await;
+    }
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    assert_eq!(
+        counted.attempts(),
+        0,
+        "wakes over unchanged input must not rebuild into the same refusal"
+    );
+    let freshness = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Parked),
+        "a reproducing refusal is parked, not indexing: {freshness:?}"
+    );
+    assert!(!freshness.rebuild_in_flight, "{freshness:?}");
+    assert_eq!(freshness.latest_generation_id, None);
+    let parked = freshness.parked.expect("typed convergence park");
+    assert_eq!(parked.reason, REASON);
+    assert!(
+        parked.remediation.contains("`tracedecay sync`"),
+        "the park must name the retry command: {parked:?}"
+    );
+    assert!(!parked.retries_on_wake);
+
+    fixture.registry.shutdown().await;
+    let restarted = Fixture::remount(fixture, PROJECT).await;
+    restarted.settle_for(MOUNT_QUIET_WINDOW).await;
+    let freshness = restarted
+        .registry
+        .dashboard_freshness(&restarted.project)
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Parked),
+        "a restart over the same refusal is parked again, not indexing: {freshness:?}"
+    );
+    assert_eq!(
+        freshness.parked.map(|parked| parked.reason).as_deref(),
+        Some(REASON)
+    );
+
+    set_model_mode(&restarted.project, 0o644);
+    assert_eq!(
+        restarted
+            .registry
+            .notify_hook_overflow(&restarted.project)
+            .await,
+        CodeIndexDemandAdmissionV1::Queued,
+        "the operator reconcile is admitted on a parked worktree"
+    );
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    let freshness = loop {
+        let freshness = restarted
+            .registry
+            .dashboard_freshness(&restarted.project)
+            .await
+            .expect("mounted freshness");
+        if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh) {
+            break freshness;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the fixed worktree never reached fresh: {freshness:?}"
+        );
+        restarted.wake_with_pending_arrival().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(freshness.parked.is_none(), "{freshness:?}");
+    let serving = restarted
+        .registry
+        .latest_complete_serving_for_test(&restarted.project)
+        .await
+        .expect("the converged generation serves");
+    assert_eq!(
+        serving
+            .generation()
+            .generation_statistics()
+            .expect("generation statistics")
+            .symbol_count,
+        3,
+        "`main`, `Gamma`, and `delta` are the fixture's symbols"
+    );
+    restarted.registry.shutdown().await;
 }
 
 /// The upgrade journey behind issue #1979, driven through the real worker.

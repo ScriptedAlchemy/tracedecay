@@ -13,11 +13,10 @@ use tracedecay_domain::{
 };
 
 use super::{
-    LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1, LexicalAliasV1, LexicalAlternativeReasonV1,
-    LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalAnchorV1, LexicalRouteErrorV1,
-    LexicalRouteKindV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
-    MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1, MAX_PREFERRED_SYMBOL_TOKENS_V1,
-    merge_lexical_routes, preferred_symbol_tokens,
+    LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1,
+    LexicalAnchorV1, LexicalRouteErrorV1, LexicalRouteKindV1, LexicalRouteOutcomeV1,
+    LexicalRoutePlanV1, LexicalRoutingV1, MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1,
+    MAX_PREFERRED_SYMBOL_TOKENS_V1, merge_lexical_routes, preferred_symbol_tokens,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalProximityV1,
@@ -508,8 +507,9 @@ fn anchor_route_reranks_and_names_itself_in_the_evidence() {
     assert_eq!(order(&batch), ["occ.reserve", "occ.allocate", "occ.other"]);
     assert_eq!(
         batch.candidates[1].raw_score,
-        FixedPointScore(450_000 + LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1),
-        "a candidate ranked by two routes carries the checked sum of both plus one anchor tier"
+        FixedPointScore(281_474_977_160_656),
+        "a candidate ranked by two routes carries the checked sum of both (450_000) plus one \
+         anchor tier (2^48)"
     );
     assert_eq!(
         batch.candidates[2].raw_score,
@@ -1025,7 +1025,8 @@ fn routes_merge_match_kinds_but_reject_source_binding_drift() {
     assert_eq!(batch.candidates.len(), 1);
     assert_eq!(
         batch.candidates[0].raw_score,
-        FixedPointScore(300 + LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1)
+        FixedPointScore(281_474_976_710_956),
+        "the route score (300) plus one anchor tier (2^48)"
     );
     assert_eq!(
         batch.evidence_by_occurrence[&id::<tracedecay_domain::SourceOccurrenceId>("occ.invoice")]

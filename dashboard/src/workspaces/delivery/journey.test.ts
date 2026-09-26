@@ -46,19 +46,75 @@ describe('buildJourney', () => {
       at: null,
       href: '/loom?loomSession=session.alpha.1',
     });
-    expect(model.undated).toBe(2);
+    // Objective, session, and the two agent-usage rows carry no event time.
+    expect(model.undated).toBe(4);
   });
 
   it('keeps an unjoined lane as a typed absence, not an empty success', () => {
-    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: [] });
+    const model = buildJourney(
+      {
+        ...OVERVIEW_ALPHA,
+        agent_usage: {
+          state: 'not_published',
+          reason: 'no session has recorded a Git branch span yet',
+          required_authority: 'session-Git correlation index',
+        },
+      },
+      { row: ROW_42, edges: [] },
+    );
     const agents = model.lanes.find((lane) => lane.id === 'agents')!;
-    expect(agents.state.kind).toBe('unavailable');
+    expect(agents.state).toMatchObject({
+      kind: 'not_published',
+      requiredAuthority: 'session-Git correlation index',
+    });
     expect(laneServes(agents.state)).toBe(false);
+    expect(agents.episodes).toEqual([]);
     const releases = model.lanes.find((lane) => lane.id === 'releases')!;
     expect(releases.state).toMatchObject({
       kind: 'not_published',
       requiredAuthority: 'github_read_authority',
     });
+  });
+
+  it("puts per-agent token and tool-call counts on the pull request's branch", () => {
+    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: [] });
+    const agents = model.lanes.find((lane) => lane.id === 'agents')!;
+    expect(agents.state.kind).toBe('served');
+    expect(agents.episodes.map((episode) => [episode.label, episode.detail, episode.grade])).toEqual([
+      ['planner', 'claude · 2 sessions · 21,500 tokens · 41 tool calls', 'inferred'],
+      // A session without provider usage keeps its tool calls and says so,
+      // rather than printing zero tokens.
+      ['Unattributed codex sessions', 'codex · 1 session · tokens not reported · 6 tool calls', 'inferred'],
+    ]);
+  });
+
+  it('does not attribute usage read for another branch to this pull request', () => {
+    const model = buildJourney(OVERVIEW_ALPHA, {
+      row: { ...ROW_42, branch_ref: 'refs/heads/feature/retry' },
+      edges: [],
+    });
+    const agents = model.lanes.find((lane) => lane.id === 'agents')!;
+    expect(agents.episodes).toEqual([]);
+    expect(agents.state.kind).toBe('unavailable');
+    expect(agents.state.detail).toMatch(/read for the checkout's branch feature\/delivery, not this pull request's head feature\/retry/);
+  });
+
+  it('names why agent usage is partial', () => {
+    const usage = OVERVIEW_ALPHA.agent_usage.state === 'ready' ? OVERVIEW_ALPHA.agent_usage.value : null;
+    const model = buildJourney(
+      {
+        ...OVERVIEW_ALPHA,
+        agent_usage: { state: 'partial', value: { ...usage!, usage_coverage: 'unavailable', truncated: true } },
+      },
+      { row: ROW_42, edges: [] },
+    );
+    const agents = model.lanes.find((lane) => lane.id === 'agents')!;
+    expect(agents.state).toEqual({
+      kind: 'partial',
+      detail:
+        'Agent usage: the correlation read reached its session ceiling; provider usage coverage is unavailable, so token counts are lower bounds',
+    });
+    expect(agents.episodes).toHaveLength(2);
   });
 
   it('reports the selected pull request missing from the head-bound page as a gap', () => {

@@ -818,7 +818,6 @@ fn managed_lsp_candidate(
             available_memory_mib: 2_048,
             catalog_digest: configuration_digest.clone(),
         }],
-        privacy_constraints: BTreeSet::new(),
         configuration_digest: configuration_digest.clone(),
         policy_revision: POLICY_REVISION_V1,
         policy_digest: policy_digest.clone(),

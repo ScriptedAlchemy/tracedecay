@@ -1,27 +1,29 @@
-//! Deadline-aware admission to existing hook spool writer locks.
+//! Deadline-aware admission to an exclusive advisory file lock.
 use std::fs::File;
+use std::io;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum LockAdmissionError {
+#[derive(Debug)]
+pub enum LockAdmissionError {
     TimedOut,
-    Io,
+    Io(io::Error),
 }
 
 // Avoid spinning while the admitted writer completes durable filesystem work.
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
-#[hotpath::measure(label = "hooks.lock.admission")]
-pub(crate) fn lock_until(file: &File, deadline: Instant) -> Result<(), LockAdmissionError> {
+/// Exclusive-locks `file`, waiting until `deadline`.
+/// A lock taken after the deadline is released and the call times out.
+#[hotpath::measure(label = "private_fs.lock.admission")]
+pub fn lock_until(file: &File, deadline: Instant) -> Result<(), LockAdmissionError> {
     loop {
         if Instant::now() >= deadline {
             return Err(LockAdmissionError::TimedOut);
         }
         match file.try_lock() {
             Ok(()) => {
-                // An expired attempt must not cross the admission boundary.
                 if Instant::now() >= deadline {
-                    file.unlock().map_err(|_| LockAdmissionError::Io)?;
+                    file.unlock().map_err(LockAdmissionError::Io)?;
                     return Err(LockAdmissionError::TimedOut);
                 }
                 return Ok(());
@@ -33,7 +35,7 @@ pub(crate) fn lock_until(file: &File, deadline: Instant) -> Result<(), LockAdmis
                 }
                 std::thread::sleep(remaining.min(LOCK_POLL_INTERVAL));
             }
-            Err(std::fs::TryLockError::Error(_)) => return Err(LockAdmissionError::Io),
+            Err(std::fs::TryLockError::Error(error)) => return Err(LockAdmissionError::Io(error)),
         }
     }
 }

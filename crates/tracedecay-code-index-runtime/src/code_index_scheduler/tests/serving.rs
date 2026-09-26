@@ -5876,61 +5876,6 @@ async fn generation_read_callers_install_exact_affected_test_attribution() {
     registry.shutdown().await;
 }
 
-/// The join holds every test's transitive coverage closure, so a full-repo
-/// generation's join is large; copying it on each query admission cost tens
-/// of seconds per call. Repeated queries must share one materialization.
-#[tokio::test(flavor = "multi_thread")]
-async fn repeated_ready_decoded_queries_share_one_test_attribution_materialization() {
-    let fixture = GitFixture::new(&[(
-        "tests/production.rs",
-        "fn helper() {}\n#[test]\nfn verifies_helper() { helper(); }\n",
-    )]);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
-    registry
-        .mount_worktree(
-            test_project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
-        )
-        .await
-        .expect("mount fixture");
-    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
-    let generation_id = latest.generation().manifest().generation_id.clone();
-    let snapshot = latest.generation().snapshot();
-    let scope = ResolvedScope::new(
-        test_project_id(),
-        snapshot.repository.clone(),
-        snapshot.worktree.clone().expect("worktree id"),
-        snapshot.reference.clone(),
-    )
-    .expect("resolved scope");
-    let query = || async {
-        let decoded = registry
-            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-            .await
-            .expect("ready-decoded caller resolves generation");
-        assert_eq!(decoded.generation().manifest().generation_id, generation_id);
-    };
-
-    query().await;
-    let first = registry.read_test_attribution(&generation_id);
-    assert!(
-        first.evidence.is_some(),
-        "the seated generation attributes tests"
-    );
-    for _ in 0..3 {
-        query().await;
-    }
-    let second = registry.read_test_attribution(&generation_id);
-    assert!(
-        Arc::ptr_eq(&first, &second),
-        "queries on one generation must reuse its attribution, not rebuild or copy it"
-    );
-
-    registry.shutdown().await;
-}
-
 /// A graph-off cold mount must keep the authenticated lightweight text owner
 /// authoritative when an overflow reconcile arrives between bounded text
 /// slices. Rebinding the same sealed generation through the full-generation

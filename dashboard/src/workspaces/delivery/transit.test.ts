@@ -18,7 +18,7 @@ describe('buildTransit', () => {
   it('reads the served PR as four graded stations joined by named bases', () => {
     const model = transit(PR42, OVERVIEW_ALPHA);
     expect(model.stations.map((station) => [station.id, station.state, station.grade, gradeSummary(station)])).toEqual([
-      ['session', 'evidence', 'inferred', '1 EXPLICIT · 1 INFERRED'],
+      ['session', 'evidence', 'inferred', '1 EXPLICIT · 3 INFERRED'],
       ['code', 'evidence', 'exact', '4 EXACT'],
       ['verification', 'evidence', 'exact', '6 EXACT'],
       ['next', 'evidence', 'exact', '2 EXACT'],
@@ -32,7 +32,7 @@ describe('buildTransit', () => {
     expect(session.branches.map((branch) => [branch.kind, branch.identities])).toEqual([
       ['objective', ['work.retry-backoff']],
       ['session', ['session.alpha.1']],
-      ['agent', []],
+      ['agent', ['Unattributed codex sessions', 'planner']],
       ['handoff', []],
     ]);
     expect(model.stations[3]!.reasons).toEqual(['OVERLAP not evaluated · unavailable · unsupported coverage']);

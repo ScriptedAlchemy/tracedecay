@@ -23,7 +23,7 @@ use super::work_retry_leak_emit::{
 const RECOVERY_RUNNING: u8 = 0;
 const RECOVERY_STOPPING: u8 = 1;
 const RECOVERY_STOPPED: u8 = 2;
-const RECOVERY_BATCH: u16 = 256;
+const RECOVERY_BATCH: NonZeroU16 = NonZeroU16::MIN.saturating_add(255);
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(1);
 const RECOVERY_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -149,9 +149,9 @@ async fn run_recovery<S>(
     let mut cursor = None;
     loop {
         tokio::select! {
-            _ = schedule.tick() => recover_batch(&storage, producer.as_ref(), &mut cursor, &mut summary).await,
+            _ = schedule.tick() => recover_batch(&storage, producer.as_ref(), RECOVERY_BATCH, &mut cursor, &mut summary).await,
             Some(RecoveryControl::Shutdown { reply }) = control.recv() => {
-                recover_batch(&storage, producer.as_ref(), &mut cursor, &mut summary).await;
+                recover_batch(&storage, producer.as_ref(), RECOVERY_BATCH, &mut cursor, &mut summary).await;
                 state.store(RECOVERY_STOPPED, Ordering::Release);
                 let _ = reply.send(summary);
                 return;
@@ -167,15 +167,12 @@ async fn run_recovery<S>(
 async fn recover_batch<S>(
     storage: &S,
     producer: &BoundedObservabilityProducerV1,
+    limit: NonZeroU16,
     cursor: &mut Option<WorkOwnerObservationScanCursorV1>,
     summary: &mut WorkOwnerObservationRecoverySummaryV1,
 ) where
     S: WorkOwnerObservationStoragePortV1 + Clone + Send + Sync + 'static,
 {
-    let Some(limit) = NonZeroU16::new(RECOVERY_BATCH) else {
-        summary.failed = summary.failed.saturating_add(1);
-        return;
-    };
     let scan_storage = S::clone(storage);
     let after = cursor.clone();
     let pending = match tokio::task::spawn_blocking(move || {
@@ -195,7 +192,7 @@ async fn recover_batch<S>(
             return;
         }
     };
-    let wrapped = pending.len() < usize::from(RECOVERY_BATCH);
+    let wrapped = pending.len() < usize::from(limit.get());
     for pending in pending {
         *cursor = Some(pending.scan_cursor.clone());
         recover_one(storage, producer, pending, summary).await;
@@ -509,21 +506,28 @@ mod tests {
             "owner-observation-pagination",
         )
         .await;
-        for ordinal in 1..=257 {
+        for ordinal in 1..=5 {
             insert_pending_duplicate(&harness.registered, ordinal).await;
         }
         let storage = harness.registered.work_storage().unwrap();
         let producer = producer(harness.registered.clone());
         let mut summary = WorkOwnerObservationRecoverySummaryV1::default();
         let mut cursor = None;
+        let batch = NonZeroU16::new(2).unwrap();
 
-        recover_batch(&storage, producer.as_ref(), &mut cursor, &mut summary).await;
-        assert_eq!(summary.marked_durable, 256);
-        assert!(cursor.is_some());
-        recover_batch(&storage, producer.as_ref(), &mut cursor, &mut summary).await;
-        assert_eq!(summary.marked_durable, 257);
+        for (marked, continues) in [(2, true), (4, true), (5, false)] {
+            recover_batch(
+                &storage,
+                producer.as_ref(),
+                batch,
+                &mut cursor,
+                &mut summary,
+            )
+            .await;
+            assert_eq!(summary.marked_durable, marked);
+            assert_eq!(cursor.is_some(), continues);
+        }
         assert_eq!(summary.failed, 0);
-        assert!(cursor.is_none());
         assert!(
             storage
                 .pending_owner_observations(None, NonZeroU16::new(1).unwrap())
