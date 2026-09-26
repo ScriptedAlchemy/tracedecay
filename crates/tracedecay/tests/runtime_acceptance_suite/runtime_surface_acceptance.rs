@@ -1421,6 +1421,53 @@ fn patch_dashboard_json(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, V
     common::response_to_json(response)
 }
 
+/// The Agents page Tokens card asks the daemon-hosted dashboard for one
+/// session's handoff-token frontier; the daemon answers it from the grant
+/// store of the project's registered session database.
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_handoff_token_frontier_reads_the_registered_grant_store() {
+    let _dashboard_lock = DASHBOARD_CONFIGURATION_TEST_LOCK.lock().await;
+    let fixture = runtime_fixture().await;
+    let base_url = start_daemon_hosted_dashboard(&fixture).await;
+    let agent = common::http_agent();
+    let url = format!("{base_url}/api/application/handoff/list-task");
+
+    let response = common::http_call_with_retry(&format!("POST {url}"), || {
+        agent
+            .post(&url)
+            .send_json(serde_json::json!({ "session_id": "session.agents-tokens-card" }))
+    });
+    let (status, body) = common::response_to_json(response);
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["kind"], "success", "{body}");
+    assert_eq!(body["value"]["outcome"]["outcome"], "evidence", "{body}");
+    let mut frontier = body["value"]["outcome"]["value"]["payload"].clone();
+    assert!(
+        frontier["observed_at"].as_i64().is_some_and(|at| at > 0),
+        "the frontier names the instant its states were decided at: {frontier}"
+    );
+    frontier["observed_at"] = Value::Null;
+    assert_eq!(
+        frontier,
+        serde_json::json!({
+            "observed_at": null,
+            "handoffs": [],
+            "open_count": 0,
+            "consumed_count": 0,
+            "expired_count": 0,
+            "truncated": false,
+        })
+    );
+
+    let _ = call_default_tool(
+        &fixture.handshake,
+        "tracedecay_dashboard",
+        serde_json::json!({ "action": "stop", "format": "json" }),
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn project_open_application_boundary() {
     let fixture = runtime_fixture().await;

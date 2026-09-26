@@ -20,6 +20,7 @@ use tracedecay_runtime_core::{
         RegisteredSchemaInstallationTransactionV1, RegisteredSchemaInstallationV1,
     },
 };
+use tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA;
 use tracedecay_rusqlite_runtime::work::{
@@ -781,6 +782,12 @@ async fn install_registered_schema_stage_sequence(
         .map_err(|error| {
             global_db_operation_error("initialize authorized scope-set schema", error)
         })?;
+    // The daemon's handoff runtime attaches its grant store to the same
+    // registered database as the Work runtime.
+    transaction
+        .execute_batch(HANDOFF_OPEN_SCHEMA_V1)
+        .await
+        .map_err(|error| global_db_operation_error("initialize handoff-open schema", error))?;
     ensure_session_parent_columns(transaction)
         .await
         .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
