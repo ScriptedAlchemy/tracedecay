@@ -6,7 +6,7 @@ use clap::{CommandFactory, FromArgMatches};
 #[cfg(any(feature = "hotpath", test))]
 use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 #[cfg(feature = "hotpath")]
 use std::sync::{Arc, Mutex};
@@ -927,8 +927,10 @@ async fn resolve_registered_project_root(
     project_id: Option<String>,
     project_path: Option<String>,
 ) -> tracedecay_domain::errors::Result<Option<PathBuf>> {
-    let Some(selector) = project_id.or(project_path) else {
-        return Ok(None);
+    let selector = match (project_id, project_path) {
+        (Some(project_id), _) => project_id,
+        (None, Some(project_path)) => registered_project_path_selector(&project_path)?,
+        (None, None) => return Ok(None),
     };
     let context = commands::daemon_tool_json(
         None,
@@ -947,6 +949,29 @@ async fn resolve_registered_project_root(
             message: "registered project not found for selector".to_string(),
         })?;
     Ok(Some(PathBuf::from(display_root)))
+}
+
+/// A `--project-path` selector as the registry must see it. The daemon
+/// resolves paths from its own directory, so a path-shaped selector is
+/// canonicalized against the CLI's working directory here; any other selector
+/// is a registered alias and passes through unchanged.
+pub(crate) fn registered_project_path_selector(
+    selector: &str,
+) -> tracedecay_domain::errors::Result<String> {
+    if !tracedecay_global_db::RegisteredGlobalDb::is_explicit_project_path_selector(selector) {
+        return Ok(selector.to_owned());
+    }
+    let config_error = |message| tracedecay_domain::errors::TraceDecayError::Config { message };
+    tracedecay_runtime_core::path_safety::canonical_existing_identity(Path::new(selector.trim()))
+        .map_err(|error| config_error(format!("--project-path '{selector}': {error}")))?
+        .into_os_string()
+        .into_string()
+        .map_err(|path| {
+            config_error(format!(
+                "--project-path '{selector}' resolves to a non-UTF-8 path '{}'",
+                path.to_string_lossy()
+            ))
+        })
 }
 
 pub(crate) async fn resolve_cli_project_root(
