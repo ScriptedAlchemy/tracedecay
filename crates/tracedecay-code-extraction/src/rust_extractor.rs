@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use tree_sitter::{Node as TsNode, Parser, Range, Tree};
+use tree_sitter::{Node as TsNode, Parser, Point, Range, Tree};
 
 use crate::common::local_node_id;
 use crate::complexity::{RUST_COMPLEXITY, count_complexity};
@@ -26,6 +26,14 @@ pub struct RustExtractor;
 #[derive(Default)]
 struct ShadowedCallNames {
     names: Vec<String>,
+}
+
+/// The names one block's `use` declarations bind, with the path each names.
+struct BlockUseScope {
+    start: Point,
+    end: Point,
+    /// `None` binds the name to an item this file may itself define.
+    paths: BTreeMap<String, Option<String>>,
 }
 
 /// Receiver bindings whose type the function body states outright: typed
@@ -381,6 +389,7 @@ impl RustExtractor {
         Self::collect_receiver_types(state, node, node, &mut receivers);
         Self::extract_call_sites(state, node, &id, &receivers);
         Self::suppress_shadowed_calls(state, node, &id);
+        Self::qualify_block_scoped_uses(state, node, &id);
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
@@ -2331,6 +2340,138 @@ impl RustExtractor {
                 || reference.reference_kind != EdgeKind::Calls
                 || !shadows.names.contains(&reference.reference_name)
         });
+    }
+
+    /// A `use` inside a block binds its names for that whole block, nested
+    /// blocks included, and shadows a module-scope import of the same name.
+    /// Import rows are file-scoped, so a call through a block `use` is
+    /// rewritten to the declared path here; the qualified resolver then binds
+    /// it exactly like a `crate::`/`super::`/extern path. A path that may
+    /// stay inside this file keeps its bare name, which binds same-file
+    /// items; the cross-file resolver never binds into the referencing file.
+    fn qualify_block_scoped_uses(
+        state: &mut ExtractionState<'_>,
+        function: TsNode<'_>,
+        fn_node_id: &str,
+    ) {
+        let mut scopes = Vec::new();
+        Self::collect_block_use_scopes(state, function, function, &mut scopes);
+        if scopes.is_empty() {
+            return;
+        }
+        for reference in &mut state.unresolved_refs {
+            if reference.from_node_id != fn_node_id || reference.reference_name.contains('.') {
+                continue;
+            }
+            let head = reference
+                .reference_name
+                .split("::")
+                .next()
+                .unwrap_or_default();
+            let site = Point {
+                row: reference.line as usize,
+                column: reference.column as usize,
+            };
+            // Pre-order: an inner block follows the block that contains it.
+            let declared = scopes
+                .iter()
+                .rev()
+                .filter(|scope| scope.start <= site && site < scope.end)
+                .find_map(|scope| scope.paths.get(head));
+            if let Some(Some(path)) = declared {
+                reference.reference_name =
+                    format!("{path}{}", &reference.reference_name[head.len()..]);
+            }
+        }
+    }
+
+    /// Whether a block `use` path names an item outside this file: `self::`
+    /// (and `crate::` from a crate root) only when it continues through a
+    /// root `mod name;` file module, and `super::` only from a file module.
+    fn block_use_path_leaves_file(
+        state: &ExtractionState<'_>,
+        function: TsNode<'_>,
+        path: &str,
+    ) -> bool {
+        let crate_root = state.file_path == "lib.rs"
+            || state.file_path == "main.rs"
+            || state.file_path.ends_with("/lib.rs")
+            || state.file_path.ends_with("/main.rs");
+        let mut segments = path.split("::");
+        let file_relative = match segments.next() {
+            Some("self") => true,
+            Some("crate") => crate_root,
+            Some("super") => {
+                return !Self::ancestors(function).any(|node| node.kind() == "mod_item");
+            }
+            _ => false,
+        };
+        if !file_relative {
+            return true;
+        }
+        let Some(module) = segments.next() else {
+            return false;
+        };
+        let Some(root) = Self::ancestors(function).find(|node| node.kind() == "source_file") else {
+            return false;
+        };
+        let mut cursor = root.walk();
+        root.named_children(&mut cursor).any(|item| {
+            item.kind() == "mod_item"
+                && item.child_by_field_name("body").is_none()
+                && item
+                    .child_by_field_name("name")
+                    .is_some_and(|name| state.node_text(name) == module)
+        })
+    }
+
+    fn ancestors(node: TsNode<'_>) -> impl Iterator<Item = TsNode<'_>> {
+        std::iter::successors(node.parent(), TsNode::parent)
+    }
+
+    fn collect_block_use_scopes(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        scopes: &mut Vec<BlockUseScope>,
+    ) {
+        if node != function && node.kind() == "function_item" {
+            return;
+        }
+        if node.kind() == "block" {
+            let mut paths = BTreeMap::new();
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() != "use_declaration" {
+                    continue;
+                }
+                let Some(argument) = child.child_by_field_name("argument") else {
+                    continue;
+                };
+                let first = state.imports.len();
+                Self::extract_use_bindings(state, argument, None, false, None);
+                let bindings = state.imports.drain(first..).collect::<Vec<_>>();
+                for import in bindings {
+                    if let (Some(local), Some(imported)) = (import.local_name, import.imported_name)
+                    {
+                        let path = format!("{}::{imported}", import.module_specifier);
+                        let leaves_file = Self::block_use_path_leaves_file(state, function, &path);
+                        paths.insert(local, leaves_file.then_some(path));
+                    }
+                }
+            }
+            if !paths.is_empty() {
+                scopes.push(BlockUseScope {
+                    start: node.start_position(),
+                    end: node.end_position(),
+                    paths,
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            Self::collect_block_use_scopes(state, child, function, scopes);
+        }
     }
 
     fn collect_shadowed_names(
