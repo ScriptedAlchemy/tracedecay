@@ -626,6 +626,10 @@ impl GitHubReadOnlyCredentialV1 {
         }
     }
 
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self.kind, GitHubReadOnlyCredentialKindV1::Anonymous)
+    }
+
     pub fn permits(&self, permission: GitHubReadPermissionV1) -> bool {
         !matches!(
             self.authorization_for_stored_repository(permission),

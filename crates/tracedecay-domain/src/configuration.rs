@@ -1948,7 +1948,9 @@ impl ConfigurationSnapshotV1 {
                 }) {
                     return Err(ProtectedChangeSnapshotError::Stale);
                 }
-                bindings.push(binding.clone());
+                let index =
+                    bindings.partition_point(|candidate| candidate.binding_id < binding.binding_id);
+                bindings.insert(index, binding.clone());
                 replace_protected_effective_value(
                     &mut effective_values,
                     &mut provenance,
@@ -2025,7 +2027,8 @@ impl ConfigurationSnapshotV1 {
                 {
                     rules[index] = rule.clone();
                 } else {
-                    rules.push(rule.clone());
+                    let index = rules.partition_point(|candidate| candidate.rule_id < rule.rule_id);
+                    rules.insert(index, rule.clone());
                 }
                 replace_protected_effective_value(
                     &mut effective_values,

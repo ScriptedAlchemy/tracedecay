@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracedecay_domain::feedback::{GitHubPullRequestIdV1, GitHubReviewRateLimitCheckpointV1};
 use tracedecay_domain::{CommitId, UtcMicros};
@@ -17,6 +19,11 @@ use super::{
 
 const GITHUB_DISCOVERY_PAGE_SIZE_V1: usize = 100;
 const MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1: usize = 1024 * 1024;
+// ponytail: each anonymous candidate costs one of the 60 hourly anonymous
+// requests, so a head-branch name shared by more open pull requests than this
+// (a popular fork's `patch-1`) is Unavailable rather than scanned; a
+// credential lifts the bound through the GraphQL route.
+const MAX_ANONYMOUS_HEAD_REF_CANDIDATES_V1: usize = 10;
 
 /// Pull requests of the checkout's repository whose head branch has the
 /// checkout's branch name, wherever that head lives. GitHub's
@@ -159,13 +166,159 @@ struct HeadRefBaseRepositoryV1 {
     owner: HeadRefLoginV1,
 }
 
+/// How this project's GitHub source is read.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubSourceStateV1 {
+    /// A credential authorizes the reads.
+    Bound,
+    /// No credential is available; the repository is read anonymously as a
+    /// public repository.
+    UnauthenticatedPublic,
+    /// No credential is available and GitHub refused the anonymous read, so
+    /// the repository is private or absent.
+    DeniedNoCredential,
+}
+
+impl GitHubSourceStateV1 {
+    /// The state a discovery with `credential` settled in. `None` is a
+    /// discovery that was not attempted.
+    pub fn observed(
+        credential: &GitHubReadOnlyCredentialV1,
+        discovery: Option<&GitHubExactCommitDiscoveryOutcomeV1>,
+    ) -> Self {
+        if !credential.is_anonymous() {
+            Self::Bound
+        } else if discovery == Some(&GitHubExactCommitDiscoveryOutcomeV1::Denied) {
+            Self::DeniedNoCredential
+        } else {
+            Self::UnauthenticatedPublic
+        }
+    }
+
+    /// What the operator does to reach [`Self::Bound`], if anything.
+    pub const fn remedy(self) -> Option<&'static str> {
+        match self {
+            Self::Bound => None,
+            Self::UnauthenticatedPublic => Some(
+                "reads are anonymous (60 requests/hour); run `gh auth login` or set GH_TOKEN to read with a credential",
+            ),
+            Self::DeniedNoCredential => Some(
+                "GitHub refused an anonymous read of this repository; run `gh auth login` or set GH_TOKEN with read access, then reopen the project",
+            ),
+        }
+    }
+}
+
+/// Pull-request discovery outcome for the checkout's exact head.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubPullRequestDiscoveryKindV1 {
+    Found,
+    NotFound,
+    Ambiguous,
+    RateLimited,
+    Denied,
+    Unavailable,
+    /// GitHub source access was not granted for this scope.
+    NotAttempted,
+}
+
+/// The GitHub source of one project as status reports it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubSourceStatusV1 {
+    /// `owner/name` of the checkout's `origin` remote.
+    pub repository: String,
+    pub state: GitHubSourceStateV1,
+    pub remedy: Option<String>,
+    pub pull_request_discovery: GitHubPullRequestDiscoveryKindV1,
+    pub pull_request: Option<u64>,
+    /// `owner/name` the discovered pull request's head lives in.
+    pub head_repository: Option<String>,
+}
+
+impl GitHubSourceStatusV1 {
+    pub fn observed(
+        repository_owner: &str,
+        repository_name: &str,
+        credential: &GitHubReadOnlyCredentialV1,
+        discovery: Option<&GitHubExactCommitDiscoveryOutcomeV1>,
+    ) -> Self {
+        let state = GitHubSourceStateV1::observed(credential, discovery);
+        let (kind, found) = match discovery {
+            None => (GitHubPullRequestDiscoveryKindV1::NotAttempted, None),
+            Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)) => {
+                (GitHubPullRequestDiscoveryKindV1::Found, Some(pull))
+            }
+            Some(GitHubExactCommitDiscoveryOutcomeV1::NotFound) => {
+                (GitHubPullRequestDiscoveryKindV1::NotFound, None)
+            }
+            Some(GitHubExactCommitDiscoveryOutcomeV1::Ambiguous) => {
+                (GitHubPullRequestDiscoveryKindV1::Ambiguous, None)
+            }
+            Some(GitHubExactCommitDiscoveryOutcomeV1::RateLimited { .. }) => {
+                (GitHubPullRequestDiscoveryKindV1::RateLimited, None)
+            }
+            Some(GitHubExactCommitDiscoveryOutcomeV1::Denied) => {
+                (GitHubPullRequestDiscoveryKindV1::Denied, None)
+            }
+            Some(GitHubExactCommitDiscoveryOutcomeV1::Unavailable) => {
+                (GitHubPullRequestDiscoveryKindV1::Unavailable, None)
+            }
+        };
+        Self {
+            repository: format!("{repository_owner}/{repository_name}"),
+            state,
+            remedy: state.remedy().map(str::to_owned),
+            pull_request_discovery: kind,
+            pull_request: found.map(|pull| pull.target.pull_request_number),
+            head_repository: found.map(|pull| {
+                format!(
+                    "{}/{}",
+                    pull.head_repository_owner, pull.head_repository_name
+                )
+            }),
+        }
+    }
+}
+
+type GitHubSourceStatusRegistryV1 = Mutex<BTreeMap<PathBuf, GitHubSourceStatusV1>>;
+
+fn github_source_status_registry_v1() -> &'static GitHubSourceStatusRegistryV1 {
+    static REGISTRY: OnceLock<GitHubSourceStatusRegistryV1> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Retains the latest GitHub source observation of the project at
+/// `project_root`, replacing the one a previous open recorded.
+pub fn record_github_source_status_v1(project_root: &Path, status: GitHubSourceStatusV1) {
+    github_source_status_registry_v1()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(project_root.to_path_buf(), status);
+}
+
+/// The GitHub source observation the project at `project_root` last
+/// recorded. `None` means none was observed in this daemon: the checkout has
+/// no GitHub `origin`, or its advisory owner has not mounted yet.
+pub fn github_source_status_v1(project_root: &Path) -> Option<GitHubSourceStatusV1> {
+    github_source_status_registry_v1()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(project_root)
+        .cloned()
+}
+
 /// Discovers the unique pull request filed against `owner/repository` whose
 /// head branch is `head_ref_name` at exactly `head_commit`, including heads
 /// that live in a fork.
 ///
-/// Acquisition is one bounded static GraphQL query per scan; the scan result
-/// must agree across scans before it is trusted. GitHub's GraphQL API refuses
-/// unauthenticated reads, so an anonymous credential yields `Denied`.
+/// With a credential, acquisition is one bounded static GraphQL query per
+/// scan. GitHub's GraphQL API refuses unauthenticated reads, so an anonymous
+/// scan uses the REST issue search's `head:` qualifier and reads each
+/// candidate pull request for its exact head. Either way the scan result must
+/// agree across scans before it is trusted.
 #[hotpath::measure(label = "usecases.github_network.discover_pr")]
 pub fn discover_exact_commit_pull_request_v1(
     owner: &str,
@@ -176,7 +329,7 @@ pub fn discover_exact_commit_pull_request_v1(
     credential: &GitHubReadOnlyCredentialV1,
     control: &GitHubDiscoveryControlV1,
 ) -> GitHubExactCommitDiscoveryOutcomeV1 {
-    if !valid_graphql_uri(&config.graphql_uri) {
+    if !valid_https_uri(&config.graphql_uri) || !valid_https_uri(&config.rest_base_uri) {
         return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
     }
     let builder = ureq::Agent::config_builder()
@@ -212,7 +365,11 @@ fn discover_with_agent(
     credential: &GitHubReadOnlyCredentialV1,
     control: &GitHubDiscoveryControlV1,
 ) -> GitHubExactCommitDiscoveryOutcomeV1 {
-    let scan = || scan_head_ref_pull_requests_v1(agent, request, config, credential, control);
+    let scan = || match credential.authorization_header_for(GitHubReadPermissionV1::PullRequests) {
+        Ok(Some(_)) => scan_head_ref_pull_requests_v1(agent, request, config, credential, control),
+        Ok(None) => scan_public_head_ref_pull_requests_v1(agent, request, config, control),
+        Err(()) => GitHubExactCommitDiscoveryOutcomeV1::Denied,
+    };
     let first = scan();
     if !discovery_outcome_requires_consensus(&first) {
         return first;
@@ -253,6 +410,225 @@ fn discovery_consensus(
     }
 }
 
+/// The per-request timeout a scan may still spend, or `None` when the
+/// request or the remaining budget cannot admit one.
+fn admitted_request_timeout(
+    request: &DiscoveryRequestV1<'_>,
+    config: &GitHubHttpReadConfigV1,
+    control: &GitHubDiscoveryControlV1,
+) -> Option<Duration> {
+    let request_timeout = config.request_timeout.min(control.remaining()?);
+    (valid_path_segment(request.owner)
+        && valid_path_segment(request.repository)
+        && valid_head_ref_name(request.head_ref_name)
+        && valid_full_git_oid(request.head_commit.as_str())
+        && !request_timeout.is_zero()
+        && !config.connect_timeout.is_zero()
+        && !config.socket_timeout.is_zero())
+    .then_some(request_timeout)
+}
+
+/// A non-success provider status as its discovery state. `None` is 200.
+fn refused_status(
+    response: &ureq::http::Response<ureq::Body>,
+) -> Option<GitHubExactCommitDiscoveryOutcomeV1> {
+    let checkpoint = rate_limit_checkpoint(response.headers());
+    match response.status().as_u16() {
+        200 => None,
+        // REST answers a repository the caller cannot see as 404 (a read) or
+        // 422 (a search qualifier naming it).
+        401 | 404 | 422 => Some(GitHubExactCommitDiscoveryOutcomeV1::Denied),
+        403 => {
+            let retry_at = retry_after_at(response.headers());
+            if checkpoint
+                .as_ref()
+                .is_none_or(|checkpoint| checkpoint.remaining != 0)
+                && retry_at.is_none()
+            {
+                return Some(GitHubExactCommitDiscoveryOutcomeV1::Denied);
+            }
+            Some(GitHubExactCommitDiscoveryOutcomeV1::RateLimited {
+                retry_at,
+                checkpoint,
+            })
+        }
+        429 => Some(GitHubExactCommitDiscoveryOutcomeV1::RateLimited {
+            retry_at: retry_after_at(response.headers()),
+            checkpoint,
+        }),
+        _ => Some(GitHubExactCommitDiscoveryOutcomeV1::Unavailable),
+    }
+}
+
+fn read_bounded_body(response: &mut ureq::http::Response<ureq::Body>) -> Option<Vec<u8>> {
+    response
+        .body_mut()
+        .with_config()
+        .limit(MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1 as u64)
+        .read_to_vec()
+        .ok()
+}
+
+/// One anonymous REST `GET`, answered as its body or its discovery state.
+fn public_rest_get(
+    agent: &ureq::Agent,
+    url: &str,
+    config: &GitHubHttpReadConfigV1,
+    request_timeout: Duration,
+    control: &GitHubDiscoveryControlV1,
+) -> Result<Vec<u8>, GitHubExactCommitDiscoveryOutcomeV1> {
+    let response = agent
+        .get(url)
+        .config()
+        .timeout_global(Some(request_timeout))
+        .timeout_connect(Some(config.connect_timeout.min(request_timeout)))
+        .timeout_recv_response(Some(config.socket_timeout.min(request_timeout)))
+        .timeout_recv_body(Some(config.socket_timeout.min(request_timeout)))
+        .build()
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "tracedecay-github-read")
+        .call();
+    if control.remaining().is_none() {
+        return Err(GitHubExactCommitDiscoveryOutcomeV1::Unavailable);
+    }
+    let Ok(mut response) = response else {
+        return Err(GitHubExactCommitDiscoveryOutcomeV1::Unavailable);
+    };
+    if let Some(refused) = refused_status(&response) {
+        return Err(refused);
+    }
+    read_bounded_body(&mut response).ok_or(GitHubExactCommitDiscoveryOutcomeV1::Unavailable)
+}
+
+#[derive(Deserialize)]
+struct HeadRefSearchV1 {
+    total_count: usize,
+    incomplete_results: bool,
+    items: Vec<HeadRefSearchItemV1>,
+}
+
+#[derive(Deserialize)]
+struct HeadRefSearchItemV1 {
+    number: u64,
+}
+
+#[derive(Deserialize)]
+struct RestPullRequestHeadRefV1 {
+    id: u64,
+    number: u64,
+    head: RestPullRequestBranchV1,
+    base: RestPullRequestBranchV1,
+}
+
+#[derive(Deserialize)]
+struct RestPullRequestBranchV1 {
+    #[serde(rename = "ref")]
+    name: String,
+    sha: String,
+    repo: Option<RestPullRequestRepositoryV1>,
+}
+
+#[derive(Deserialize)]
+struct RestPullRequestRepositoryV1 {
+    name: String,
+    owner: HeadRefLoginV1,
+}
+
+/// Anonymous discovery: the issue search's `head:` qualifier names every pull
+/// request of the repository from a branch of that name, in any fork, and
+/// each candidate's own read pins its exact head commit and repository.
+fn scan_public_head_ref_pull_requests_v1(
+    agent: &ureq::Agent,
+    request: &DiscoveryRequestV1<'_>,
+    config: &GitHubHttpReadConfigV1,
+    control: &GitHubDiscoveryControlV1,
+) -> GitHubExactCommitDiscoveryOutcomeV1 {
+    let Some(request_timeout) = admitted_request_timeout(request, config, control) else {
+        return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+    };
+    let rest_base = config.rest_base_uri.trim_end_matches('/');
+    let Ok(mut search) = Url::parse(&format!("{rest_base}/search/issues")) else {
+        return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+    };
+    search
+        .query_pairs_mut()
+        .append_pair(
+            "q",
+            &format!(
+                "repo:{}/{} is:pr head:{}",
+                request.owner, request.repository, request.head_ref_name
+            ),
+        )
+        .append_pair("per_page", &GITHUB_DISCOVERY_PAGE_SIZE_V1.to_string());
+    let body = match public_rest_get(agent, search.as_str(), config, request_timeout, control) {
+        Ok(body) => body,
+        Err(outcome) => return outcome,
+    };
+    let Ok(found) = serde_json::from_slice::<HeadRefSearchV1>(&body) else {
+        return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+    };
+    if found.incomplete_results
+        || found.total_count != found.items.len()
+        || found.items.len() > MAX_ANONYMOUS_HEAD_REF_CANDIDATES_V1
+    {
+        return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+    }
+    let mut matches = Vec::new();
+    for candidate in found.items {
+        let url = format!(
+            "{rest_base}/repos/{}/{}/pulls/{}",
+            request.owner, request.repository, candidate.number
+        );
+        let body = match public_rest_get(agent, &url, config, request_timeout, control) {
+            Ok(body) => body,
+            Err(outcome) => return outcome,
+        };
+        let Ok(pull) = serde_json::from_slice::<RestPullRequestHeadRefV1>(&body) else {
+            return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+        };
+        if pull.number != candidate.number {
+            return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+        }
+        if pull.head.sha != request.head_commit.as_str() || pull.head.name != request.head_ref_name
+        {
+            continue;
+        }
+        let (Some(head_repository), Some(base_repository)) = (pull.head.repo, pull.base.repo)
+        else {
+            return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+        };
+        let Some(found) = exact_pull_request(
+            request,
+            HeadRefPullRequestV1 {
+                database_id: pull.id,
+                number: pull.number,
+                head_ref_oid: pull.head.sha,
+                base_ref_oid: pull.base.sha,
+                head_repository_owner: Some(head_repository.owner),
+                head_repository: Some(HeadRefNameV1 {
+                    name: head_repository.name,
+                }),
+                base_repository: Some(HeadRefBaseRepositoryV1 {
+                    name: base_repository.name,
+                    owner: base_repository.owner,
+                }),
+            },
+        ) else {
+            return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+        };
+        matches.push(found);
+        if matches.len() > 1 {
+            return GitHubExactCommitDiscoveryOutcomeV1::Ambiguous;
+        }
+    }
+    matches
+        .pop()
+        .map_or(GitHubExactCommitDiscoveryOutcomeV1::NotFound, |pull| {
+            GitHubExactCommitDiscoveryOutcomeV1::Found(pull)
+        })
+}
+
 fn scan_head_ref_pull_requests_v1(
     agent: &ureq::Agent,
     request: &DiscoveryRequestV1<'_>,
@@ -260,20 +636,9 @@ fn scan_head_ref_pull_requests_v1(
     credential: &GitHubReadOnlyCredentialV1,
     control: &GitHubDiscoveryControlV1,
 ) -> GitHubExactCommitDiscoveryOutcomeV1 {
-    let Some(remaining) = control.remaining() else {
+    let Some(request_timeout) = admitted_request_timeout(request, config, control) else {
         return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
     };
-    let request_timeout = config.request_timeout.min(remaining);
-    if !valid_path_segment(request.owner)
-        || !valid_path_segment(request.repository)
-        || !valid_head_ref_name(request.head_ref_name)
-        || !valid_full_git_oid(request.head_commit.as_str())
-        || request_timeout.is_zero()
-        || config.connect_timeout.is_zero()
-        || config.socket_timeout.is_zero()
-    {
-        return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
-    }
     let authorization =
         match credential.authorization_header_for(GitHubReadPermissionV1::PullRequests) {
             Ok(authorization) => authorization,
@@ -313,38 +678,13 @@ fn scan_head_ref_pull_requests_v1(
     {
         return GitHubExactCommitDiscoveryOutcomeV1::Denied;
     }
-    let checkpoint = rate_limit_checkpoint(response.headers());
-    match response.status().as_u16() {
-        200 => {}
-        401 => return GitHubExactCommitDiscoveryOutcomeV1::Denied,
-        403 => {
-            let retry_at = retry_after_at(response.headers());
-            if checkpoint
-                .as_ref()
-                .is_none_or(|checkpoint| checkpoint.remaining != 0)
-                && retry_at.is_none()
-            {
-                return GitHubExactCommitDiscoveryOutcomeV1::Denied;
-            }
-            return GitHubExactCommitDiscoveryOutcomeV1::RateLimited {
-                retry_at,
-                checkpoint,
-            };
-        }
-        429 => {
-            return GitHubExactCommitDiscoveryOutcomeV1::RateLimited {
-                retry_at: retry_after_at(response.headers()),
-                checkpoint,
-            };
-        }
-        _ => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
+    if matches!(response.status().as_u16(), 404 | 422) {
+        return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
     }
-    let Ok(body) = response
-        .body_mut()
-        .with_config()
-        .limit(MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1 as u64)
-        .read_to_vec()
-    else {
+    if let Some(refused) = refused_status(&response) {
+        return refused;
+    }
+    let Some(body) = read_bounded_body(&mut response) else {
         return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
     };
     let Ok(envelope) = serde_json::from_slice::<HeadRefEnvelopeV1>(&body) else {
@@ -425,7 +765,7 @@ fn exact_pull_request(
     })
 }
 
-fn valid_graphql_uri(value: &str) -> bool {
+fn valid_https_uri(value: &str) -> bool {
     Url::parse(value).is_ok_and(|url| {
         url.scheme() == "https"
             && url.host_str().is_some()
@@ -458,9 +798,19 @@ fn valid_head_ref_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::net::TcpListener;
 
-    use super::super::network::test_support::{read_http_request_with_headers, write_http_json};
+    use super::super::network::test_support::{
+        read_http_request_with_headers, write_http_json, write_http_response,
+    };
+    use super::super::{
+        GitHubReadOnlyCredentialAuthorityOutcomeV1, GitHubReadOnlyCredentialAuthorityV1,
+        GitHubReadOnlyCredentialSecretV1, RegisteredGitHubReadOnlyCredentialV1,
+        register_github_read_only_credential_authority_v1,
+        resolve_registered_github_read_only_credential_v1,
+        unregister_github_read_only_credential_authority_v1,
+    };
     use super::*;
 
     const FORK_HEAD_FIXTURE: &str = include_str!("../fixtures/fork_head_pull_request.json");
@@ -480,29 +830,51 @@ mod tests {
         })
     }
 
-    /// Serves the cached GitHub answers for dtolnay/anyhow#463 to `requests`
-    /// discovery requests: the commit-associated REST route answers `[]` for
-    /// a fork head, the head-ref GraphQL query names the pull request.
-    fn serve_fork_head_fixture(requests: usize) -> (String, std::thread::JoinHandle<()>) {
+    /// Serves the cached GitHub answers for dtolnay/anyhow#463 as GitHub gave
+    /// them: GraphQL refuses a request without `Authorization` (rate limit 0)
+    /// and answers the head-ref query for one with it; the REST issue search
+    /// and pull request read answer anonymously.
+    fn serve_fork_head_fixture(requests: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let fixture: serde_json::Value = serde_json::from_str(FORK_HEAD_FIXTURE).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
             for _ in 0..requests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let (headers, _) = read_http_request_with_headers(&mut stream);
-                let response = if headers.starts_with("POST /graphql ") {
-                    &fixture["graphql_head_ref"]["response"]
+                let request_line = headers.lines().next().unwrap_or_default().to_owned();
+                let authorized = headers.to_ascii_lowercase().contains("\r\nauthorization:");
+                if request_line.starts_with("POST /graphql ") && !authorized {
+                    let refusal = &fixture["graphql_anonymous"];
+                    let headers = refusal["headers"]
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str().unwrap()))
+                        .collect::<Vec<_>>();
+                    write_http_response(&mut stream, 403, &headers, &refusal["response"]);
+                } else if request_line.starts_with("POST /graphql ") {
+                    write_http_json(&mut stream, &fixture["graphql_head_ref"]["response"]);
+                } else if request_line.starts_with("GET /search/issues?") {
+                    write_http_json(&mut stream, &fixture["rest_head_ref_search"]["response"]);
+                } else if request_line.starts_with("GET /repos/dtolnay/anyhow/pulls/463 ") {
+                    write_http_json(&mut stream, &fixture["rest_pull_request"]["response"]);
                 } else {
-                    &fixture["rest_commit_pulls"]["response"]
-                };
-                write_http_json(&mut stream, response);
+                    write_http_response(&mut stream, 404, &[], &serde_json::json!({}));
+                }
+                seen.push(request_line);
             }
+            seen
         });
         (format!("http://{address}"), server)
     }
 
-    fn discover_against(base_uri: &str, head_commit: &str) -> GitHubExactCommitDiscoveryOutcomeV1 {
+    fn discover_against(
+        base_uri: &str,
+        head_commit: &str,
+        credential: &GitHubReadOnlyCredentialV1,
+    ) -> GitHubExactCommitDiscoveryOutcomeV1 {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .https_only(false)
             .http_status_as_error(false)
@@ -521,36 +893,140 @@ mod tests {
                 graphql_uri: format!("{base_uri}/graphql"),
                 ..GitHubHttpReadConfigV1::default()
             },
-            &GitHubReadOnlyCredentialV1::anonymous(),
+            credential,
             &GitHubDiscoveryControlV1::bounded(Instant::now() + Duration::from_secs(15)),
         )
     }
 
-    #[test]
-    fn fork_headed_pull_request_is_found_with_its_head_repository() {
-        let (base_uri, server) = serve_fork_head_fixture(4);
+    fn anyhow_463() -> GitHubExactCommitDiscoveryOutcomeV1 {
+        GitHubExactCommitDiscoveryOutcomeV1::Found(GitHubExactCommitPullRequestV1 {
+            target: GitHubRepositoryTargetV1 {
+                owner: "dtolnay".to_owned(),
+                repository: "anyhow".to_owned(),
+                pull_request_number: 463,
+                pull_request_id: GitHubPullRequestIdV1::new("4597599038").unwrap(),
+            },
+            head_repository_owner: "sb123sb123".to_owned(),
+            head_repository_name: "anyhow".to_owned(),
+            base_commit_id: CommitId::new("c63b279f3f4af2b02ca6267d9eb47d6d10497f69").unwrap(),
+            head_commit_id: CommitId::new("c7b210a78b32ea90b10860c58983f8c0a742ed03").unwrap(),
+        })
+    }
 
+    struct FixtureTokenAuthority;
+
+    impl GitHubReadOnlyCredentialAuthorityV1 for FixtureTokenAuthority {
+        fn resolve(
+            &self,
+            _repository_owner: &str,
+            _repository_name: &str,
+        ) -> GitHubReadOnlyCredentialAuthorityOutcomeV1 {
+            GitHubReadOnlyCredentialAuthorityOutcomeV1::Verified {
+                secret: GitHubReadOnlyCredentialSecretV1::new("github_pat_fixture_discovery")
+                    .unwrap(),
+                exact_permissions: BTreeSet::from([GitHubReadPermissionV1::PullRequests]),
+            }
+        }
+    }
+
+    #[test]
+    fn anonymous_discovery_finds_a_fork_headed_pull_request_by_rest_head_ref_search() {
+        let (base_uri, server) = serve_fork_head_fixture(8);
+        let anonymous = GitHubReadOnlyCredentialV1::anonymous();
+
+        let found = discover_against(
+            &base_uri,
+            "c7b210a78b32ea90b10860c58983f8c0a742ed03",
+            &anonymous,
+        );
+        assert_eq!(found, anyhow_463());
         assert_eq!(
-            discover_against(&base_uri, "c7b210a78b32ea90b10860c58983f8c0a742ed03"),
-            GitHubExactCommitDiscoveryOutcomeV1::Found(GitHubExactCommitPullRequestV1 {
-                target: GitHubRepositoryTargetV1 {
-                    owner: "dtolnay".to_owned(),
-                    repository: "anyhow".to_owned(),
-                    pull_request_number: 463,
-                    pull_request_id: GitHubPullRequestIdV1::new("4597599038").unwrap(),
-                },
-                head_repository_owner: "sb123sb123".to_owned(),
-                head_repository_name: "anyhow".to_owned(),
-                base_commit_id: CommitId::new("c63b279f3f4af2b02ca6267d9eb47d6d10497f69").unwrap(),
-                head_commit_id: CommitId::new("c7b210a78b32ea90b10860c58983f8c0a742ed03").unwrap(),
-            })
+            GitHubSourceStatusV1::observed("dtolnay", "anyhow", &anonymous, Some(&found)),
+            GitHubSourceStatusV1 {
+                repository: "dtolnay/anyhow".to_owned(),
+                state: GitHubSourceStateV1::UnauthenticatedPublic,
+                remedy: Some(
+                    "reads are anonymous (60 requests/hour); run `gh auth login` or set GH_TOKEN to read with a credential"
+                        .to_owned()
+                ),
+                pull_request_discovery: GitHubPullRequestDiscoveryKindV1::Found,
+                pull_request: Some(463),
+                head_repository: Some("sb123sb123/anyhow".to_owned()),
+            }
         );
         assert_eq!(
-            discover_against(&base_uri, "0000000000000000000000000000000000000001"),
+            discover_against(
+                &base_uri,
+                "0000000000000000000000000000000000000001",
+                &anonymous,
+            ),
             GitHubExactCommitDiscoveryOutcomeV1::NotFound,
             "a local head the pull request no longer points at must not admit it"
         );
+        let seen = server.join().unwrap();
+        assert!(
+            seen.iter().all(|line| line.starts_with("GET ")),
+            "anonymous discovery must never ask GraphQL: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn credentialed_discovery_reads_the_head_ref_graphql_query() {
+        let authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1> =
+            Arc::new(FixtureTokenAuthority);
+        assert!(register_github_read_only_credential_authority_v1(
+            "dtolnay", "anyhow", &authority,
+        ));
+        let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) =
+            resolve_registered_github_read_only_credential_v1("dtolnay", "anyhow")
+        else {
+            panic!("the fixture token must resolve");
+        };
+        let (base_uri, server) = serve_fork_head_fixture(2);
+
+        let found = discover_against(
+            &base_uri,
+            "c7b210a78b32ea90b10860c58983f8c0a742ed03",
+            &credential,
+        );
+        assert!(unregister_github_read_only_credential_authority_v1(
+            "dtolnay", "anyhow", &authority,
+        ));
+        assert_eq!(found, anyhow_463());
+        assert_eq!(
+            GitHubSourceStateV1::observed(&credential, Some(&found)),
+            GitHubSourceStateV1::Bound
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            ["POST /graphql HTTP/1.1", "POST /graphql HTTP/1.1"]
+        );
+    }
+
+    #[test]
+    fn anonymous_discovery_of_a_repository_github_will_not_show_is_denied_no_credential() {
+        let fixture: serde_json::Value = serde_json::from_str(FORK_HEAD_FIXTURE).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut stream);
+            let refusal = &fixture["rest_head_ref_search_unseen_repository"];
+            write_http_response(&mut stream, 422, &[], &refusal["response"]);
+        });
+        let anonymous = GitHubReadOnlyCredentialV1::anonymous();
+
+        let refused = discover_against(
+            &format!("http://{address}"),
+            "c7b210a78b32ea90b10860c58983f8c0a742ed03",
+            &anonymous,
+        );
         server.join().unwrap();
+        assert_eq!(refused, GitHubExactCommitDiscoveryOutcomeV1::Denied);
+        assert_eq!(
+            GitHubSourceStateV1::observed(&anonymous, Some(&refused)),
+            GitHubSourceStateV1::DeniedNoCredential
+        );
     }
 
     #[test]

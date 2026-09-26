@@ -9,9 +9,10 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::advisory::github_runtime::{
     ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
     GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
-    ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
-    discover_exact_commit_pull_request_v1, public_repository_read_credential_v1,
-    resolve_registered_github_read_only_credential_v1,
+    GitHubSourceStatusV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
+    RegisteredGitHubReadOnlyCredentialV1, discover_exact_commit_pull_request_v1,
+    github_repository_from_remote_v1, public_repository_read_credential_v1,
+    record_github_source_status_v1, resolve_registered_github_read_only_credential_v1,
 };
 use tracedecay_application::advisory::{
     AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
@@ -1861,8 +1862,8 @@ async fn register_production_advisory_owner(
 /// checkout as its own project-open component, before and independent of the
 /// feedback/advisory owners whose mounts can stay deferred behind a sealed
 /// code-index generation. A provider mount gate is retained as a typed
-/// Delivery answer so the dashboard can tell "configure a token" apart from
-/// "broken" even while the advisory chain never mounts.
+/// Delivery answer so the dashboard can tell an unmountable provider apart
+/// from a broken one even while the advisory chain never mounts.
 async fn register_project_delivery_read_authority(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -2168,7 +2169,7 @@ fn resolve_production_github_provider_access(
     let Some(remote_url) = tracedecay_runtime_core::git::git_remote_url(project_root) else {
         return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
     };
-    let Some((owner, repository)) = super::github_repository_from_remote(&remote_url) else {
+    let Some((owner, repository)) = github_repository_from_remote_v1(&remote_url) else {
         return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
     };
     let profile_id = &state.session_db.binding().shard_id.profile_id;
@@ -2177,11 +2178,12 @@ fn resolve_production_github_provider_access(
         &owner,
         &repository,
     ) {
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public => {
+        // A repository the profile does not name is read as the `origin`
+        // project-open bound: with the local GitHub login when there is one,
+        // anonymously otherwise.
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public
+        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
             public_repository_read_credential_v1(&owner, &repository)
-        }
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
-            return Err(ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured);
         }
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => {
             return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
@@ -2336,6 +2338,14 @@ async fn discover_production_pull_request(
         }
         _ => None,
     };
+    let source = GitHubSourceStatusV1::observed(owner, repository, credential, discovery.as_ref());
+    tracing::info!(
+        event = "github_source",
+        state = ?source.state,
+        repository = %source.repository,
+        project = %project_root.display(),
+    );
+    record_github_source_status_v1(project_root, source);
     match &discovery {
         Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)) => tracing::info!(
             event = "github_pull_request_discovery",

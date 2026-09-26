@@ -6,8 +6,12 @@ use tracedecay_contracts::clock::now_micros;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationValueV1, SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey,
-    UserProfileId,
+    ConfigurationValueV1, ProtectedChange, SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding,
+    SettingKey, UserProfileId,
+};
+
+use tracedecay_application::advisory::github_runtime::{
+    daemon_owned_github_source_binding_v1, github_repository_from_remote_v1,
 };
 
 use tracedecay_configuration::config::{PinnedRuntimeConfiguration, RuntimeTraceDecayConfig};
@@ -435,9 +439,9 @@ async fn open_runtime_configuration_from_store(
                 // A concurrent open may have won the swap; adopt what it
                 // published and re-verify it exactly.
                 current = match store
-                    .rebind_daemon_project_source_binding(
+                    .publish_daemon_source_binding(
                         &current.revision_id,
-                        &daemon_binding,
+                        &ProtectedChange::RebindSource(daemon_binding.clone()),
                         now_micros(),
                     )
                     .await
@@ -454,10 +458,73 @@ async fn open_runtime_configuration_from_store(
             }
         }
     }
+    let current = provision_github_origin_source_binding(store, &target, current).await?;
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
     install_pinned_runtime_configuration(configuration.clone());
     Ok(configuration)
+}
+
+/// Binds the GitHub repository of the checkout's `origin` remote as this
+/// project's GitHub source, so pull-request discovery and review reads are
+/// authorized for exactly that repository.
+///
+/// An operator-bound GitHub source for another repository is left alone: a
+/// project has exactly one GitHub binding and the operator's choice wins. The
+/// daemon-owned binding follows `origin` when the remote changes.
+async fn provision_github_origin_source_binding(
+    store: &GlobalDbConfigurationControlStore<'_>,
+    target: &RuntimeConfigurationTarget,
+    mut current: ConfigurationCurrentStateV1,
+) -> Result<ConfigurationCurrentStateV1> {
+    let Some((owner, repository)) =
+        tracedecay_runtime_core::git::git_remote_url(&target.project_root)
+            .as_deref()
+            .and_then(github_repository_from_remote_v1)
+    else {
+        return Ok(current);
+    };
+    let binding = daemon_owned_github_source_binding_v1(&target.project_id, &owner, &repository)
+        .ok_or_else(|| {
+            config_error(format!(
+                "GitHub source binding for {owner}/{repository} could not be derived"
+            ))
+        })?;
+    let source_bindings_key = source_bindings_setting_key()?;
+    for _ in 0..2 {
+        let Some(ConfigurationValueV1::SourceBindings(bindings)) =
+            current.snapshot.effective_values.get(&source_bindings_key)
+        else {
+            return Err(TraceDecayError::reset_required(
+                "configuration",
+                "canonical configuration source bindings are missing",
+            ));
+        };
+        let github = bindings.iter().find(|candidate| {
+            candidate.source_kind == binding.source_kind && candidate.authority == binding.authority
+        });
+        let change = match github {
+            Some(existing) if existing.source_locator_digest == binding.source_locator_digest => {
+                return Ok(current);
+            }
+            Some(existing) if existing.binding_id != binding.binding_id => return Ok(current),
+            Some(_) => ProtectedChange::RebindSource(binding.clone()),
+            None => ProtectedChange::BindSource(binding.clone()),
+        };
+        match store
+            .publish_daemon_source_binding(&current.revision_id, &change, now_micros())
+            .await
+        {
+            Ok(state) => return Ok(state),
+            Err(ConfigurationError::RevisionConflict) => {
+                current = store.current().await.map_err(map_configuration_error)?;
+            }
+            Err(error) => return Err(map_configuration_error(error)),
+        }
+    }
+    Err(config_error(
+        "GitHub source binding lost two consecutive configuration revision races",
+    ))
 }
 
 /// Test-only convenience wrapper over

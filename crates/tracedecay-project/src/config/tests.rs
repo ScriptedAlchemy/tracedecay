@@ -212,6 +212,7 @@ mod runtime_configuration_cutover {
     use std::collections::BTreeMap;
 
     use tempfile::TempDir;
+    use tracedecay_application::advisory::github_runtime::daemon_owned_github_source_binding_v1;
     use tracedecay_domain::configuration::{
         AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId,
         ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationEffectV1,
@@ -219,7 +220,7 @@ mod runtime_configuration_cutover {
         ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1,
         DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
         SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, ScopeSourceBinding, SettingKey,
-        SourceBindingId,
+        SourceBindingId, SourceKindV1,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId, UtcMicros};
 
@@ -907,6 +908,109 @@ mod runtime_configuration_cutover {
             )
             .expect("linked binding"),
         );
+    }
+
+    fn github_source_bindings(
+        configuration: &PinnedRuntimeConfiguration,
+    ) -> Vec<(String, tracedecay_domain::LocatorDigest)> {
+        let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).expect("source bindings key");
+        let Some(ConfigurationValueV1::SourceBindings(bindings)) =
+            configuration.snapshot().effective_values.get(&key)
+        else {
+            panic!("configuration carries no source bindings");
+        };
+        bindings
+            .iter()
+            .filter(|binding| binding.source_kind == SourceKindV1::GitHub)
+            .map(|binding| {
+                (
+                    binding.binding_id.as_str().to_owned(),
+                    binding.source_locator_digest.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// A fresh init binds the checkout's `origin` as the project's GitHub
+    /// source; the binding follows `origin` when the remote changes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fresh_open_binds_the_github_origin_as_the_project_github_source() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary root");
+        let checkout = root.path().join("anyhow");
+        std::fs::create_dir_all(&checkout).expect("create checkout");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&checkout)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-b", "fix/462-new-with-backtrace", "--quiet"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/dtolnay/anyhow.git",
+        ]);
+        let project_id = project_id("proj_runtime_github_origin");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &checkout,
+            project_id.as_str(),
+        )
+        .expect("write enrollment marker");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&checkout)
+                .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
+            &checkout,
+            project_id.clone(),
+        )
+        .await
+        .expect("open retained project runtime");
+        let expected = |owner: &str, repository: &str| {
+            let binding = daemon_owned_github_source_binding_v1(&project_id, owner, repository)
+                .expect("GitHub origin binding");
+            vec![(
+                binding.binding_id.as_str().to_owned(),
+                binding.source_locator_digest,
+            )]
+        };
+
+        let initial = runtime
+            .ensure_runtime_configuration_for_test(&checkout, &layout)
+            .await
+            .expect("fresh open");
+        assert_eq!(
+            github_source_bindings(&initial),
+            expected("dtolnay", "anyhow")
+        );
+        assert_eq!(
+            github_source_bindings(&initial)[0].0,
+            "binding.tracedecay-daemon.github-origin"
+        );
+
+        let reopened = runtime
+            .ensure_runtime_configuration_for_test(&checkout, &layout)
+            .await
+            .expect("reopen");
+        assert_eq!(reopened.revision_id(), initial.revision_id());
+
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:rust-lang/log.git",
+        ]);
+        let moved = runtime
+            .ensure_runtime_configuration_for_test(&checkout, &layout)
+            .await
+            .expect("open after the remote moved");
+        assert_eq!(github_source_bindings(&moved), expected("rust-lang", "log"));
     }
 
     /// Moving or renaming a checkout changes only the path-derived locator

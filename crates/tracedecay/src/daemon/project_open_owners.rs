@@ -10,10 +10,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tracedecay_application::advisory::GitHubRepositoryTargetV1;
+use tracedecay_application::advisory::github_runtime::github_repository_from_remote_v1;
 use tracedecay_application::project_open_authorization::project_open_work_grant;
 use tracedecay_contracts::{ApplicationContractError, ResolvedScope, now_micros};
-use tracedecay_domain::feedback::GitHubPullRequestIdV1;
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 
 use super::DaemonInvocationState;
@@ -507,7 +506,7 @@ pub(super) async fn register_project_open_production_owners(
     // the sole producer of canonical provider observations and anchors.
     if tracedecay_runtime_core::git::git_remote_url(project_root)
         .as_deref()
-        .and_then(github_repository_from_remote)
+        .and_then(github_repository_from_remote_v1)
         .is_some()
     {
         let stack_coordinator = invocation.github_stack_coordinator();
@@ -909,48 +908,6 @@ async fn register_production_lsp_owner(
             gateway_capabilities,
         )
         .await
-}
-
-fn github_repository_from_remote(remote: &str) -> Option<(String, String)> {
-    let (owner, repository) = if let Ok(url) = url::Url::parse(remote) {
-        if (url.scheme() != "https" && url.scheme() != "ssh")
-            || !url.host_str()?.eq_ignore_ascii_case("github.com")
-            || url.password().is_some()
-            || (url.scheme() == "https" && !url.username().is_empty())
-            || (url.scheme() == "ssh" && url.username() != "git")
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            return None;
-        }
-        let segments = url.path_segments()?.collect::<Vec<_>>();
-        if segments.len() != 2 {
-            return None;
-        }
-        (segments[0].to_owned(), segments[1].to_owned())
-    } else {
-        let remote = remote.strip_prefix("git@github.com:")?;
-        let mut segments = remote.split('/');
-        let owner = segments.next()?;
-        let repository = segments.next()?;
-        if segments.next().is_some() {
-            return None;
-        }
-        (owner.to_owned(), repository.to_owned())
-    };
-    let repository = repository
-        .strip_suffix(".git")
-        .unwrap_or(&repository)
-        .to_owned();
-    let target = GitHubRepositoryTargetV1 {
-        owner,
-        repository,
-        pull_request_number: 1,
-        pull_request_id: GitHubPullRequestIdV1::new("1").ok()?,
-    };
-    target
-        .validate()
-        .then_some((target.owner, target.repository))
 }
 
 pub(super) fn project_open_retained_grant(

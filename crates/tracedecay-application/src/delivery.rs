@@ -357,7 +357,8 @@ pub enum ProjectDeliveryReadOutcomeV1 {
     },
     Denied,
     /// Project-open resolved no GitHub provider for this checkout; the exact
-    /// typed gate tells "configure a token" apart from "broken".
+    /// typed gate tells a checkout without a GitHub remote or with a refused
+    /// credential apart from a broken authority.
     NotMounted {
         gate: ProjectDeliveryProviderMountGateV1,
     },
@@ -370,9 +371,6 @@ pub enum ProjectDeliveryReadOutcomeV1 {
 pub enum ProjectDeliveryProviderMountGateV1 {
     /// The admitted checkout has no recognizable GitHub remote.
     NoGitRemote,
-    /// No GitHub read-only credential is configured for this profile and
-    /// repository, and the repository is not registered as public.
-    GitHubCredentialNotConfigured,
     /// A credential configuration exists but was refused (rejected, missing
     /// at resolution, or write-capable), so reads stay unmounted.
     GitHubAccessRefused,
@@ -954,9 +952,7 @@ fn delivery_inbox_provider(
             },
         ),
         ProjectDeliveryReadOutcomeV1::NotMounted {
-            gate:
-                ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured
-                | ProjectDeliveryProviderMountGateV1::NoGitRemote,
+            gate: ProjectDeliveryProviderMountGateV1::NoGitRemote,
         } => (
             ProjectDeliveryProviderStateV1::NotConfigured,
             None,
@@ -2721,7 +2717,7 @@ mod tests {
             },
         );
         not_configured.delivery = ProjectDeliveryReadOutcomeV1::NotMounted {
-            gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+            gate: ProjectDeliveryProviderMountGateV1::NoGitRemote,
         };
         let mut denied = inbox_source(
             "project.delivery-denied",
@@ -3120,7 +3116,7 @@ mod tests {
         let context = test_context(&scope);
         let handle = gated_project_delivery_read_handle_v1(
             scope.clone(),
-            ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+            ProjectDeliveryProviderMountGateV1::NoGitRemote,
         );
         let request = ProjectDeliveryReadRequestV1 {
             kind: ProjectDeliveryReadKindV1::Overview,
@@ -3135,7 +3131,7 @@ mod tests {
         assert_eq!(
             handle.read(&context, &request, &control).await,
             ProjectDeliveryReadOutcomeV1::NotMounted {
-                gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+                gate: ProjectDeliveryProviderMountGateV1::NoGitRemote,
             }
         );
 

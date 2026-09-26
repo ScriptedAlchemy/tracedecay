@@ -62,3 +62,24 @@ pub(in crate::advisory::github_runtime) fn write_http_json(
     .unwrap();
     stream.write_all(&body).unwrap();
 }
+
+/// Writes one response with an exact status line and extra headers, as a
+/// captured provider refusal carries them.
+pub(in crate::advisory::github_runtime) fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    headers: &[(&str, &str)],
+    value: &serde_json::Value,
+) {
+    let body = serde_json::to_vec(value).unwrap();
+    let mut head = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n");
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    ));
+    stream.write_all(head.as_bytes()).unwrap();
+    stream.write_all(&body).unwrap();
+}

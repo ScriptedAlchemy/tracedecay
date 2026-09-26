@@ -43,7 +43,10 @@ use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 use super::{GitHubReadOnlyTransport, GitHubRestDescriptorV1, context_allows_feedback_operation};
 
-pub use access::ConfiguredGitHubSourceAccessAuthorityV1;
+pub use access::{
+    ConfiguredGitHubSourceAccessAuthorityV1, DAEMON_GITHUB_ORIGIN_SOURCE_BINDING_ID,
+    daemon_owned_github_source_binding_v1, github_repository_from_remote_v1,
+};
 pub use anchors::{
     GitHubReviewBodyEvidenceAuthorityV1, GitHubReviewBodyEvidenceV1, GitHubReviewBodyReadOutcomeV1,
     ProjectGitHubAnchorAuthorityV1, ProjectGitHubRegistrarAuthoritiesV1,
@@ -60,7 +63,8 @@ pub use decoder::{
 };
 pub use discovery::{
     GitHubDiscoveryControlV1, GitHubExactCommitDiscoveryOutcomeV1, GitHubExactCommitPullRequestV1,
-    discover_exact_commit_pull_request_v1,
+    GitHubPullRequestDiscoveryKindV1, GitHubSourceStateV1, GitHubSourceStatusV1,
+    discover_exact_commit_pull_request_v1, github_source_status_v1, record_github_source_status_v1,
 };
 pub use dto::{
     GitHubActionsCheckRunOutputV1, GitHubActionsCheckRunV1, GitHubActionsCheckSuiteRefV1,
