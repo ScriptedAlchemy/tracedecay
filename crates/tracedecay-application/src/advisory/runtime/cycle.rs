@@ -165,18 +165,18 @@ where
                     }
                 };
                 // Retain the allowlisted pull-request identity read beside a
-                // usable thread refresh so Delivery can serve PR title, state,
+                // usable review refresh so Delivery can serve PR title, state,
                 // and diff shape. It contributes no advisory findings and a
-                // rate-limited or denied thread refresh never spends a second
+                // rate-limited or denied review refresh never spends a second
                 // provider read.
-                if provider_request.operation
-                    == GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
-                    && matches!(
-                        outcome,
-                        GitHubReviewRefreshOutcomeV1::Stored(_)
-                            | GitHubReviewRefreshOutcomeV1::Stale
-                    )
-                {
+                if matches!(
+                    provider_request.operation,
+                    GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
+                        | GitHubReviewReadOperationV1::RestListPullRequestReviewComments
+                ) && matches!(
+                    outcome,
+                    GitHubReviewRefreshOutcomeV1::Stored(_) | GitHubReviewRefreshOutcomeV1::Stale
+                ) {
                     let identity_request = GitHubReviewReadRequestV1 {
                         operation: GitHubReviewReadOperationV1::RestGetPullRequest,
                         scope: provider_request.scope.clone(),
