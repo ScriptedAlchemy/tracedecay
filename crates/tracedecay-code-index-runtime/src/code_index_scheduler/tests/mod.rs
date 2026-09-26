@@ -42,6 +42,7 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod branch_publication_tests;
+mod cancellation_tests;
 mod deferred_mount_tests;
 mod noop_reconcile_tests;
 mod publication_store;

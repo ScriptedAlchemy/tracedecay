@@ -724,7 +724,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// branch-publication token even if a future worker re-seats an equal id.
     serving_generation_epoch: Arc<AtomicU64>,
     /// A wake signal only: readers resolve identity and availability from the serving slot.
-    serving_generation_changed: tokio::sync::watch::Sender<()>,
+    serving_generation_changed: Arc<tokio::sync::watch::Sender<()>>,
     /// One in-flight branch publication may own a serving-slot installation.
     /// It is paired with `serving_generation_epoch` under the slot CAS.
     serving_generation_installation: Arc<Mutex<Option<ServingGenerationInstallationClaimV1>>>,
@@ -1685,6 +1685,17 @@ pub struct CodeIndexSchedulerRegistryV1 {
     /// retired generation is not pinned here. Its test attribution is
     /// materialized only on an attribution read, never on query admission.
     test_attribution_authorities: Arc<RwLock<AttributionSeatsV1>>,
+    /// Early-shutdown handles of every mounted worker. `mounted` is an async
+    /// map held across awaits, so the synchronous `cancel` signals workers
+    /// through these instead and never waits for that map.
+    worker_shutdown_signals: Arc<Mutex<Vec<WorkerShutdownSignalV1>>>,
+}
+
+/// One worker's early-shutdown handles, registered when it is mounted.
+struct WorkerShutdownSignalV1 {
+    shutting_down: Weak<AtomicBool>,
+    wake: Weak<tokio::sync::Notify>,
+    serving_generation_changed: Weak<tokio::sync::watch::Sender<()>>,
 }
 
 type AttributionSeatsV1 =
@@ -3369,13 +3380,42 @@ impl CodeIndexSchedulerRegistryV1 {
     pub fn cancel(&self) {
         self.background_reconcile_admission.close();
         self.cancel_cold_mount_reservations();
-        if let Ok(mounted) = self.mounted.try_lock() {
-            for worktree in mounted.values() {
-                worktree.shutting_down.store(true, Ordering::Release);
-                worktree.serving_generation_changed.send_replace(());
-                worktree.wake.notify_one();
+        let signals = self
+            .worker_shutdown_signals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for signal in signals.iter() {
+            let Some(shutting_down) = signal.shutting_down.upgrade() else {
+                continue;
+            };
+            shutting_down.store(true, Ordering::Release);
+            if let Some(serving_generation_changed) = signal.serving_generation_changed.upgrade() {
+                serving_generation_changed.send_replace(());
+            }
+            if let Some(wake) = signal.wake.upgrade() {
+                wake.notify_one();
             }
         }
+    }
+
+    /// Registers a newly mounted worker for early shutdown, pruning workers
+    /// that have fully exited.
+    fn register_worker_shutdown_signal(
+        &self,
+        shutting_down: &Arc<AtomicBool>,
+        wake: &Arc<tokio::sync::Notify>,
+        serving_generation_changed: &Arc<tokio::sync::watch::Sender<()>>,
+    ) {
+        let mut signals = self
+            .worker_shutdown_signals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        signals.retain(|signal| signal.shutting_down.strong_count() > 0);
+        signals.push(WorkerShutdownSignalV1 {
+            shutting_down: Arc::downgrade(shutting_down),
+            wake: Arc::downgrade(wake),
+            serving_generation_changed: Arc::downgrade(serving_generation_changed),
+        });
     }
 }
 

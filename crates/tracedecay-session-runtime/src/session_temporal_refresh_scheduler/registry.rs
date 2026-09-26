@@ -176,31 +176,18 @@ impl Default for SessionTemporalRefreshSchedulerRegistry {
 impl Drop for SessionTemporalRefreshSchedulerRegistry {
     fn drop(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
-        if let Ok(project) = self.project.try_lock() {
-            for entry in project.values() {
-                if let Some(history) = entry
-                    .history
-                    .read()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .as_ref()
-                {
-                    history.cancel();
-                }
-                entry.state.cancel();
+        let project = self.project.get_mut().values();
+        let profile = self.profile.get_mut().values();
+        for entry in project.chain(profile) {
+            if let Some(history) = entry
+                .history
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                history.cancel();
             }
-        }
-        if let Ok(profile) = self.profile.try_lock() {
-            for entry in profile.values() {
-                if let Some(history) = entry
-                    .history
-                    .read()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .as_ref()
-                {
-                    history.cancel();
-                }
-                entry.state.cancel();
-            }
+            entry.state.cancel();
         }
     }
 }

@@ -22,7 +22,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
 #[cfg(unix)]
-use super::scheduler::AutomationSchedulerHandle;
+use super::scheduler::{AutomationSchedulerHandle, AutomationSchedulerSignal};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry;
 #[cfg(unix)]
@@ -472,6 +472,10 @@ pub(super) struct StoreAdministration {
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
+    /// Early-stop handles of every started automation loop, kept outside the
+    /// async scheduler map so synchronous cancel never waits for that map.
+    #[cfg(unix)]
+    automation_scheduler_signals: Arc<std::sync::Mutex<Vec<AutomationSchedulerSignal>>>,
     #[cfg(unix)]
     manual_branch_publications: Arc<ManualBranchPublicationTasks>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
@@ -592,6 +596,8 @@ impl Default for StoreAdministration {
                 tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            #[cfg(unix)]
+            automation_scheduler_signals: Arc::default(),
             #[cfg(unix)]
             manual_branch_publications: Arc::new(ManualBranchPublicationTasks::default()),
             session_temporal_refresh_schedulers: Arc::new(
@@ -1313,6 +1319,13 @@ impl StoreAdministration {
         &self,
     ) -> &Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>> {
         &self.automation_schedulers
+    }
+
+    #[cfg(unix)]
+    pub(super) fn automation_scheduler_signals(
+        &self,
+    ) -> &std::sync::Mutex<Vec<AutomationSchedulerSignal>> {
+        &self.automation_scheduler_signals
     }
 
     pub(super) fn session_temporal_refresh_schedulers(
