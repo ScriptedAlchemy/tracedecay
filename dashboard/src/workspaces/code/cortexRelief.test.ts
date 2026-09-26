@@ -65,13 +65,10 @@ function measurement(
     ideal_depth: 3,
     max_depth: overrides.max_depth ?? 4,
     scan: {
-      budget_ms: 4000,
       cache_scope: 'graph_generation',
       cache_state: 'hit',
       dependency_edges_examined: 900,
       files_examined: 120,
-      max_dependency_edges: 40_000,
-      max_files: 20_000,
     },
     ...overrides,
   };
@@ -535,22 +532,5 @@ describe('the aggregation cap', () => {
     expect(model.drawnRegions.map((region) => region.order)).toEqual(
       Array.from({ length: MAX_DRAWN_REGIONS }, (_, index) => index),
     );
-  });
-
-  it('reports the scan budget as a cap on the terrain, not as a depth', () => {
-    const model = buildCortexModel(
-      measurement([cluster('a', { order: 0 })], [file('a/x.rs', 1)], {
-        scan: {
-          budget_ms: 4000,
-          cache_scope: 'graph_generation',
-          cache_state: 'miss',
-          dependency_edges_examined: 40_000,
-          files_examined: 20_000,
-          max_dependency_edges: 40_000,
-          max_files: 20_000,
-        },
-      }),
-    );
-    expect(model.capped).toBe(true);
   });
 });

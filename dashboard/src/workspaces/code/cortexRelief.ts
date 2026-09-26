@@ -211,8 +211,6 @@ export interface CortexModel {
   /** Highest finite coupling among drawn regions. Sealed regions are not a ratio. */
   readonly tightestCoupling: { readonly label: string; readonly ratio: number } | null;
   readonly sealedRegions: number;
-  readonly capped: boolean;
-  readonly scan: StrataMeasurementV1['scan'];
   readonly algorithm: string;
   readonly clusterOrdering: string;
   readonly granularity: string;
@@ -464,10 +462,6 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     widestFileCount,
     tightestCoupling,
     sealedRegions,
-    capped:
-      measurement.scan.files_examined >= measurement.scan.max_files ||
-      measurement.scan.dependency_edges_examined >= measurement.scan.max_dependency_edges,
-    scan: measurement.scan,
     algorithm: measurement.algorithm,
     clusterOrdering: measurement.cluster_ordering,
     granularity: measurement.granularity,

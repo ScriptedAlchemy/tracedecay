@@ -7,7 +7,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -42,8 +41,6 @@ const TEST_CALLER_DEPTH: usize = 3;
 const FACT_MATCH_LIMIT: usize = 100;
 const STRATA_MAX_FILES: usize = 50_000;
 const STRATA_MAX_DEPENDENCY_EDGES: usize = 250_000;
-const STRATA_SCAN_BUDGET_MS: u64 = 5_000;
-const STRATA_SCAN_BUDGET: Duration = Duration::from_millis(STRATA_SCAN_BUDGET_MS);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CallChainParamsV1 {
@@ -132,11 +129,8 @@ pub(super) struct StrataClusterV1 {
 pub(super) struct StrataScanV1 {
     cache_scope: &'static str,
     cache_state: &'static str,
-    budget_ms: u64,
-    max_files: usize,
-    max_dependency_edges: usize,
     files_examined: usize,
-    dependency_edges_examined: usize,
+    dependency_edges_examined: u64,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -162,7 +156,7 @@ pub(crate) struct CachedStrataV1 {
     files: Vec<StrataFileV1>,
     clusters: Vec<StrataClusterV1>,
     files_examined: usize,
-    dependency_edges_examined: usize,
+    dependency_edges_examined: u64,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -420,36 +414,15 @@ async fn strata(
                 .derived_snapshots
                 .strata
                 .get_or_compute(graph_generation.clone(), || async {
-                    // The futures lane also records the drop-on-timeout case,
-                    // so budget-exceeded scans stay visible as cancelled work.
-                    let scan = match tokio::time::timeout(
-                        STRATA_SCAN_BUDGET,
-                        hotpath::future!(
-                            GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
-                                .build_file_adjacency_bounded(
-                                    STRATA_MAX_FILES,
-                                    STRATA_MAX_DEPENDENCY_EDGES,
-                                ),
-                            label = "dashboard_api.graph.strata_scan"
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(Ok(scan)) => scan,
-                        Ok(Err(error)) => {
+                    let dependencies = match hotpath::measure_block!(
+                        "dashboard_api.graph.strata_dependencies",
+                        GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
+                            .file_dependencies()
+                    ) {
+                        Ok(dependencies) => dependencies,
+                        Err(error) => {
                             return Err(graph_runtime_error_response::<StrataMeasurementV1>(
                                 &state, error,
-                            ));
-                        }
-                        Err(_) => {
-                            return Err(failed_response::<StrataMeasurementV1>(
-                                &state,
-                                "strata_scan_timed_out",
-                                format!(
-                                    "file adjacency scan exceeded the {}ms budget",
-                                    STRATA_SCAN_BUDGET.as_millis()
-                                ),
-                                true,
                             ));
                         }
                     };
@@ -457,8 +430,9 @@ async fn strata(
                     let computed_generation = graph_generation.clone();
                     let snapshot = tokio::task::spawn_blocking(move || {
                         hotpath::measure_block!("dashboard_api.graph.strata_compute", {
-                            let depth = dependency_depth(&scan.adjacency, scan.adjacency.len());
-                            let mut files = Vec::with_capacity(scan.adjacency.len());
+                            let adjacency = dependencies.adjacency.as_ref();
+                            let depth = dependency_depth(adjacency, adjacency.len());
+                            let mut files = Vec::with_capacity(adjacency.len());
                             for chain in &depth.chains {
                                 for path in &chain.scc_files {
                                     files.push(StrataFileV1 {
@@ -475,7 +449,7 @@ async fn strata(
                                     .cmp(&left.depth)
                                     .then_with(|| left.path.cmp(&right.path))
                             });
-                            let clusters = dsm_clusters(&scan.adjacency)
+                            let clusters = dsm_clusters(adjacency)
                                 .into_iter()
                                 .enumerate()
                                 .map(|(index, cluster)| {
@@ -497,8 +471,8 @@ async fn strata(
                                 ideal_depth: depth.ideal_depth,
                                 files,
                                 clusters,
-                                files_examined: scan.files_examined,
-                                dependency_edges_examined: scan.dependency_edges_examined,
+                                files_examined: adjacency.len(),
+                                dependency_edges_examined: dependencies.dependency_edges,
                             })
                         })
                     })
@@ -535,9 +509,6 @@ async fn strata(
                     scan: StrataScanV1 {
                         cache_scope: "graph_generation",
                         cache_state: cache_state.as_str(),
-                        budget_ms: STRATA_SCAN_BUDGET.as_millis() as u64,
-                        max_files: STRATA_MAX_FILES,
-                        max_dependency_edges: STRATA_MAX_DEPENDENCY_EDGES,
                         files_examined: snapshot.files_examined,
                         dependency_edges_examined: snapshot.dependency_edges_examined,
                     },
@@ -1252,7 +1223,7 @@ fn graph_runtime_error_response<T: Serialize>(
         };
         return graph_error_response::<T>(state, graph_error);
     }
-    failed_response::<T>(state, "strata_scan_failed", error.to_string(), false)
+    failed_response::<T>(state, "strata_read_failed", error.to_string(), false)
 }
 
 fn measured_response<T: Serialize>(

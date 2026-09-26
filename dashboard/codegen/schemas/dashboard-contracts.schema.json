@@ -24420,11 +24420,6 @@
     },
     "StrataScanV1": {
       "properties": {
-        "budget_ms": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "cache_scope": {
           "type": "string"
         },
@@ -24432,21 +24427,11 @@
           "type": "string"
         },
         "dependency_edges_examined": {
-          "format": "uint",
+          "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "files_examined": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "max_dependency_edges": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "max_files": {
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -24455,9 +24440,6 @@
       "required": [
         "cache_scope",
         "cache_state",
-        "budget_ms",
-        "max_files",
-        "max_dependency_edges",
         "files_examined",
         "dependency_edges_examined"
       ],

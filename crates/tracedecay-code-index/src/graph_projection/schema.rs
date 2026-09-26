@@ -71,12 +71,12 @@ pub(super) fn record_property(payload: Vec<u8>) -> Result<GraphProperty, CodeGra
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
 }
 
-pub(super) fn deserialize_property<T>(
-    entity: &GraphEntity,
+pub(super) fn deserialize_property<'entity, T>(
+    entity: &'entity GraphEntity,
     name: &str,
 ) -> Result<T, CodeGraphProjectionError>
 where
-    T: for<'de> Deserialize<'de>,
+    T: Deserialize<'entity>,
 {
     let property = entity
         .properties

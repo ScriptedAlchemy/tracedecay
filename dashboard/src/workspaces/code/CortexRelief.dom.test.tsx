@@ -74,13 +74,10 @@ function wideMeasurement(): StrataMeasurementV1 {
     ideal_depth: 3,
     max_depth: 3,
     scan: {
-      budget_ms: 4000,
       cache_scope: 'graph_generation',
       cache_state: 'hit',
       dependency_edges_examined: 1200,
       files_examined: 240,
-      max_dependency_edges: 40_000,
-      max_files: 20_000,
     },
   };
 }

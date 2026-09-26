@@ -478,7 +478,7 @@ function StrataLine({ reading }: { reading: StrataReading }) {
               {reading.depth}
             </span>
             <span className="td-unit">
-              {reading.capped ? 'or deeper' : `of ${reading.maxDepth} deep · ${reading.idealDepth} ideal`}
+              of {reading.maxDepth} deep · {reading.idealDepth} ideal
             </span>
           </span>
           <span className="td-value truncate text-3xs text-text-muted" title={reading.directory}>
@@ -493,14 +493,12 @@ function StrataLine({ reading }: { reading: StrataReading }) {
           this file is not in the layering scan; its directory{' '}
           <span className="td-value">{reading.directory}</span> sits at depth{' '}
           {reading.depths.join(', ')}
-          {reading.capped ? ', the scan stopped at its budget' : ''}
         </Absent>
       );
     case 'not_in_scan':
       return (
         <Absent>
-          not in the layering scan ({reading.filesLaidOut.toLocaleString()} files laid out
-          {reading.capped ? ', budget reached' : ''})
+          not in the layering scan ({reading.filesLaidOut.toLocaleString()} files laid out)
         </Absent>
       );
     case 'no_path':

@@ -245,17 +245,14 @@ export type StrataReading =
       idealDepth: number;
       directory: string;
       sccSize: number;
-      /** The depth is a floor: the scan stopped at its budget. */
-      capped: boolean;
     }
   | {
       /** The scan laid out files in this symbol's directory but not this file. */
       kind: 'directory_only';
       directory: string;
       depths: readonly number[];
-      capped: boolean;
     }
-  | { kind: 'not_in_scan'; filesLaidOut: number; capped: boolean }
+  | { kind: 'not_in_scan'; filesLaidOut: number }
   | { kind: 'no_path' };
 
 /** Where a symbol's file sits in the dependency layering, by exact path, then
@@ -266,10 +263,6 @@ export function strataForPath(
   filePath: string | null | undefined,
 ): StrataReading {
   if (!filePath) return { kind: 'no_path' };
-  const { scan } = measurement;
-  const capped =
-    scan.files_examined >= scan.max_files ||
-    scan.dependency_edges_examined >= scan.max_dependency_edges;
   const exact = measurement.files.find((file) => file.path === filePath);
   if (exact) {
     return {
@@ -279,7 +272,6 @@ export function strataForPath(
       idealDepth: measurement.ideal_depth,
       directory: directoryOf(exact.path),
       sccSize: exact.scc_size,
-      capped,
     };
   }
   const directory = directoryOf(filePath);
@@ -289,10 +281,9 @@ export function strataForPath(
       kind: 'directory_only',
       directory,
       depths: [...new Set(siblings.map((file) => file.depth))].sort((a, b) => a - b),
-      capped,
     };
   }
-  return { kind: 'not_in_scan', filesLaidOut: measurement.files.length, capped };
+  return { kind: 'not_in_scan', filesLaidOut: measurement.files.length };
 }
 
 /* ---- diagnostics --------------------------------------------------------- */

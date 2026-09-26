@@ -37,9 +37,9 @@ use self::builder::{ProductionCodeGraphInputs, build_projection};
 use self::interactive::InteractiveCatalogCache;
 pub use self::interactive::{
     CodeGraphCatalogReleaseV1, CodeGraphCensusV1, CodeGraphDegreeRankingV1,
-    CodeGraphEdgeKindCountsV1, CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1,
-    CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
-    CodeGraphRankedSymbolV1, CodeGraphReadCostMeter, CodeGraphRelationKeyV1,
+    CodeGraphEdgeKindCountsV1, CodeGraphFileDependenciesV1, CodeGraphFileSymbolCountV1,
+    CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader,
+    CodeGraphPathSearchV1, CodeGraphRankedSymbolV1, CodeGraphReadCostMeter, CodeGraphRelationKeyV1,
     CodeGraphRelationKeysV1, CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1,
     CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolRefV1,
     CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1,
