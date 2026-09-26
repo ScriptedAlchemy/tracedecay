@@ -12,7 +12,9 @@
 # (`extra-filename` already includes the leading hyphen). Cargo hardlinks
 # that deps file into `target/release/tracedecay` (or a `cargo install`
 # prefix) after this wrapper returns, so the signature on the deps file
-# is the one the final binary keeps.
+# is the one the final binary keeps. The signature's designated requirement
+# is `identifier "dev.tracedecay.cli"`, not the binary cdhash, so a TCC
+# Allow survives the next rebuild.
 #
 # Off Darwin this execs rustc and does nothing else. Release jobs do not
 # Apple-sign; a Developer ID signature is left untouched.
