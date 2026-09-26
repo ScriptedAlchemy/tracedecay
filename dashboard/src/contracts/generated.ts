@@ -1418,6 +1418,27 @@ export const DecideWorkRelationReplanRequestV1Schema = z.object({
 }).strict();
 export type DecideWorkRelationReplanRequestV1 = z.infer<typeof DecideWorkRelationReplanRequestV1Schema>;
 
+export const DeliveryAgentUsageRowV1Schema = z.object({
+  agent: z.string().nullable(),
+  counters: z.lazy(() => AggregatedProviderUsageCountersV1Schema),
+  provider: z.string(),
+  sessions: z.number().int().safe().min(0),
+  sessions_with_usage: z.number().int().safe().min(0),
+  tool_calls: z.number().int().safe().min(0),
+  usage_complete: z.boolean(),
+});
+export type DeliveryAgentUsageRowV1 = z.infer<typeof DeliveryAgentUsageRowV1Schema>;
+
+/** The agents whose sessions the correlation index places on `branch`. */
+export const DeliveryAgentUsageV1Schema = z.object({
+  agents: z.array(z.lazy(() => DeliveryAgentUsageRowV1Schema)),
+  branch: z.string(),
+  sessions: z.number().int().safe().min(0),
+  truncated: z.boolean(),
+  usage_coverage: z.lazy(() => ProviderUsageCoverageV1Schema),
+});
+export type DeliveryAgentUsageV1 = z.infer<typeof DeliveryAgentUsageV1Schema>;
+
 export const DeliveryAttentionEvidenceV1Schema = z.discriminatedUnion("kind", [z.object({
   failure_anchor: z.string(),
   kind: z.literal("ci_failure"),
@@ -1676,6 +1697,7 @@ export const DeliveryMembershipEdgeV1Schema = z.object({
 export type DeliveryMembershipEdgeV1 = z.infer<typeof DeliveryMembershipEdgeV1Schema>;
 
 export const DeliveryOverviewV1Schema = z.object({
+  agent_usage: z.lazy(() => DeliveryProjectionV19Schema),
   changes: z.lazy(() => DeliveryProjectionV1Schema),
   ci_checks: z.lazy(() => DeliveryProjectionV15Schema),
   commits: z.lazy(() => DeliveryProjectionV12Schema),
@@ -1966,6 +1988,41 @@ export const DeliveryProjectionV18Schema = z.discriminatedUnion("state", [z.obje
   value: z.union([z.lazy(() => DeliveryGenerationFreshnessV1Schema), z.null()]),
 })]);
 export type DeliveryProjectionV18 = z.infer<typeof DeliveryProjectionV18Schema>;
+
+export const DeliveryProjectionV19Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+  value: z.union([z.lazy(() => DeliveryAgentUsageV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("empty_measured"),
+  value: z.lazy(() => DeliveryAgentUsageV1Schema),
+}), z.object({
+  state: z.literal("failed"),
+  value: z.lazy(() => DeliveryAgentUsageV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("not_published"),
+}), z.object({
+  state: z.literal("partial"),
+  value: z.lazy(() => DeliveryAgentUsageV1Schema),
+}), z.object({
+  checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
+  retry_at_micros: z.number().int().safe().nullable(),
+  state: z.literal("rate_limited"),
+  value: z.union([z.lazy(() => DeliveryAgentUsageV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("ready"),
+  value: z.lazy(() => DeliveryAgentUsageV1Schema),
+}), z.object({
+  state: z.literal("stale"),
+  value: z.lazy(() => DeliveryAgentUsageV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unavailable"),
+  value: z.union([z.lazy(() => DeliveryAgentUsageV1Schema), z.null()]),
+})]);
+export type DeliveryProjectionV19 = z.infer<typeof DeliveryProjectionV19Schema>;
 
 export const DeliveryProviderStateV1Schema = z.enum(["denied", "failed", "not_configured", "not_published", "partial", "rate_limited", "ready", "stale", "unavailable"]);
 export type DeliveryProviderStateV1 = z.infer<typeof DeliveryProviderStateV1Schema>;

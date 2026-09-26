@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ScopedBrain } from './ScopedBrain.tsx';
 import { useScope } from '../../data/scope/store.ts';
@@ -86,10 +86,14 @@ const SUBGRAPH_ENVELOPE = withEnvelopePayload(SUBGRAPH);
 const SUBGRAPH_EMPTY = { ...SUBGRAPH, nodes: [], edges: [] };
 const SUBGRAPH_EMPTY_ENVELOPE = withEnvelopePayload(SUBGRAPH_EMPTY);
 
-const graphOverview = (totals: Record<string, number>) =>
+const graphOverview = (
+  totals: Record<string, number>,
+  nodesByKind: ReadonlyArray<{ kind: string; count: number }> = [],
+) =>
   withEnvelopePayload({
     ...wirePayload('/api/plugins/graph/overview'),
     totals,
+    nodes_by_kind: nodesByKind,
   });
 
 const MEMORY_PAYLOAD = wirePayload('/api/plugins/holographic/status');
@@ -328,6 +332,31 @@ describe('ScopedBrain', () => {
     expect(readout('files')).toBe('0');
   });
 
+  it('lists the scoped symbol kinds and accounts for symbols without a kind', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
+        '/api/projects/proj_x/plugins/graph/overview': {
+          status: 200,
+          body: graphOverview({ nodes: 12_873, edges: 41_206, files: 642 }, [
+            { kind: 'struct', count: 3_000 },
+            { kind: 'function', count: 9_000 },
+          ]),
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    const section = await screen.findByRole('region', { name: 'Symbols by kind' });
+    const rows = within(section).getAllByRole('listitem').map((row) => row.textContent);
+    expect(rows).toEqual(['function9,000', 'struct3,000']);
+    expect(
+      within(section).getByText('873 of 12,873 symbols carry no kind metadata and are not counted by kind'),
+    ).toBeTruthy();
+  });
+
   it('withholds graph totals when the overview read fails', async () => {
     vi.stubGlobal(
       'fetch',
@@ -346,6 +375,8 @@ describe('ScopedBrain', () => {
     await waitFor(() => expect(readout('nodes')).toBe('—'));
     expect(readout('edges')).toBe('—');
     expect(readout('files')).toBe('—');
+    expect(screen.queryByRole('region', { name: 'Symbols by kind' })).toBeNull();
+    expect(screen.getByText(/Graph totals and symbol kinds: the read failed/)).toBeTruthy();
   });
 
   /**
