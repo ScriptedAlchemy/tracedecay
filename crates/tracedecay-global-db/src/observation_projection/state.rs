@@ -5,7 +5,7 @@ use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1, PayloadD
 use tracedecay_store::{
     EDITED_FILES_KEY, ObservationProjection, PROJECTION_TERMINAL_RETRY_MICROS,
     ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4, SPAWNED_SESSIONS_KEY,
     SessionMessageProjection, SessionMessageRecord, SessionRecord, message_output_digest,
 };
 
@@ -1416,14 +1416,16 @@ fn reconcile_metadata(
                     *actual_value = merged;
                 }
             }
-            // Each record contributes its own file-edit entries; the session
-            // row keeps the union in first-seen order (re-applying a record
-            // adds nothing).
-            Some(serde_json::Value::Array(actual_files)) if key == EDITED_FILES_KEY => {
-                if let serde_json::Value::Array(expected_files) = expected_value {
-                    for file in expected_files {
-                        if !actual_files.contains(&file) {
-                            actual_files.push(file);
+            // Each record contributes its own file-edit and spawn entries; the
+            // session row keeps the union in first-seen order (re-applying a
+            // record adds nothing).
+            Some(serde_json::Value::Array(actual_entries))
+                if key == EDITED_FILES_KEY || key == SPAWNED_SESSIONS_KEY =>
+            {
+                if let serde_json::Value::Array(expected_entries) = expected_value {
+                    for entry in expected_entries {
+                        if !actual_entries.contains(&entry) {
+                            actual_entries.push(entry);
                         }
                     }
                 }

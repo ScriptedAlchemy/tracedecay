@@ -146,6 +146,13 @@ fn derive_canonical_projection_for(
             serde_json::Value::Array(edited_files),
         );
     }
+    let spawned_sessions = canonical_spawned_sessions(&envelope);
+    if !spawned_sessions.is_empty() {
+        session_row_metadata.insert(
+            SPAWNED_SESSIONS_KEY.to_owned(),
+            serde_json::Value::Array(spawned_sessions),
+        );
+    }
     let session_metadata_json = serialize_metadata_map(&session_row_metadata)?;
     let session = SessionRecord {
         provider: provider.clone(),
@@ -377,6 +384,14 @@ pub const EDITED_FILES_KEY: &str = "edited_files";
 /// recorded none.
 pub const TOOL_USE_ID_KEY: &str = "tool_use_id";
 
+/// `sessions.metadata_json` key of the spawn rollup on a delegating session:
+/// `[{session_id, tool_use_id}]`, one entry per child session the host
+/// recorded this session's tool call spawning. Hosts that record the spawning
+/// call only in the parent transcript (Codex `SubAgentActivity`, OpenCode
+/// `task` parts) bind a child's `parent_tool_use_id` through it. The store
+/// reconciles the arrays of a session's records by union.
+pub const SPAWNED_SESSIONS_KEY: &str = "spawned_sessions";
+
 /// One rollup entry per `Git { FileEdit }` fact that names its path. The time,
 /// change type, and hunk count are copied only when the capture recorded them
 /// from the host (`edited_at_micros`, `change_type`, `hunks` in the fact
@@ -400,6 +415,33 @@ fn canonical_edited_files(envelope: &CanonicalObservationEnvelopeV1) -> Vec<serd
                     }
                 }
                 Some(serde_json::Value::Object(entry))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// One rollup entry per `Workflow { Subagent }` fact that names the spawned
+/// session (`reference`) and the spawning call (`content.tool_use_id`), both
+/// as the host recorded them. A subagent fact without either names no spawn.
+fn canonical_spawned_sessions(envelope: &CanonicalObservationEnvelopeV1) -> Vec<serde_json::Value> {
+    envelope
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            CanonicalObservationFactV1::Workflow {
+                evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                reference: Some(session_id),
+                content: Some(content),
+            } if !session_id.is_empty() => {
+                let tool_use_id = content
+                    .get(TOOL_USE_ID_KEY)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())?;
+                Some(serde_json::json!({
+                    "session_id": session_id,
+                    TOOL_USE_ID_KEY: tool_use_id,
+                }))
             }
             _ => None,
         })
@@ -1553,6 +1595,42 @@ mod tests {
                 .is_none(),
             "a record without edit facts records no edited_files array"
         );
+    }
+
+    #[test]
+    fn subagent_spawn_facts_roll_up_on_the_delegating_session_row() {
+        let spawn = provider_envelope(
+            "claude",
+            vec![
+                CanonicalObservationFactV1::Workflow {
+                    evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                    reference: Some("child-thread".to_owned()),
+                    content: Some(json!({"tool_use_id": "call_spawn", "text": "/root/explorer"})),
+                },
+                CanonicalObservationFactV1::Workflow {
+                    evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                    reference: None,
+                    content: Some(json!({"tool_use_id": "call_unnamed"})),
+                },
+                CanonicalObservationFactV1::Workflow {
+                    evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                    reference: Some("child-without-call".to_owned()),
+                    content: None,
+                },
+            ],
+        );
+        let projection =
+            derive_canonical_projection(&observation_without_native_record_id(&spawn)).unwrap();
+        let output = projection.messages().next().unwrap();
+        let session_metadata: serde_json::Value =
+            serde_json::from_str(output.session().metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            session_metadata["spawned_sessions"],
+            json!([{"session_id": "child-thread", "tool_use_id": "call_spawn"}]),
+            "only a fact naming both the child and the host call records a spawn"
+        );
+        assert_eq!(output.message().kind.as_deref(), Some("workflow_subagent"));
+        assert_eq!(output.message().text, "/root/explorer");
     }
 
     #[test]

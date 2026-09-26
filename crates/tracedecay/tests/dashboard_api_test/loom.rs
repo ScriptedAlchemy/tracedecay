@@ -132,7 +132,149 @@ fn loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities() {
         assert_eq!(source("session_commit")["state"], "ready");
         assert_eq!(source("session_file")["state"], "partial");
         assert_eq!(source("branch_worktree")["state"], "ready");
-        assert_eq!(statuses.len(), 3);
+        assert_eq!(source("subagent_spawn")["state"], "ready");
+        assert_eq!(source("subagent_spawn")["coverage"]["matched"], 1);
+        assert_eq!(statuses.len(), 4);
+    });
+}
+
+fn write_rollout(path: &std::path::Path, records: &[serde_json::Value]) {
+    let body = records
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect::<String>();
+    std::fs::write(path, body).unwrap_or_else(|error| panic!("write rollout fixture: {error}"));
+}
+
+/// A Codex session tree ingested through production capture: the parent
+/// rollout alone records which `spawn_agent` call started each child. The Loom
+/// temporal read serves each child's `parent_tool_use_id`, and the parent's
+/// transcript page serves a tool call carrying that same id, the pair the Loom
+/// draws as an EXACT fork on the call. A child whose parent recorded no
+/// spawning call keeps its parent and is counted as omitted coverage.
+#[test]
+fn loom_forks_bind_to_the_spawning_call_recorded_by_the_parent_transcript() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(true).await;
+        let home = std::env::var_os("HOME").expect("fixture HOME");
+        let dir = std::path::Path::new(&home).join(".codex/sessions/2026/09/02");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = fixture.project_root.to_string_lossy().into_owned();
+        let parent = "01a05f21-0000-7000-8000-00000000a001";
+        let spawned = "01a05f21-0000-7000-8000-00000000c001";
+        let unspawned = "01a05f21-0000-7000-8000-00000000c002";
+        // More transcript records than a ranked search would keep from one
+        // source, so the page must serve the whole window for the spawn call
+        // to be loaded at all.
+        let mut parent_records = vec![serde_json::json!({
+            "timestamp": "2026-09-02T00:00:00.000Z", "type": "session_meta",
+            "payload": {"id": parent, "cwd": cwd, "model_provider": "openai"}})];
+        parent_records.extend((0..6).map(|step| {
+            serde_json::json!({"timestamp": format!("2026-09-02T00:00:0{step}.500Z"), "type": "event_msg",
+                "payload": {"type": "agent_message", "message": format!("Planning step {step}.")}})
+        }));
+        parent_records.extend([
+            serde_json::json!({"timestamp": "2026-09-02T00:00:10.000Z", "type": "response_item",
+                "payload": {"type": "function_call", "name": "spawn_agent", "call_id": "call_loom_spawn",
+                    "arguments": "{\"agent_type\":\"explorer\"}"}}),
+            serde_json::json!({"timestamp": "2026-09-02T00:00:11.000Z", "type": "event_msg",
+                "payload": {"type": "item_completed", "thread_id": parent, "item": {
+                    "type": "SubAgentActivity", "id": "call_loom_spawn", "kind": "started",
+                    "agent_thread_id": spawned, "agent_path": "/root/explorer"}}}),
+            serde_json::json!({"timestamp": "2026-09-02T00:01:00.000Z", "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Explorer finished."}}),
+        ]);
+        write_rollout(
+            &dir.join(format!("rollout-2026-09-02T00-00-00-{parent}.jsonl")),
+            &parent_records,
+        );
+        for (child, start) in [(spawned, "00-00-11"), (unspawned, "00-00-20")] {
+            let at = format!("2026-09-02T{}.500Z", start.replace('-', ":"));
+            write_rollout(
+                &dir.join(format!("rollout-2026-09-02T{start}-{child}.jsonl")),
+                &[
+                    serde_json::json!({"timestamp": at, "type": "session_meta", "payload": {
+                        "id": child, "parent_thread_id": parent, "cwd": cwd, "thread_source": "subagent",
+                        "source": {"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}},
+                        "model_provider": "openai"}}),
+                    serde_json::json!({"timestamp": "2026-09-02T00:00:40.000Z", "type": "event_msg",
+                        "payload": {"type": "agent_message", "message": format!("child {child} done")}}),
+                ],
+            );
+        }
+        fixture
+            .host_runtime
+            .ingest_project_provider_for_test(
+                &fixture.project_root,
+                tracedecay_sessions::runtime::SessionProvider::Codex,
+            )
+            .await
+            .expect("ingest the Codex session tree");
+        fixture
+            .host_runtime
+            .materialize_session_temporal_refresh_for_test(parent)
+            .await
+            .expect("materialize the parent transcript's temporal refresh");
+
+        let agent = http_agent();
+        let (status, envelope) = get_json(
+            &agent,
+            &format!("{}/api/loom/temporal?limit=200", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{envelope}");
+        let sessions = envelope["payload"]["sessions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("Loom sessions: {envelope}"));
+        let row = |id: &str| {
+            sessions
+                .iter()
+                .find(|session| session["provider"] == "codex" && session["session_id"] == id)
+                .unwrap_or_else(|| panic!("missing Loom session {id}: {envelope}"))
+        };
+        assert_eq!(row(spawned)["parent_session_id"], parent);
+        assert_eq!(row(spawned)["parent_tool_use_id"], "call_loom_spawn");
+        assert_eq!(row(unspawned)["parent_session_id"], parent);
+        assert!(
+            row(unspawned).get("parent_tool_use_id").is_none(),
+            "a child whose parent recorded no spawn has no call: {}",
+            row(unspawned)
+        );
+        let spawn_status = envelope["payload"]["source_statuses"]
+            .as_array()
+            .and_then(|statuses| statuses.iter().find(|status| status["id"] == "subagent_spawn"))
+            .unwrap_or_else(|| panic!("missing subagent_spawn status: {envelope}"));
+        assert_eq!(spawn_status["state"], "partial", "{spawn_status}");
+        assert_eq!(spawn_status["providers"], serde_json::json!(["codex"]));
+        assert_eq!(spawn_status["coverage"]["eligible"], 2);
+        assert_eq!(spawn_status["coverage"]["matched"], 1);
+        assert_eq!(spawn_status["coverage"]["omitted"], 1);
+
+        let (status, page) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/session/{parent}?limit=50",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{page}");
+        let messages = page["payload"]["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("parent transcript page: {page}"));
+        assert_eq!(
+            Some(messages.len() as u64),
+            page["payload"]["counts"]["message_count"].as_u64(),
+            "the transcript page serves every recorded message: {page}"
+        );
+        let spawn_calls: Vec<&serde_json::Value> = messages
+            .iter()
+            .filter(|message| message["tool_use_id"] == "call_loom_spawn")
+            .collect();
+        assert_eq!(spawn_calls.len(), 1, "{page}");
+        assert_eq!(spawn_calls[0]["tool_name"], "spawn_agent");
     });
 }
 

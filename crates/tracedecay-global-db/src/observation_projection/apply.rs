@@ -9,8 +9,8 @@ use tracedecay_domain::{
 use tracedecay_store::{
     ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectionSkipReason,
     ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
-    SessionMessageProjection, SessionMessageRecord, SessionRecord, WorkflowFactProjection,
-    WorkflowFactRecord, workflow_semantic_kind,
+    SPAWNED_SESSIONS_KEY, SessionMessageProjection, SessionMessageRecord, SessionRecord,
+    WorkflowFactProjection, WorkflowFactRecord, workflow_semantic_kind,
 };
 
 use tracedecay_lcm::contracts::LcmError;
@@ -485,7 +485,7 @@ pub(super) async fn apply_session(
     // Downstream reconciliation, verify/audit, and rebuild then operate on
     // stored strings alone without touching the filesystem.
     let session = &canonicalize_session_project_paths(session);
-    match read_session(conn, &session.provider, &session.session_id).await? {
+    let stored = match read_session(conn, &session.provider, &session.session_id).await? {
         Some(actual) => {
             let normalized_actual = canonicalize_session_project_paths(&actual);
             let merged = reconcile_session_rows_detailed(&normalized_actual, session).map_err(
@@ -522,11 +522,11 @@ pub(super) async fn apply_session(
                 ],
             )
             .await
-            .map(|_| ())
-            .map_err(|error| storage("enrich projected session", error))
+            .map_err(|error| storage("enrich projected session", error))?;
+            merged
         }
-        None => conn
-            .execute(
+        None => {
+            conn.execute(
                 "INSERT INTO sessions
             (provider, session_id, project_key, project_path, title, started_at, ended_at,
              transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
@@ -549,9 +549,82 @@ pub(super) async fn apply_session(
                 ],
             )
             .await
-            .map(|_| ())
-            .map_err(|error| storage("insert projected session", error)),
+            .map_err(|error| storage("insert projected session", error))?;
+            session.clone()
+        }
+    };
+    bind_spawn_calls(conn, &stored, session).await
+}
+
+/// The parent's recorded spawn rollup entry naming `child`, as its call id.
+/// Shared by the live bind below and the rebuild activation sweep.
+pub(super) const SPAWN_CALL_FOR_CHILD_SQL: &str = "(
+    SELECT json_extract(spawn.value, '$.tool_use_id')
+    FROM sessions AS parent,
+         json_each(
+             CASE WHEN json_valid(parent.metadata_json) THEN parent.metadata_json ELSE '{}' END,
+             '$.spawned_sessions'
+         ) AS spawn
+    WHERE parent.provider = child.provider
+      AND parent.session_id = child.parent_session_id
+      AND json_extract(spawn.value, '$.session_id') = child.session_id
+      AND json_type(spawn.value, '$.tool_use_id') = 'text'
+    ORDER BY CAST(spawn.key AS INTEGER)
+    LIMIT 1
+)";
+
+/// Binds a child session's `parent_tool_use_id` to the call its parent's
+/// transcript recorded spawning it (`sessions.metadata_json
+/// $.spawned_sessions[]`), for hosts whose child transcript does not carry
+/// the call. Either side may be ingested first: a child row lacking the call
+/// reads its parent's rollup, and a record adding spawn entries binds the
+/// already-ingested children it names. A call the child recorded itself is
+/// never overwritten, and a child naming another parent is never bound.
+async fn bind_spawn_calls(
+    conn: &impl Executor,
+    stored: &SessionRecord,
+    incoming: &SessionRecord,
+) -> ProjectionStoreResult<()> {
+    if stored.parent_session_id.is_some() && stored.parent_tool_use_id.is_none() {
+        conn.execute(
+            &format!(
+                "UPDATE sessions AS child SET parent_tool_use_id = {SPAWN_CALL_FOR_CHILD_SQL}
+                 WHERE child.provider = ?1 AND child.session_id = ?2
+                   AND child.parent_tool_use_id IS NULL
+                   AND {SPAWN_CALL_FOR_CHILD_SQL} IS NOT NULL"
+            ),
+            params![stored.provider.as_str(), stored.session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("bind child session spawn call", error))?;
     }
+    if records_spawns(incoming) {
+        conn.execute(
+            &format!(
+                "UPDATE sessions AS child SET parent_tool_use_id = {SPAWN_CALL_FOR_CHILD_SQL}
+                 WHERE child.provider = ?1 AND child.parent_session_id = ?2
+                   AND child.parent_tool_use_id IS NULL
+                   AND {SPAWN_CALL_FOR_CHILD_SQL} IS NOT NULL"
+            ),
+            params![stored.provider.as_str(), stored.session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("bind spawned child session calls", error))?;
+    }
+    Ok(())
+}
+
+fn records_spawns(session: &SessionRecord) -> bool {
+    session
+        .metadata_json
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .is_some_and(|metadata| {
+            metadata
+                .get(SPAWNED_SESSIONS_KEY)
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|spawns| !spawns.is_empty())
+        })
 }
 
 /// Aligns a provenance-owned message row onto the projection's session before
