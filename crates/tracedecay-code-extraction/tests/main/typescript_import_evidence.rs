@@ -549,14 +549,18 @@ fn reexport_statements_are_public_import_evidence() {
             ),
         ]
     );
-    assert!(
+    assert_eq!(
         artifact
             .result
             .nodes
             .iter()
             .filter(|node| node.kind == NodeKind::Export)
-            .count()
-            >= 2,
-        "the raw export statement nodes stay in the graph"
+            .map(|node| node.signature.as_deref())
+            .collect::<Vec<_>>(),
+        [
+            Some("export { sum as add, type Shape } from \"./math\";"),
+            Some("export { local };"),
+        ],
+        "the export-clause statements stay in the graph as their own nodes"
     );
 }
