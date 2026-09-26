@@ -6101,8 +6101,7 @@ async fn owner_activity_reports_a_pass_that_settled_before_the_reader_looked() {
             .await,
         super::super::CodeIndexDemandAdmissionV1::Queued
     ));
-    let advanced = wait_for_generation_change(&registry, fixture.path(), &initial).await;
-    assert_ne!(advanced, initial);
+    let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
     wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
     wait_for_settled_owner(&registry, fixture.path()).await;
 

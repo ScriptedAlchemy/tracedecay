@@ -1317,9 +1317,8 @@ struct PendingWakeStateV1 {
 /// release and its marker release.
 struct PendingWakeV1 {
     slot: Mutex<PendingWakeStateV1>,
-    /// Whether the slot holds a wake. Every writer publishes it through
-    /// [`PendingWakeGuardV1`] before releasing `slot`, so subscribers observe
-    /// occupancy changes in lock order.
+    /// Every writer publishes occupancy through [`PendingWakeGuardV1`] before
+    /// releasing `slot`, so subscribers observe it in lock order.
     occupied: tokio::sync::watch::Sender<bool>,
     #[cfg(test)]
     drop_gate: Mutex<Option<Arc<PendingWakeDropGateTestV1>>>,
@@ -1389,13 +1388,6 @@ impl CodeIndexOwnerActivityV1 {
         *self.pending_wake.borrow()
     }
 
-    pub fn refresh_in_flight(&self) -> bool {
-        self.passes().running() || self.wake_pending()
-    }
-
-    /// Resolves on the next pass, pending-wake, or worker-phase transition, or with
-    /// [`tokio::sync::watch::error::RecvError`] once the worktree's owner is
-    /// gone.
     pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
         tokio::select! {
             changed = self.passes.changed() => changed,
@@ -2661,34 +2653,30 @@ impl CodeIndexSchedulerRegistryV1 {
         let service_micros = receipt.service_micros().max(0) as u64;
         telemetry.send_modify(|telemetry| {
             telemetry.record(receipt);
-            Self::log_newly_eligible_cadence_percentile(telemetry);
+            // Emit the aggregate exactly when a percentile first becomes eligible,
+            // so aggregate lines stay bounded to a few per ring cycle.
+            if let Some(percentile) = newly_eligible_percentile(telemetry.latency_sample_count()) {
+                let read_model = telemetry.read_model();
+                tracing::debug!(
+                    event = "code_index_cadence_read_model",
+                    newly_eligible = percentile,
+                    retained_count = read_model.retained_count,
+                    capacity = read_model.capacity,
+                    latency_sample_count = read_model.latency_sample_count,
+                    arrival_unavailable_count = read_model.arrival_unavailable_count,
+                    published_count = read_model.published_count,
+                    noop_count = read_model.noop_count,
+                    event_to_ready_p50_micros = ?read_model.event_to_ready_micros.p50.value,
+                    event_to_ready_p95_micros = ?read_model.event_to_ready_micros.p95.value,
+                    event_to_ready_p99_micros = ?read_model.event_to_ready_micros.p99.value,
+                    queue_delay_p50_micros = ?read_model.queue_delay_micros.p50.value,
+                    queue_delay_p95_micros = ?read_model.queue_delay_micros.p95.value,
+                    queue_delay_p99_micros = ?read_model.queue_delay_micros.p99.value,
+                    "code-index cadence percentile became eligible"
+                );
+            }
         });
         service_micros
-    }
-
-    fn log_newly_eligible_cadence_percentile(telemetry: &CodeIndexCadenceTelemetryV1) {
-        // Emit the aggregate exactly when a percentile first becomes eligible,
-        // so aggregate lines stay bounded to a few per ring cycle.
-        if let Some(percentile) = newly_eligible_percentile(telemetry.latency_sample_count()) {
-            let read_model = telemetry.read_model();
-            tracing::debug!(
-                event = "code_index_cadence_read_model",
-                newly_eligible = percentile,
-                retained_count = read_model.retained_count,
-                capacity = read_model.capacity,
-                latency_sample_count = read_model.latency_sample_count,
-                arrival_unavailable_count = read_model.arrival_unavailable_count,
-                published_count = read_model.published_count,
-                noop_count = read_model.noop_count,
-                event_to_ready_p50_micros = ?read_model.event_to_ready_micros.p50.value,
-                event_to_ready_p95_micros = ?read_model.event_to_ready_micros.p95.value,
-                event_to_ready_p99_micros = ?read_model.event_to_ready_micros.p99.value,
-                queue_delay_p50_micros = ?read_model.queue_delay_micros.p50.value,
-                queue_delay_p95_micros = ?read_model.queue_delay_micros.p95.value,
-                queue_delay_p99_micros = ?read_model.queue_delay_micros.p99.value,
-                "code-index cadence percentile became eligible"
-            );
-        }
     }
 
     pub fn subscribe_generation_publications(
@@ -2732,8 +2720,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Some(worktree.serving_generation_changed.subscribe())
     }
 
-    /// Watch one mounted worktree's owner passes and pending wake, the inputs
-    /// the freshness ladder reports as `refresh_in_flight`.
+    /// Owner passes, pending wake, and worker phase for one mounted worktree.
     pub async fn subscribe_owner_activity(
         &self,
         project_root: &Path,

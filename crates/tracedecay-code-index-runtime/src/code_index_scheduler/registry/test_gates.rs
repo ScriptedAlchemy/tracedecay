@@ -492,22 +492,6 @@ impl CodeIndexSchedulerRegistryV1 {
         gate.drop_release.notify_all();
     }
 
-    /// The mounted root that owns one exact scope's worktree.
-    #[cfg(test)]
-    pub async fn mounted_root_for_scope_for_test(
-        &self,
-        scope: &tracedecay_contracts::ResolvedScope,
-    ) -> Option<std::path::PathBuf> {
-        let mounted = self.mounted.lock().await;
-        mounted
-            .iter()
-            .find(|(_, worktree)| {
-                worktree.repository_id == scope.repository_id
-                    && worktree.worktree_id == scope.worktree_id
-            })
-            .map(|(root, _)| root.clone())
-    }
-
     /// The pending-wake slot for one exact scope's worktree, in unix micros;
     /// `0` means no wake is outstanding.
     #[cfg(test)]

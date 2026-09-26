@@ -1241,7 +1241,6 @@ async fn wait_for_quiescent_owner_pass(
     .await;
 }
 
-/// Wait until the worker for `project_root` reaches `phase`.
 async fn wait_for_worker_phase(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -1480,10 +1479,13 @@ async fn clear_pending_wake_until_quiet(
     registry: &CodeIndexSchedulerRegistryV1,
     scope: &tracedecay_contracts::ResolvedScope,
 ) {
-    let root = registry
-        .mounted_root_for_scope_for_test(scope)
-        .await
-        .expect("mounted worktree for scope");
+    let root = {
+        let mounted = registry.mounted.lock().await;
+        super::registry::unique_mounted_for_scope(&mounted, scope)
+            .unique()
+            .map(|(root, _)| root.clone())
+            .expect("mounted worktree for scope")
+    };
     // With the admission held the worker cannot start another pass, and once
     // it is back at a wait its tail can no longer stamp the slot.
     wait_for_quiescent_owner_pass(registry, &root).await;
@@ -1743,7 +1745,6 @@ where
     }
 }
 
-/// Wait until `probe` observes a serving seat for `path`.
 async fn wait_until_serving_seat<T, F, Fut>(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,

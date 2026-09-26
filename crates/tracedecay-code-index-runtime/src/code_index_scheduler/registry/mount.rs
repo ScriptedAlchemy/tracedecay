@@ -340,10 +340,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let build_publication_lock = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
         let pending_wake = Arc::new(PendingWakeV1::default());
-        let worker_phase = Arc::new(tokio::sync::watch::Sender::new(
+        let phase = Arc::new(tokio::sync::watch::Sender::new(
             super::CodeIndexWorkerPhaseV1::default(),
         ));
-        let worker_phase_signal = Arc::clone(&worker_phase);
+        let worker_phase = Arc::clone(&phase);
         let index_observability = Arc::new(OnceLock::<
             super::super::observability::CodeIndexObservabilityV1,
         >::new());
@@ -504,13 +504,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 // never idle.
                 if !notified.as_mut().enable() {
                     super::CodeIndexWorkerPhaseV1::enter(
-                        &worker_phase_signal,
+                        &worker_phase,
                         super::CodeIndexWorkerPhaseV1::Parked,
                     );
                 }
                 hotpath::future!(notified, label = "daemon.code_index.wake_wait").await;
                 super::CodeIndexWorkerPhaseV1::enter(
-                    &worker_phase_signal,
+                    &worker_phase,
                     super::CodeIndexWorkerPhaseV1::Working,
                 );
                 if worker_shutting_down.load(Ordering::Acquire) {
@@ -562,7 +562,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     continue;
                 }
                 super::CodeIndexWorkerPhaseV1::enter(
-                    &worker_phase_signal,
+                    &worker_phase,
                     super::CodeIndexWorkerPhaseV1::AwaitingAdmission,
                 );
                 let Ok(_background_reconcile_admission) = hotpath::future!(
@@ -590,7 +590,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 super::CodeIndexWorkerPhaseV1::enter(
-                    &worker_phase_signal,
+                    &worker_phase,
                     super::CodeIndexWorkerPhaseV1::AwaitingPublicationGate,
                 );
                 let mut build_publication =
@@ -615,7 +615,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                 };
                 super::CodeIndexWorkerPhaseV1::enter(
-                    &worker_phase_signal,
+                    &worker_phase,
                     super::CodeIndexWorkerPhaseV1::Working,
                 );
                 let wake_to_gates_held_micros =
@@ -2660,7 +2660,7 @@ impl CodeIndexSchedulerRegistryV1 {
             index_observability,
             shutting_down,
             reconcile_in_progress,
-            worker_phase,
+            worker_phase: phase,
             _active_generation_encoded_bytes: active_generation_encoded_bytes,
             task,
         });
