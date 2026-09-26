@@ -21,7 +21,10 @@ pub use port_order::compute_port_order;
 pub use port_status::compute_port_status;
 pub use registry::{handle_project_context, handle_project_list, handle_project_search};
 pub use remote_status::handle_remote_status;
-pub use status::{graph_statistics_value, handle_active_project, handle_status};
+pub use status::{
+    graph_statistics_value, handle_active_project, handle_status, readiness_wait_outcome,
+    status_readiness_wait,
+};
 pub use todos::compute_todos;
 
 /// Default node kinds for port comparisons.

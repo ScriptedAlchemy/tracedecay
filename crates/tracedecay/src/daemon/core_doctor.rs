@@ -88,11 +88,16 @@ fn core_status_request_id(request: Option<&JsonRpcRequest>) -> Option<serde_json
         return None;
     }
     let (tool_name, arguments) = projectless_tool_call(request.params.as_ref()).ok()?;
+    // A `wait_for` read asks to be held until the index is ready, so it rides
+    // the project open instead of taking the core's converging snapshot.
     (tool_name == "tracedecay_status"
         && arguments
             .get("include_branch_diagnostics")
             .and_then(serde_json::Value::as_bool)
-            != Some(true))
+            != Some(true)
+        && arguments
+            .get("wait_for")
+            .is_none_or(serde_json::Value::is_null))
     .then(|| request.id.clone().unwrap_or(serde_json::Value::Null))
 }
 
@@ -813,6 +818,31 @@ mod doctor_runtime_route_tests {
         );
 
         assert!(core_status_request_id(request.parsed()).is_none());
+    }
+
+    #[test]
+    fn status_wait_for_rides_the_project_open_instead_of_the_core_snapshot() {
+        let status = |arguments: serde_json::Value| {
+            AuthenticatedFirstRequest::new(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "tools/call",
+                    "params": { "name": "tracedecay_status", "arguments": arguments },
+                })
+                .to_string(),
+            )
+        };
+        let plain = status(serde_json::json!({ "format": "json" }));
+        assert_eq!(
+            core_status_request_id(plain.parsed()),
+            Some(serde_json::json!(12))
+        );
+        let waiting = status(serde_json::json!({
+            "format": "json",
+            "wait_for": { "state": "fresh", "timeout_ms": 1000 },
+        }));
+        assert_eq!(core_status_request_id(waiting.parsed()), None);
     }
 
     fn filesystem_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
