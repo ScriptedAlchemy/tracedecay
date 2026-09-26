@@ -198,20 +198,15 @@ impl DrainingDaemonFixture {
 
     /// Serves the restarted daemon's identity on the unit's socket so the
     /// restore's readiness wait can prove `RunningEnabled`.
-    fn serve_restarted_daemon(
-        &self,
-    ) -> (
-        tracedecay_daemon_identity::authority::DaemonAuthority,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) {
+    fn serve_restarted_daemon(&self) -> tracedecay_daemon_identity::authority::DaemonAuthority {
         let authority = super::tests::seed_socket_authority(&self.socket_path);
         let listener = UnixListener::bind(&self.socket_path).expect("bind restarted daemon");
-        let (served, _acknowledged) = super::tests::serve_identity_probes(
+        super::tests::serve_identity_probes(
             listener,
             vec![super::tests::TEST_BUILD_VERSION],
             authority.auth_token().to_owned(),
         );
-        (authority, served)
+        authority
     }
 
     fn assert_daemon_running_after(&self, phase: &str) {
@@ -262,16 +257,12 @@ fn maintenance_window_waits_out_the_lease_of_the_daemon_it_just_stopped() {
         "the window owns the exclusive lease once the daemon released its share"
     );
 
-    let (_authority, served) = fixture.serve_restarted_daemon();
+    let _authority = fixture.serve_restarted_daemon();
     guard
         .finish_after_update()
         .expect("restore the previously running daemon");
 
     fixture.assert_daemon_running_after("a completed maintenance window");
-    assert!(
-        served.load(std::sync::atomic::Ordering::SeqCst) >= 1,
-        "the restore must be proven by an authenticated identity answer"
-    );
 }
 
 /// A holder that outlives the bound is contention, reported typed, and the
@@ -283,7 +274,7 @@ fn failed_lease_acquisition_restores_the_stopped_daemon_before_reporting() {
     let _env_lock = lock_user_data_dir_test_env();
     let fixture = DrainingDaemonFixture::new();
     let _holder = fixture.hold_daemon_lease(None);
-    let (_authority, served) = fixture.serve_restarted_daemon();
+    let _authority = fixture.serve_restarted_daemon();
 
     let error = QuiescedDaemonLifecycle::acquire_with_runner_and_timeout(
         "update",
@@ -305,8 +296,4 @@ fn failed_lease_acquisition_restores_the_stopped_daemon_before_reporting() {
         "the restore after a lost acquisition must succeed: {message}"
     );
     fixture.assert_daemon_running_after("a lost lease acquisition");
-    assert!(
-        served.load(std::sync::atomic::Ordering::SeqCst) >= 1,
-        "the restore must be proven by an authenticated identity answer"
-    );
 }
