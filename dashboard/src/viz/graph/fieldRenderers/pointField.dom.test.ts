@@ -100,12 +100,15 @@ describe('point field hover', () => {
     expect(onHover).toHaveBeenLastCalledWith(null);
   });
 
-  it('never clears an inspection it did not make', () => {
+  it('clears only the inspection it made', () => {
     const onHover = vi.fn();
     const canvas = mount(onHover);
+    const [ax, ay] = at(0, 1);
     const [ex, ey] = at(1.5, 0.2);
+    fireEvent.pointerMove(canvas, { clientX: ax, clientY: ay });
+    fireEvent.pointerLeave(canvas);
     fireEvent.pointerMove(canvas, { clientX: ex, clientY: ey });
     fireEvent.pointerLeave(canvas);
-    expect(onHover).not.toHaveBeenCalled();
+    expect(onHover.mock.calls).toEqual([['a'], [null]]);
   });
 });
