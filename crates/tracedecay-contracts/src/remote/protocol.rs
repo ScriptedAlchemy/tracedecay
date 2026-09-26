@@ -554,6 +554,7 @@ pub fn remote_protocol_problem(
             )?,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
+            detail: None,
         },
         RemoteProtocolFailureV1::AuthorityReachable => ApplicationProblem::conflict(
             "remote.authority_reachable",
@@ -571,6 +572,7 @@ pub fn remote_protocol_problem(
             )?,
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
+            detail: None,
         },
     };
     ApplicationProblemEnvelope::new(contract, request_id, problem)

@@ -29,14 +29,15 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOperation, ApplicationOutcome,
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
-    AuthorityReceipt, CancellationContext, CancellationObservation, CancellationStage,
-    CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState,
-    Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState,
-    LegalAction, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission,
-    RequestContext, RequestCostReceiptV1, RequestId, ResolvedScope, RetrievalEvidence,
-    RetryDirective, SafeDiagnostic, TemporalState,
+    ApplicationProblem, ApplicationProblemDetailV1, ApplicationProblemEnvelope,
+    ApplicationProblemKind, ApplicationResult, AuthorityReceipt, CancellationContext,
+    CancellationObservation, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
+    CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass, EvidenceCoverage,
+    EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, Omission, OmissionReason,
+    OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor,
+    PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext,
+    RequestCostReceiptV1, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective,
+    SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::text::forward_slash_path;
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
@@ -472,8 +473,7 @@ impl OwnedPrimitiveRuntime {
 impl OwnedPrimitiveRuntime {
     /// A code-index read refused as retryable while the worktree is parked
     /// would be retried forever: nothing converges until the operator acts.
-    /// The park's remedy and cause replace the generic refusal; the remedy
-    /// leads so a long cause is what the diagnostic bound cuts.
+    /// The park's typed cause and remedy replace the generic refusal.
     async fn parked_refusal(&self, refusal: ApplicationProblemEnvelope) -> PrimitiveResult<Value> {
         let Some(parked) = self
             .convergence_park
@@ -482,14 +482,14 @@ impl OwnedPrimitiveRuntime {
         else {
             return Ok(Err(refusal));
         };
-        let message = safe_problem_message(&format!(
-            "The code index for this worktree is parked; remedy: {}; cause: {}",
-            parked.remediation, parked.reason
-        ));
         Ok(Err(ApplicationProblemEnvelope::new(
             refusal.contract,
             refusal.request_id,
-            ApplicationProblem::code_index_parked(message),
+            ApplicationProblem::from_detail(ApplicationProblemDetailV1::Parked {
+                cause: parked.reason,
+                remedy: parked.remediation,
+                retries_on_wake: parked.retries_on_wake,
+            }),
         )?))
     }
 }

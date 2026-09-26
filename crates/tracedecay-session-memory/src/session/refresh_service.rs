@@ -107,7 +107,9 @@ pub enum SessionRefreshServiceOutcome {
     WrongScope,
     Stale,
     StaleFrontier {
-        active_projection_frontier: u64,
+        requested: u64,
+        committed: u64,
+        active: u64,
     },
     NotFound,
     Aborted,

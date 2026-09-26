@@ -679,6 +679,7 @@ fn graph_tool_unavailable(
         diagnostic,
         retry: tracedecay_contracts::RetryDirective::Never,
         legal_actions: Vec::new(),
+        detail: None,
     }
 }
 

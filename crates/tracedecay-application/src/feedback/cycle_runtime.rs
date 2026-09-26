@@ -233,7 +233,7 @@ impl FeedbackCycleRuntimeError {
     pub fn lsp_failure_class(&self) -> &'static str {
         match self {
             Self::Contract(_) => "feedback-cycle-contract",
-            Self::Runtime(FeedbackRuntimeError::HandleStore(TraceDecayError::SyncLock {
+            Self::Runtime(FeedbackRuntimeError::HandleStore(TraceDecayError::LockDeadline {
                 ..
             })) => "feedback-cycle-handle-store-busy",
             Self::Runtime(_) => "feedback-cycle-runtime",

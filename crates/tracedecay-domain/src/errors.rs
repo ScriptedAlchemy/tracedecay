@@ -89,6 +89,14 @@ pub enum TraceDecayError {
     #[error("sync lock: {message}")]
     SyncLock { message: String },
 
+    /// A writer lock stayed held by other writers past its admission
+    /// deadline. `resource` names the lock class, never a filesystem path.
+    #[error("{resource} stayed busy past its {deadline_ms}ms admission deadline")]
+    LockDeadline {
+        resource: &'static str,
+        deadline_ms: u64,
+    },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

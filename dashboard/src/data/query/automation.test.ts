@@ -822,6 +822,7 @@ function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required"
               message: "The retained operation conflicts with current state.",
             }
           : null,
+        detail: null,
         committed_receipt: effectReceipt,
         owning_layer: "runtime",
         terminality: kind === "conflict" ? "pre_admission" : "admitted_terminal",

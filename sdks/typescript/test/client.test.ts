@@ -24,6 +24,7 @@ import {
   TraceDecayPartialEffectError,
   TraceDecayProtocolError,
   TraceDecayResetRequiredError,
+  TraceDecayUnavailableError,
   createClient,
   type OperationRequestOptions,
 } from "../src/client";
@@ -243,6 +244,7 @@ function problemEnvelope(
     unavailableClassification?: string | null;
     executionFailureClassification?: string | null;
     diagnostic?: unknown;
+    detail?: unknown;
     terminality?: string;
   } = {},
 ) {
@@ -284,6 +286,7 @@ function problemEnvelope(
       code,
       message: code,
       diagnostic,
+      detail: options.detail ?? null,
       committed_receipt: options.committedReceipt ?? null,
       owning_layer: "application",
       terminality:
@@ -996,6 +999,46 @@ describe("TraceDecayClient transport envelopes", () => {
         await expect(
           client.cancelOperation("request.operation"),
         ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+      },
+    );
+  });
+
+  it("surfaces a problem's typed detail and refuses one on a kind without detail", async () => {
+    const detail = {
+      kind: "parked",
+      cause: "source unreadable",
+      remedy: "restore the mode, then run `tracedecay sync`",
+      retries_on_wake: false,
+    };
+    const parked = problemEnvelope("unavailable", "application.code-index.parked", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["reconcile"],
+      detail,
+    });
+    const grafted = problemEnvelope("invalid_request", "request.invalid", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["correct_request"],
+      detail,
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 503, parked),
+        (_request, response) => json(response, 400, grafted),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(TraceDecayUnavailableError);
+        expect((refusal as TraceDecayUnavailableError).problem.detail).toEqual(detail);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
       },
     );
   });

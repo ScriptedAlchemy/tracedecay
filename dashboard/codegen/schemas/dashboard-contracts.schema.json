@@ -1334,6 +1334,93 @@
       ],
       "type": "string"
     },
+    "ApplicationProblemDetailV1": {
+      "description": "The structured facts behind a problem. Adapters read these fields; the\nproblem's `message` is only [`Self::message`] rendered from them.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The worktree's code index is parked until the operator applies\n`remedy`; repeating the request cannot change the answer.",
+          "properties": {
+            "cause": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "parked",
+              "type": "string"
+            },
+            "remedy": {
+              "type": "string"
+            },
+            "retries_on_wake": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "cause",
+            "remedy",
+            "retries_on_wake"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A session refresh asked to begin from a source frontier the\ncommitted projection has already passed.",
+          "properties": {
+            "active": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "committed": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "stale_refresh_frontier",
+              "type": "string"
+            },
+            "requested": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "requested",
+            "committed",
+            "active"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A writer lock stayed held by other writers past its admission\ndeadline.",
+          "properties": {
+            "deadline_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "lock_deadline",
+              "type": "string"
+            },
+            "resource": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "resource",
+            "deadline_ms"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ApplicationProblemEnvelope": {
       "additionalProperties": false,
       "description": "Stable application failure envelope. Partial effects and reset-required\nstates are admitted terminals; partial effects carry their committed\nreceipt directly while reset-required states carry an explicit action.",
@@ -1378,13 +1465,13 @@
       "description": "Stable application problem record shared verbatim by every adapter.",
       "properties": {
         "cancellation_stage": {
-          "$ref": "#/$defs/RequiredNullable2"
+          "$ref": "#/$defs/RequiredNullable3"
         },
         "code": {
           "type": "string"
         },
         "committed_receipt": {
-          "$ref": "#/$defs/RequiredNullable",
+          "$ref": "#/$defs/RequiredNullable2",
           "description": "A committed effect is present only for an admitted partial effect.\nThe nullable field is always serialized: omitting it would create a\ncompatibility/default path that could hide a missing receipt."
         },
         "coverage": {
@@ -1396,6 +1483,10 @@
               "type": "null"
             }
           ]
+        },
+        "detail": {
+          "$ref": "#/$defs/RequiredNullable",
+          "description": "The structured facts `message` is rendered from, when the problem has\nany. Always serialized so a client never mistakes an omitted detail\nfor a problem without one."
         },
         "details": {
           "items": {
@@ -1414,7 +1505,7 @@
           ]
         },
         "execution_failure_classification": {
-          "$ref": "#/$defs/RequiredNullable4"
+          "$ref": "#/$defs/RequiredNullable5"
         },
         "kind": {
           "$ref": "#/$defs/ApplicationProblemKind"
@@ -1470,7 +1561,7 @@
           "type": "string"
         },
         "unavailable_classification": {
-          "$ref": "#/$defs/RequiredNullable3"
+          "$ref": "#/$defs/RequiredNullable4"
         }
       },
       "required": [
@@ -1479,6 +1570,7 @@
         "code",
         "message",
         "diagnostic",
+        "detail",
         "committed_receipt",
         "owning_layer",
         "terminality",
@@ -21228,7 +21320,7 @@
     "RequiredNullable": {
       "anyOf": [
         {
-          "$ref": "#/$defs/EffectReceipt"
+          "$ref": "#/$defs/ApplicationProblemDetailV1"
         },
         {
           "type": "null"
@@ -21239,7 +21331,7 @@
     "RequiredNullable2": {
       "anyOf": [
         {
-          "$ref": "#/$defs/CancellationStage"
+          "$ref": "#/$defs/EffectReceipt"
         },
         {
           "type": "null"
@@ -21250,7 +21342,7 @@
     "RequiredNullable3": {
       "anyOf": [
         {
-          "$ref": "#/$defs/ApplicationUnavailableClassV1"
+          "$ref": "#/$defs/CancellationStage"
         },
         {
           "type": "null"
@@ -21259,6 +21351,17 @@
       "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
     },
     "RequiredNullable4": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ApplicationUnavailableClassV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
+    },
+    "RequiredNullable5": {
       "anyOf": [
         {
           "$ref": "#/$defs/ApplicationExecutionFailureClassV1"

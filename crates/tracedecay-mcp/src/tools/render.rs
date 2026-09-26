@@ -384,7 +384,7 @@ fn run_blocking_handle_store<T>(work: impl FnOnce() -> T) -> T {
 /// The adapter records the full typed error in internal telemetry. Public
 /// output must not disclose project-local filesystem paths.
 fn handle_store_failure_status(error: &TraceDecayError) -> Value {
-    if matches!(error, TraceDecayError::SyncLock { .. }) {
+    if matches!(error, TraceDecayError::LockDeadline { .. }) {
         return serde_json::json!({
             "reason_code": "handle_store_busy",
             "message": "The local response-handle cache stayed busy with other writers past its admission deadline, so no retrieval handle is available.",

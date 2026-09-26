@@ -527,6 +527,7 @@ mod work_product_problem_tests {
                 },
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
+                detail: None,
             }
         );
     }
