@@ -1189,14 +1189,7 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tracedecay_memory_status"
     {
         "memory & session"
-    } else if n == "tracedecay_health"
-        || n == "tracedecay_runtime"
-        || n == "tracedecay_dsm"
-        || n == "tracedecay_test_risk"
-        || n == "tracedecay_test_map"
-        || n == "tracedecay_gini"
-        || n == "tracedecay_dependency_depth"
-    {
+    } else if n == "tracedecay_runtime" {
         "health"
     } else if n == "tracedecay_call_chain"
         || n == "tracedecay_impact"
@@ -1209,10 +1202,7 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tracedecay_find_exact_symbol"
     {
         "graph"
-    } else if n == "tracedecay_diagnose"
-        || n == "tracedecay_diagnostics"
-        || n == "tracedecay_run_affected_tests"
-    {
+    } else if n == "tracedecay_run_affected_tests" {
         "workflow"
     } else if n == "tracedecay_dead_code"
         || n == "tracedecay_unmounted_files"

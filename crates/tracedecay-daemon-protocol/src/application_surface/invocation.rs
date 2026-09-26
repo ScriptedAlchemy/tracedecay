@@ -853,6 +853,13 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::PortStatus
         | ApplicationSurfaceOperation::PortOrder
         | ApplicationSurfaceOperation::Todos
+        | ApplicationSurfaceOperation::TestMap
+        | ApplicationSurfaceOperation::TestRisk
+        | ApplicationSurfaceOperation::Gini
+        | ApplicationSurfaceOperation::DependencyDepth
+        | ApplicationSurfaceOperation::Health
+        | ApplicationSurfaceOperation::Dsm
+        | ApplicationSurfaceOperation::Diagnose
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

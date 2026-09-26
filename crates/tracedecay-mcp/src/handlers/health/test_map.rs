@@ -12,21 +12,16 @@ const MAX_TEST_MAP_IMPACT_SYMBOLS: usize = 20_000;
 const MAX_TEST_MAP_RELATIONS_PER_HOP: usize = 20_000;
 
 #[hotpath::measure(label = "mcp.health.test_risk.total")]
-pub async fn handle_test_risk(
-    response_handle_root: &Path,
+pub async fn compute_test_risk(
     graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(20, |v| v.min(200) as usize);
-    let path_prefix = effective_path(&args, scope_prefix);
-    let include_tested = args
-        .get("include_tested")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+) -> Result<GraphToolCompletionV1> {
+    let request: TestRiskSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_test_risk")?;
+    let limit = request.limit.map_or(20, |v| v.min(200) as usize);
+    let path_prefix = request.path.as_deref().or(scope_prefix);
+    let include_tested = request.include_tested.unwrap_or(false);
 
     let report = hotpath::future!(
         tracedecay_graph_query::test_risk::analyze_test_risk(
@@ -38,30 +33,20 @@ pub async fn handle_test_risk(
         label = "mcp.health.test_risk.graph"
     )
     .await?;
-    let output = hotpath::measure_block!(
-        "mcp.health.test_risk.assemble",
-        serde_json::to_value(report).map_err(|err| TraceDecayError::Config {
-            message: format!("failed to serialize test risk report: {err}")
-        })?
-    );
-
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &output,
-        vec![],
+    Ok(graph_tool_completion(
+        GraphToolResultV1::TestRisk(report),
+        Vec::new(),
     ))
 }
 
 #[hotpath::measure(label = "mcp.health.test_map.total")]
-pub async fn handle_test_map(
-    response_handle_root: &Path,
+pub async fn compute_test_map(
     graph: &VerifiedGraphQuery,
     args: Value,
-    _scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
+) -> Result<GraphToolCompletionV1> {
+    let request: TestMapSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_test_map")?;
     let source_nodes = hotpath::measure_block!("mcp.health.test_map.graph", {
-        match test_map_target(&args)? {
+        match test_map_target(&request)? {
             TestMapTarget::File(file) => {
                 let nodes = graph.symbols_in_logical_file(file, MAX_TEST_MAP_FILE_SYMBOLS + 1)?;
                 if nodes.len() > MAX_TEST_MAP_FILE_SYMBOLS {
@@ -84,10 +69,10 @@ pub async fn handle_test_map(
 
     let test_callers = batched_test_callers(graph, &source_nodes)?;
 
-    let (coverage_map, uncovered, all_test_files) =
+    let (coverage, uncovered, all_test_files) =
         hotpath::measure_block!("mcp.health.test_map.compute", {
-            let mut coverage_map: Vec<Value> = Vec::new();
-            let mut uncovered: Vec<Value> = Vec::new();
+            let mut coverage: Vec<TestMapSourceCoverageV1> = Vec::new();
+            let mut uncovered: Vec<TestMapUncoveredV1> = Vec::new();
             let mut all_test_files: HashSet<String> = HashSet::new();
 
             for node in &source_nodes {
@@ -96,60 +81,54 @@ pub async fn handle_test_map(
                 if !NodeKind::from_str(&metadata.kind).is_some_and(|kind| kind.is_callable_kind()) {
                     continue;
                 }
-                let mut mapped_callers = Vec::new();
+                let mut tests = Vec::new();
                 for (caller, depth) in test_callers.get(&node.occurrence).into_iter().flatten() {
                     let (caller_metadata, caller_file) =
                         tracedecay_graph_query::test_risk::verified_test_symbol_parts(caller)?;
                     all_test_files.insert(caller_file.to_owned());
-                    mapped_callers.push(json!({
-                        "test_name": caller_metadata.simple_name,
-                        "test_file": caller_file,
-                        "test_line": caller_metadata.start_line.saturating_add(1),
-                        "attribution_depth": depth,
-                    }));
+                    tests.push(TestMapTestV1 {
+                        test_name: caller_metadata.simple_name.clone(),
+                        test_file: caller_file.to_owned(),
+                        test_line: caller_metadata.start_line.saturating_add(1),
+                        attribution_depth: *depth,
+                    });
                 }
 
-                if mapped_callers.is_empty() {
-                    uncovered.push(json!({
-                        "id": node.occurrence.as_str(),
-                        "name": metadata.simple_name,
-                        "file": source_file,
-                        "line": metadata.start_line.saturating_add(1),
-                    }));
+                if tests.is_empty() {
+                    uncovered.push(TestMapUncoveredV1 {
+                        id: node.occurrence.as_str().to_owned(),
+                        name: metadata.simple_name.clone(),
+                        file: source_file.to_owned(),
+                        line: metadata.start_line.saturating_add(1),
+                    });
                 } else {
-                    coverage_map.push(json!({
-                        "source_name": metadata.simple_name,
-                        "source_id": node.occurrence.as_str(),
-                        "source_file": source_file,
-                        "source_line": metadata.start_line.saturating_add(1),
-                        "tests": mapped_callers,
-                    }));
+                    coverage.push(TestMapSourceCoverageV1 {
+                        source_name: metadata.simple_name.clone(),
+                        source_id: node.occurrence.as_str().to_owned(),
+                        source_file: source_file.to_owned(),
+                        source_line: metadata.start_line.saturating_add(1),
+                        tests,
+                    });
                 }
             }
-            (coverage_map, uncovered, all_test_files)
+            (coverage, uncovered, all_test_files)
         });
 
-    let output = hotpath::measure_block!("mcp.health.test_map.assemble", {
-        let mut test_file_list: Vec<String> = all_test_files.into_iter().collect();
-        test_file_list.sort();
-        json!({
-            "covered_symbols": coverage_map.len(),
-            "uncovered_symbols": uncovered.len(),
-            "test_files": test_file_list,
-            "coverage": coverage_map,
-            "uncovered": uncovered,
-        })
-    });
-
+    let mut test_files: Vec<String> = all_test_files.into_iter().collect();
+    test_files.sort();
     let touched_files = source_nodes
         .iter()
         .map(tracedecay_graph_query::test_risk::verified_test_symbol_parts)
         .collect::<Result<Vec<_>>>()?;
     let touched_files = unique_file_paths(touched_files.into_iter().map(|(_, file)| file));
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &output,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::TestMap(TestMapResultV1 {
+            covered_symbols: coverage.len() as u64,
+            uncovered_symbols: uncovered.len() as u64,
+            test_files,
+            coverage,
+            uncovered,
+        }),
         touched_files,
     ))
 }
@@ -334,14 +313,10 @@ fn test_map_unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail)
 }
 
-fn test_map_target(args: &Value) -> Result<TestMapTarget<'_>> {
-    if let Some(file) = args.get("file").and_then(Value::as_str) {
+fn test_map_target(request: &TestMapSurfaceRequestV1) -> Result<TestMapTarget<'_>> {
+    if let Some(file) = request.file.as_deref() {
         Ok(TestMapTarget::File(file))
-    } else if let Some(node_id) = args
-        .get("node_id")
-        .or(args.get("id"))
-        .and_then(Value::as_str)
-    {
+    } else if let Some(node_id) = request.node_id.as_deref() {
         Ok(TestMapTarget::NodeId(node_id))
     } else {
         Err(TraceDecayError::Config {
@@ -361,8 +336,8 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::{map_reached_tests, test_map_target, test_map_unavailable};
-    use serde_json::json;
     use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+    use tracedecay_contracts::retrieval::TestMapSurfaceRequestV1;
     use tracedecay_domain::SymbolOccurrenceId;
 
     fn occurrence(value: &str) -> SymbolOccurrenceId {
@@ -379,7 +354,11 @@ mod tests {
 
     #[test]
     fn test_map_requires_file_or_node_id() {
-        let error = test_map_target(&json!({})).expect_err("selector is required");
+        let error = test_map_target(&TestMapSurfaceRequestV1 {
+            file: None,
+            node_id: None,
+        })
+        .expect_err("selector is required");
         assert!(
             error.to_string().contains("file") && error.to_string().contains("node_id"),
             "{error}"

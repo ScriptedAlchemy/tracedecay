@@ -1,13 +1,15 @@
-//! Typed terminals for the graph and port reads whose results are their
-//! catalog result schemas, plus the files they report beside the result.
+//! Typed terminals for the graph-backed reads and reports whose results are
+//! their catalog result schemas, plus the files they report beside the result.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::InvocationAnalyticsV1;
 use crate::retrieval::{
-    ContextResultV1, ImpactResultV1, NodeResultV1, PortOrderResultV1, PortStatusResultV1,
-    RedundancyResultV1, RenamePreviewPrimitiveOutcomeV1, SimilarResultV1, TodosResultV1,
+    ContextResultV1, DependencyDepthResultV1, DiagnoseResultV1, DsmResultV1, GiniResultV1,
+    HealthResultV1, ImpactResultV1, NodeResultV1, PortOrderResultV1, PortStatusResultV1,
+    RedundancyResultV1, RenamePreviewPrimitiveOutcomeV1, SimilarResultV1, TestMapResultV1,
+    TestRiskResultV1, TodosResultV1,
 };
 
 /// One graph read's typed result, tagged by its operation.
@@ -23,6 +25,13 @@ pub enum GraphToolResultV1 {
     PortStatus(PortStatusResultV1),
     PortOrder(PortOrderResultV1),
     Todos(TodosResultV1),
+    TestMap(TestMapResultV1),
+    TestRisk(TestRiskResultV1),
+    Gini(GiniResultV1),
+    DependencyDepth(DependencyDepthResultV1),
+    Health(HealthResultV1),
+    Dsm(DsmResultV1),
+    Diagnose(DiagnoseResultV1),
 }
 
 impl GraphToolResultV1 {
@@ -42,6 +51,13 @@ impl GraphToolResultV1 {
             Operation::PortStatus => Self::PortStatus(serde_json::from_value(value)?),
             Operation::PortOrder => Self::PortOrder(serde_json::from_value(value)?),
             Operation::Todos => Self::Todos(serde_json::from_value(value)?),
+            Operation::TestMap => Self::TestMap(serde_json::from_value(value)?),
+            Operation::TestRisk => Self::TestRisk(serde_json::from_value(value)?),
+            Operation::Gini => Self::Gini(serde_json::from_value(value)?),
+            Operation::DependencyDepth => Self::DependencyDepth(serde_json::from_value(value)?),
+            Operation::Health => Self::Health(serde_json::from_value(value)?),
+            Operation::Dsm => Self::Dsm(serde_json::from_value(value)?),
+            Operation::Diagnose => Self::Diagnose(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -63,6 +79,13 @@ impl GraphToolResultV1 {
             Self::PortStatus(result) => serde_json::to_value(result),
             Self::PortOrder(result) => serde_json::to_value(result),
             Self::Todos(result) => serde_json::to_value(result),
+            Self::TestMap(result) => serde_json::to_value(result),
+            Self::TestRisk(result) => serde_json::to_value(result),
+            Self::Gini(result) => serde_json::to_value(result),
+            Self::DependencyDepth(result) => serde_json::to_value(result),
+            Self::Health(result) => serde_json::to_value(result),
+            Self::Dsm(result) => serde_json::to_value(result),
+            Self::Diagnose(result) => serde_json::to_value(result),
         }
     }
 }

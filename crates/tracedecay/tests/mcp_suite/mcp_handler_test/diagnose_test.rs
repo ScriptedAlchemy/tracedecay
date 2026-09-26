@@ -328,16 +328,14 @@ _No diagnostics._
         .error
         .as_ref()
         .expect("missing cargo_output is a JSON-RPC error");
-    assert_eq!(error.code, -32602);
-    assert_eq!(error.message, "missing required parameter: cargo_output");
+    assert_eq!(error.code, -32603);
     assert_eq!(
-        error.data,
-        Some(json!({
-            "tool": "tracedecay_diagnose",
-            "reason_code": "missing_required_parameter",
-            "retryable": false,
-            "detail": "missing required parameter: cargo_output"
-        }))
+        error.message,
+        "tool execution failed: config error: invalid arguments for tracedecay_diagnose: missing field `cargo_output`"
+    );
+    assert_eq!(
+        error.data.as_ref().map(|data| &data["tool"]),
+        Some(&json!("tracedecay_diagnose"))
     );
 
     fixture.harness.shutdown().await;

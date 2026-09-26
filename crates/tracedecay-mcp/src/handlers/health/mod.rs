@@ -1,26 +1,33 @@
 //! Portable code-health report handlers.
 
-mod dispatch;
 mod dsm;
 mod reports;
 mod runtime;
 mod test_map;
 
-pub use dispatch::dispatch_tool;
-pub use dsm::handle_dsm;
-pub use reports::{handle_dependency_depth, handle_gini, handle_health};
+pub use dsm::{compute_dsm, render_dsm_md};
+pub use reports::{compute_dependency_depth, compute_gini, compute_health};
 pub use runtime::{collect_database_snapshot, handle_runtime};
-pub use test_map::{handle_test_map, handle_test_risk};
+pub use test_map::{compute_test_map, compute_test_risk};
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
-use serde_json::{Value, json};
-
-use crate::tools::render::{self, Md};
-use crate::{
-    ToolResult, effective_path, generic_tool_result, rendered_tool_result, unique_file_paths,
+use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
+    DependencyDepthChainV1, DependencyDepthResultV1, DependencyDepthSurfaceRequestV1, DsmClusterV1,
+    DsmMatrixV1, DsmResultV1, DsmShapeV1, DsmStatsV1, DsmSurfaceRequestV1, GiniMetricV1,
+    GiniOutlierV1, GiniResultV1, GiniScopeV1, GiniSurfaceRequestV1, HealthAcyclicityV1,
+    HealthCoverageDisciplineV1, HealthDepthV1, HealthDimensionsV1, HealthEqualityV1,
+    HealthModularityV1, HealthRedundancyV1, HealthResultV1, HealthSurfaceRequestV1,
+    HealthWeightsV1, TestMapResultV1, TestMapSourceCoverageV1, TestMapSurfaceRequestV1,
+    TestMapTestV1, TestMapUncoveredV1, TestRiskSurfaceRequestV1,
 };
+
+use crate::handlers::graph::graph_tool_completion;
+use crate::handlers::support::decode_primitive_request;
+use crate::tools::render::{self, Md};
+use crate::unique_file_paths;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_graph_query::health::{

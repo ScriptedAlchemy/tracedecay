@@ -1,4 +1,4 @@
-//! Graph and port reads served by the project's graph-tool owner.
+//! Graph-backed reads and reports served by the project's graph-tool owner.
 //!
 //! The owner computes each operation's typed catalog result; every surface
 //! renders it here, so MCP and the CLI print the same tool result.
@@ -15,13 +15,21 @@ use crate::handlers::graph::{
     compute_context, compute_impact, compute_node, compute_redundancy, compute_rename_preview,
     compute_similar, not_found_tool_result, render_context,
 };
+use crate::handlers::health::{
+    compute_dependency_depth, compute_dsm, compute_gini, compute_health, compute_test_map,
+    compute_test_risk, render_dsm_md,
+};
 use crate::handlers::info::{compute_port_order, compute_port_status, compute_todos};
-use crate::handlers::support::{generic_tool_result, unknown_tool_error};
+use crate::handlers::support::{generic_tool_result, rendered_tool_result, unknown_tool_error};
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
+use crate::tools::render;
 use crate::tools::response_trailers::ResponseTrailer;
 use crate::{McpToolContext, ToolResult};
 
 /// Computes one graph-tool operation's typed result on the owner's side.
+///
+/// `tracedecay_diagnose` publishes into the project's own store, so its owner
+/// computes it beside this table.
 pub async fn compute_graph_tool(
     ctx: &McpToolContext<'_>,
     open: &VerifiedGraphOpen<'_>,
@@ -51,6 +59,24 @@ pub async fn compute_graph_tool(
         ApplicationSurfaceOperation::Todos => {
             compute_todos(&open(read("todos")?).await?, args, scope_prefix).await
         }
+        ApplicationSurfaceOperation::TestMap => {
+            compute_test_map(&open(read("health_read")?).await?, args).await
+        }
+        ApplicationSurfaceOperation::TestRisk => {
+            compute_test_risk(&open(read("health_read")?).await?, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Gini => {
+            compute_gini(&open(read("health_read")?).await?, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::DependencyDepth => {
+            compute_dependency_depth(&open(read("health_read")?).await?, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Health => {
+            compute_health(&open(read("health_delta")?).await?, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Dsm => {
+            compute_dsm(&open(read("health_read")?).await?, args, scope_prefix).await
+        }
         operation => Err(unknown_tool_error(operation.mcp_tool_name())),
     }
 }
@@ -77,6 +103,18 @@ pub fn render_graph_tool(
         GraphToolResultV1::Node(NodeResultV1::NotFound(not_found))
         | GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
+        }
+        GraphToolResultV1::Dsm(_) => {
+            let value = result.result_value()?;
+            rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+                render_dsm_md(&value)
+            })
+        }
+        GraphToolResultV1::Diagnose(_) => {
+            let value = result.result_value()?;
+            rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+                render::diagnostics_md(&value)
+            })
         }
         _ => generic_tool_result(
             response_handle_root,

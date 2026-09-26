@@ -19,7 +19,14 @@ use crate::capability_manifest::{
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
+use crate::retrieval::DependencyDepthResultV1;
 use crate::retrieval::callable_code_catalog::CALLABLE_CODE_DEFAULT_PAGE_SIZE;
+use crate::retrieval::graph_report_surface::{
+    DependencyDepthSurfaceRequestV1, DiagnoseResultV1, DiagnoseSurfaceRequestV1, DsmResultV1,
+    DsmSurfaceRequestV1, GiniResultV1, GiniSurfaceRequestV1, HealthResultV1,
+    HealthSurfaceRequestV1, TestMapResultV1, TestMapSurfaceRequestV1, TestRiskResultV1,
+    TestRiskSurfaceRequestV1,
+};
 use crate::retrieval::primitive_surface::{
     ContextResultV1, ContextSurfaceRequestV1, ImpactResultV1, NodeDepthSurfaceRequestV1,
     NodeResultV1, NodeSurfaceRequestV1, PortOrderResultV1, PortOrderSurfaceRequestV1,
@@ -106,6 +113,10 @@ struct PrimitiveReadSpec {
     capability: &'static str,
     use_case: &'static str,
     default_page_size: u32,
+    /// Bounded reads continue through `meta.cursor`; whole-project reports
+    /// answer in one response and advertise no pagination.
+    paginated: bool,
+    deadline_millis: u64,
 }
 
 fn primitive_profile_ids(operation: &str) -> &'static [&'static str] {
@@ -167,6 +178,13 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     primitive_spec("port_status"),
     primitive_spec("port_order"),
     primitive_spec("todos"),
+    graph_report_spec("test_map"),
+    graph_report_spec("test_risk"),
+    graph_report_spec("gini"),
+    graph_report_spec("dependency_depth"),
+    graph_report_spec("health"),
+    graph_report_spec("dsm"),
+    graph_report_spec("diagnose"),
     primitive_spec("session_lookup"),
     primitive_spec("qualified_name"),
     primitive_spec("call_chain"),
@@ -201,7 +219,8 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         // The project's graph-tool owner answers these for the tool surfaces
         // only; their typed results render as the established tool output.
         "context" | "node" | "impact" | "similar" | "redundancy" | "rename_preview"
-        | "port_status" | "port_order" | "todos" => &CLI_MCP_PRIMITIVE_SURFACES,
+        | "port_status" | "port_order" | "todos" | "test_map" | "test_risk" | "gini"
+        | "dependency_depth" | "health" | "dsm" | "diagnose" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -293,6 +312,27 @@ fn primitive_read_description(operation: &str) -> &'static str {
         "diagnostics_read" => {
             "Read retained diagnostics for the current indexed generation, scoped to the workspace or one file. This does not run a compiler or refresh diagnostics; use the project's build or typecheck when fresh post-edit results are required."
         }
+        "test_map" => {
+            "Map a source file's or symbol's callables to the tests that reach them within three call-graph hops. Coverage is static attribution, not executed coverage."
+        }
+        "test_risk" => {
+            "Rank source symbols with weak or no static test attribution by complexity, fan-in, and churn."
+        }
+        "gini" => {
+            "Measure how unevenly a metric (complexity, lines, fan-in, fan-out, or members) is distributed across files or symbols, with the top outliers."
+        }
+        "dependency_depth" => {
+            "Report the longest file-level dependency chains and how far the deepest exceeds the ideal depth."
+        }
+        "health" => {
+            "Score code health (0-10000) as the geometric mean of acyclicity, depth, equality, redundancy, modularity, and coverage discipline."
+        }
+        "dsm" => {
+            "Summarize the file dependency design-structure matrix: density, directory clusters, and optionally the matrix itself."
+        }
+        "diagnose" => {
+            "Map raw cargo, clippy, or rustc diagnostics to the smallest containing graph symbol and its callers, and publish them to the managed diagnostics store."
+        }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
 }
@@ -310,6 +350,22 @@ const fn primitive_spec_with_default_page_size(
         capability: operation,
         use_case: operation,
         default_page_size,
+        paginated: true,
+        deadline_millis: 10_000,
+    }
+}
+
+/// A whole-project graph report. It keeps the two-minute interactive ceiling
+/// these reports have always dispatched under: a report over every file in a
+/// large repository is not a ten-second primitive read.
+const fn graph_report_spec(operation: &'static str) -> PrimitiveReadSpec {
+    PrimitiveReadSpec {
+        operation,
+        capability: operation,
+        use_case: operation,
+        default_page_size: CALLABLE_CODE_DEFAULT_PAGE_SIZE,
+        paginated: false,
+        deadline_millis: 120_000,
     }
 }
 
@@ -440,12 +496,19 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                     CancellationPoint::BeforeRead,
                     CancellationPoint::DuringRead,
                 ])?,
-                deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
-                pagination: Some(PaginationContract::new(
-                    spec.default_page_size,
-                    1_000,
-                    60_000,
-                )?),
+                deadline: DeadlineContract::new(
+                    spec.deadline_millis,
+                    DeadlineBehavior::ReturnOperationReceipt,
+                )?,
+                pagination: if spec.paginated {
+                    Some(PaginationContract::new(
+                        spec.default_page_size,
+                        1_000,
+                        60_000,
+                    )?)
+                } else {
+                    None
+                },
                 inverse: None,
                 authority_revalidation: RevalidationContract::required(vec![
                     RevalidationPoint::Authority,
@@ -595,6 +658,17 @@ fn primitive_executable_schemas(
     );
     add!("port_order", PortOrderSurfaceRequestV1, PortOrderResultV1);
     add!("todos", TodosSurfaceRequestV1, TodosResultV1);
+    add!("test_map", TestMapSurfaceRequestV1, TestMapResultV1);
+    add!("test_risk", TestRiskSurfaceRequestV1, TestRiskResultV1);
+    add!("gini", GiniSurfaceRequestV1, GiniResultV1);
+    add!(
+        "dependency_depth",
+        DependencyDepthSurfaceRequestV1,
+        DependencyDepthResultV1
+    );
+    add!("health", HealthSurfaceRequestV1, HealthResultV1);
+    add!("dsm", DsmSurfaceRequestV1, DsmResultV1);
+    add!("diagnose", DiagnoseSurfaceRequestV1, DiagnoseResultV1);
     Ok(schemas)
 }
 

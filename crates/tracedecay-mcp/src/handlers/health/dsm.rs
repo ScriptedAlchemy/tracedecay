@@ -3,21 +3,15 @@
 use super::*;
 
 #[hotpath::measure(label = "mcp.health.dsm.total")]
-pub async fn handle_dsm(
-    response_handle_root: &Path,
+pub async fn compute_dsm(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let path_prefix = effective_path(&args, scope_prefix);
-    let shape = args
-        .get("shape")
-        .and_then(|v| v.as_str())
-        .unwrap_or("stats");
-    let max_files = args
-        .get("max_files")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(30, |v| v.min(200) as usize);
+) -> Result<GraphToolCompletionV1> {
+    let request: DsmSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_dsm")?;
+    let path_prefix = request.path.as_deref().or(scope_prefix);
+    let shape = request.shape.unwrap_or_default();
+    let max_files = request.max_files.map_or(30, |v| v.min(200) as usize);
 
     let adj = hotpath::future!(
         graph.build_file_adjacency(path_prefix),
@@ -35,17 +29,15 @@ pub async fn handle_dsm(
         };
 
         let cluster_rows = dsm_clusters(&adj);
-        let clusters: Vec<Value> = cluster_rows
+        let clusters: Vec<DsmClusterV1> = cluster_rows
             .iter()
-            .map(|cluster| {
-                json!({
-                    "directory": cluster.directory,
-                    "file_count": cluster.file_count,
-                    "internal_edges": cluster.internal_edges,
-                    "outgoing_edges": cluster.outgoing_edges,
-                    "incoming_edges": cluster.incoming_edges,
-                    "boundary_edges": cluster.boundary_edges(),
-                })
+            .map(|cluster| DsmClusterV1 {
+                directory: cluster.directory.clone(),
+                file_count: cluster.file_count as u64,
+                internal_edges: cluster.internal_edges as u64,
+                outgoing_edges: cluster.outgoing_edges as u64,
+                incoming_edges: cluster.incoming_edges as u64,
+                boundary_edges: cluster.boundary_edges() as u64,
             })
             .collect();
         let largest_cluster = cluster_rows
@@ -53,50 +45,39 @@ pub async fn handle_dsm(
             .map(|cluster| cluster.file_count as u64)
             .max()
             .unwrap_or(0);
-        let stats = json!({
-            "files": file_count,
-            "edges": edge_count,
-            "density": (density * 10000.0).round() / 10000.0,
-            "clusters": cluster_rows.len(),
-            "largest_cluster": largest_cluster,
-        });
+        let stats = DsmStatsV1 {
+            files: file_count as u64,
+            edges: edge_count as u64,
+            density: (density * 10000.0).round() / 10000.0,
+            clusters: cluster_rows.len() as u64,
+            largest_cluster,
+        };
         (clusters, stats)
     });
-    let output = hotpath::measure_block!(
-        "mcp.health.dsm.assemble",
-        match shape {
-            "clusters" => json!({
-                "shape": "clusters",
-                "stats": stats,
-                "clusters": clusters,
-            }),
-            "matrix" => json!({
-                "shape": "matrix",
-                "stats": stats,
-                "clusters": clusters.into_iter().take(10).collect::<Vec<_>>(),
-                "matrix": dsm_matrix(&adj, max_files),
-            }),
-            _ => {
-                clusters.truncate(10);
-                json!({
-                    "shape": "stats",
-                    "stats": stats,
-                    "clusters": clusters,
-                })
-            }
+    let matrix = match shape {
+        DsmShapeV1::Clusters => None,
+        DsmShapeV1::Matrix => {
+            clusters.truncate(10);
+            Some(dsm_matrix(&adj, max_files))
         }
-    );
+        DsmShapeV1::Stats => {
+            clusters.truncate(10);
+            None
+        }
+    };
 
-    Ok(rendered_tool_result(
-        Some(response_handle_root),
-        &args,
-        &output,
-        vec![],
-        || render_dsm_md(&output),
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Dsm(DsmResultV1 {
+            shape,
+            stats,
+            clusters,
+            matrix,
+        }),
+        Vec::new(),
     ))
 }
 
-fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> Value {
+fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> DsmMatrixV1 {
     let mut file_edge_counts: Vec<(String, usize)> = adj
         .iter()
         .map(|(f, targets)| {
@@ -129,14 +110,15 @@ fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> Value
         }
     }
 
-    json!({
-        "files": short_names,
-        "matrix": matrix,
-        "note": format!("Top {} files by edge count shown", n),
-    })
+    DsmMatrixV1 {
+        files: short_names,
+        matrix,
+        note: format!("Top {n} files by edge count shown"),
+    }
 }
 
-fn render_dsm_md(value: &Value) -> String {
+/// Markdown view of a rendered DSM result.
+pub fn render_dsm_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Design Structure Matrix");
     md.field("shape", render::field_str(value, "shape"));

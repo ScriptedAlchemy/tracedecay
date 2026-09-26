@@ -1696,16 +1696,20 @@ async fn test_dsm_reports_authored_file_dependencies() {
         })
     );
 
-    // An unrecognized shape is the stats report, not an empty success.
-    let unknown =
-        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "layers" })).await);
+    // An unrecognized shape is a typed refusal, not a silently substituted
+    // stats report.
+    let unknown = handle_tool_call(
+        &host,
+        "tracedecay_dsm",
+        json!({ "format": "json", "shape": "layers" }),
+        None,
+        None,
+    )
+    .await
+    .expect_err("an unknown DSM shape must be refused");
     assert_eq!(
-        unknown,
-        json!({
-            "shape": "stats",
-            "stats": coupling_stats(),
-            "clusters": coupling_clusters(),
-        })
+        unknown.to_string(),
+        "config error: tracedecay_dsm failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_dsm: unknown variant `layers`, expected one of `stats`, `clusters`, `matrix`"
     );
 
     let matrix =

@@ -3,6 +3,7 @@ mod callable_code_catalog;
 mod callable_code_service;
 pub mod catalog;
 mod git_topology_anchor;
+mod graph_report_surface;
 pub mod grep_analysis;
 mod ports;
 mod primitive_surface;
@@ -85,6 +86,19 @@ pub use git_topology_anchor::{
     GitTopologyAnchorPublication, GitTopologyAnchorPublicationOutcome, GitTopologyAnchorResolution,
     GitTopologyAnchorResolutionOutcome, MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION,
 };
+pub use graph_report_surface::{
+    DependencyDepthSurfaceRequestV1, DiagnoseItemV1, DiagnosePublicationV1, DiagnoseResultV1,
+    DiagnoseSeverityFilterV1, DiagnoseSeverityV1, DiagnoseSurfaceRequestV1, DiagnoseSymbolV1,
+    DsmClusterV1, DsmMatrixV1, DsmResultV1, DsmShapeV1, DsmStatsV1, DsmSurfaceRequestV1,
+    GiniMetricV1, GiniOutlierV1, GiniResultV1, GiniScopeV1, GiniSurfaceRequestV1,
+    HealthAcyclicityV1, HealthCoverageDisciplineV1, HealthDepthV1, HealthDimensionsV1,
+    HealthEqualityV1, HealthModularityV1, HealthRedundancyV1, HealthResultV1,
+    HealthSurfaceRequestV1, HealthWeightsV1, TestAttributionMethodV1, TestMapResultV1,
+    TestMapSourceCoverageV1, TestMapSurfaceRequestV1, TestMapTestV1, TestMapUncoveredV1,
+    TestRiskAttributionSummaryV1, TestRiskBucketSummaryV1, TestRiskConfidenceV1, TestRiskEntryV1,
+    TestRiskResultV1, TestRiskSummaryV1, TestRiskSurfaceRequestV1,
+};
+pub use grep_analysis::{DependencyDepthChainV1, DependencyDepthResultV1};
 pub use ports::{
     AffectedTestsRetrievalPort, OperationalRetrievalPort, RetrievalPortContext,
     RetrievalPortOutcome, SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,

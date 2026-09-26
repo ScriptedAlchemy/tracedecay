@@ -117,7 +117,14 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::RenamePreview
         | ApplicationSurfaceOperation::PortStatus
         | ApplicationSurfaceOperation::PortOrder
-        | ApplicationSurfaceOperation::Todos) => {
+        | ApplicationSurfaceOperation::Todos
+        | ApplicationSurfaceOperation::TestMap
+        | ApplicationSurfaceOperation::TestRisk
+        | ApplicationSurfaceOperation::Gini
+        | ApplicationSurfaceOperation::DependencyDepth
+        | ApplicationSurfaceOperation::Health
+        | ApplicationSurfaceOperation::Dsm
+        | ApplicationSurfaceOperation::Diagnose) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList
