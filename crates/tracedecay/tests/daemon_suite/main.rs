@@ -35,6 +35,8 @@ mod indexing_lifecycle_test;
 mod invocation_observability;
 mod invocation_primitives;
 #[cfg(unix)]
+mod sealed_generation_crash_test;
+#[cfg(unix)]
 mod socket_lifecycle_test;
 #[cfg(unix)]
 mod stale_client_resilience_test;

@@ -29,7 +29,7 @@ use tracedecay_domain::{
     ProjectionOperationV1, ProjectionOutcomeV1, SanitizerRevision,
     canonical_text::encode_tagged_lowercase_hex, sha256_hex_suffix,
 };
-use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, DurableFileBatch};
 
 use crate::code_index::{
     chunks::content_digest,
@@ -521,6 +521,56 @@ pub(super) struct TemporaryEvidencePackV1 {
     published_path: Option<PathBuf>,
 }
 
+/// One seal's new file segments. Each keeps a temporary name until the whole
+/// batch is durable, so a content-addressed segment name always holds its
+/// complete bytes, even across a power loss mid-seal.
+struct StagedGenerationSegmentsV1 {
+    durable: DurableFileBatch,
+    /// Temporary path of every written segment, keyed by its final name.
+    pending: BTreeMap<PathBuf, PathBuf>,
+}
+
+impl StagedGenerationSegmentsV1 {
+    fn open(segments_root: &Path) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
+        Ok(Self {
+            durable: DurableFileBatch::open(segments_root)
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?,
+            pending: BTreeMap::new(),
+        })
+    }
+
+    fn contains(&self, final_path: &Path) -> bool {
+        self.pending.contains_key(final_path)
+    }
+
+    /// Flush every staged segment once, then name each. Returns whether a
+    /// rename happened, which the caller makes durable with one directory
+    /// fsync.
+    fn publish(&mut self) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+        self.durable
+            .sync()
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        while let Some((final_path, temporary)) = self.pending.pop_first() {
+            if let Err(error) = std::fs::rename(&temporary, &final_path) {
+                self.pending.insert(final_path, temporary);
+                return Err(DaemonCodeIndexPublicationStoreV1::unavailable(error));
+            }
+        }
+        Ok(true)
+    }
+}
+
+impl Drop for StagedGenerationSegmentsV1 {
+    fn drop(&mut self) {
+        for temporary in self.pending.values() {
+            let _ = std::fs::remove_file(temporary);
+        }
+    }
+}
+
 struct PinnedGenerationSegmentV1 {
     digest: String,
     size_bytes: u64,
@@ -775,7 +825,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             store_root,
             project_root,
         )?;
-        Self::remove_abandoned_evidence_packs(&segments_root, store_root)
+        Self::remove_abandoned_publication_temporaries(&segments_root, store_root)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(Self {
             cache: Arc::new(DecodedGenerationCacheV1::default()),
@@ -849,7 +899,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         self
     }
 
-    /// The seal encodes and durably writes one segment per file, so a
+    /// The seal encodes and writes one segment per file, so a
     /// generation-sized worktree spends seconds here with no other
     /// cancellation point. Daemon shutdown retires the worktree's shutdown
     /// signal and a retained rebuild's supersession retires its fence;
@@ -928,17 +978,20 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     /// Only this scope's temporaries: the store lock held by the caller proves
     /// no publication of this scope is in flight, and other scopes' are theirs.
-    fn remove_abandoned_evidence_packs(
+    /// A seal killed before its segment flush leaves every segment it wrote
+    /// under a temporary name.
+    fn remove_abandoned_publication_temporaries(
         segments_root: &Path,
         store_root: &Path,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let prefix = format!(
-            ".evidence-pack-publication.{}.",
-            store_root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| Self::unavailable("code-generation store root has no UTF-8 name"))?
-        );
+        let store_name = store_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Self::unavailable("code-generation store root has no UTF-8 name"))?;
+        let prefixes = [
+            format!(".evidence-pack-publication.{store_name}."),
+            format!(".segment-publication.{store_name}."),
+        ];
         let mut removed = false;
         for entry in std::fs::read_dir(segments_root).map_err(Self::unavailable)? {
             let entry = entry.map_err(Self::unavailable)?;
@@ -946,13 +999,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if !name.starts_with(&prefix) || !name.ends_with(".tmp") {
+            if !prefixes
+                .iter()
+                .any(|prefix| name.starts_with(prefix.as_str()))
+                || !name.ends_with(".tmp")
+            {
                 continue;
             }
             let metadata = entry.path().symlink_metadata().map_err(Self::unavailable)?;
             if !metadata.file_type().is_file() {
                 return Err(Self::unavailable(
-                    "sealed evidence pack temporary path is not a regular file",
+                    "sealed publication temporary path is not a regular file",
                 ));
             }
             std::fs::remove_file(entry.path()).map_err(Self::unavailable)?;
@@ -980,20 +1037,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
         file.sync_all().map_err(Self::unavailable)
     }
 
-    /// Writes a sealed segment durably, deferring the containing-directory
-    /// fsync to the caller so a multi-segment publish batch pays for one
-    /// directory sync instead of one per segment (each segment file is
-    /// still fsynced before its rename, so per-file durability is
-    /// unaffected). Returns `true` if a new segment file was written and
-    /// renamed into place (requiring the caller to sync the directory
-    /// afterward), or `false` if an already-durable, verified segment was
-    /// found in place (no rename occurred, so no directory sync is owed).
+    /// Writes one new sealed segment under a temporary name in `staged`, or
+    /// verifies the already-named segment with its content address. A new
+    /// segment takes its name only when [`StagedGenerationSegmentsV1::publish`]
+    /// has made the whole seal's segments durable.
     #[hotpath::measure(label = "code_index.generation.publish.segment")]
-    fn publish_segment_durable(
+    fn stage_segment(
         &self,
         digest: &ManifestDigest,
         bytes: &[u8],
-    ) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
+        staged: &mut StagedGenerationSegmentsV1,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let digest_hex = sha256_hex_suffix(digest.as_str())
             .ok_or_else(|| Self::unavailable("sealed segment digest is not sha256"))?;
         let expected_digest = digest.as_str();
@@ -1017,10 +1071,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         "existing sealed segment does not match its content address",
                     ));
                 }
-                return Ok(false);
+                return Ok(());
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(Self::unavailable(error)),
+        }
+        if staged.contains(&final_path) {
+            return Ok(());
         }
         let temporary_path = self.segments_root.join(format!(
             ".segment-publication.{}.{}.tmp",
@@ -1038,9 +1095,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(Self::unavailable(error)),
         }
-        Self::write_durable(&temporary_path, bytes)?;
-        std::fs::rename(&temporary_path, &final_path).map_err(Self::unavailable)?;
-        Ok(true)
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary_path)
+            .map_err(Self::unavailable)?;
+        staged.pending.insert(final_path, temporary_path);
+        let mut file = hotpath::io!(file, label = "code_index.generation.sealing.io");
+        file.write_all(bytes).map_err(Self::unavailable)?;
+        staged.durable.written(&file).map_err(Self::unavailable)
     }
 
     fn state_digest_file(path: &Path) -> Result<String, CodeIndexPublicationStoreErrorV1> {
@@ -2419,8 +2482,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             self.segment_temporary_prefix
         ));
         let mut evidence_pack = TemporaryEvidencePackV1::create(evidence_temporary_path)?;
+        let mut staged_segments = StagedGenerationSegmentsV1::open(&self.segments_root)?;
         let mut referenced_segment_bytes = 0_u64;
-        let mut wrote_new_file_segment = false;
         self.seal_encoded_segment_bytes.store(0, Ordering::Relaxed);
         self.seal_existing_segment_bytes_read
             .store(0, Ordering::Relaxed);
@@ -2440,15 +2503,13 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                                     "sealed segment length exceeds u64".to_owned(),
                                 )
                             })?;
-                            if hotpath::measure_block!(
+                            hotpath::measure_block!(
                                 "code_index.generation.publish.segment_durable",
-                                self.publish_segment_durable(digest, bytes)
+                                self.stage_segment(digest, bytes, &mut staged_segments)
                             )
                             .map_err(|error| {
                                 CodeIndexProductionErrorV1::Contract(error.to_string())
-                            })? {
-                                wrote_new_file_segment = true;
-                            }
+                            })?;
                             #[cfg(test)]
                             if let Some(observer) = self.seal_segment_observer.as_ref() {
                                 observer();
@@ -2514,13 +2575,21 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 return Err(Self::unavailable(error));
             }
         };
-        // All newly written segment files for this publish were fsynced
-        // and renamed above; POSIX only requires a single directory fsync
-        // to make those renames durable, so batch it here rather than
-        // syncing once per segment inside `publish_segment_durable`.
-        // The manifest and active pointer must remain unpublished until this
-        // succeeds: a crash before it may discard any of the segment renames.
-        if wrote_new_file_segment {
+        // The seal's new segments become durable in one flush, take their
+        // names, and one directory fsync makes the renames durable. The
+        // manifest and active pointer stay unpublished until both succeed.
+        let named_new_segments = hotpath::measure_block!(
+            "code_index.generation.publish.segments_flush",
+            staged_segments.publish()
+        );
+        let named_new_segments = match named_new_segments {
+            Ok(named) => named,
+            Err(error) => {
+                evidence_pack.rollback_unattached(&self.segments_root)?;
+                return Err(error);
+            }
+        };
+        if named_new_segments {
             hotpath::measure_block!(
                 "code_index.generation.publish.segments_dir_sync",
                 Self::sync_directory(&self.segments_root)
