@@ -95,10 +95,14 @@ pub struct AdmittedDoctorNetworkProbes {
 /// Runs a comprehensive health check of the tracedecay installation.
 #[hotpath::measure(label = "doctor.run", future = true)]
 pub async fn run_doctor(
+    profile_root: &std::path::Path,
     network: AdmittedDoctorNetworkProbes,
 ) -> tracedecay_domain::errors::Result<()> {
     let _lifecycle_lease =
-        match tracedecay_runtime_core::lifecycle_lease::acquire_shared_or_inherited("doctor") {
+        match tracedecay_runtime_core::lifecycle_lease::acquire_shared_or_inherited(
+            profile_root,
+            "doctor",
+        ) {
             Ok(lease) => lease,
             Err(error) => {
                 eprintln!("tracedecay doctor could not start: {error}");

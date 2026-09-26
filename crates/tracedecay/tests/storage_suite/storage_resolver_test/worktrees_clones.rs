@@ -182,8 +182,9 @@ async fn linked_worktree_refuses_retired_local_enrollment_until_reset() {
         "{refused:?}"
     );
 
-    let retired = tracedecay_runtime_core::storage::retired_checkout_layout_dir(&worktree)
-        .expect("the refused layout is the one the reset deletes");
+    let retired =
+        tracedecay_runtime_core::storage::retired_checkout_layout_dir(&profile_root, &worktree)
+            .expect("the refused layout is the one the reset deletes");
     fs::remove_dir_all(retired).unwrap();
     let layout = TraceDecay::resolve_store_layout_for_identity_with_options(&worktree, &options)
         .await

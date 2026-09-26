@@ -77,8 +77,8 @@ impl TraceDecay {
         allow_default_identity: bool,
         adoption: &MovedStoreAdoption,
     ) -> Result<StoreLayout> {
-        storage::refuse_retired_checkout_layout(project_root)?;
         let profile_root = open_options.resolved_profile_root()?;
+        storage::refuse_retired_checkout_layout(&profile_root, project_root)?;
         let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
         // Every linked worktree resolves through its repository, attached or
         // not; suppressing this for detached worktrees dropped them onto the

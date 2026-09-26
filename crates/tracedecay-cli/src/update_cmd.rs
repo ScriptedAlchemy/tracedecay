@@ -470,6 +470,7 @@ pub(crate) async fn run_post_update_command(
     if let Some(token) = lifecycle_lease_token {
         let lifecycle_lease =
             tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_or_inherited(
+                &tracedecay_runtime_core::storage::default_profile_root()?,
                 "post-update",
                 Some(token),
             )?;

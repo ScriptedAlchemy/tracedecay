@@ -654,7 +654,11 @@ pub(crate) async fn handle_sync(
         ),
     }
     if doctor {
-        tracedecay::doctor::run_doctor(crate::cloud::doctor_network_probes()).await?;
+        tracedecay::doctor::run_doctor(
+            &tracedecay_runtime_core::storage::default_profile_root()?,
+            crate::cloud::doctor_network_probes(),
+        )
+        .await?;
     }
     Ok(())
 }
