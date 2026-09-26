@@ -20,7 +20,7 @@ use tracedecay_contracts::retrieval::grep_analysis::{
 use tracedecay_contracts::retrieval::{
     AffectedFileTestsPrimitiveResultV1, HealthDeltaRequest, HealthDeltaResult,
     OperationalRetrievalPort, PrimitiveFailureKind, PrimitiveInvocation, PrimitiveRequest,
-    RetrievalPortContext, RetrievalPortOutcome, SessionRetrievalBudgetStageV1,
+    PrimitiveSupportGap, RetrievalPortContext, RetrievalPortOutcome, SessionRetrievalBudgetStageV1,
     SessionRetrievalStructuralRefusalV1, SourceReadPortContext, SourceReadPortOutcome,
     SourceReadPrimitivePort, SourceRetrievalPort, SymbolGraphItem, SymbolGraphPage,
     SymbolGraphPortContext, SymbolGraphPortOutcome, SymbolGraphPrimitivePort,
@@ -1362,7 +1362,11 @@ fn symbol_page<T: Serialize + SymbolGraphItem>(
     let total = page.total;
     let continuation = page.next_cursor.clone();
     let temporal = symbol_temporal_state(&page, finished_at);
-    let unsupported = !page.support_gaps.is_empty();
+    let gap_omissions = page
+        .support_gaps
+        .iter()
+        .map(PrimitiveSupportGap::omission_reason)
+        .collect::<BTreeSet<_>>();
     let touched_files = page.touched_files();
     let payload = value_or_problem!(serde_json::to_value(page), context, operation);
     let mut result = evidence_result(
@@ -1392,16 +1396,17 @@ fn symbol_page<T: Serialize + SymbolGraphItem>(
         envelope.touched_files = touched_files;
         envelope.cost = cost;
     }
-    if unsupported
-        && let Ok(envelope) = &mut result
+    if let Ok(envelope) = &mut result
         && let ApplicationOutcome::Evidence(packet) = &mut envelope.outcome
     {
-        // Unsupported coverage is one capability omission, not an estimate of missing symbols.
-        packet.omissions.push(Omission {
-            domain,
-            count: 1,
-            reason: OmissionReason::Unsupported,
-        });
+        // Each gap kind is one capability omission, not an estimate of missing symbols.
+        packet
+            .omissions
+            .extend(gap_omissions.into_iter().map(|reason| Omission {
+                domain,
+                count: 1,
+                reason,
+            }));
     }
     Ok(result)
 }

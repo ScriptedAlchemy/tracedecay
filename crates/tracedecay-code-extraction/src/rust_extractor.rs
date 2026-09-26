@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use tree_sitter::{Node as TsNode, Tree};
+use tree_sitter::{Node as TsNode, Parser, Range, Tree};
 
 use crate::common::local_node_id;
 use crate::complexity::{RUST_COMPLEXITY, count_complexity};
@@ -143,6 +143,32 @@ struct ExtractionState<'s> {
     file_path: String,
     source: &'s [u8],
     timestamp: u64,
+    /// Created on the first item-position macro body; most files have none.
+    macro_body_parser: Option<Parser>,
+}
+
+/// What an item-position macro's delimited body holds once re-parsed.
+enum MacroItemBody {
+    Empty,
+    Items(Tree),
+    Unparsed,
+}
+
+/// Whether a top-level Rust node is an item (or trivia) rather than an
+/// expression or statement, so a macro body of only these is a plain item
+/// list.
+fn is_rust_item_kind(kind: &str) -> bool {
+    kind.ends_with("_item")
+        || matches!(
+            kind,
+            "use_declaration"
+                | "extern_crate_declaration"
+                | "macro_invocation"
+                | "macro_definition"
+                | "line_comment"
+                | "block_comment"
+                | "empty_statement"
+        )
 }
 
 impl<'s> ExtractionState<'s> {
@@ -159,6 +185,7 @@ impl<'s> ExtractionState<'s> {
             file_path: file_path.to_string(),
             source: source.as_bytes(),
             timestamp,
+            macro_body_parser: None,
         }
     }
 
@@ -199,7 +226,7 @@ impl RustExtractor {
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
-        state.root_modules = Self::root_module_names(&state, tree.root_node());
+        state.root_modules = Self::root_module_names(&mut state, tree.root_node());
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -1012,26 +1039,51 @@ impl RustExtractor {
         state.root_modules.get(module).map(String::as_str)
     }
 
+    /// Modules declared at the file root, including those inside root-level
+    /// macro item bodies (`cfg_rt! { mod builder; }`).
     fn root_module_names(
-        state: &ExtractionState<'_>,
+        state: &mut ExtractionState<'_>,
         root: TsNode<'_>,
     ) -> BTreeMap<String, String> {
-        let mut cursor = root.walk();
-        root.named_children(&mut cursor)
-            .filter(|child| child.kind() == "mod_item")
-            .filter_map(|child| {
-                let name = child.child_by_field_name("name")?;
-                let name = state.node_text(name).to_owned();
-                let id = local_node_id(
-                    &state.file_path,
-                    state.source,
-                    &NodeKind::Module,
-                    &name,
-                    child,
-                );
-                Some((name, id))
-            })
-            .collect()
+        let mut modules = BTreeMap::new();
+        Self::collect_module_names(state, root, &mut modules);
+        modules
+    }
+
+    fn collect_module_names(
+        state: &mut ExtractionState<'_>,
+        container: TsNode<'_>,
+        modules: &mut BTreeMap<String, String>,
+    ) {
+        let mut cursor = container.walk();
+        let children = container.named_children(&mut cursor).collect::<Vec<_>>();
+        for child in children {
+            match child.kind() {
+                "mod_item" => {
+                    let Some(name) = child.child_by_field_name("name") else {
+                        continue;
+                    };
+                    let name = state.node_text(name).to_owned();
+                    let id = local_node_id(
+                        &state.file_path,
+                        state.source,
+                        &NodeKind::Module,
+                        &name,
+                        child,
+                    );
+                    modules.insert(name, id);
+                }
+                "macro_invocation" => {
+                    let Some(body) = find_direct_child_by_kind(child, "token_tree") else {
+                        continue;
+                    };
+                    if let MacroItemBody::Items(tree) = Self::parse_macro_item_body(state, body) {
+                        Self::collect_module_names(state, tree.root_node(), modules);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Extract a const item node.
@@ -1272,7 +1324,11 @@ impl RustExtractor {
         state.node_stack.pop();
     }
 
-    /// Record a macro invocation as an unresolved call reference.
+    /// Record an item-position macro invocation as an unresolved call
+    /// reference, then extract its body: a body that is a clean item list
+    /// (`cfg_rt! { pub mod runtime; }`) contributes its items to the enclosing
+    /// scope as if unwrapped; any other body becomes an unexpanded `name!`
+    /// macro node that owns the calls written inside it.
     fn visit_macro_invocation(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let macro_name = node.child_by_field_name("macro").map_or_else(
             || {
@@ -1288,13 +1344,136 @@ impl RustExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: parent_id.to_string(),
-                reference_name: macro_name,
+                reference_name: macro_name.clone(),
                 reference_kind: EdgeKind::Calls,
                 line: start_line,
                 column: start_column,
                 file_path: state.file_path.clone(),
             });
         }
+        let Some(body) = find_direct_child_by_kind(node, "token_tree") else {
+            return;
+        };
+        match Self::parse_macro_item_body(state, body) {
+            MacroItemBody::Empty => {}
+            MacroItemBody::Items(tree) => Self::visit_children(state, tree.root_node()),
+            MacroItemBody::Unparsed => {
+                Self::visit_unparsed_macro_body(state, node, body, &macro_name);
+            }
+        }
+    }
+
+    /// Re-parse the inside of an item-position macro's delimited body at its
+    /// original source positions, so node ids, spans, and text of the items
+    /// found there are exactly those of the enclosing file.
+    fn parse_macro_item_body(state: &mut ExtractionState<'_>, body: TsNode<'_>) -> MacroItemBody {
+        let last = u32::try_from(body.child_count())
+            .ok()
+            .and_then(|count| count.checked_sub(1));
+        let (Some(open), Some(close)) = (body.child(0), last.and_then(|index| body.child(index)))
+        else {
+            return MacroItemBody::Unparsed;
+        };
+        if open.id() == close.id() {
+            return MacroItemBody::Unparsed;
+        }
+        if open.end_byte() >= close.start_byte() {
+            return MacroItemBody::Empty;
+        }
+        if state.macro_body_parser.is_none() {
+            let mut parser = Parser::new();
+            if parser
+                .set_language(&crate::ts_provider::rust_grammar::LANGUAGE.into())
+                .is_err()
+            {
+                return MacroItemBody::Unparsed;
+            }
+            state.macro_body_parser = Some(parser);
+        }
+        let Some(parser) = state.macro_body_parser.as_mut() else {
+            return MacroItemBody::Unparsed;
+        };
+        let range = Range {
+            start_byte: open.end_byte(),
+            end_byte: close.start_byte(),
+            start_point: open.end_position(),
+            end_point: close.start_position(),
+        };
+        if parser.set_included_ranges(&[range]).is_err() {
+            return MacroItemBody::Unparsed;
+        }
+        let Some(tree) = parser.parse(state.source, None) else {
+            return MacroItemBody::Unparsed;
+        };
+        let items_only = {
+            let root = tree.root_node();
+            let mut cursor = root.walk();
+            !root.has_error()
+                && root
+                    .named_children(&mut cursor)
+                    .all(|child| is_rust_item_kind(child.kind()))
+        };
+        if items_only {
+            MacroItemBody::Items(tree)
+        } else {
+            MacroItemBody::Unparsed
+        }
+    }
+
+    /// A body that is not an item list has no syntax the extractor can model
+    /// until the macro expands. The invocation becomes a `name!` macro node so
+    /// calls written in it remain attributed evidence, and readers can
+    /// disclose that the expansion itself is not covered.
+    fn visit_unparsed_macro_body(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        body: TsNode<'_>,
+        macro_name: &str,
+    ) {
+        let name = format!("{macro_name}!");
+        let start_line = node.start_position().row as u32;
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::MacroInvocation,
+            &name,
+            node,
+        );
+        state.nodes.push(Node {
+            id: id.clone(),
+            kind: NodeKind::MacroInvocation,
+            name: name.clone(),
+            qualified_name: format!("{}::{name}", state.qualified_prefix()),
+            file_path: state.file_path.clone(),
+            start_line,
+            attrs_start_line: Self::compute_attrs_start_line(node),
+            end_line: node.end_position().row as u32,
+            start_column: node.start_position().column as u32,
+            end_column: node.end_position().column as u32,
+            signature: Some(name),
+            docstring: None,
+            visibility: Visibility::Private,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            updated_at: state.timestamp,
+            parent_id: None,
+        });
+        if let Some(parent_id) = state.parent_node_id() {
+            state.edges.push(Edge {
+                source: parent_id.to_string(),
+                target: id.clone(),
+                kind: EdgeKind::Contains,
+                line: Some(start_line),
+            });
+        }
+        Self::extract_calls_in_token_tree(state, body, &id);
     }
 
     /// Extract the name of a node by looking for a "name" field child.

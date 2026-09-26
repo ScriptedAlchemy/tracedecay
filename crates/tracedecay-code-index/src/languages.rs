@@ -219,6 +219,11 @@ impl StaticLanguageRegistry {
             // callee. Only re-extraction removes the poisoned record. Rust v13
             // retains unresolved receiver-call evidence at the parser's member
             // token; re-extracting Rust does not perturb other languages' rows.
+            // Rust v14 extracts the items of item-position macro bodies that
+            // parse as item lists (`cfg_rt! { ... }`), records other bodies as
+            // unexpanded `name!` macro nodes, binds calls to every `#[cfg]`
+            // variant of one definition, and retains qualified calls through a
+            // declared module whose name is also a blocklisted std name.
             // TypeScript v7 records `export … from` forwarding as public
             // import evidence and retains explicitly imported ubiquitous names
             // as cross-file candidates, so barrels and workspace packages bind.
@@ -233,7 +238,7 @@ impl StaticLanguageRegistry {
             // comments and `///` lost its stray `/`; QBasic dialects moved when
             // CONST names stopped losing their text before an underscore.
             let extractor_revision = match language.as_str() {
-                "rust" => 13,
+                "rust" => 14,
                 "typescript" => 9,
                 "protobuf" => 7,
                 "sql" => 6,
@@ -438,7 +443,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v13");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v14");
 
         assert_eq!(
             registry

@@ -616,19 +616,19 @@ where
             resolved_references.insert(cache_key, resolved.clone());
             resolved
         };
-        let Some((target_index, target)) = resolved else {
+        let Some((target_index, targets)) = resolved else {
             continue;
         };
         if target_index == index {
             continue;
         }
-        edges.push(CanonicalRelationEdgeV1 {
+        edges.extend(targets.into_iter().map(|target| CanonicalRelationEdgeV1 {
             from_occurrence: reference.from_occurrence.clone(),
             to_occurrence: target,
             kind: reference.kind,
             authority: EdgeAuthorityV1::NameResolved,
             evidence_span: reference.evidence_span,
-        });
+        }));
     }
     edges
 }
@@ -644,7 +644,7 @@ pub(super) fn take_seal_reference_resolutions() -> usize {
 }
 
 type ResolvedReferenceCacheV1<'a> =
-    HashMap<(usize, &'a str, RelationEdgeKindV1), Option<(usize, SymbolOccurrenceId)>>;
+    HashMap<(usize, &'a str, RelationEdgeKindV1), Option<(usize, Vec<SymbolOccurrenceId>)>>;
 
 fn resolve_cross_file_reference<T>(
     files: &[T],
@@ -653,7 +653,7 @@ fn resolve_cross_file_reference<T>(
     typescript_modules: &TypeScriptModuleIndexV1,
     index: usize,
     reference: &CodeIndexUnresolvedReferenceV1,
-) -> Option<(usize, SymbolOccurrenceId)>
+) -> Option<(usize, Vec<SymbolOccurrenceId>)>
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
@@ -680,7 +680,7 @@ where
     {
         return match outcome {
             ImportBindingOutcomeV1::Bound(target_index, symbol) if target_index != index => {
-                Some((target_index, symbol.occurrence.clone()))
+                Some((target_index, vec![symbol.occurrence.clone()]))
             }
             ImportBindingOutcomeV1::Bound(..)
             | ImportBindingOutcomeV1::External
@@ -700,11 +700,17 @@ where
         .and_then(|binding| binding.imported_name.as_deref())
         .or_else(|| reference.reference_name.rsplit("::").next())
         .unwrap_or(reference.reference_name.as_str());
+    let is_rust = file.extraction.language.as_str() == "rust";
+    let owner_attested = qualified
+        && is_rust
+        && (CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name)
+            || cross_file_reference_name_is_blocklisted(&reference.reference_name, false))
+        && rust_qualified_owner_is_project_attested(rust, file, &reference.reference_name);
     // Retention already narrows names, but carried artifacts outlive policy
     // revisions; apply the current blocklist to every retained reference.
     if simple_name.is_empty()
         || (import.is_some() && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name))
-        || cross_file_reference_name_is_blocklisted(&reference.reference_name)
+        || cross_file_reference_name_is_blocklisted(&reference.reference_name, owner_attested)
     {
         return None;
     }
@@ -721,14 +727,13 @@ where
     }
     let source_path = &file.authority.logical_path;
     let crate_qualified = reference.reference_name.strip_prefix("crate::");
-    let is_rust = file.extraction.language.as_str() == "rust";
     // A blocklisted member (`new`, `read`, `spawn`) is exempt from the
     // blocklist only behind an owner this file attests as project code;
     // `fs::read` through `use std::fs` keeps the member's verdict.
     if qualified
         && is_rust
         && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name)
-        && !rust_qualified_owner_is_project_attested(rust, file, &reference.reference_name)
+        && !owner_attested
     {
         return None;
     }
@@ -817,6 +822,18 @@ where
     let compatible = match compatible.as_slice() {
         [] => return None,
         [_] => compatible,
+        // `#[cfg]` variants of one Rust definition: one file, one qualified
+        // name, one kind. The call binds that identity at every site.
+        [(first_index, first), rest @ ..]
+            if is_rust
+                && rest.iter().all(|(index, symbol)| {
+                    index == first_index
+                        && symbol.qualified_name == first.qualified_name
+                        && symbol.kind == first.kind
+                }) =>
+        {
+            compatible
+        }
         many => {
             let inherent = many
                 .iter()
@@ -831,11 +848,17 @@ where
             }
         }
     };
-    let (first_index, target) = compatible.into_iter().next()?;
-    if *first_index == index {
+    let (target_index, _) = compatible.first()?;
+    if *target_index == index {
         return None;
     }
-    Some((*first_index, target.occurrence.clone()))
+    Some((
+        *target_index,
+        compatible
+            .iter()
+            .map(|(_, symbol)| symbol.occurrence.clone())
+            .collect(),
+    ))
 }
 
 fn unique_import<'a>(

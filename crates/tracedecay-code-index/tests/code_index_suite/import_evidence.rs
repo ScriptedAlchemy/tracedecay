@@ -1111,3 +1111,119 @@ fn sealed_import_generation_rejects_wrong_file_path_and_span_after_segment_readd
         rows[0]["span"]["end_byte"] = Value::from(FIRST_SOURCE.len() as u64 + 1);
     });
 }
+
+/// starship@cc825b00 `src/modules/mod.rs::handle`: `container::module` has one
+/// `#[cfg]` variant per target, and `status::module` goes through the file's
+/// own `mod status;` although `status` is also a blocklisted std name and a
+/// second `status` module exists under `configs`.
+#[test]
+fn rust_calls_bind_every_cfg_variant_and_declared_modules_named_like_std() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.starship.main",
+            "src/main.rs",
+            "mod configs;\nmod modules;\n",
+        ),
+        (
+            "file.starship.configs",
+            "src/configs/mod.rs",
+            "pub mod status;\n",
+        ),
+        (
+            "file.starship.configs-status",
+            "src/configs/status.rs",
+            "pub struct StatusConfig;\n",
+        ),
+        (
+            "file.starship.modules",
+            "src/modules/mod.rs",
+            "mod aws;\nmod container;\nmod status;\n\npub fn handle() -> u32 {\n    \
+             aws::module() + container::module() + status::module()\n}\n",
+        ),
+        (
+            "file.starship.aws",
+            "src/modules/aws.rs",
+            "pub fn module() -> u32 { 1 }\n",
+        ),
+        (
+            "file.starship.container",
+            "src/modules/container.rs",
+            "#[cfg(not(target_os = \"linux\"))]\npub fn module() -> u32 { 0 }\n\n\
+             #[cfg(target_os = \"linux\")]\npub fn module() -> u32 { 2 }\n",
+        ),
+        (
+            "file.starship.status",
+            "src/modules/status.rs",
+            "pub fn module() -> u32 { 3 }\n",
+        ),
+    ]);
+    let handle = symbol_occurrence(&generation, "src/modules/mod.rs::handle");
+    let by_occurrence = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| (&symbol.occurrence, symbol))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut callees = generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.from_occurrence == handle && edge.kind == RelationEdgeKindV1::Calls)
+        .map(|edge| {
+            let symbol = by_occurrence[&edge.to_occurrence];
+            (symbol.qualified_name.as_str(), symbol.start_line)
+        })
+        .collect::<Vec<_>>();
+    callees.sort();
+    assert_eq!(
+        callees,
+        vec![
+            ("src/modules/aws.rs::module", 0),
+            ("src/modules/container.rs::module", 1),
+            ("src/modules/container.rs::module", 4),
+            ("src/modules/status.rs::module", 0),
+        ],
+        "handle calls three module identities; the cfg-duplicated one binds at both sites"
+    );
+}
+
+/// tokio declares modules inside `cfg_rt! { ... }` item lists; a function in
+/// such a module is a symbol whose same-file and cross-file callers resolve.
+#[test]
+fn rust_items_inside_item_list_macros_are_symbols_with_resolved_callers() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.cfg-rt.lib",
+            "src/lib.rs",
+            "cfg_rt! { pub mod foo { pub fn bar() {} } }\n\
+             mod user;\n\
+             pub fn local() { foo::bar(); }\n",
+        ),
+        (
+            "file.cfg-rt.user",
+            "src/user.rs",
+            "pub fn remote() { crate::foo::bar(); }\n",
+        ),
+    ]);
+    let bar = symbol_occurrence(&generation, "src/lib.rs::foo::bar");
+    let mut callers = generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.to_occurrence == bar && edge.kind == RelationEdgeKindV1::Calls)
+        .map(|edge| {
+            generation
+                .symbols()
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence == edge.from_occurrence)
+                .map(|symbol| (symbol.qualified_name.as_str(), edge.authority))
+        })
+        .collect::<Vec<_>>();
+    callers.sort_by_key(|caller| caller.as_ref().map(|(name, _)| *name));
+    assert_eq!(
+        callers,
+        vec![
+            Some(("src/lib.rs::local", EdgeAuthorityV1::SyntaxExact)),
+            Some(("src/user.rs::remote", EdgeAuthorityV1::NameResolved)),
+        ]
+    );
+}

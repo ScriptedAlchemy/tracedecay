@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -573,7 +573,7 @@ where
                     Ok(records) => records,
                     Err(()) => return failed(context, "caller traversal failed"),
                 };
-                let gaps = if unsupported {
+                let mut gaps = if unsupported {
                     // Unresolved Rust receiver calls and TypeScript imports the
                     // seal could not bind share one disclosure; the gap is the
                     // call site, not a language.
@@ -586,6 +586,17 @@ where
                 } else {
                     Vec::new()
                 };
+                // A caller inside an unexpanded macro body is syntactic
+                // evidence only; what the expansion calls is not covered.
+                gaps.extend(
+                    records
+                        .iter()
+                        .filter(|record| record.symbol.kind == NodeKind::MacroInvocation.as_str())
+                        .map(|record| record.symbol.name.as_str())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .map(PrimitiveSupportGap::macro_body_unparsed),
+                );
                 complete_or_failed(
                     &self.cursors,
                     context,

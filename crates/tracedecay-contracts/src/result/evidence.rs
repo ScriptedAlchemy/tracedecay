@@ -345,6 +345,9 @@ pub enum OmissionReason {
     Cancelled,
     TimedOut,
     Conflict,
+    /// Evidence came from a macro body that was not expanded, so what the
+    /// expansion defines or calls is not covered.
+    MacroBodyUnparsed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
