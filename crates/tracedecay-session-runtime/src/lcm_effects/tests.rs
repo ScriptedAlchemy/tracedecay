@@ -1574,6 +1574,35 @@ async fn active_projection_frontier(db: &RegisteredGlobalDb, session_id: &str) -
         .map(|row| row.get::<i64>(0).unwrap())
 }
 
+/// An explicit refresh request shaped like the session refresh service's:
+/// bound to the caller's view of the frontier through its refresh key.
+fn explicit_refresh_request(
+    session: &SessionId,
+    observed_through: u64,
+    committed_through: u64,
+) -> tracedecay_store::SessionRefreshBeginOrJoinRequestV1 {
+    let source_id =
+        tracedecay_domain::SessionSourceIdV1::new(format!("{}:cursor", session.as_str())).unwrap();
+    let frontier = tracedecay_domain::SessionSourceFrontierV1::new(observed_through);
+    let refresh_key = tracedecay_domain::SessionRefreshKeyV1::new(
+        "root.lcm-effects",
+        session.clone(),
+        vec![
+            tracedecay_domain::SessionRefreshSourceTargetV1::new(source_id, frontier, frontier)
+                .unwrap(),
+        ],
+        "session-refresh-projector.fixture.v1",
+        format!("sha256:{committed_through:064x}"),
+    )
+    .unwrap();
+    tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+        session.clone(),
+        tracedecay_store::SessionRefreshFrontierV1::new(observed_through, committed_through)
+            .unwrap(),
+    )
+    .with_refresh_key(refresh_key)
+}
+
 async fn eventually<F, Fut>(what: &str, mut ready: F)
 where
     F: FnMut() -> Fut,
@@ -1677,12 +1706,7 @@ fn refresh_begins_at_the_committed_frontier_after_background_summaries_publish()
         let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db.as_ref());
         let session = SessionId::new(session_id).unwrap();
         let begun = store
-            .begin_or_join_session_refresh(
-                tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
-                    session.clone(),
-                    tracedecay_store::SessionRefreshFrontierV1::new(8, 0).unwrap(),
-                ),
-            )
+            .begin_or_join_session_refresh(explicit_refresh_request(&session, 8, 0))
             .await
             .unwrap();
         assert_eq!(
@@ -1696,12 +1720,7 @@ fn refresh_begins_at_the_committed_frontier_after_background_summaries_publish()
         // A window the store already moved past is a stale request, not an
         // unavailable store.
         let stale = store
-            .begin_or_join_session_refresh(
-                tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
-                    session.clone(),
-                    tracedecay_store::SessionRefreshFrontierV1::new(7, 0).unwrap(),
-                ),
-            )
+            .begin_or_join_session_refresh(explicit_refresh_request(&session, 7, 0))
             .await;
         assert!(
             matches!(
