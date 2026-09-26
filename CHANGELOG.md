@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.55](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.54...v1.0.0-beta.55) (2026-09-26)
+
+
+### Features
+
+* **code-graph:** release idle serving graph engines ([#2196](https://github.com/ScriptedAlchemy/tracedecay/issues/2196)) ([7600a2c](https://github.com/ScriptedAlchemy/tracedecay/commit/7600a2c2dbe99a894e94c91be6477f78a2c5bcf6))
+* **code-graph:** report and release the interactive catalog as an owner ([#2210](https://github.com/ScriptedAlchemy/tracedecay/issues/2210)) ([ac56f1e](https://github.com/ScriptedAlchemy/tracedecay/commit/ac56f1e86c7ea68f905dcb6b3923af386c4803a8))
+* **code-index:** shed retained state before refusing a text build ([#2198](https://github.com/ScriptedAlchemy/tracedecay/issues/2198)) ([2279c4e](https://github.com/ScriptedAlchemy/tracedecay/commit/2279c4e5a4c37238eab57ebfed681e1dcd922fde))
+* **contracts:** carry typed problem detail beside the message ([#2259](https://github.com/ScriptedAlchemy/tracedecay/issues/2259)) ([99b357d](https://github.com/ScriptedAlchemy/tracedecay/commit/99b357dbb16dd684e5db325f55df797316d3d837))
+* **daemon:** free retained state through one memory authority ([#2194](https://github.com/ScriptedAlchemy/tracedecay/issues/2194)) ([f0afc1d](https://github.com/ScriptedAlchemy/tracedecay/commit/f0afc1d60051794ba093e1ab930555c87aeb011a))
+* **doctor:** report the GitHub source with its remedy ([#2250](https://github.com/ScriptedAlchemy/tracedecay/issues/2250)) ([e3adbfb](https://github.com/ScriptedAlchemy/tracedecay/commit/e3adbfba17379b7ee8d9687bb1a5a89bfeba0d3e))
+* **mcp:** render trailer and footer from every typed envelope ([#2192](https://github.com/ScriptedAlchemy/tracedecay/issues/2192)) ([fea536b](https://github.com/ScriptedAlchemy/tracedecay/commit/fea536b3088059a518890fe80bdf4d9048a42c2a))
+* **mcp:** report a per-request store cost receipt ([#2214](https://github.com/ScriptedAlchemy/tracedecay/issues/2214)) ([9f1bd63](https://github.com/ScriptedAlchemy/tracedecay/commit/9f1bd63790ef0ba4790eaf4d46dc3f9b1933d1b5))
+* **status:** add graph_ready wait state to tracedecay_status ([#2216](https://github.com/ScriptedAlchemy/tracedecay/issues/2216)) ([0351078](https://github.com/ScriptedAlchemy/tracedecay/commit/03510787d30adced8ac5ead231cafa1cd68d6672))
+* **status:** wait for code-index readiness on tracedecay_status ([#2179](https://github.com/ScriptedAlchemy/tracedecay/issues/2179)) ([3e32f17](https://github.com/ScriptedAlchemy/tracedecay/commit/3e32f174a14af78a8046f9b98f04ca6b7efcf332))
+
+
+### Bug Fixes
+
+* **build:** set the macOS rustc wrapper only on macOS jobs ([#2232](https://github.com/ScriptedAlchemy/tracedecay/issues/2232)) ([27acfc0](https://github.com/ScriptedAlchemy/tracedecay/commit/27acfc009fb26f5480d3cd36e5aefe98153bf1b3)), closes [#2223](https://github.com/ScriptedAlchemy/tracedecay/issues/2223)
+* **cli:** keep the installed version when post-update cannot run ([#2234](https://github.com/ScriptedAlchemy/tracedecay/issues/2234)) ([eea5a66](https://github.com/ScriptedAlchemy/tracedecay/commit/eea5a66db76f19a91e517b707df713201c9e8883))
+* **cli:** report a tracked host without its CLI as pending ([#2233](https://github.com/ScriptedAlchemy/tracedecay/issues/2233)) ([9d9f2c6](https://github.com/ScriptedAlchemy/tracedecay/commit/9d9f2c61f37cf18ad0d085683a0d7d8a89f389cf))
+* **cli:** resolve a relative --project-path against the CLI directory ([#2262](https://github.com/ScriptedAlchemy/tracedecay/issues/2262)) ([14caed2](https://github.com/ScriptedAlchemy/tracedecay/commit/14caed2d7d6c9f638a9e04b439231e8b99339171)), closes [#2241](https://github.com/ScriptedAlchemy/tracedecay/issues/2241)
+* **cli:** type unredeemable cursors instead of unavailable ([#2269](https://github.com/ScriptedAlchemy/tracedecay/issues/2269)) ([bf0ddaf](https://github.com/ScriptedAlchemy/tracedecay/commit/bf0ddaf1927cf6dadd911a5219fa867ff20d5434))
+* **code-index:** charge a generation re-decode against the budget ([#2254](https://github.com/ScriptedAlchemy/tracedecay/issues/2254)) ([07e4a8a](https://github.com/ScriptedAlchemy/tracedecay/commit/07e4a8ac25543d3005bf0582642047a6a9d3c667))
+* **code-index:** judge the clone census by source evidence only ([#2188](https://github.com/ScriptedAlchemy/tracedecay/issues/2188)) ([fd371a2](https://github.com/ScriptedAlchemy/tracedecay/commit/fd371a23007d757d8afbf660500ccea7ba19d6ed))
+* **code-index:** resolve calls through block-scoped use ([#2272](https://github.com/ScriptedAlchemy/tracedecay/issues/2272)) ([56839b9](https://github.com/ScriptedAlchemy/tracedecay/commit/56839b98a935eb5e8f22add96fe20758cb534473))
+* **code-index:** resolve cfg variants and item-list macro bodies ([#2256](https://github.com/ScriptedAlchemy/tracedecay/issues/2256)) ([d70368d](https://github.com/ScriptedAlchemy/tracedecay/commit/d70368df0a7a4b85d059d5475273398d540393a6)), closes [#2130](https://github.com/ScriptedAlchemy/tracedecay/issues/2130)
+* **code-index:** retry a memory-refused graph when memory is given back ([#2209](https://github.com/ScriptedAlchemy/tracedecay/issues/2209)) ([92f4b97](https://github.com/ScriptedAlchemy/tracedecay/commit/92f4b97532682b28f969afdb64c9a1c28a7067fb))
+* **code-index:** scope the worker runtime to its owner ([#2197](https://github.com/ScriptedAlchemy/tracedecay/issues/2197)) ([8bb205b](https://github.com/ScriptedAlchemy/tracedecay/commit/8bb205b85bfa662f815860ed1819cf0ce8ff6c33))
+* **code-index:** stop status reads from scheduling re-verification ([#2193](https://github.com/ScriptedAlchemy/tracedecay/issues/2193)) ([3f14b09](https://github.com/ScriptedAlchemy/tracedecay/commit/3f14b09babea8608beb62b082ba89fe73488756c))
+* **code-index:** wake serving waiters on text owner install ([#2207](https://github.com/ScriptedAlchemy/tracedecay/issues/2207)) ([423ecbe](https://github.com/ScriptedAlchemy/tracedecay/commit/423ecbe06a9614f5202ed0313a3ff2646e68a42e))
+* **configuration:** provision the GitHub origin source binding ([#2221](https://github.com/ScriptedAlchemy/tracedecay/issues/2221)) ([83f73d3](https://github.com/ScriptedAlchemy/tracedecay/commit/83f73d3c99f60c541cc4714f4329581137ad6067))
+* **contracts:** check the generated SDK sources in contracts:check ([#2189](https://github.com/ScriptedAlchemy/tracedecay/issues/2189)) ([c70b865](https://github.com/ScriptedAlchemy/tracedecay/commit/c70b865c579a1ac52c4c4863f84e6b5643b42175)), closes [#2167](https://github.com/ScriptedAlchemy/tracedecay/issues/2167)
+* **daemon:** mount the profile LCM on projectless transcript ingest ([#2212](https://github.com/ScriptedAlchemy/tracedecay/issues/2212)) ([d85ec58](https://github.com/ScriptedAlchemy/tracedecay/commit/d85ec58003f6b8b981d1e95bafe6376f0125f0bd)), closes [#2187](https://github.com/ScriptedAlchemy/tracedecay/issues/2187)
+* **dashboard:** mount session authorities once the project opens ([#2239](https://github.com/ScriptedAlchemy/tracedecay/issues/2239)) ([08a6807](https://github.com/ScriptedAlchemy/tracedecay/commit/08a680737118b12495df34cd74988dbd918192a7))
+* delete backup commands and copy-based remote restore ([#2177](https://github.com/ScriptedAlchemy/tracedecay/issues/2177)) ([0708270](https://github.com/ScriptedAlchemy/tracedecay/commit/07082703162eedffd8a38aed155d5c58dfc3d9af))
+* **delivery:** name pull requests by their repository number ([#2249](https://github.com/ScriptedAlchemy/tracedecay/issues/2249)) ([a64cd76](https://github.com/ScriptedAlchemy/tracedecay/commit/a64cd769b56e362dddb1cd69ac4eb168b34b493d))
+* **delivery:** quarantine review bodies per comment ([#2203](https://github.com/ScriptedAlchemy/tracedecay/issues/2203)) ([8e733c0](https://github.com/ScriptedAlchemy/tracedecay/commit/8e733c02d0012bdde16a64f5cce6868996c38bc5))
+* **feedback:** admit a cycle's own in-cycle provider reads ([#2248](https://github.com/ScriptedAlchemy/tracedecay/issues/2248)) ([a13adb5](https://github.com/ScriptedAlchemy/tracedecay/commit/a13adb52de3e7a1828f29a8aa073fb026a9d996a)), closes [#2218](https://github.com/ScriptedAlchemy/tracedecay/issues/2218)
+* **feedback:** answer the first advisory cycle after a reopen ([#2228](https://github.com/ScriptedAlchemy/tracedecay/issues/2228)) ([dfb4ef4](https://github.com/ScriptedAlchemy/tracedecay/commit/dfb4ef469a0ebb14fff41bded8e8ff933755a334))
+* **handoff:** create the grant store in the registered session schema ([#2238](https://github.com/ScriptedAlchemy/tracedecay/issues/2238)) ([60327b0](https://github.com/ScriptedAlchemy/tracedecay/commit/60327b0263039ca62fa7e02a7330729fc49a339f))
+* **hermes:** admit turn callbacks through the observation authority ([#2235](https://github.com/ScriptedAlchemy/tracedecay/issues/2235)) ([fe6b7fd](https://github.com/ScriptedAlchemy/tracedecay/commit/fe6b7fd469ff5313693d310e1cd8c9ca230099c3)), closes [#2206](https://github.com/ScriptedAlchemy/tracedecay/issues/2206)
+* **lcm:** report payload GC on empty stores; drop writer snapshots ([#2208](https://github.com/ScriptedAlchemy/tracedecay/issues/2208)) ([7346310](https://github.com/ScriptedAlchemy/tracedecay/commit/7346310e6998cf75b0e280ba0b95f93fbb697934))
+* make Windows OS-matrix root identity and fs checks green ([#2191](https://github.com/ScriptedAlchemy/tracedecay/issues/2191)) ([afec152](https://github.com/ScriptedAlchemy/tracedecay/commit/afec1527f5e8126569fcbbbb2150179a231caa0a))
+* **registry:** report default and HEAD branches in separate fields ([#2195](https://github.com/ScriptedAlchemy/tracedecay/issues/2195)) ([59fba30](https://github.com/ScriptedAlchemy/tracedecay/commit/59fba30022d74a369ea0a89e2e34ccd64877819a))
+* **sessions:** converge git evidence in one publication per pass ([#2184](https://github.com/ScriptedAlchemy/tracedecay/issues/2184)) ([15a43ba](https://github.com/ScriptedAlchemy/tracedecay/commit/15a43ba7f15c88b240d3e371a380074e60363e0c))
+* **sessions:** store Git evidence as per-session rows ([#2202](https://github.com/ScriptedAlchemy/tracedecay/issues/2202)) ([1b8ca37](https://github.com/ScriptedAlchemy/tracedecay/commit/1b8ca37877818b001ee622a92a3e220378bf0065)), closes [#2141](https://github.com/ScriptedAlchemy/tracedecay/issues/2141)
+* **status:** report a project without a GitHub origin as absent ([#2260](https://github.com/ScriptedAlchemy/tracedecay/issues/2260)) ([6df7c4f](https://github.com/ScriptedAlchemy/tracedecay/commit/6df7c4f86053c9b38c8920e3c5024322cc95a36b)), closes [#2244](https://github.com/ScriptedAlchemy/tracedecay/issues/2244)
+* **status:** report only the project's own resident memory owners ([#2220](https://github.com/ScriptedAlchemy/tracedecay/issues/2220)) ([6bc4a3b](https://github.com/ScriptedAlchemy/tracedecay/commit/6bc4a3b8e88b97ce162ae7933562d4dc03850549)), closes [#2205](https://github.com/ScriptedAlchemy/tracedecay/issues/2205)
+* **storage:** drop corrupt-config copy and name daemon stop on reset ([#2204](https://github.com/ScriptedAlchemy/tracedecay/issues/2204)) ([da126a6](https://github.com/ScriptedAlchemy/tracedecay/commit/da126a6ec12e5e2bb4e619e7e24eaed33755ffc5))
+* **store:** drop the dead handoff table from the graph store ([#2261](https://github.com/ScriptedAlchemy/tracedecay/issues/2261)) ([c796c11](https://github.com/ScriptedAlchemy/tracedecay/commit/c796c1132a76cd9f28ea01566fffaa43a1237b12))
+
+
+### Performance Improvements
+
+* **code-extraction:** hold clone token streams compactly ([#2237](https://github.com/ScriptedAlchemy/tracedecay/issues/2237)) ([0bece17](https://github.com/ScriptedAlchemy/tracedecay/commit/0bece17d9888912ff058f3c0d523a726b01524cd))
+* **code-index:** build code-graph rows from sealed segments ([#2271](https://github.com/ScriptedAlchemy/tracedecay/issues/2271)) ([beefa81](https://github.com/ScriptedAlchemy/tracedecay/commit/beefa817c900c2ac8697e68a516f1f0e4ee4fe22))
+* **code-index:** drop the read bundle and lexical import copies ([#2185](https://github.com/ScriptedAlchemy/tracedecay/issues/2185)) ([17274b3](https://github.com/ScriptedAlchemy/tracedecay/commit/17274b3a448336e6fdfef6745e28a6996e6bab77)), closes [#1103](https://github.com/ScriptedAlchemy/tracedecay/issues/1103)
+* **code-index:** enumerate relation keys without entity reads ([#2224](https://github.com/ScriptedAlchemy/tracedecay/issues/2224)) ([aba3191](https://github.com/ScriptedAlchemy/tracedecay/commit/aba31911525a24bdfacabd773eea41fab4155637)), closes [#2129](https://github.com/ScriptedAlchemy/tracedecay/issues/2129)
+* **code-index:** make the seal the build's one durable point ([#2186](https://github.com/ScriptedAlchemy/tracedecay/issues/2186)) ([83ea014](https://github.com/ScriptedAlchemy/tracedecay/commit/83ea01423476f7bcdcda3adc0a65c68df9c6a8dc)), closes [#2131](https://github.com/ScriptedAlchemy/tracedecay/issues/2131)
+* **code-index:** resolve trait dispatch from relation keys ([#2243](https://github.com/ScriptedAlchemy/tracedecay/issues/2243)) ([6a4635f](https://github.com/ScriptedAlchemy/tracedecay/commit/6a4635f780f7723a604c227d2969a86acd6c51e2)), closes [#2226](https://github.com/ScriptedAlchemy/tracedecay/issues/2226)
+* **dashboard:** serve strata from catalog-folded file dependencies ([#2240](https://github.com/ScriptedAlchemy/tracedecay/issues/2240)) ([6b0e862](https://github.com/ScriptedAlchemy/tracedecay/commit/6b0e862a2edff17a3de8031b4506841276781aaf))
+* **graph-db:** store relation identities once, on the locator ([#2268](https://github.com/ScriptedAlchemy/tracedecay/issues/2268)) ([fd9fd06](https://github.com/ScriptedAlchemy/tracedecay/commit/fd9fd06531332bc43ec5bc86a904916ed86c8e71)), closes [#1103](https://github.com/ScriptedAlchemy/tracedecay/issues/1103)
+* **graph-db:** store unique keys as binary namespace-id keys ([#2257](https://github.com/ScriptedAlchemy/tracedecay/issues/2257)) ([6554ff1](https://github.com/ScriptedAlchemy/tracedecay/commit/6554ff19012941339b4e0ee794b45199c1f8037b)), closes [#1103](https://github.com/ScriptedAlchemy/tracedecay/issues/1103)
+
 ## [1.0.0-beta.54](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.53...v1.0.0-beta.54) (2026-09-26)
 
 
