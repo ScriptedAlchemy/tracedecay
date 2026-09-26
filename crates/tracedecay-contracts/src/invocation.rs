@@ -21,12 +21,15 @@ use crate::retrieval::PageRequest;
 pub enum InvocationTarget {
     CurrentProject,
     Resolved(ResolvedScope),
+    /// The authenticated profile's own memory, session, and LCM stores. Only
+    /// retained operations resolve against it; no project is opened.
+    Profile,
 }
 
 impl InvocationTarget {
     pub fn resolved(&self) -> Option<&ResolvedScope> {
         match self {
-            Self::CurrentProject => None,
+            Self::CurrentProject | Self::Profile => None,
             Self::Resolved(scope) => Some(scope),
         }
     }

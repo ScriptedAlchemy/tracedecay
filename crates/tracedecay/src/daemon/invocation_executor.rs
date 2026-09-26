@@ -243,7 +243,12 @@ impl InProcessDaemonInvocationExecutor {
 
     #[hotpath::skip]
     async fn invoke_once(&self, request: DaemonInvocationRequest) -> DaemonInvocationResponse {
-        if let Some(project_admission) = self.project_admission.as_ref() {
+        if let Some(project_admission) = self.project_admission.as_ref()
+            && !matches!(
+                request.payload,
+                tracedecay_daemon_service::DaemonInvocationPayload::ProfileRetainedApplication { .. }
+            )
+        {
             let git_service = if invocation_is_git_operation(request.operation()) {
                 git_service_for_project_path(&self.store_administration, Some(&self.project_path))
                     .await

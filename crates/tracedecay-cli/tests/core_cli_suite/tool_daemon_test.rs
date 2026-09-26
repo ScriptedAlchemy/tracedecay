@@ -1263,6 +1263,134 @@ fn fact_store_cli_routes_exact_tool_through_daemon() {
     assert_eq!(add.category, Some(FactCategoryV1::Decision));
 }
 
+/// Runs `tracedecay tool <name>` against the live daemon and returns the
+/// tool's JSON body with the process exit status.
+fn live_tool_json(home: &Path, cwd: &Path, tool: &str, args: Value) -> (bool, Value) {
+    let mut args = args;
+    args["format"] = json!("json");
+    let output = tracedecay_command_with_home(home)
+        .current_dir(cwd)
+        .args(["tool", tool, "--json", "--args", &args.to_string()])
+        .output()
+        .expect("tracedecay tool should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let printed: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "{tool} printed non-JSON ({error}):\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let body = match printed["content"][0]["text"].as_str() {
+        Some(text) => serde_json::from_str(text).expect("tool text JSON"),
+        None => printed,
+    };
+    (output.status.success(), body)
+}
+
+/// Retained memory and LCM calls answer through the daemon's typed owner on
+/// both targets: the profile target from a directory outside any project, and
+/// the project target. `fact_store_related` shares its page shape with
+/// `fact_store_probe`, so it proves the client decodes the named variant.
+#[test]
+fn retained_tool_calls_answer_through_the_live_daemon_owner() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let nowhere = home_path.join("nowhere");
+    std::fs::create_dir_all(&nowhere).unwrap();
+
+    let (added, body) = live_tool_json(
+        &home_path,
+        &nowhere,
+        "fact_store_add",
+        json!({
+            "content": "Profile beacon: the operator prefers terse answers",
+            "category": "user_pref",
+            "memory_scope": "user"
+        }),
+    );
+    assert!(added, "{body}");
+    let (searched, body) = live_tool_json(
+        &home_path,
+        &nowhere,
+        "fact_store_search",
+        json!({ "query": "terse answers", "memory_scope": "user" }),
+    );
+    assert!(searched, "{body}");
+    let payload = &body["outcome"]["value"]["payload"];
+    assert_eq!(payload["owner"], json!({"kind": "profile"}), "{body}");
+    assert_eq!(
+        payload["hits"][0]["fact"]["content"], "Profile beacon: the operator prefers terse answers",
+        "{body}"
+    );
+
+    let (related, body) = live_tool_json(
+        &home_path,
+        &nowhere,
+        "fact_store_related",
+        json!({ "entity": "operator", "memory_scope": "user" }),
+    );
+    assert!(related, "{body}");
+    assert_eq!(body["outcome"]["outcome"], "evidence", "{body}");
+    assert_eq!(
+        body["outcome"]["value"]["payload"]["owner"],
+        json!({"kind": "profile"}),
+        "{body}"
+    );
+
+    let (status_ok, body) = live_tool_json(
+        &home_path,
+        &nowhere,
+        "lcm_status",
+        json!({ "storage_scope": "user" }),
+    );
+    assert!(status_ok, "{body}");
+    assert_eq!(
+        body["outcome"]["value"]["payload"]["lcm"]["summary_convergence"],
+        json!({
+            "pending_session_count": 0,
+            "retryable_session_count": 0,
+            "current_session_count": 0,
+            "unavailable_session_count": 0,
+            "permanent_session_count": 0,
+            "reasons": []
+        }),
+        "{body}"
+    );
+    assert!(
+        body["scope"]["project_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("tracedecay.profile-session.profile.")),
+        "{body}"
+    );
+
+    let (added, body) = live_tool_json(
+        &home_path,
+        &project_path,
+        "fact_store_add",
+        json!({
+            "content": "Project beacon: releases ship on Thursdays",
+            "category": "decision"
+        }),
+    );
+    assert!(added, "{body}");
+    let (related, body) = live_tool_json(
+        &home_path,
+        &project_path,
+        "fact_store_related",
+        json!({ "entity": "releases" }),
+    );
+    assert!(related, "{body}");
+    assert_eq!(body["outcome"]["outcome"], "evidence", "{body}");
+    assert_eq!(
+        body["outcome"]["value"]["payload"]["owner"]["kind"], "project",
+        "{body}"
+    );
+}
+
 #[test]
 fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
     let home = TempDir::new().unwrap();

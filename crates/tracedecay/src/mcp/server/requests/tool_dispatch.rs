@@ -278,10 +278,6 @@ impl McpServer {
             .session_sync_service
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
-        let user_session_refresh_serving = self
-            .user_session_refresh_wake
-            .as_ref()
-            .map(super::super::construction::refresh_worker_serving_port);
         let dispatch: std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
         > = handle_tool_call_with_registry_options(
@@ -354,13 +350,10 @@ impl McpServer {
                 )
                 .with_profile_identity(self.profile_identity.clone())
                 .with_background_cpu(self.background_cpu.clone())
-                .with_profile_retained_authority(self.profile_retained_authority.as_ref())
                 .with_lcm_authorities(
                     self.project_lcm_authority.as_deref(),
                     self.user_lcm_authority.as_deref(),
-                )
-                .with_profile_session_refresh(self.profile_session_refresh_service.as_deref())
-                .with_profile_session_refresh_serving(user_session_refresh_serving.as_ref()),
+                ),
             },
         );
         // A composed daemon serves one transcript home. The refresh schedulers

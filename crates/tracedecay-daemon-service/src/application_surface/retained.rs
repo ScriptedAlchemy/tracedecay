@@ -1,7 +1,6 @@
-//! Retained application results and the HTTP replay-collision terminal.
+//! The retained HTTP replay-collision terminal.
 
 use axum::response::{IntoResponse, Response};
-use tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, RouteExposureV1};
 
 use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
@@ -56,27 +55,6 @@ fn active_request_conflict(
         binding_id.clone(),
         Err(problem),
     ))
-}
-
-pub fn result_value(
-    result: tracedecay_contracts::ApplicationResult<RetainedSurfaceResultV1>,
-) -> Result<
-    tracedecay_contracts::ApplicationResult<serde_json::Value>,
-    ApplicationSurfaceAdapterError,
-> {
-    match result {
-        Ok(envelope) => Ok(Ok(tracedecay_contracts::ApplicationEnvelope {
-            contract: envelope.contract,
-            request_id: envelope.request_id,
-            scope: envelope.scope,
-            outcome: tracedecay_daemon_protocol::application_outcome_value(envelope.outcome)
-                .map_err(ApplicationSurfaceAdapterError::invalid_request)?,
-            touched_files: envelope.touched_files,
-            code_graph: envelope.code_graph,
-            analytics: envelope.analytics,
-        })),
-        Err(problem) => Ok(Err(problem)),
-    }
 }
 
 #[cfg(test)]

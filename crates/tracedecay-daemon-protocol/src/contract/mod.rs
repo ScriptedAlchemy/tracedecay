@@ -411,6 +411,7 @@ pub enum DaemonInvocationOperation {
     ContextScout,
     ObservatoryRead,
     RetainedApplication,
+    ProfileRetainedApplication,
     MultiRootScopeSetRead,
     MultiRootScopeSetCompareAndSwap,
     MultiRootExecute,
@@ -477,6 +478,7 @@ impl DaemonInvocationOperation {
             Self::ContextScout => "context_scout",
             Self::ObservatoryRead => "observatory_read",
             Self::RetainedApplication => "retained_application",
+            Self::ProfileRetainedApplication => "profile_retained_application",
             Self::MultiRootScopeSetRead => "multi_root_scope_set_read",
             Self::MultiRootScopeSetCompareAndSwap => "multi_root_scope_set_compare_and_swap",
             Self::MultiRootExecute => "multi_root_execute",
@@ -671,6 +673,14 @@ pub enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     RetainedApplication {
+        request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    /// A retained request against the authenticated profile's own stores. It
+    /// names no project: the daemon composition root owns the profile.
+    ProfileRetainedApplication {
         request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
@@ -1249,6 +1259,27 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub fn profile_retained_application(
+        request_id: impl Into<String>,
+        request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::ProfileRetainedApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub fn observatory_read(
         request_id: impl Into<String>,
         request: ObservatoryReadRequestV1,
@@ -1797,6 +1828,9 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::RetainedApplication { .. } => {
                 DaemonInvocationOperation::RetainedApplication
             }
+            DaemonInvocationPayload::ProfileRetainedApplication { .. } => {
+                DaemonInvocationOperation::ProfileRetainedApplication
+            }
             DaemonInvocationPayload::MultiRootScopeSetRead { .. } => {
                 DaemonInvocationOperation::MultiRootScopeSetRead
             }
@@ -2269,6 +2303,12 @@ impl DaemonInvocationRequest {
                 }
             }
             DaemonInvocationPayload::RetainedApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::ProfileRetainedApplication {
                 observed_at,
                 deadline,
                 cancellation,
