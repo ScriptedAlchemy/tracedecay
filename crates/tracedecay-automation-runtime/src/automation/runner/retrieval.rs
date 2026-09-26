@@ -836,26 +836,40 @@ mod authority_tests {
         }
     }
 
+    fn outcome_label(outcome: &AutomationTemporalRetrieval) -> String {
+        match outcome {
+            AutomationTemporalRetrieval::Complete(_) => "complete".to_owned(),
+            AutomationTemporalRetrieval::CompleteZero => "complete_zero".to_owned(),
+            AutomationTemporalRetrieval::Rejected(reason) => (*reason).to_owned(),
+            AutomationTemporalRetrieval::StructuralRefusal(refusal) => format!("{refusal:?}"),
+        }
+    }
+
     /// The production authorizer admits the forensic request the runner builds,
     /// so a bounded request reaches the registered store, while a candidate
     /// workspace past the ranker ceiling is refused before execution.
     #[tokio::test]
     async fn production_retrieval_admits_bounded_requests_and_refuses_oversized_workspaces() {
         let directory = tempdir().expect("temporary profile");
-        let runtime = RegisteredGlobalDbTestRuntime::profile(directory.path())
-            .await
-            .expect("registered test runtime");
-        let database = runtime.profile_database_arc();
+        let project_id = ProjectId::new("project.automation.bounded").expect("project id");
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            directory.path().join("profile"),
+            directory.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered test runtime");
+        let database = runtime.project_database_arc().expect("project database");
         let shard = database.binding().shard_id.clone();
         let profile_identity = FixtureProfileIdentity::new(
-            directory.path().to_path_buf(),
+            directory.path().join("profile"),
             shard.brain_id.clone(),
             shard.profile_id.clone(),
         );
         let retrieval = ProductionAutomationSessionRetrieval {
             database,
-            identity: profile_automation_identity(&shard, &profile_identity)
-                .expect("profile identity"),
+            identity: project_automation_identity(&shard, &profile_identity, &project_id)
+                .expect("project identity"),
             anchor_session_id: SessionId::new("session.automation.bounded").expect("session id"),
         };
 
@@ -878,10 +892,6 @@ mod authority_tests {
         )
         .await
         .expect("bounded request");
-        assert!(matches!(
-            bounded,
-            AutomationTemporalRetrieval::Rejected("session_evidence_unavailable")
-        ));
 
         let oversized = SessionTemporalQuery::new(
             SessionId::new("session.automation.bounded").expect("session id"),
@@ -910,15 +920,13 @@ mod authority_tests {
             ..ExecutionLimits::default()
         });
         let refused = retrieval.retrieve(oversized).await;
-        assert!(matches!(
-            refused,
-            AutomationTemporalRetrieval::StructuralRefusal(
-                SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                    stage: SessionRetrievalBudgetStageV1::RequestCandidateBytes,
-                    accounting: None,
-                }
+        assert_eq!(
+            (outcome_label(&bounded), outcome_label(&refused)),
+            (
+                "complete_zero".to_owned(),
+                "BudgetExhausted { stage: RequestCandidateBytes, accounting: None }".to_owned(),
             )
-        ));
+        );
     }
 
     #[tokio::test]
