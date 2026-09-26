@@ -78,7 +78,10 @@ jobs:
         with:
           node-version: 22
       - uses: ./.github/actions/setup-pnpm
-      - run: cargo test --manifest-path sdks/codegen/Cargo.toml
+      # Cargo reads .cargo/config.toml from the working directory, and the
+      # codegen workspace has its own pnpm-vendored sources and lockfile.
+      - run: cargo test
+        working-directory: sdks/codegen
       - run: scripts/check-sdk-codegen.sh
       - run: cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
       - run: pnpm run typecheck
