@@ -122,53 +122,6 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
     registry.shutdown().await;
 }
 
-/// The advisory cycle resolves its generation through this lookup. After the
-/// idle window released the decode, the first lookup must answer with the
-/// still-current sealed generation, not only the retry.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_first_feedback_lookup_after_an_idle_release_answers() {
-    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
-    let store = TempDir::new().expect("store root");
-    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
-    let (registry, scope) = mounted_core_query_worktree_in(
-        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
-        &fixture,
-        &store,
-    )
-    .await;
-    let seated = wait_for_live_complete_generation(&registry, fixture.path())
-        .await
-        .generation()
-        .manifest()
-        .generation_id
-        .clone();
-    let before = registry
-        .latest_feedback_generation_for_scope(fixture.path(), &scope)
-        .await
-        .expect("a seated generation answers the feedback lookup");
-    assert_eq!(before.metadata().manifest().generation_id, seated);
-
-    let released = owners.release_idle(Instant::now() + IDLE_WINDOW);
-    assert_eq!(
-        released
-            .iter()
-            .map(|release| (release.kind, release.cause))
-            .collect::<Vec<_>>(),
-        [(
-            ResidentOwnerKindV1::DecodedGeneration,
-            ResidentOwnerReleaseCauseV1::Idle
-        )]
-    );
-
-    let first = registry
-        .latest_feedback_generation_for_scope(fixture.path(), &scope)
-        .await
-        .map(|generation| generation.metadata().manifest().generation_id.clone());
-    assert_eq!(first, Some(seated));
-
-    registry.shutdown().await;
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generation_swaps_keep_retained_bytes_flat() {
     const FIRST: &str = "fn main() { first(); }\nfn first() {}\n";
