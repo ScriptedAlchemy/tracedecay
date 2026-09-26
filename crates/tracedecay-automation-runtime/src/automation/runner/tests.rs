@@ -1,36 +1,17 @@
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use tracedecay_contracts::retained_surfaces::MemoryAutomationFactEvidenceItemV1;
-use tracedecay_contracts::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId,
-};
 use tracedecay_domain::{
-    ActorId, FactOwnerV1, ProjectId, RepositoryId, RetrievalAnchorId, RetrievalGrainV1, SessionId,
-    TemporalCoverageCountsV1, UtcMicros, WorktreeId,
-};
-use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_session_memory::context::{
-    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
-    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
-    session_application_grant_digest,
+    FactOwnerV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
 };
 use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_session_memory::session::{
-    AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionFreshnessPolicy, SessionRequestBinding, SessionRetrievalConfiguration,
-    SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalExecutionPort,
-    SessionTemporalQuery,
+    SessionFreshnessPolicy, SessionRetrievalOutcome, SessionTemporalQuery,
 };
 use tracedecay_temporal_query::TemporalKernelResult;
-use tracedecay_temporal_query::context::VersionedTokenEstimator;
-use tracedecay_temporal_query::execution::ExecutionLimits;
 use tracedecay_temporal_query::ranking::RankedCandidate;
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::super::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
 use super::super::run_ledger::AutomationRunLedgerRecord;
@@ -40,18 +21,16 @@ use super::evidence::{
     validate_complete_evidence,
 };
 use super::retrieval::{
-    AUTOMATION_SESSION_MAX_BYTES, AutomationWordEstimator, accept_automation_temporal_outcome,
-    automation_structural_refusal_skip, ranked_evidence_owner,
+    accept_automation_temporal_outcome, automation_structural_refusal_skip, ranked_evidence_owner,
     retrieve_automation_session_evidence,
 };
 use super::{
-    AuthorizedAutomationSessionRetrieval, AutomationRunControl, AutomationSessionRetrieval,
-    AutomationSessionRetrievalFuture, AutomationTemporalEvidence, AutomationTemporalEvidenceItem,
-    AutomationTemporalRetrieval, CombinedReviewDispatch, canonical_evidence_hash,
-    combined_asymmetric_failure, combined_reflector_evidence_or_not_combined,
-    combined_reflector_failure_projection, combined_skill_failure_projection,
-    combined_skill_writer_evidence_or_not_combined, split_skill_runtime_failure,
-    validate_session_fact_candidates,
+    AutomationRunControl, AutomationSessionRetrieval, AutomationSessionRetrievalFuture,
+    AutomationTemporalEvidence, AutomationTemporalEvidenceItem, AutomationTemporalRetrieval,
+    CombinedReviewDispatch, canonical_evidence_hash, combined_asymmetric_failure,
+    combined_reflector_evidence_or_not_combined, combined_reflector_failure_projection,
+    combined_skill_failure_projection, combined_skill_writer_evidence_or_not_combined,
+    split_skill_runtime_failure, validate_session_fact_candidates,
 };
 use tracedecay_lcm::{LcmGrepSort, LcmScope};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
@@ -152,289 +131,6 @@ fn combined_skill_failure_projection_excludes_fact_payloads() {
     );
     assert!(!serialized.contains(fact_secret));
     assert!(projection.get("facts").is_none());
-}
-
-struct RecordingDenyAutomationAuthorizer {
-    requests: Arc<Mutex<Vec<SessionScopeAuthorizationRequest>>>,
-}
-
-impl SessionScopeAuthorizer for RecordingDenyAutomationAuthorizer {
-    fn authorize(
-        &self,
-        _context: &RequestContext,
-        _binding: &SessionRequestBinding,
-        request: &SessionScopeAuthorizationRequest,
-    ) -> std::result::Result<SessionAuthorizationGrant, SessionAuthorizationError> {
-        self.requests.lock().unwrap().push(request.clone());
-        Err(SessionAuthorizationError::Denied)
-    }
-}
-
-struct NeverAutomationExecution;
-
-impl SessionTemporalExecutionPort for NeverAutomationExecution {
-    fn execute<'a, E>(
-        &'a self,
-        _request: tracedecay_session_memory::session::AuthorizedTemporalExecutionRequest,
-        _estimator: &'a E,
-    ) -> tracedecay_session_memory::session::TemporalExecutionFuture<'a>
-    where
-        E: VersionedTokenEstimator + Sync + 'a,
-    {
-        Box::pin(async { panic!("denied retrieval must not reach temporal execution") })
-    }
-}
-
-struct PermitAutomationAuthorizer;
-
-impl SessionScopeAuthorizer for PermitAutomationAuthorizer {
-    fn authorize(
-        &self,
-        context: &RequestContext,
-        binding: &SessionRequestBinding,
-        request: &SessionScopeAuthorizationRequest,
-    ) -> std::result::Result<SessionAuthorizationGrant, SessionAuthorizationError> {
-        SessionAuthorizationGrant::issue(
-            AuthorizationGrantId::new("grant.automation.execution.test")?,
-            1,
-            context,
-            binding,
-            request,
-        )
-    }
-}
-
-struct CountingUnavailableAutomationExecution {
-    calls: Arc<AtomicUsize>,
-}
-
-impl SessionTemporalExecutionPort for CountingUnavailableAutomationExecution {
-    fn execute<'a, E>(
-        &'a self,
-        _request: tracedecay_session_memory::session::AuthorizedTemporalExecutionRequest,
-        _estimator: &'a E,
-    ) -> tracedecay_session_memory::session::TemporalExecutionFuture<'a>
-    where
-        E: VersionedTokenEstimator + Sync + 'a,
-    {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Err(SessionTemporalExecutionError::Unavailable) })
-    }
-}
-
-fn authorized_retrieval_context() -> (RequestContext, SessionRequestBinding) {
-    let actor = ActorId::new("automation.session-evidence").unwrap();
-    let request_id = RequestId::new("request.automation.session-evidence.test").unwrap();
-    let identity = ResolvedSessionIdentity::for_project(
-        ProfileId::new("profile.test").unwrap(),
-        ProjectId::new("project.test").unwrap(),
-        SessionStoreId::new("store.project.test").unwrap(),
-        SessionRootId::new("root.project.test").unwrap(),
-        ResolvedGitRoute::new(
-            RepositoryId::new("repository.test").unwrap(),
-            WorktreeId::new("worktree.test").unwrap(),
-            BranchId::new("main").unwrap(),
-        ),
-    );
-    let scope = identity.application_scope().unwrap();
-    let capability = CapabilityDigest::new([0x11; 32]);
-    let policy = PolicyDigest::new([0x22; 32]);
-    let configuration = ConfigurationDigest::new([0x33; 32]);
-    let cancellation = CancellationToken::for_application_request(request_id.as_str());
-    let budgets = RequestBudgets::new(64, AUTOMATION_SESSION_MAX_BYTES, 10_000).unwrap();
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.automation.session-evidence.test").unwrap(),
-        1,
-        session_application_grant_digest(capability, policy, configuration, &cancellation, budgets)
-            .unwrap(),
-        actor.clone(),
-        UtcMicros(1),
-        UtcMicros(i64::MAX - 1),
-        scope.clone(),
-        BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").unwrap()]),
-        BTreeSet::from([UseCaseId::new("use-case.automation.session-evidence").unwrap()]),
-        DisclosureClass::Evidence,
-    )
-    .unwrap();
-    let context = RequestContext::new(
-        actor,
-        scope,
-        grant,
-        request_id.clone(),
-        Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
-        CancellationContext::active(cancellation.application_token_id().unwrap()).unwrap(),
-    )
-    .unwrap();
-    let binding = SessionRequestBinding::new(
-        identity,
-        capability,
-        policy,
-        configuration,
-        cancellation,
-        budgets,
-    );
-    (context, binding)
-}
-
-#[tokio::test]
-async fn real_authorized_service_path_denies_before_execution() {
-    let authorization_requests = Arc::new(Mutex::new(Vec::new()));
-    let service = SessionRetrievalService::new(
-        RecordingDenyAutomationAuthorizer {
-            requests: Arc::clone(&authorization_requests),
-        },
-        NeverAutomationExecution,
-        AutomationWordEstimator,
-        SessionRetrievalConfiguration::new(1, 1).unwrap(),
-    );
-    let (context, binding) = authorized_retrieval_context();
-    let adapter = AuthorizedAutomationSessionRetrieval::new(
-        &service,
-        &context,
-        &binding,
-        SessionId::new("session.authorized.test").unwrap(),
-    );
-    let outcome = retrieve_automation_session_evidence(
-        &adapter,
-        "authorized test",
-        LcmScope::All,
-        AutomationEvidenceFilters {
-            provider: "cursor",
-            session_id: None,
-            include_summaries: true,
-            evidence_limit: 5,
-            include_recent_sessions: false,
-            recent_sessions_limit: 1,
-            role: None,
-            start_time: None,
-            end_time: None,
-            sort: LcmGrepSort::Relevance,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert!(matches!(
-        outcome,
-        AutomationTemporalRetrieval::Rejected("session_evidence_denied")
-    ));
-    let requests = authorization_requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].temporal_mode(),
-        tracedecay_domain::TemporalModeV1::Forensic
-    );
-    assert_eq!(requests[0].grain(), RetrievalGrainV1::LogicalMessage);
-    assert_eq!(requests[0].access(), SessionAccess::Hydrate);
-}
-
-#[tokio::test]
-async fn automation_evidence_request_within_2mib_reaches_authorized_execution() {
-    let execution_calls = Arc::new(AtomicUsize::new(0));
-    let service = SessionRetrievalService::new(
-        PermitAutomationAuthorizer,
-        CountingUnavailableAutomationExecution {
-            calls: Arc::clone(&execution_calls),
-        },
-        AutomationWordEstimator,
-        SessionRetrievalConfiguration::new(1, 1).unwrap(),
-    );
-    let (context, binding) = authorized_retrieval_context();
-    let adapter = AuthorizedAutomationSessionRetrieval::new(
-        &service,
-        &context,
-        &binding,
-        SessionId::new("session.automation.admitted").unwrap(),
-    );
-
-    let outcome = retrieve_automation_session_evidence(
-        &adapter,
-        "admitted bounded automation evidence",
-        LcmScope::All,
-        AutomationEvidenceFilters {
-            provider: "cursor",
-            session_id: None,
-            include_summaries: true,
-            evidence_limit: 5,
-            include_recent_sessions: false,
-            recent_sessions_limit: 1,
-            role: None,
-            start_time: None,
-            end_time: None,
-            sort: LcmGrepSort::Relevance,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert!(matches!(
-        outcome,
-        AutomationTemporalRetrieval::Rejected("session_evidence_unavailable")
-    ));
-    assert_eq!(execution_calls.load(Ordering::SeqCst), 1);
-}
-
-/// The retrieval service owns two separate ceilings: the grant's response
-/// budget and the ranker's input workspace. A candidate workspace past the
-/// workspace ceiling is refused at `RequestCandidateBytes` before the
-/// execution port is ever reached.
-#[tokio::test]
-async fn oversized_automation_request_preserves_candidate_stage_without_execution() {
-    let execution_calls = Arc::new(AtomicUsize::new(0));
-    let service = SessionRetrievalService::new(
-        PermitAutomationAuthorizer,
-        CountingUnavailableAutomationExecution {
-            calls: Arc::clone(&execution_calls),
-        },
-        AutomationWordEstimator,
-        SessionRetrievalConfiguration::new(1, 1).unwrap(),
-    );
-    let (context, binding) = authorized_retrieval_context();
-    let adapter = AuthorizedAutomationSessionRetrieval::new(
-        &service,
-        &context,
-        &binding,
-        SessionId::new("session.automation.oversized").unwrap(),
-    );
-    let query = SessionTemporalQuery::new(
-        SessionId::new("session.automation.oversized").unwrap(),
-        Some("cursor".to_owned()),
-        "oversized automation evidence",
-        None,
-        tracedecay_domain::TemporalModeV1::Forensic,
-        RetrievalGrainV1::LogicalMessage,
-        1,
-        tracedecay_temporal_query::ranking::DiversityLimits {
-            per_logical_message: 1,
-            per_turn: 1,
-            per_session: 1,
-            per_source: 1,
-            per_evidence_role: 1,
-        },
-        tracedecay_temporal_query::context::ContextBudget {
-            max_bytes: AUTOMATION_SESSION_MAX_BYTES,
-            max_tokens: AUTOMATION_SESSION_MAX_BYTES / 4,
-            estimator_version: "automation-words-v1".to_owned(),
-        },
-    )
-    .unwrap()
-    .with_execution_limits(ExecutionLimits {
-        candidate_total_bytes: ExecutionLimits::default().candidate_total_bytes + 1,
-        ..ExecutionLimits::default()
-    });
-
-    let outcome = adapter.retrieve(query).await;
-
-    assert!(matches!(
-        outcome,
-        AutomationTemporalRetrieval::StructuralRefusal(
-            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
-                accounting: None,
-            }
-        )
-    ));
-    assert_eq!(execution_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

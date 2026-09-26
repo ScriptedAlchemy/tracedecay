@@ -17,7 +17,6 @@ pub mod evidence_budget;
 pub mod managed_skill_format;
 mod managed_skill_model;
 mod managed_skill_validation;
-mod ports;
 pub mod run_labels;
 pub mod skill_frontmatter;
 pub mod text;
@@ -37,7 +36,6 @@ pub mod managed_skills {
 }
 
 pub use error::{AutomationError, Result};
-pub use ports::AutomationRunRecord;
 
 pub(crate) fn config_error(message: impl Into<String>) -> AutomationError {
     AutomationError::config(message)

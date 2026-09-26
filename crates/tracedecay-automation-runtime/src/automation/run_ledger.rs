@@ -217,12 +217,6 @@ pub struct AutomationRunLedgerRecord {
     pub completed_at_micros: Option<i64>,
 }
 
-impl tracedecay_automation::AutomationRunRecord for AutomationRunLedgerRecord {
-    fn accepted_count(&self) -> usize {
-        self.accepted_count
-    }
-}
-
 pub fn run_ledger_path(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join(RUN_LEDGER_FILENAME)
 }

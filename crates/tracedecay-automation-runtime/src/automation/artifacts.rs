@@ -80,7 +80,7 @@ pub(crate) async fn write_improvement_artifacts(
             "prompt_version": prompt_version,
             "policy": {
                 "optimizer_action": policy.optimizer_action,
-                "next_actions": policy.next_actions(record),
+                "next_actions": policy.next_actions(record.accepted_count),
                 "handoff_tests": [policy.handoff_test()],
                 "eval_replay_commands": [policy.eval_replay_command()],
             },

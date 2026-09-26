@@ -66,8 +66,7 @@ pub use super::memory_curator::{
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
 pub use retrieval::registered_project_automation_retrieval;
 pub use retrieval::{
-    AuthorizedAutomationSessionRetrieval, AutomationSessionRetrieval,
-    AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
+    AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
 };
 pub use session_reflector::{
     SessionFactCurationOutcome, SessionFactCurationReceipt, SessionReflectorAutomationOptions,
