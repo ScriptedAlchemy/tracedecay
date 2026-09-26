@@ -211,11 +211,17 @@ pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
     read_resident_memory_authority_v1().limit_bytes
 }
 
-fn read_resident_memory_authority_v1() -> ResidentMemoryAuthorityV1 {
+/// Physical RAM of this host, or `None` when the platform does not report it.
+#[must_use]
+pub fn physical_memory_bytes_v1() -> Option<u64> {
     let system = System::new_with_specifics(
         RefreshKind::new().with_memory(MemoryRefreshKind::new().with_ram()),
     );
-    let total_memory_bytes = system.total_memory();
+    Some(system.total_memory()).filter(|bytes| *bytes != 0)
+}
+
+fn read_resident_memory_authority_v1() -> ResidentMemoryAuthorityV1 {
+    let total_memory_bytes = physical_memory_bytes_v1().unwrap_or(0);
     let proc_self_cgroup = Path::new(PROC_SELF_CGROUP_V1);
     let cgroup_root = Path::new(CGROUP_V2_ROOT_V1);
     let cgroup = cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root);
