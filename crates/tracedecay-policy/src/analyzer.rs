@@ -10,9 +10,7 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{CapabilityId, ManifestDigest, UtcMicros};
 
-use crate::authorization::{
-    PolicyIdentifierV1, PrivacyConstraintSetV1, PrivacyConstraintV1, policy_digest,
-};
+use crate::identity::{PolicyIdentifierV1, policy_digest};
 
 const ANALYZER_ADMISSION_SNAPSHOT_DOMAIN: &str = "tracedecay.policy.analyzer-admission-snapshot.v1";
 
@@ -70,7 +68,6 @@ pub struct AnalyzerAdmissionInputV1 {
     pub language_id: AnalyzerLanguageId,
     pub requested_capability: CapabilityId,
     pub candidates: Vec<AnalyzerCandidateV1>,
-    pub privacy_constraints: PrivacyConstraintSetV1,
     pub configuration_digest: ManifestDigest,
     pub policy_revision: u64,
     pub policy_digest: ManifestDigest,
@@ -97,7 +94,6 @@ pub enum AnalyzerAdmissionReasonV1 {
     CandidateUnknown,
     CandidateAmbiguous,
     ScopeUnauthorized,
-    LocalOnlyPrivacy,
     RestrictedPrivacy,
     InsufficientMemory,
     Selected,
@@ -301,18 +297,6 @@ impl AnalyzerAdmissionEvaluator for AnalyzerAdmissionEvaluatorV1 {
                 AnalyzerAdmissionDispositionV1::Deny,
                 None,
                 vec![AnalyzerAdmissionReasonV1::ScopeUnauthorized],
-            );
-        }
-        if input
-            .privacy_constraints
-            .contains(&PrivacyConstraintV1::LocalOnly)
-            && candidate.execution_location == AnalyzerExecutionLocationV1::External
-        {
-            return self.decision(
-                input,
-                AnalyzerAdmissionDispositionV1::Deny,
-                None,
-                vec![AnalyzerAdmissionReasonV1::LocalOnlyPrivacy],
             );
         }
         if selection.privacy_class == AnalyzerPrivacyClassV1::Restricted

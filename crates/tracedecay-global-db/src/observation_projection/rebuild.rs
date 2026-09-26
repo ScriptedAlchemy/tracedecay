@@ -7,8 +7,8 @@ use tracedecay_runtime_core::db::{
     engine::{Executor, QueryExecutor, Row, params},
 };
 use tracedecay_store::{
-    ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation,
-    ProjectionBatchItem, ProjectionDrainBatch, ProjectionPersistOutcome,
+    ObservationProjection, PROJECTION_TERMINAL_RETRY_MICROS, PROVIDER_USAGE_PROJECTOR_VERSION,
+    ProjectedObservation, ProjectionBatchItem, ProjectionDrainBatch, ProjectionPersistOutcome,
     ProjectionPredecessorConvergence, ProjectionRebuildOutcome, ProjectionSkipReason,
     ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
     SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, SessionMessageRecord,
@@ -252,13 +252,18 @@ async fn next_ready_projection_head(
              WHERE next_retry_at_micros <= ?2
                AND observation_sequence = (
                  SELECT MIN(observation_sequence) FROM projection_queue
+                 WHERE next_retry_at_micros < ?3
                )
                AND NOT EXISTS (
                  SELECT 1 FROM observation_projection_rebuilds
                  WHERE projector_version = ?1
                )
              LIMIT 1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION, now_micros],
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                now_micros,
+                PROJECTION_TERMINAL_RETRY_MICROS
+            ],
         )
         .await
         .map_err(|error| storage("read projection queue head", error))?;
@@ -598,7 +603,12 @@ async fn project_observation_in_transaction_with_session(
     ) {
         record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
     }
-    consume_projection_queue_item(transaction, observation_id).await?;
+    // A genuine session collision stays on its queue row with last_error set
+    // and a terminal deadline. The checkpoint still advances, and head
+    // selection skips that row, so later observations project.
+    if !queue_row_is_terminal_collision(transaction, observation_id).await? {
+        consume_projection_queue_item(transaction, observation_id).await?;
+    }
     let checkpoint = write_checkpoint(transaction, sequence).await?;
     let output_count = effect.output_count();
     let outcome = match effect {
@@ -1003,6 +1013,33 @@ async fn write_effect_converging_collisions(
             );
             converge_collided_effect(conn, write, sequence, observation, effect).await
         }
+        Err(ProjectionStoreError::SessionOutputCollision {
+            provider,
+            session_id,
+            field,
+        }) => {
+            let collision = ProjectionStoreError::SessionOutputCollision {
+                provider: provider.clone(),
+                session_id: session_id.clone(),
+                field,
+            };
+            tracing::warn!(
+                %provider,
+                %session_id,
+                field,
+                observation = observation.observation_id().as_str(),
+                "projection session output collided; recording the error and advancing"
+            );
+            match write {
+                CollisionGuardedWrite::Drain => {
+                    isolate_session_collision(conn, observation, &collision, effect).await?;
+                    write.run(conn, sequence, observation, effect).await
+                }
+                CollisionGuardedWrite::Stage { .. } => {
+                    converge_collided_effect(conn, write, sequence, observation, effect).await
+                }
+            }
+        }
         Err(error) => Err(error),
     }
 }
@@ -1036,6 +1073,53 @@ async fn converge_collided_effect(
     }
     *effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
     write.run(conn, sequence, observation, effect).await
+}
+
+/// Live-drain session collision: keep the queue row, record the error, and
+/// let the caller advance the checkpoint. Head selection ignores the terminal
+/// deadline, so one session cannot block later observations.
+async fn isolate_session_collision(
+    conn: &impl Executor,
+    observation: &DurableObservationV1,
+    collision: &ProjectionStoreError,
+    effect: &mut ObservationProjection,
+) -> ProjectionStoreResult<()> {
+    conn.execute_batch(&format!(
+        "ROLLBACK TO {PROJECTION_COLLISION_SAVEPOINT}; \
+         RELEASE {PROJECTION_COLLISION_SAVEPOINT};"
+    ))
+    .await
+    .map_err(|error| storage("rollback projection collision savepoint", error))?;
+    reconcile_collided_observation_provenance(conn, observation).await?;
+    let updated = conn
+        .execute(
+            "UPDATE projection_queue
+             SET attempt_count = attempt_count + 1,
+                 next_retry_at_micros = ?2,
+                 last_error = ?3
+             WHERE observation_id = ?1",
+            params![
+                observation.observation_id().as_str(),
+                PROJECTION_TERMINAL_RETRY_MICROS,
+                collision.durable_detail(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("record session projection collision", error))?;
+    if updated != 1 {
+        return Err(ProjectionStoreError::NotQueued);
+    }
+    *effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
+    Ok(())
+}
+
+async fn queue_row_is_terminal_collision(
+    conn: &impl QueryExecutor,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<bool> {
+    Ok(projection_retry_state(conn, observation_id)
+        .await?
+        .is_some_and(|state| state.next_retry_at_micros == PROJECTION_TERMINAL_RETRY_MICROS))
 }
 
 /// Removes provenance rows durable under the collided observation's key and

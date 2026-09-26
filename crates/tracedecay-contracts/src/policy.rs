@@ -16,7 +16,7 @@ use tracedecay_domain::{
 use tracedecay_policy::analyzer::{
     AnalyzerAdmissionEvaluatorV1, AnalyzerAdmissionInputV1, AnalyzerAdmissionSnapshotV1,
 };
-use tracedecay_policy::authorization::PolicyIdentifierV1;
+use tracedecay_policy::identity::PolicyIdentifierV1;
 use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRouteCandidateV1,
     CapabilityRoutingCancellationV1, CapabilityRoutingDecisionV1, CapabilityRoutingEvaluator,

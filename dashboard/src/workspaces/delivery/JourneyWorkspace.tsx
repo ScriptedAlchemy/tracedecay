@@ -19,6 +19,7 @@ import {
 } from './deliveryChrome.tsx';
 import { projectFor } from './inboxFilter.ts';
 import {
+  agentTokenLabel,
   buildJourney,
   laneLabel,
   laneServes,
@@ -304,6 +305,22 @@ function RefIdentity({ episodeRef: ref }: { episodeRef: EpisodeRef }) {
       return <IdentityRow label="agent" value={ref.agentId} />;
     case 'handoff':
       return <IdentityRow label="handoff" value={ref.handoffId} />;
+    case 'agent_usage': {
+      const { usage } = ref;
+      const count = (value: number | null) => (value === null ? 'not reported' : value.toLocaleString('en-US'));
+      return (
+        <>
+          <IdentityRow label="agent" value={usage.agent ?? 'no agent recorded'} />
+          <IdentityRow label="provider" value={usage.provider} />
+          <IdentityRow label="branch" value={ref.branch} />
+          <IdentityRow label="sessions" value={`${usage.sessions} · ${usage.sessions_with_usage} with usage`} />
+          <IdentityRow label="tokens" value={agentTokenLabel(usage)} />
+          <IdentityRow label="input" value={count(usage.counters.input_tokens)} />
+          <IdentityRow label="output" value={count(usage.counters.output_tokens)} />
+          <IdentityRow label="tool calls" value={usage.tool_calls.toLocaleString('en-US')} />
+        </>
+      );
+    }
     default: {
       const unhandled: never = ref;
       return unhandled;

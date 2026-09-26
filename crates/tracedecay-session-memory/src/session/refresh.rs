@@ -185,7 +185,46 @@ pub enum SessionRefreshOutcome {
     NotFound,
     Aborted,
     DeadlineExceeded,
-    Unavailable,
+    Unavailable(SessionRefreshUnavailable),
+}
+
+/// Why the refresh authority could not answer, carried to the caller instead
+/// of a bare "unavailable".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionRefreshUnavailable {
+    /// The session-temporal store failed the operation; `detail` is its error.
+    Store { detail: String },
+    /// The target cannot form a canonical refresh key.
+    RefreshKey,
+    /// The store answered for a different session or frontier.
+    ReceiptMismatch,
+    /// Scope authorization could not produce a grant.
+    Authorization(SessionAuthorizationError),
+    /// The daemon's refresh configuration is invalid.
+    Configuration(SessionRefreshRequestError),
+}
+
+impl SessionRefreshUnavailable {
+    fn store(error: &SessionStoreError) -> Self {
+        Self::Store {
+            detail: error.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for SessionRefreshUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store { detail } => write!(formatter, "session refresh store failed: {detail}"),
+            Self::RefreshKey => {
+                formatter.write_str("the refresh target cannot form a canonical refresh key")
+            }
+            Self::ReceiptMismatch => formatter
+                .write_str("the refresh store answered for a different session or frontier"),
+            Self::Authorization(error) => write!(formatter, "{error}"),
+            Self::Configuration(error) => write!(formatter, "{error}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,7 +306,7 @@ where
             target.session_id().as_str(),
             target.source_scope().unwrap_or("all")
         )) else {
-            return SessionRefreshOutcome::Unavailable;
+            return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::RefreshKey);
         };
         let Ok(refresh_key) = SessionRefreshKeyV1::new(
             grant.scope().identity().root_id().as_str(),
@@ -278,12 +317,16 @@ where
                 SessionSourceFrontierV1::new(target.frozen_frontier().observed_through()),
             ) {
                 Ok(source) => source,
-                Err(_) => return SessionRefreshOutcome::Unavailable,
+                Err(_) => {
+                    return SessionRefreshOutcome::Unavailable(
+                        SessionRefreshUnavailable::RefreshKey,
+                    );
+                }
             }],
             self.configuration.projector_version(),
             encode_tagged_lowercase_hex("sha256:", digests.projection.as_bytes()),
         ) else {
-            return SessionRefreshOutcome::Unavailable;
+            return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::RefreshKey);
         };
         let request = SessionRefreshBeginOrJoinRequestV1::new(
             target.session_id().clone(),
@@ -304,13 +347,17 @@ where
             Ok(Err(SessionStoreError::IdempotencyConflict { .. })) => {
                 return SessionRefreshOutcome::Busy;
             }
-            Ok(Err(_)) => return SessionRefreshOutcome::Unavailable,
+            Ok(Err(error)) => {
+                return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
+                    &error,
+                ));
+            }
             Err(outcome) => return outcome,
         };
         if receipt.session_id() != target.session_id()
             || receipt.target_frontier() != target.frozen_frontier()
         {
-            return SessionRefreshOutcome::Unavailable;
+            return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::ReceiptMismatch);
         }
         let handle = SessionRefreshHandle {
             operation_id: receipt.operation_id().clone(),
@@ -362,7 +409,11 @@ where
         .await
         {
             Ok(Ok(progress)) => progress,
-            Ok(Err(_)) => return SessionRefreshOutcome::Unavailable,
+            Ok(Err(error)) => {
+                return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
+                    &error,
+                ));
+            }
             Err(outcome) => return outcome,
         }
         .map(|progress| {
@@ -407,7 +458,11 @@ where
         .await
         {
             Ok(Ok(progress)) => progress,
-            Ok(Err(_)) => return SessionRefreshOutcome::Unavailable,
+            Ok(Err(error)) => {
+                return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
+                    &error,
+                ));
+            }
             Err(outcome) => return outcome,
         };
         match self.read_receipt(context, binding, handle).await {
@@ -453,7 +508,9 @@ where
                 | SessionStoreError::InvalidStateTransition { .. }
                 | SessionStoreError::ReceiptIdentityMismatch { .. },
             )) => self.status(context, binding, handle).await,
-            Ok(Err(_)) => SessionRefreshOutcome::Unavailable,
+            Ok(Err(error)) => {
+                SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(&error))
+            }
             Err(outcome) => outcome,
         }
     }
@@ -509,7 +566,9 @@ where
                     None => receipt,
                 }
             })),
-            Ok(Err(_)) => Err(SessionRefreshOutcome::Unavailable),
+            Ok(Err(error)) => Err(SessionRefreshOutcome::Unavailable(
+                SessionRefreshUnavailable::store(&error),
+            )),
             Err(outcome) => Err(outcome),
         }
     }
@@ -543,7 +602,9 @@ where
         target.grain,
         SessionAccess::Hydrate,
     )
-    .map_err(|_| SessionRefreshOutcome::Unavailable)?;
+    .map_err(|error| {
+        SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::Authorization(error))
+    })?;
     let grant = authorizer
         .authorize(context, binding, &request)
         .map_err(map_authorization_error)?;
@@ -568,7 +629,9 @@ fn map_authorization_error(error: SessionAuthorizationError) -> SessionRefreshOu
         SessionAuthorizationError::Unavailable
         | SessionAuthorizationError::InvalidGrantId
         | SessionAuthorizationError::InvalidProviderScope
-        | SessionAuthorizationError::ZeroRevision => SessionRefreshOutcome::Unavailable,
+        | SessionAuthorizationError::ZeroRevision => {
+            SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::Authorization(error))
+        }
     }
 }
 

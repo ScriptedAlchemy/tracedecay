@@ -19,6 +19,8 @@ from pathlib import Path
 from types import FrameType
 from typing import Callable, Mapping, Sequence
 
+from scripts.lib.portable_process import dies_with_this_process
+
 
 class LifecycleError(RuntimeError):
     """A managed runtime process violated its lifecycle contract."""
@@ -162,6 +164,7 @@ class OwnedDaemon:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            preexec_fn=dies_with_this_process(),
         )
         self.process_group_id = os.getpgid(self.process.pid)
         try:

@@ -109,7 +109,10 @@ pub enum SessionRefreshServiceOutcome {
     NotFound,
     Aborted,
     DeadlineExceeded,
-    Unavailable,
+    /// `reason` is the refresh authority's typed cause, rendered.
+    Unavailable {
+        reason: String,
+    },
 }
 
 pub fn utc_micros_value(value: UtcMicros) -> i64 {

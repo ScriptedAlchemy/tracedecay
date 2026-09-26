@@ -23,7 +23,12 @@ use tracedecay_graph_query::{
 };
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_session_memory::context::RegisteredScopeResolver;
+use tracedecay_session_memory::transcript::GlobalDbTranscriptStore;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::runtime::shared::TranscriptIngestStats;
+use tracedecay_sessions::runtime::source::{
+    TranscriptIngestResult, TranscriptSource, try_ingest_source,
+};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 #[derive(Clone)]
@@ -503,6 +508,22 @@ impl DashboardTestRuntimeV1 {
             .database(scope)?
             .get_session(provider, session_id)
             .await)
+    }
+
+    /// Drives one host transcript source through the production project
+    /// ingest path, including canonical observation admission.
+    pub(crate) async fn ingest_project_transcript_source_for_test(
+        &self,
+        source: &dyn TranscriptSource,
+        project_root: &Path,
+    ) -> TranscriptIngestResult<TranscriptIngestStats> {
+        try_ingest_source(
+            &GlobalDbTranscriptStore::new(self.project_database.as_ref()),
+            source,
+            project_root,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn record_project_span_for_test(

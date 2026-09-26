@@ -327,7 +327,8 @@ fn same_module_export_clauses_bind_the_forwarded_binding() {
     // no edge, and the call site stays a disclosed gap.
     let gaps = generation.unresolved_typescript_import_calls();
     assert!(
-        gaps.iter().any(|gap| gap.reference_name == "relayedMissing"),
+        gaps.iter()
+            .any(|gap| gap.reference_name == "relayedMissing"),
         "{gaps:?}"
     );
 }

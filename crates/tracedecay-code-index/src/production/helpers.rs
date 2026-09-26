@@ -7,9 +7,9 @@ use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1, ImportRe
 use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId};
 
 use crate::chunks::{
-    CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted,
-    is_typescript_family, relation_target_kind_is_compatible,
-    rust_qualified_name_is_ufcs_trait_impl, rust_type_path_alias_for_trait_impl_method,
+    CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted, is_typescript_family,
+    relation_target_kind_is_compatible, rust_qualified_name_is_ufcs_trait_impl,
+    rust_type_path_alias_for_trait_impl_method,
 };
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::typescript_resolution::{

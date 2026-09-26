@@ -9,6 +9,7 @@
 //! sources unavailable instead of inferring relationships from session rows.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -21,13 +22,17 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
-    DashboardWatermarkV1, scope_from_state,
+    DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardWatermarkV1, scope_from_state,
 };
-use super::util::{JsonQuery, query_rows};
-use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, params};
+use super::util::{JsonQuery, collect_rows};
+use super::{DashboardState, RequestControl};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{
+    Error as EngineError, IntoParams, QueryExecutor, params,
+};
+use tracedecay_session_memory::context::{RequestInterruption, run_deadline_signal_interruptible};
 use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SessionGitSpan};
 
 const DEFAULT_LIMIT: i64 = 200;
@@ -69,18 +74,114 @@ pub type DashboardGitCorrelationReadFutureV1<'a> = Pin<
 >;
 
 /// Daemon-owned read over the verified session-git-evidence projection.
-/// HTTP adapters receive complete typed rows and never a graph store handle.
+/// HTTP adapters receive complete typed rows for the requested sessions and
+/// never a graph store handle.
 pub trait DashboardGitCorrelationReadPortV1: Send + Sync {
-    fn read<'a>(&'a self) -> DashboardGitCorrelationReadFutureV1<'a>;
+    fn read(&self, session_ids: BTreeSet<String>) -> DashboardGitCorrelationReadFutureV1<'_>;
 }
 
-const PAGE_CTE: &str = "
+/// The requested page of sessions, newest start first. Only rowids ride the
+/// sort; message counts and bounds are then resolved per page row through the
+/// `(provider, session_id, …)` indexes, so the work scales with the page and
+/// that page's messages, never with the whole history.
+const SESSION_PAGE_SQL: &str = "
     WITH page AS (
-        SELECT provider, session_id
+        SELECT rowid AS page_rowid, started_at
         FROM sessions
         ORDER BY (started_at IS NULL), started_at DESC, rowid DESC
         LIMIT ?1 OFFSET ?2
-    )";
+    )
+    SELECT p.page_rowid, s.provider, s.session_id, s.title, s.started_at, s.ended_at,
+           s.is_subagent,
+           NULLIF(TRIM(s.parent_session_id), '') AS parent_session_id,
+           NULLIF(TRIM(s.parent_tool_use_id), '') AS parent_tool_use_id,
+           (SELECT COUNT(*) FROM lcm_raw_messages m
+             WHERE m.provider = s.provider AND m.session_id = s.session_id) AS messages,
+           (SELECT MAX(m.timestamp) FROM lcm_raw_messages m
+             WHERE m.provider = s.provider AND m.session_id = s.session_id) AS last_message_at,
+           CASE WHEN json_valid(s.metadata_json)
+                      AND json_type(s.metadata_json, '$.edited_files') = 'array'
+                THEN 1 ELSE 0 END AS edited_files_recorded
+    FROM page p
+    JOIN sessions s ON s.rowid = p.page_rowid
+    ORDER BY (p.started_at IS NULL), p.started_at DESC, p.page_rowid DESC";
+
+/// Per-page reads bind the page's session rowids as one JSON array (`?1`) and
+/// join outward from it, so no statement re-sorts or rescans `sessions`.
+const PAGE_MODELS_SQL: &str = "
+    SELECT s.provider, s.session_id, m.model
+    FROM json_each(?1) page
+    CROSS JOIN sessions s ON s.rowid = page.value
+    CROSS JOIN lcm_raw_messages m ON m.provider = s.provider AND m.session_id = s.session_id
+    WHERE m.model IS NOT NULL AND TRIM(m.model) != ''
+    GROUP BY s.provider, s.session_id, m.model
+    ORDER BY s.provider, s.session_id, m.model";
+
+const PAGE_EDITED_FILES_SQL: &str = "
+    SELECT s.provider, s.session_id,
+           json_extract(file.value, '$.path') AS path,
+           json_extract(file.value, '$.change_type') AS change_type,
+           json_extract(file.value, '$.hunks') AS hunks,
+           CASE WHEN json_type(file.value, '$.edited_at_micros') = 'integer'
+                THEN json_extract(file.value, '$.edited_at_micros') END
+               AS edited_at_micros
+    FROM json_each(?1) page
+    CROSS JOIN sessions s ON s.rowid = page.value
+    JOIN json_each(
+        CASE WHEN json_valid(s.metadata_json) THEN s.metadata_json ELSE '{}' END,
+        '$.edited_files'
+    ) AS file
+    WHERE json_type(file.value, '$.path') = 'text'
+    ORDER BY s.provider, s.session_id, path";
+
+const PAGE_GENERATIONS_SQL: &str = "
+    SELECT COUNT(*) AS active_generations, MAX(generation.activated_at) AS latest_activated_at
+    FROM json_each(?1) page
+    CROSS JOIN sessions s ON s.rowid = page.value
+    CROSS JOIN session_temporal_generations generation ON generation.session_id = s.session_id
+    WHERE generation.state = 'active'";
+
+const LOOM_REFRESH_OPERATION: &str = "use-case.dashboard.loom.temporal.refresh";
+
+/// Why a Loom temporal read produced no page.
+#[derive(Debug)]
+enum LoomReadFailureV1 {
+    /// The session store could not serve the read now (reader lane refused or
+    /// broken, the statement was interrupted or found the store busy); the
+    /// same read can succeed on retry.
+    StoreUnavailable(String),
+    /// The store failed the read or answered with data that breaks this
+    /// route's contract; retrying the same read does not help.
+    Failed(String),
+}
+
+impl fmt::Display for LoomReadFailureV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StoreUnavailable(detail) | Self::Failed(detail) => formatter.write_str(detail),
+        }
+    }
+}
+
+impl From<EngineError> for LoomReadFailureV1 {
+    fn from(error: EngineError) -> Self {
+        const SQLITE_BUSY: i32 = 5;
+        const SQLITE_LOCKED: i32 = 6;
+        const SQLITE_INTERRUPT: i32 = 9;
+        let transient = match &error {
+            EngineError::Busy | EngineError::Runtime(_) => true,
+            EngineError::Sqlite { code, .. } => {
+                matches!(code, Some(SQLITE_BUSY | SQLITE_LOCKED | SQLITE_INTERRUPT))
+            }
+            _ => false,
+        };
+        if transient {
+            Self::StoreUnavailable(error.to_string())
+        } else {
+            Self::Failed(error.to_string())
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct LoomTemporalParamsV1 {
@@ -207,9 +308,15 @@ struct LoomReadV1 {
     latest_activated_at: Option<i64>,
 }
 
-fn decode_rows<T: DeserializeOwned>(rows: Vec<Value>, label: &str) -> Result<Vec<T>, String> {
-    serde_json::from_value(Value::Array(rows))
-        .map_err(|error| format!("{label} did not match its response contract: {error}"))
+fn decode_rows<T: DeserializeOwned>(
+    rows: Vec<Value>,
+    label: &str,
+) -> Result<Vec<T>, LoomReadFailureV1> {
+    serde_json::from_value(Value::Array(rows)).map_err(|error| {
+        LoomReadFailureV1::Failed(format!(
+            "{label} did not match its response contract: {error}"
+        ))
+    })
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -224,6 +331,7 @@ pub struct LoomFileSessionProjectionV1 {
 
 pub async fn temporal(
     State(state): State<DashboardState>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<LoomTemporalParamsV1>,
 ) -> Response {
     hotpath::future!(
@@ -243,20 +351,21 @@ pub async fn temporal(
                 .into_response();
             };
 
-            let snapshot = match database.read_snapshot().await {
-                Ok(snapshot) => snapshot,
-                Err(error) => return query_error(format!("open Loom session snapshot: {error}")),
-            };
-            let git_correlation = match state.git_correlation_read_authority.as_ref() {
-                None => GitCorrelationSourceReadV1::Absent,
-                Some(authority) => match authority.read().await {
-                    Ok(read) => GitCorrelationSourceReadV1::Read(read),
-                    Err(error) => GitCorrelationSourceReadV1::Failed(error.detail),
-                },
-            };
-            let read = match read_temporal(&snapshot, limit, offset, git_correlation).await {
-                Ok(read) => read,
-                Err(error) => return query_error(error),
+            let read = run_deadline_signal_interruptible(
+                &control.deadline(),
+                control.cancellation(),
+                read_temporal(
+                    database,
+                    state.git_correlation_read_authority.as_deref(),
+                    limit,
+                    offset,
+                ),
+            )
+            .await;
+            let read = match read {
+                Ok(Ok(read)) => read,
+                Ok(Err(failure)) => return read_failure_response(&state, failure),
+                Err(interruption) => return interrupted_response(&state, interruption),
             };
             let total = read.payload.total;
             let examined = read.examined_sessions;
@@ -290,6 +399,68 @@ pub async fn temporal(
     .await
 }
 
+/// A read the admitted request deadline or cancellation ended. The page is
+/// withheld, never truncated into a partial success; retrying is the legal
+/// action.
+fn interrupted_response(state: &DashboardState, interruption: RequestInterruption) -> Response {
+    let (status, domain_state, code, detail) = match interruption {
+        RequestInterruption::DeadlineExceeded => (
+            StatusCode::GATEWAY_TIMEOUT,
+            DashboardDomainStateV1::TimedOut,
+            "loom_temporal_read_timed_out",
+            "the Loom temporal read did not finish within its admitted request deadline",
+        ),
+        RequestInterruption::Cancelled => (
+            StatusCode::REQUEST_TIMEOUT,
+            DashboardDomainStateV1::Cancelled,
+            "loom_temporal_read_cancelled",
+            "the Loom temporal request was cancelled before the read finished",
+        ),
+    };
+    let mut coverage = DashboardCoverageV1::unknown();
+    coverage.omission_reasons = vec![code.to_owned(), detail.to_owned()];
+    problem_response(
+        status,
+        DashboardEnvelopeV1::new(
+            scope_from_state(state),
+            domain_state,
+            coverage,
+            DashboardFreshnessV1::unknown(),
+            None,
+        )
+        .with_legal_actions(vec![refresh_action()]),
+    )
+}
+
+fn read_failure_response(state: &DashboardState, failure: LoomReadFailureV1) -> Response {
+    let scope = scope_from_state(state);
+    match failure {
+        LoomReadFailureV1::StoreUnavailable(detail) => {
+            let mut envelope =
+                DashboardEnvelopeV1::unavailable(scope, None, "loom_session_store_unavailable")
+                    .with_legal_actions(vec![refresh_action()]);
+            envelope.coverage.omission_reasons.push(detail);
+            problem_response(StatusCode::SERVICE_UNAVAILABLE, envelope)
+        }
+        LoomReadFailureV1::Failed(detail) => {
+            let mut envelope = DashboardEnvelopeV1::error(scope, None, "loom_temporal_read_failed");
+            envelope.coverage.omission_reasons.push(detail);
+            problem_response(StatusCode::INTERNAL_SERVER_ERROR, envelope)
+        }
+    }
+}
+
+fn problem_response(
+    status: StatusCode,
+    envelope: DashboardEnvelopeV1<Option<LoomTemporalPayloadV1>>,
+) -> Response {
+    (status, Json(envelope)).into_response()
+}
+
+fn refresh_action() -> DashboardLegalActionRefV1 {
+    DashboardLegalActionRefV1::new(DashboardLegalActionKindV1::Refresh, LOOM_REFRESH_OPERATION)
+}
+
 /// One resolved git-correlation read for this request: the composed
 /// authority's outcome, or the typed absent/failed states.
 enum GitCorrelationSourceReadV1 {
@@ -299,41 +470,35 @@ enum GitCorrelationSourceReadV1 {
 }
 
 async fn read_temporal(
-    conn: &(impl QueryExecutor + ?Sized),
+    database: &RegisteredGlobalDb,
+    git_authority: Option<&dyn DashboardGitCorrelationReadPortV1>,
     limit: i64,
     offset: i64,
-    git_correlation: GitCorrelationSourceReadV1,
-) -> Result<LoomReadV1, String> {
+) -> Result<LoomReadV1, LoomReadFailureV1> {
+    let snapshot = database.read_snapshot().await.map_err(|error| {
+        LoomReadFailureV1::StoreUnavailable(format!("open Loom session snapshot: {error}"))
+    })?;
+    let conn = &snapshot;
     let total = query_count(conn, "SELECT COUNT(*) AS total FROM sessions", (), "total").await?;
-    let session_sql = "
-        SELECT s.provider, s.session_id, s.title, s.started_at, s.ended_at,
-               s.is_subagent,
-               NULLIF(TRIM(s.parent_session_id), '') AS parent_session_id,
-               NULLIF(TRIM(s.parent_tool_use_id), '') AS parent_tool_use_id,
-               COUNT(m.message_id) AS messages,
-               MAX(m.timestamp) AS last_message_at,
-               CASE WHEN json_valid(s.metadata_json)
-                          AND json_type(s.metadata_json, '$.edited_files') = 'array'
-                    THEN 1 ELSE 0 END AS edited_files_recorded
-        FROM sessions s
-        LEFT JOIN lcm_raw_messages m
-          ON m.provider = s.provider AND m.session_id = s.session_id
-        GROUP BY s.provider, s.session_id
-        ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
-        LIMIT ?1 OFFSET ?2";
-    let mut sessions = query_rows(conn, session_sql, params![limit, offset]).await?;
+    let mut sessions = query_rows(conn, SESSION_PAGE_SQL, params![limit, offset]).await?;
     let examined_sessions = sessions.len() as u64;
 
-    let model_sql = format!(
-        "{PAGE_CTE}
-         SELECT m.provider, m.session_id, m.model
-         FROM lcm_raw_messages m
-         JOIN page p ON p.provider = m.provider AND p.session_id = m.session_id
-         WHERE m.model IS NOT NULL AND TRIM(m.model) != ''
-         GROUP BY m.provider, m.session_id, m.model
-         ORDER BY m.provider, m.session_id, m.model"
-    );
-    let model_rows = query_rows(conn, &model_sql, params![limit, offset]).await?;
+    let mut page_rowids = Vec::with_capacity(sessions.len());
+    let mut page_keys: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut edited_examined = 0_u64;
+    for session in &sessions {
+        page_rowids.push(required_i64(session, "page_rowid")?);
+        page_keys.insert((
+            required_str(session, "provider")?.to_string(),
+            required_str(session, "session_id")?.to_string(),
+        ));
+        if required_i64(session, "edited_files_recorded")? != 0 {
+            edited_examined += 1;
+        }
+    }
+    let page = Value::from(page_rowids).to_string();
+
+    let model_rows = query_rows(conn, PAGE_MODELS_SQL, params![page.as_str()]).await?;
     let mut models: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
     for row in model_rows {
         let provider = required_str(&row, "provider")?.to_string();
@@ -361,66 +526,29 @@ async fn read_temporal(
         }
     }
 
-    let edited_file_sql = format!(
-        "{PAGE_CTE}
-         SELECT p.provider, p.session_id,
-                json_extract(file.value, '$.path') AS path,
-                json_extract(file.value, '$.change_type') AS change_type,
-                json_extract(file.value, '$.hunks') AS hunks,
-                CASE WHEN json_type(file.value, '$.edited_at_micros') = 'integer'
-                     THEN json_extract(file.value, '$.edited_at_micros') END
-                    AS edited_at_micros
-         FROM page p
-         JOIN sessions s ON s.provider = p.provider AND s.session_id = p.session_id
-         JOIN json_each(
-             CASE WHEN json_valid(s.metadata_json) THEN s.metadata_json ELSE '{{}}' END,
-             '$.edited_files'
-         ) AS file
-         WHERE json_type(file.value, '$.path') = 'text'
-         ORDER BY p.provider, p.session_id, path"
-    );
-    let edited_files = query_rows(conn, &edited_file_sql, params![limit, offset]).await?;
-    let edited_examined_sql = format!(
-        "{PAGE_CTE}
-         SELECT COUNT(*) AS examined
-         FROM page p
-         JOIN sessions s ON s.provider = p.provider AND s.session_id = p.session_id
-         WHERE json_valid(s.metadata_json)
-           AND json_type(s.metadata_json, '$.edited_files') = 'array'"
-    );
-    let edited_examined = query_count(
-        conn,
-        &edited_examined_sql,
-        params![limit, offset],
-        "examined",
-    )
-    .await?;
-
-    let generation_sql = format!(
-        "{PAGE_CTE}
-         SELECT COUNT(*) AS active_generations, MAX(generation.activated_at) AS latest_activated_at
-         FROM session_temporal_generations generation
-         JOIN page p ON p.session_id = generation.session_id
-         WHERE generation.state = 'active'"
-    );
-    let generation_rows = query_rows(conn, &generation_sql, params![limit, offset]).await?;
+    let edited_files = query_rows(conn, PAGE_EDITED_FILES_SQL, params![page.as_str()]).await?;
+    let generation_rows = query_rows(conn, PAGE_GENERATIONS_SQL, params![page.as_str()]).await?;
     let generation = generation_rows
         .first()
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let active_generations = required_u64(&generation, "active_generations")?;
+        .ok_or_else(|| LoomReadFailureV1::Failed("generation count returned no row".to_owned()))?;
+    let active_generations = required_u64(generation, "active_generations")?;
     let latest_activated_at = generation
         .get("latest_activated_at")
         .and_then(Value::as_i64);
+    drop(snapshot);
 
-    let mut page_keys: BTreeSet<(String, String)> = BTreeSet::new();
-    for session in &sessions {
-        page_keys.insert((
-            required_str(session, "provider")?.to_string(),
-            required_str(session, "session_id")?.to_string(),
-        ));
-    }
-    let git = resolve_git_sources(git_correlation, &page_keys, examined_sessions)?;
+    let git_correlation = match git_authority {
+        None => GitCorrelationSourceReadV1::Absent,
+        Some(authority) => {
+            let session_ids = page_keys.iter().map(|(_, id)| id.clone()).collect();
+            match authority.read(session_ids).await {
+                Ok(read) => GitCorrelationSourceReadV1::Read(read),
+                Err(error) => GitCorrelationSourceReadV1::Failed(error.detail),
+            }
+        }
+    };
+    let git = resolve_git_sources(git_correlation, &page_keys, examined_sessions)
+        .map_err(LoomReadFailureV1::Failed)?;
 
     let statuses = vec![
         git.session_commit,
@@ -765,7 +893,8 @@ pub async fn sessions_for_edited_file(
         (),
         "eligible",
     )
-    .await?;
+    .await
+    .map_err(|failure| failure.to_string())?;
     let sessions = query_rows(
         conn,
         "SELECT DISTINCT s.provider, s.session_id, s.title, s.started_at, s.ended_at
@@ -778,7 +907,8 @@ pub async fn sessions_for_edited_file(
          ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC",
         params![file_path],
     )
-    .await?;
+    .await
+    .map_err(|failure| failure.to_string())?;
     Ok(LoomFileSessionProjectionV1 {
         granularity: "file",
         authority: "sessions.metadata_json $.edited_files[]",
@@ -834,34 +964,54 @@ fn matched_sessions(rows: &[Value]) -> u64 {
         .len() as u64
 }
 
+async fn query_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+    sql: &str,
+    params: impl IntoParams,
+) -> Result<Vec<Value>, LoomReadFailureV1> {
+    hotpath::future!(
+        async move {
+            let rows = conn.query(sql, params).await?;
+            Ok(collect_rows(rows).await?)
+        },
+        label = "dashboard_api.loom.query_rows"
+    )
+    .await
+}
+
 async fn query_count(
     conn: &(impl QueryExecutor + ?Sized),
     sql: &str,
     params: impl IntoParams,
     field: &str,
-) -> Result<u64, String> {
+) -> Result<u64, LoomReadFailureV1> {
     let rows = query_rows(conn, sql, params).await?;
-    let row = rows
-        .first()
-        .ok_or_else(|| format!("count query returned no row for {field}"))?;
+    let row = rows.first().ok_or_else(|| {
+        LoomReadFailureV1::Failed(format!("count query returned no row for {field}"))
+    })?;
     required_u64(row, field)
 }
 
-fn required_u64(row: &Value, field: &str) -> Result<u64, String> {
+fn required_u64(row: &Value, field: &str) -> Result<u64, LoomReadFailureV1> {
     let value = required_i64(row, field)?;
-    u64::try_from(value).map_err(|_| format!("{field} was negative: {value}"))
+    u64::try_from(value)
+        .map_err(|_| LoomReadFailureV1::Failed(format!("{field} was negative: {value}")))
 }
 
-fn required_i64(row: &Value, field: &str) -> Result<i64, String> {
-    row.get(field)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| format!("required integer field {field} was absent or invalid"))
+fn required_i64(row: &Value, field: &str) -> Result<i64, LoomReadFailureV1> {
+    row.get(field).and_then(Value::as_i64).ok_or_else(|| {
+        LoomReadFailureV1::Failed(format!(
+            "required integer field {field} was absent or invalid"
+        ))
+    })
 }
 
-fn required_str<'a>(row: &'a Value, field: &str) -> Result<&'a str, String> {
-    row.get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("required string field {field} was absent or invalid"))
+fn required_str<'a>(row: &'a Value, field: &str) -> Result<&'a str, LoomReadFailureV1> {
+    row.get(field).and_then(Value::as_str).ok_or_else(|| {
+        LoomReadFailureV1::Failed(format!(
+            "required string field {field} was absent or invalid"
+        ))
+    })
 }
 
 fn unavailable_payload(reason: &str) -> LoomTemporalPayloadV1 {
@@ -939,14 +1089,6 @@ fn unavailable_payload(reason: &str) -> LoomTemporalPayloadV1 {
             authority: "session_temporal_generations maintained by the temporal refresh scheduler",
         },
     }
-}
-
-fn query_error(error: String) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "detail": format!("Loom temporal read failed: {error}") })),
-    )
-        .into_response()
 }
 
 #[cfg(test)]

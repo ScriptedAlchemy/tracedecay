@@ -1,6 +1,10 @@
+#[cfg(unix)]
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 
 #[cfg(unix)]
 use std::io::BufRead;
@@ -11,6 +15,7 @@ use std::os::unix::net::UnixListener;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
+#[cfg(target_os = "linux")]
 use tracing_subscriber::fmt::MakeWriter;
 
 use super::runner::ServiceRunner;
@@ -86,15 +91,19 @@ fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
     guard.settlement = RestoreSettlement::Complete;
 }
 
+// The tracing capture only backs the systemd fallback-restore tests below.
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 struct CapturedWriter {
     bytes: Arc<Mutex<Vec<u8>>>,
 }
 
+#[cfg(target_os = "linux")]
 struct CapturedGuard {
     bytes: Arc<Mutex<Vec<u8>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl Write for CapturedGuard {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         self.bytes
@@ -109,6 +118,7 @@ impl Write for CapturedGuard {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl<'a> MakeWriter<'a> for CapturedWriter {
     type Writer = CapturedGuard;
 
@@ -121,6 +131,7 @@ impl<'a> MakeWriter<'a> for CapturedWriter {
 
 /// Runs `scope` under a capturing `tracing` subscriber and returns everything
 /// it logged.
+#[cfg(target_os = "linux")]
 fn captured_tracing(scope: impl FnOnce()) -> String {
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
@@ -139,6 +150,7 @@ fn captured_tracing(scope: impl FnOnce()) -> String {
     String::from_utf8(bytes).expect("captured tracing is UTF-8")
 }
 
+#[cfg(target_os = "linux")]
 const FALLBACK_RESTORE_FAILED: &str = "quiesced daemon lifecycle fallback restore failed";
 
 /// A quiesced `RunningEnabled` daemon whose systemd `start` always fails, so

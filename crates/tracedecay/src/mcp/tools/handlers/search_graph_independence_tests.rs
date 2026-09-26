@@ -101,6 +101,7 @@ fn completed_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchO
                 routes: vec![tracedecay_query::retrieval::lexical::LexicalRouteKindV1::Query],
                 matches_by_anchor: BTreeMap::new(),
                 anchors: Vec::new(),
+                dropped_sites: std::collections::BTreeMap::new(),
             },
         },
     )

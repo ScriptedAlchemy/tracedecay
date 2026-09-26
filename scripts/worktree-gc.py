@@ -623,6 +623,9 @@ def main(argv: list[str]) -> int:
     start = os.getcwd() if args.repo is None and git_ok("rev-parse", "--is-inside-work-tree") else args.repo
     start = start or str(Path(__file__).resolve().parent.parent)
     repo = git("rev-parse", "--show-toplevel", cwd=start).decode().strip()
+    if git("rev-parse", "--is-shallow-repository", cwd=repo).strip() == b"true":
+        # Grafts cut merge bases and patch equivalence, so every verdict would be a silent UNMERGED.
+        raise GcError(f"{repo} is a shallow repository; restore full history (`git fetch --unshallow`) first")
     integ = Integration(*resolve_integration(repo, args.integration))
     slug, gh_note = github_repo_slug(repo, args.github_repo)
 

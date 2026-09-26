@@ -45,7 +45,8 @@ mod stack_delivery_tests;
 mod support;
 pub use discovery_queue::HostDiscoveryQueueEntry;
 pub use git_correlation_adapter::{
-    GitEvidenceConvergenceOutcome, GitEvidenceConvergenceStats, GlobalDbGitCorrelationStore,
+    GitEvidenceConvergenceOutcome, GitEvidenceConvergenceStats, GitSessionEvidence,
+    GlobalDbGitCorrelationStore,
 };
 pub use git_topology_anchor::RegisteredGitTopologyAnchorAuthority;
 pub use observability_rollup::{
@@ -183,6 +184,9 @@ mod observation_batch_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod observation_collision_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod session_project_rebind_tests;
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub mod tests;

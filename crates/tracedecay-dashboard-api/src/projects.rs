@@ -14,7 +14,8 @@ use super::read_model::{
 };
 use super::{DashboardState, build_selected_project_state, config_error};
 use crate::project_registry::{
-    PublicCodeProject, build_project_registry_view, public_code_project_from_record,
+    PublicCodeProject, align_public_checkout_branches, build_project_registry_view,
+    public_code_project_for_checkout, public_code_project_from_record,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::ProjectRegistryContext;
@@ -221,11 +222,17 @@ pub async fn list(
             );
         }
     };
-    let view = build_project_registry_view(&contexts, runtime.active_project_id(), truncated);
-    let rows = projects
+    let view = build_project_registry_view(
+        &contexts,
+        runtime.active_project_id(),
+        Some(runtime.active.project_root.as_path()),
+        truncated,
+    );
+    let mut rows = projects
         .iter()
         .map(|project| public_code_project_from_record(project, runtime.active_project_id()))
         .collect::<Vec<_>>();
+    align_public_checkout_branches(&mut rows, &view);
     let row_count = rows.len() as u64;
 
     let payload = ProjectsPayloadV1 {
@@ -340,9 +347,11 @@ pub async fn context(
             status: "ok".to_owned(),
             error: None,
             is_active: Some(is_active),
-            project: Some(public_code_project_from_record(
+            project: Some(public_code_project_for_checkout(
                 &context.project,
+                &context.aliases,
                 runtime.active_project_id(),
+                is_active.then_some(runtime.active.project_root.as_path()),
             )),
             aliases: context.aliases,
         },

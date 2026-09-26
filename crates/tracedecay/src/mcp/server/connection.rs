@@ -188,9 +188,11 @@ impl McpServer {
         let serving = crate::daemon::serve_routed_rmcp_connection(
             server,
             tracedecay_mcp::BrokerStreamTransport::new(daemon_side),
-            first_request,
-            std::collections::VecDeque::new(),
-            None,
+            crate::daemon::RoutedRmcpReplay {
+                first_request_line: first_request,
+                pending_lines: std::collections::VecDeque::new(),
+                initialize_route: None,
+            },
             self.timings_enabled(),
             lifecycle,
             lifecycle.try_enter(),

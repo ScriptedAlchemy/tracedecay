@@ -1595,67 +1595,70 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )
         )?;
-        hotpath::measure_block!("query.artifact.batch.sqlite", {
-            let _mutation_authority = BuilderMutationGuardV1::enter(&self.mutation_gate)?;
-            let transaction = self.connection.transaction().map_err(sqlite_error)?;
-            let mutation = (|| {
-                hotpath::measure_block!("query.artifact.batch.imports", {
-                    for page in pages {
-                        append_prepared_imports(&transaction, page, control)?;
-                    }
-                    Ok::<(), CodeLexicalArtifactErrorV1>(())
-                })?;
-                record_batch_import_metrics(pages);
-                hotpath::measure_block!(
-                    "query.artifact.batch.clone_bodies",
-                    append_prepared_clone_bodies(&transaction, pages, control)
-                )?;
-                hotpath::measure_block!(
-                    "query.artifact.batch.rows.stage_dictionary",
-                    stage_row_dictionary(&transaction, pages, control)
-                )?;
-                hotpath::measure_block!(
-                    "query.artifact.batch.rows",
-                    append_prepared_rows(&transaction, pages, control)
-                )?;
-                record_batch_row_metrics(pages);
-                hotpath::measure_block!(
-                    "query.artifact.batch.postings",
-                    append_prepared_postings(
-                        &transaction,
-                        pages,
-                        &term_insert_plan,
-                        &exact_insert_plan,
-                        control,
-                    )
-                )?;
-                record_batch_posting_metrics(pages);
-                hotpath::measure_block!("query.artifact.batch.receipts", {
-                    for page in pages {
-                        insert_prepared_source_page(&transaction, page)?;
-                    }
-                    Ok::<(), CodeLexicalArtifactErrorV1>(())
-                })?;
-                record_batch_receipt_metrics(pages);
-                checkpoint(control)
-            })();
-            if let Err(error) = mutation {
-                hotpath::gauge!("query.artifact.batch.rollbacks_total").inc(1u64);
-                hotpath::measure_block!(
-                    "query.artifact.batch.rollback",
-                    transaction.rollback().map_err(sqlite_error)
-                )?;
-                return Err(error);
-            }
-            hotpath::gauge!("query.artifact.batch.commit_attempts_total").inc(1u64);
-            let commit = hotpath::measure_block!(
-                "query.artifact.batch.commit",
-                transaction.commit().map_err(sqlite_error)
-            );
-            if commit.is_ok() {
-                hotpath::gauge!("query.artifact.batch.commit_succeeded_total").inc(1u64);
-            }
-            commit
+        let mutation_gate = &self.mutation_gate;
+        super::with_memory_statement_journals(&mut self.connection, |connection| {
+            hotpath::measure_block!("query.artifact.batch.sqlite", {
+                let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
+                let transaction = connection.transaction().map_err(sqlite_error)?;
+                let mutation = (|| {
+                    hotpath::measure_block!("query.artifact.batch.imports", {
+                        for page in pages {
+                            append_prepared_imports(&transaction, page, control)?;
+                        }
+                        Ok::<(), CodeLexicalArtifactErrorV1>(())
+                    })?;
+                    record_batch_import_metrics(pages);
+                    hotpath::measure_block!(
+                        "query.artifact.batch.clone_bodies",
+                        append_prepared_clone_bodies(&transaction, pages, control)
+                    )?;
+                    hotpath::measure_block!(
+                        "query.artifact.batch.rows.stage_dictionary",
+                        stage_row_dictionary(&transaction, pages, control)
+                    )?;
+                    hotpath::measure_block!(
+                        "query.artifact.batch.rows",
+                        append_prepared_rows(&transaction, pages, control)
+                    )?;
+                    record_batch_row_metrics(pages);
+                    hotpath::measure_block!(
+                        "query.artifact.batch.postings",
+                        append_prepared_postings(
+                            &transaction,
+                            pages,
+                            &term_insert_plan,
+                            &exact_insert_plan,
+                            control,
+                        )
+                    )?;
+                    record_batch_posting_metrics(pages);
+                    hotpath::measure_block!("query.artifact.batch.receipts", {
+                        for page in pages {
+                            insert_prepared_source_page(&transaction, page)?;
+                        }
+                        Ok::<(), CodeLexicalArtifactErrorV1>(())
+                    })?;
+                    record_batch_receipt_metrics(pages);
+                    checkpoint(control)
+                })();
+                if let Err(error) = mutation {
+                    hotpath::gauge!("query.artifact.batch.rollbacks_total").inc(1u64);
+                    hotpath::measure_block!(
+                        "query.artifact.batch.rollback",
+                        transaction.rollback().map_err(sqlite_error)
+                    )?;
+                    return Err(error);
+                }
+                hotpath::gauge!("query.artifact.batch.commit_attempts_total").inc(1u64);
+                let commit = hotpath::measure_block!(
+                    "query.artifact.batch.commit",
+                    transaction.commit().map_err(sqlite_error)
+                );
+                if commit.is_ok() {
+                    hotpath::gauge!("query.artifact.batch.commit_succeeded_total").inc(1u64);
+                }
+                commit
+            })
         })?;
         // Do not observe cancellation between durable COMMIT and publishing
         // its exact progress. The source callback must be able to advance its

@@ -2390,22 +2390,44 @@ async fn update_active_replay_metadata(
     Ok(())
 }
 
-async fn ensure_session(
+/// Project fields on a session row LCM inserts only so foreign keys resolve.
+/// Not a project identity. A later rollout projection overwrites them.
+pub const LCM_UNKNOWN_PROJECT_KEY: &str = "unknown";
+
+/// Historical placeholder `ensure_session` used to write as if it were a project.
+/// Live stores still hold it; projection treats it as unscoped, same as
+/// [`LCM_UNKNOWN_PROJECT_KEY`].
+pub const LCM_LEGACY_PLACEHOLDER_PROJECT_KEY: &str = "lcm-active-context";
+
+/// Whether both project fields are an LCM placeholder rather than a project.
+pub fn lcm_unscoped_session_project(project_key: &str, project_path: &str) -> bool {
+    project_key == project_path
+        && matches!(
+            project_key,
+            LCM_UNKNOWN_PROJECT_KEY | LCM_LEGACY_PLACEHOLDER_PROJECT_KEY | ""
+        )
+}
+
+/// Inserts the session row LCM foreign keys require without claiming a project.
+///
+/// `INSERT OR IGNORE` leaves a row the rollout projection already created.
+/// Callers that run first store [`LCM_UNKNOWN_PROJECT_KEY`] in both project
+/// fields so the projector can replace them with the real project.
+pub async fn ensure_session(
     conn: &impl Executor,
     provider: &str,
     session_id: &str,
 ) -> Result<(), LcmError> {
     conn.execute(
         "INSERT OR IGNORE INTO sessions (
-            provider, session_id, project_key, project_path, title, started_at
+            provider, session_id, project_key, project_path, started_at
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())",
+         VALUES (?1, ?2, ?3, ?4, unixepoch())",
         params![
             provider,
             session_id,
-            "lcm-active-context",
-            "lcm-active-context",
-            "LCM active context",
+            LCM_UNKNOWN_PROJECT_KEY,
+            LCM_UNKNOWN_PROJECT_KEY,
         ],
     )
     .await?;

@@ -29,14 +29,17 @@ use super::super::{
 use super::{
     ACTIVATION_RETRY_BACKOFF_CEILING, ACTIVATION_RETRY_BACKOFF_FLOOR,
     CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+    CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
+    CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
     ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1, MountedCodeIndexWorktreeV1,
     PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingGenerationSlot, ServingSwapOutcomeV1,
     TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
-    convergence_park_retries_on_wake, is_repeated_conflict_verdict, park_convergence,
-    publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
+    clear_graph_resident_memory_park, convergence_park_retries_on_wake,
+    is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
+    retained_noop_requires_follow_up_wake,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -531,18 +534,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 // needs. It deliberately does not attribute the span to the
                 // SQL writer alone.
                 let pass_wake_observed_at = Instant::now();
-                // A quarantined or backing-off panic unit must not consume the
+                let pass_control_epoch = worker_control_epoch.load(Ordering::Acquire);
+                // A quarantined or backing-off unit must not consume the
                 // pending arrival: the wake stays outstanding so a later
                 // eligible pass still measures its full queue wait.
-                if panic_guard.suppresses_pass(
-                    tokio::time::Instant::now(),
-                    worker_control_epoch.load(Ordering::Acquire),
-                ) {
+                if panic_guard.suppresses_pass(tokio::time::Instant::now(), pass_control_epoch) {
                     tracing::debug!(
                         event = "code_index_reconcile_panic_suppressed",
                         path = "background_worker",
                         consecutive_panics = panic_guard.consecutive_panics(),
-                        "code-index reconcile is suppressed after repeated panics over unchanged input"
+                        "code-index reconcile is suppressed over unchanged input after a panic or a reproducing failure"
                     );
                     continue;
                 }
@@ -1780,11 +1781,24 @@ impl CodeIndexSchedulerRegistryV1 {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
                             last_seat_conflict = None;
+                            clear_graph_resident_memory_park(&worker_convergence_park);
                         }
                         Err(error) if error.is_graph_activation_refusal() => {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
                             last_seat_conflict = None;
+                            // This generation never re-attempts its graph in
+                            // this daemon, so an unparked refusal read as an
+                            // indefinite `indexing` with no way forward.
+                            if error.is_resident_memory_graph_refusal() {
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    error.to_string(),
+                                    CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
+                                    Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                                    false,
+                                );
+                            }
                             tracing::warn!(
                                 event = "code_index_graph_activation_refused",
                                 error = %error,
@@ -2408,6 +2422,22 @@ impl CodeIndexSchedulerRegistryV1 {
                                         "code-index reconcile stopped retrying a capacity refusal; the next hint retries"
                                     ),
                                 }
+                            } else if error.reproduces_on_unchanged_input() {
+                                // The restored arrival alone read as an
+                                // indefinite `indexing` while every wake
+                                // rebuilt the whole worktree into the same
+                                // refusal. Park it typed and hold passes
+                                // until the input changes; a daemon restart
+                                // remounts with an empty park and retries.
+                                capacity_retry.record_progress();
+                                panic_guard.quarantine_unchanged_input(pass_control_epoch);
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    error.to_string(),
+                                    CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
+                                    None,
+                                    false,
+                                );
                             } else {
                                 capacity_retry.record_progress();
                             }

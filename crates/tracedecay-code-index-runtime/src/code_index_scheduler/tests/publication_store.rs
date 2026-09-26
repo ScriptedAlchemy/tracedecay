@@ -3418,11 +3418,10 @@ fn a_pointer_sealed_before_segment_bytes_is_corrupt_until_the_store_is_reset() {
     let receipt = upgraded
         .reset_corrupt_publication_authority()
         .expect("the derived store is deleted, not repaired");
-    assert!(
-        receipt.removed_entries >= 2,
-        "the pointer and the generations directory are gone: {receipt:?}"
+    assert_eq!(
+        receipt.removed_entries, 5,
+        "every derived top-level entry of the one-generation store is removed: {receipt:?}"
     );
-    assert!(receipt.removed_bytes > 0);
     assert!(
         !pointer_path.exists(),
         "no copy of the corrupt pointer survives"

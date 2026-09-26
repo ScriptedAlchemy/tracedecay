@@ -1498,6 +1498,23 @@ async fn open_registered_test_database_with_identity(
     Ok((registered, database))
 }
 
+/// Reopens one sessions database under a new project id.
+///
+/// A re-enroll keeps the sessions file and admits later observations for the
+/// current project. The previous projection rows stay in place.
+#[cfg(test)]
+pub(crate) async fn reopen_project_sessions_database(
+    path: &std::path::Path,
+    project_id: tracedecay_domain::ProjectId,
+) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)> {
+    open_registered_test_database_with(
+        path,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions { project_id },
+        RegisteredTestWriteAuthority::DaemonScoped,
+    )
+    .await
+}
+
 /// Opens a registered-store fixture through the same physical publication,
 /// sealed schema installation, owner migration, and client issuance route as
 /// production admission. Tests may use engine fixtures for post-admission

@@ -17,14 +17,47 @@ if __name__ == "__main__" and sys.argv[1:] == ["monotonic-ms"]:
     raise SystemExit(0)
 
 import argparse
+import ctypes
 import errno
+import functools
 import math
 import os
 from pathlib import Path
 import signal
 import socket
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+
+_PR_SET_PDEATHSIG = 1
+# Loaded before any fork: a `preexec_fn` must not dlopen in the child.
+_LIBC = ctypes.CDLL(None, use_errno=True) if sys.platform.startswith("linux") else None
+
+
+def die_with_parent(parent_pid: int) -> None:
+    """Have the kernel SIGKILL this process when `parent_pid` exits.
+
+    Call it in a forked child before exec (see `dies_with_this_process` for
+    `Popen`). Harness traps and `finally` blocks never
+    run when the harness itself is SIGKILLed, so a daemon in its own session
+    used to outlive it for days. prctl(2) fires on exit of the forking
+    *thread*, so spawn from a thread that outlives the child. Linux-only;
+    elsewhere the harness teardown remains the only owner.
+    """
+    if _LIBC is None:
+        return
+    if _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, f"prctl(PR_SET_PDEATHSIG): {os.strerror(error)}")
+    # A parent that died before the signal was armed never delivers it.
+    if os.getppid() != parent_pid:
+        raise OSError(errno.ESRCH, "parent exited before the child was bound to it")
+
+
+def dies_with_this_process() -> Callable[[], None] | None:
+    """`preexec_fn` binding a `Popen` child to this process, where supported."""
+    if _LIBC is None:
+        return None
+    return functools.partial(die_with_parent, os.getpid())
 
 
 def _positive_seconds(value: str) -> float:
@@ -138,6 +171,7 @@ def _return_code(status: int) -> int:
 
 def command_exec_session(args: argparse.Namespace) -> int:
     command = _command_after_separator(args.command)
+    die_with_parent(args.parent_pid)
     try:
         os.setsid()
     except PermissionError:
@@ -311,6 +345,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="action", required=True)
 
     exec_session = subparsers.add_parser("exec-session")
+    exec_session.add_argument("--parent-pid", required=True, type=_positive_pid)
     exec_session.add_argument("command", nargs=argparse.REMAINDER)
     exec_session.set_defaults(func=command_exec_session)
 
