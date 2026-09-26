@@ -852,9 +852,8 @@ const CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1: &str = "indexing this w
 /// does.
 const CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1: &str = "the native code graph \
      was refused because daemon memory reached its admission watermark; exact and lexical \
-     search keep serving; free memory or raise the daemon's memory limit, then run \
-     `tracedecay daemon restart` to rebuild the graph (a source change that seals a new \
-     generation also retries it)";
+     search keep serving, and the graph retries on its own once retained memory is given \
+     back or RSS falls (a source change that seals a new generation also retries it)";
 
 /// Remediation when the derived publication was already deleted and rebuilt
 /// once in this mount and is corrupt again. The daemon deletes and rebuilds a

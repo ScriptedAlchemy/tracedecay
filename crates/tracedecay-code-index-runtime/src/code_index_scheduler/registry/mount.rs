@@ -970,6 +970,23 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
+                // Memory given back is the retry for a graph refused at the
+                // watermark: its generation activates again on this pass.
+                if matches!(
+                    trigger,
+                    CodeIndexCadenceTriggerV1::MemoryHeadroom
+                        | CodeIndexCadenceTriggerV1::MemoryRetry
+                ) && retained_text
+                    .as_ref()
+                    .is_some_and(LatestCodeTextGenerationV1::retry_resident_memory_graph_refusal)
+                {
+                    graph_seat_attempted = None;
+                    tracing::info!(
+                        event = "code_index_graph_activation_memory_retry",
+                        trigger = trigger.label(),
+                        "memory was given back; the refused native graph activates again"
+                    );
+                }
                 let serving_empty = worker_serving_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1823,22 +1840,25 @@ impl CodeIndexSchedulerRegistryV1 {
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
                             last_seat_conflict = None;
                             clear_graph_resident_memory_park(&worker_convergence_park);
+                            worker_memory_retry.reset();
                         }
                         Err(error) if error.is_graph_activation_refusal() => {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
                             last_seat_conflict = None;
-                            // This generation never re-attempts its graph in
-                            // this daemon, so an unparked refusal read as an
-                            // indefinite `indexing` with no way forward.
+                            // A configuration refusal never re-attempts, so an
+                            // unparked refusal read as an indefinite `indexing`.
+                            // A memory refusal parks typed until memory is
+                            // given back or its retry delay elapses.
                             if error.is_resident_memory_graph_refusal() {
                                 park_convergence(
                                     &worker_convergence_park,
                                     error.to_string(),
                                     CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
                                     Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
-                                    false,
+                                    true,
                                 );
+                                worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
                             }
                             tracing::warn!(
                                 event = "code_index_graph_activation_refused",
@@ -2710,21 +2730,24 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree_id: worktree_id.clone(),
             },
         );
-        // A text-artifact build refused for memory records no retry of its
-        // own; memory given back anywhere in the process is its retry. Only
-        // a missing or unfinished text owner wakes: a pass on a finished
-        // worktree would re-seat the decode a release just gave back. The
-        // watcher holds no strong reference, so it ends with the worktree.
+        // A text-artifact build or a native graph refused for memory records
+        // no retry of its own; memory given back anywhere in the process is
+        // its retry. Only a missing or unfinished text owner or a graph parked
+        // on resident memory wakes: a pass on a finished worktree would
+        // re-seat the decode a release just gave back. The watcher holds no
+        // strong reference, so it ends with the worktree.
         let mut headroom = self.resident_owners.subscribe_headroom();
         let headroom_pending_wake = Arc::downgrade(&pending_wake);
         let headroom_wake = Arc::downgrade(&wake);
         let headroom_text = Arc::downgrade(&text_generation);
+        let headroom_park = Arc::downgrade(&convergence_park);
         tokio::spawn(async move {
             while headroom.changed().await.is_ok() {
-                let (Some(pending_wake), Some(wake), Some(text)) = (
+                let (Some(pending_wake), Some(wake), Some(text), Some(park)) = (
                     headroom_pending_wake.upgrade(),
                     headroom_wake.upgrade(),
                     headroom_text.upgrade(),
+                    headroom_park.upgrade(),
                 ) else {
                     return;
                 };
@@ -2733,7 +2756,14 @@ impl CodeIndexSchedulerRegistryV1 {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .as_ref()
                     .is_none_or(LatestCodeTextGenerationV1::text_projection_needs_work);
-                if !text_unfinished {
+                let graph_refused_for_memory = park
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .is_some_and(|parked| {
+                        parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+                    });
+                if !text_unfinished && !graph_refused_for_memory {
                     continue;
                 }
                 Self::note_wake_if_idle(
