@@ -578,10 +578,10 @@ pub(super) async fn bounded_repository_identity(
 /// warming project open. Spawn and probe failures are terminal because retrying
 /// them until the caller's budget expires only hides the actionable error.
 ///
-/// A deferral names when to come back and, when one is still running, that a
-/// resolution is in progress, the difference between "this root is being
-/// resolved" and "this root is unresolved", which is what a client staring at
-/// a repeated deferral cannot otherwise tell.
+/// A deferral names the checkout whose walk is blocked and when to come back.
+/// The in-flight identity slot is optional: a probe can be parked in `open()`
+/// without that slot, and the refusal still has to name the path so status
+/// and doctor can tell this project from every other one.
 pub(super) fn repository_discovery_deferred(
     path: &Path,
     reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
@@ -592,12 +592,13 @@ pub(super) fn repository_discovery_deferred(
     );
     let progress = if deferred {
         let retry_after_ms = super::REPOSITORY_DISCOVERY_DEADLINE.as_millis();
+        let blocked = format!("repository discovery blocked on {}", path.display());
         match tracedecay_runtime_core::git_discovery::identity_resolution_elapsed(path) {
             Some(elapsed) => format!(
-                "; resolution in progress for {:.1}s and publishing its result, retry after {retry_after_ms}ms",
+                "; {blocked} for {:.1}s; retry after {retry_after_ms}ms",
                 elapsed.as_secs_f64()
             ),
-            None => format!("; retry after {retry_after_ms}ms"),
+            None => format!("; {blocked}; retry after {retry_after_ms}ms"),
         }
     } else {
         String::new()

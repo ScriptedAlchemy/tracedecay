@@ -415,6 +415,65 @@ fn daemon_runtime_parser_reports_missing_database_telemetry_as_pending() {
 /// caller and CI gate. `doctor_result` already turns any issue into a non-zero
 /// exit, so grading this `fail` is what makes an unavailable daemon fail closed.
 #[test]
+fn doctor_reports_a_discovery_blocked_daemon_without_recovery_guidance() {
+    let path = std::path::Path::new("/Volumes/external/checkout");
+    let blocked = tracedecay_domain::errors::TraceDecayError::project_route(
+        crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+        true,
+        format!(
+            "repository discovery for '{}' is deferred (DeadlineExceeded); repository discovery blocked on {}; retry after 2000ms",
+            path.display(),
+            path.display()
+        ),
+    );
+    let message = super::daemon_warming_doctor_message(path, &blocked)
+        .expect("discovery-blocked daemon is a warming report");
+    assert!(
+        message.contains(&format!(
+            "daemon is still warming: repository discovery blocked on {}",
+            path.display()
+        )),
+        "{message}"
+    );
+    assert!(
+        !message.contains("daemon closed the connection")
+            && !message.contains("Preserve this recovery set")
+            && !message.contains("WAL:"),
+        "{message}"
+    );
+    let health = super::classify_daemon_status_error(&mut DoctorCounters::new(), path, &blocked);
+    assert!(
+        matches!(health, super::DatabaseHealth::Unknown { reason } if reason == "daemon_warming"),
+        "discovery-blocked warming must stay unknown health, not a store failure"
+    );
+
+    let warming = tracedecay_domain::errors::TraceDecayError::project_route(
+        crate::daemon::PROJECT_WARMING_REASON_CODE,
+        true,
+        "TraceDecay profile runtime is warming in the background; retry the same tool shortly",
+    );
+    let warming_message = super::daemon_warming_doctor_message(path, &warming)
+        .expect("profile warming is a warming report");
+    assert!(
+        warming_message.contains("daemon is still warming: profile runtime is warming"),
+        "{warming_message}"
+    );
+    assert!(
+        !warming_message.contains("Preserve this recovery set")
+            && !warming_message.contains("WAL:"),
+        "{warming_message}"
+    );
+
+    let closed = tracedecay_domain::errors::TraceDecayError::Config {
+        message: "daemon closed the connection after the tool request was sent but before returning a result; the outcome is unknown and the request was not retried".to_owned(),
+    };
+    assert!(
+        super::daemon_warming_doctor_message(path, &closed).is_none(),
+        "a closed connection is not a warming report"
+    );
+}
+
+#[test]
 fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
     let mut counters = DoctorCounters::new();
     super::report_daemon_diagnostics_unavailable(

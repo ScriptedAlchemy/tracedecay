@@ -209,6 +209,11 @@ fn map_repository_error(
                 stderr: detail,
             }
         }
+        GitRepositoryError::DiscoveryBlocked { path } => GitIntelligenceError::GitFailed {
+            operation: "repository discovery",
+            status: "blocked".to_owned(),
+            stderr: format!("repository discovery blocked on {path}"),
+        },
         GitRepositoryError::UnreadableHead { detail } => GitIntelligenceError::GitFailed {
             operation: "HEAD",
             status: "gix".to_owned(),

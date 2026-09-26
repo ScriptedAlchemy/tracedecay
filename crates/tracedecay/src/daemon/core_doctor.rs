@@ -607,10 +607,14 @@ where
     let report_ready = if request.doctor_report_requested() {
         match Box::pin(doctor_report_ready()).await {
             Ok(ready) => ready,
-            // Enrollment is the client's state. Answering it here used to
-            // drop the socket before any frame, which Doctor could only
-            // report as a closed connection and then treat as store damage.
-            Err(error) if super::error_is_project_not_enrolled(&error) => {
+            // Enrollment, warming, and a blocked repository walk are client
+            // states. Dropping the socket before any frame made Doctor report
+            // a closed connection and then print store-recovery guidance.
+            Err(error)
+                if super::error_is_project_not_enrolled(&error)
+                    || super::error_is_project_warming(&error)
+                    || super::error_is_repository_discovery_deferred(&error) =>
+            {
                 drop(setup_activity);
                 Box::pin(write_json_rpc_response(
                     transport,
@@ -1065,6 +1069,71 @@ mod doctor_runtime_route_tests {
                 .output
                 .contains(r#""reason":"doctor_report_owner_warming""#),
             "not-enrolled must not be reported as a warming owner: {}",
+            transport.output
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_report_probe_answers_discovery_blocked_without_closing() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let project = root.path().join("blocked");
+        let handshake = handshake(
+            project.clone(),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        let store_administration = StoreAdministration::default();
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
+        let detail = format!("repository discovery blocked on {}", project.display());
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            {
+                let detail = detail.clone();
+                move || async move {
+                    Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                        super::super::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                        true,
+                        detail,
+                    ))
+                }
+            },
+        )
+        .await
+        .expect("discovery-blocked is a response, not a closed connection");
+
+        assert!(outcome.is_none());
+        assert!(
+            transport
+                .output
+                .contains(r#""reason_code":"repository_discovery_deferred""#),
+            "doctor probe response: {}",
+            transport.output
+        );
+        assert!(
+            transport.output.contains("repository discovery blocked on"),
+            "doctor probe response: {}",
+            transport.output
+        );
+        assert!(
+            !transport.output.contains("daemon closed the connection"),
+            "discovery-blocked must not be reported as a closed connection: {}",
             transport.output
         );
     }
