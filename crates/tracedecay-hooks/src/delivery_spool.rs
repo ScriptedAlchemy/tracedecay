@@ -8,19 +8,17 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::lock_admission::{LockAdmissionError, lock_until};
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     DeliverySettlementOutcomeV1, DeliverySettlementV1, DeliverySurfaceFamilyV1,
     canonical_json_bytes, canonical_sha256, sha256_hex_suffix,
 };
-use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, atomic_write, is_owned_temporary_name, read_bounded,
     remove_abandoned_temporaries, sync_directory, validate_regular_or_missing,
 };
+use tracedecay_private_fs::{FileLease, LockAdmissionError, lock_until};
 
 const MAX_PENDING_RECEIPTS: usize = 1_024;
 const MAX_RECEIPT_BYTES: usize = 4 * 1024;
@@ -165,7 +163,7 @@ impl HookDeliveryReceiptSpoolV1 {
             Some(wait_budget) => {
                 lock_until(&lock, Instant::now() + wait_budget).map_err(|error| match error {
                     LockAdmissionError::TimedOut => HookDeliverySpoolError::AdmissionTimedOut,
-                    LockAdmissionError::Io => HookDeliverySpoolError::Io,
+                    LockAdmissionError::Io(_) => HookDeliverySpoolError::Io,
                 })?;
             }
             None => {
