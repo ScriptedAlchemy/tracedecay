@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,55 +150,6 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
             Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "run checkpoint",
                 message: "physical runtime has no typed checkpoint port".to_owned(),
-            })
-        })
-    }
-
-    fn snapshot_to<'a>(
-        &'a self,
-        destination: PathBuf,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> Pin<
-        Box<
-            dyn Future<
-                    Output = Result<
-                        tracedecay_rusqlite_runtime::OnlineBackupReceipt,
-                        StoreRuntimeRegistryFailure,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        let _ = (destination, authority);
-        Box::pin(async {
-            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "snapshot database",
-                message: "physical runtime has no typed online-backup port".to_owned(),
-            })
-        })
-    }
-
-    fn snapshot_to_interruptible<'a>(
-        &'a self,
-        destination: PathBuf,
-        probe: Arc<dyn RuntimeRequestProbeV1>,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> Pin<
-        Box<
-            dyn Future<
-                    Output = Result<
-                        tracedecay_rusqlite_runtime::OnlineBackupReceipt,
-                        StoreRuntimeRegistryFailure,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        let _ = (destination, probe, authority);
-        Box::pin(async {
-            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "snapshot database",
-                message: "physical runtime has no interruptible online-backup port".to_owned(),
             })
         })
     }

@@ -20,15 +20,13 @@ use crate::{
     telemetry::WriterTelemetry,
 };
 
-use super::super::{
-    backup::OnlineBackupCommand,
-    request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand, SharedReply},
+use super::super::request::{
+    AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand, SharedReply,
 };
 pub(super) enum WorkerWake {
     Write(Option<AcceptedRequest>),
     ExactSql(Box<Option<ExactSqlWriterCommand>>),
     IncrementalVacuum(Box<Option<IncrementalVacuumCommand>>),
-    OnlineBackup(Box<Option<OnlineBackupCommand>>),
     Checkpoint(Box<Option<CheckpointCommand>>),
     Shutdown,
     CheckpointRetry,
@@ -39,13 +37,11 @@ pub(super) async fn wait_for_work(
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     exact_sql_receiver: &mut mpsc::Receiver<ExactSqlWriterCommand>,
     incremental_vacuum_receiver: &mut mpsc::Receiver<IncrementalVacuumCommand>,
-    online_backup_receiver: &mut mpsc::Receiver<OnlineBackupCommand>,
     checkpoint_receiver: &mut mpsc::Receiver<CheckpointCommand>,
     shutdown_receiver: &mut mpsc::UnboundedReceiver<()>,
     input_closed: bool,
     exact_sql_closed: bool,
     incremental_vacuum_closed: bool,
-    online_backup_closed: bool,
     checkpoint_closed: bool,
     checkpoint_retry_after: Option<std::time::Duration>,
 ) -> WorkerWake {
@@ -72,11 +68,6 @@ pub(super) async fn wait_for_work(
         {
             return Poll::Ready(WorkerWake::IncrementalVacuum(Box::new(command)));
         }
-        if !online_backup_closed
-            && let Poll::Ready(command) = Pin::new(&mut *online_backup_receiver).poll_recv(context)
-        {
-            return Poll::Ready(WorkerWake::OnlineBackup(Box::new(command)));
-        }
         if !input_closed && let Poll::Ready(item) = Pin::new(&mut *receiver).poll_recv(context) {
             return Poll::Ready(WorkerWake::Write(item));
         }
@@ -99,13 +90,11 @@ pub(super) fn apply_wake(
     inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     exact_sql_queue: &mut VecDeque<ExactSqlWriterCommand>,
     incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
-    online_backup_queue: &mut VecDeque<OnlineBackupCommand>,
     checkpoint_queue: &mut VecDeque<CheckpointCommand>,
     telemetry: &WriterTelemetry,
     input_closed: &mut bool,
     exact_sql_closed: &mut bool,
     incremental_vacuum_closed: &mut bool,
-    online_backup_closed: &mut bool,
     checkpoint_closed: &mut bool,
 ) {
     match wake {
@@ -121,10 +110,6 @@ pub(super) fn apply_wake(
             Some(command) => incremental_vacuum_queue.push_back(command),
             None => *incremental_vacuum_closed = true,
         },
-        WorkerWake::OnlineBackup(command) => match *command {
-            Some(command) => online_backup_queue.push_back(command),
-            None => *online_backup_closed = true,
-        },
         WorkerWake::Checkpoint(command) => match *command {
             Some(command) => checkpoint_queue.push_back(command),
             None => *checkpoint_closed = true,
@@ -136,7 +121,7 @@ pub(super) fn apply_wake(
 
 /// Move every command already sitting in `receiver` into `queue`.
 ///
-/// Each auxiliary channel (exact SQL, incremental vacuum, online backup,
+/// Each auxiliary channel (exact SQL, incremental vacuum,
 /// checkpoint) drains identically, park the command, stop on empty, and latch
 /// `input_closed` once the sender is gone, so they share this one loop. The
 /// product-write channel does not: it settles duplicates through
@@ -162,13 +147,11 @@ pub(super) fn drain_command_ingress<T>(
 pub(super) enum AuxiliaryWork {
     ExactSql,
     IncrementalVacuum,
-    OnlineBackup,
 }
 
 pub(super) fn select_auxiliary_work(
     exact_sql_waiting: bool,
     incremental_vacuum_waiting: bool,
-    online_backup_waiting: bool,
     product_queue_empty: bool,
     prefer_auxiliary: bool,
     next: AuxiliaryWork,
@@ -179,24 +162,12 @@ pub(super) fn select_auxiliary_work(
     let waiting = |work| match work {
         AuxiliaryWork::ExactSql => exact_sql_waiting,
         AuxiliaryWork::IncrementalVacuum => incremental_vacuum_waiting,
-        AuxiliaryWork::OnlineBackup => online_backup_waiting,
     };
     let order = match next {
-        AuxiliaryWork::ExactSql => [
-            AuxiliaryWork::ExactSql,
-            AuxiliaryWork::IncrementalVacuum,
-            AuxiliaryWork::OnlineBackup,
-        ],
-        AuxiliaryWork::IncrementalVacuum => [
-            AuxiliaryWork::IncrementalVacuum,
-            AuxiliaryWork::OnlineBackup,
-            AuxiliaryWork::ExactSql,
-        ],
-        AuxiliaryWork::OnlineBackup => [
-            AuxiliaryWork::OnlineBackup,
-            AuxiliaryWork::ExactSql,
-            AuxiliaryWork::IncrementalVacuum,
-        ],
+        AuxiliaryWork::ExactSql => [AuxiliaryWork::ExactSql, AuxiliaryWork::IncrementalVacuum],
+        AuxiliaryWork::IncrementalVacuum => {
+            [AuxiliaryWork::IncrementalVacuum, AuxiliaryWork::ExactSql]
+        }
     };
     order.into_iter().find(|work| waiting(*work))
 }
@@ -274,7 +245,7 @@ mod tests {
 
     use super::{
         AcceptedRequest, CheckpointCommand, ExactSqlWriterCommand, IncrementalVacuumCommand,
-        OnlineBackupCommand, WorkerWake, wait_for_work,
+        WorkerWake, wait_for_work,
     };
 
     #[test]
@@ -282,7 +253,6 @@ mod tests {
         let (_write_tx, mut write_rx) = mpsc::channel::<AcceptedRequest>(1);
         let (_exact_sql_tx, mut exact_sql_rx) = mpsc::channel::<ExactSqlWriterCommand>(1);
         let (_vacuum_tx, mut vacuum_rx) = mpsc::channel::<IncrementalVacuumCommand>(1);
-        let (_backup_tx, mut backup_rx) = mpsc::channel::<OnlineBackupCommand>(1);
         let (_checkpoint_tx, mut checkpoint_rx) = mpsc::channel::<CheckpointCommand>(1);
         let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
         shutdown_tx.send(()).expect("shutdown receiver is open");
@@ -295,10 +265,8 @@ mod tests {
             &mut write_rx,
             &mut exact_sql_rx,
             &mut vacuum_rx,
-            &mut backup_rx,
             &mut checkpoint_rx,
             &mut shutdown_rx,
-            false,
             false,
             false,
             false,

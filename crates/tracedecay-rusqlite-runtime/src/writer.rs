@@ -1,6 +1,5 @@
 //! One bounded, persistent SQLite writer for one authorized shard.
 
-mod backup;
 mod request;
 mod settlement;
 #[cfg(test)]
@@ -65,8 +64,6 @@ impl RuntimeWriteAuthority for UnrestrictedRuntimeWriteAuthority {
     }
 }
 
-use backup::{OnlineBackupCommand, validate_destination};
-pub use backup::{OnlineBackupReceipt, WriterOnlineBackupError};
 use request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand};
 use worker::Worker;
 
@@ -440,7 +437,6 @@ pub enum WriterActorError {
     ReplyDropped,
     StorageFailure(StorageRuntimeErrorV1),
     IncrementalVacuumFailed(String),
-    OnlineBackupFailed(WriterOnlineBackupError),
     InvalidWorkerOutcome(StorageRuntimeContractErrorV1),
     ThreadPanicked,
 }
@@ -460,7 +456,6 @@ impl fmt::Display for WriterActorError {
             Self::IncrementalVacuumFailed(message) => {
                 write!(f, "SQLite incremental vacuum failed: {message}")
             }
-            Self::OnlineBackupFailed(error) => write!(f, "{error}"),
             Self::InvalidWorkerOutcome(error) => {
                 write!(f, "SQLite writer returned an invalid outcome: {error}")
             }
@@ -474,7 +469,6 @@ impl Error for WriterActorError {
         match self {
             Self::InvalidRequest(error) | Self::InvalidWorkerOutcome(error) => Some(error),
             Self::StorageFailure(error) => Some(error),
-            Self::OnlineBackupFailed(error) => Some(error),
             _ => None,
         }
     }
@@ -534,7 +528,6 @@ pub struct PersistentWriter {
     sender: Mutex<Option<mpsc::Sender<AcceptedRequest>>>,
     exact_sql_sender: Mutex<Option<mpsc::Sender<ExactSqlWriterCommand>>>,
     incremental_vacuum_sender: Mutex<Option<mpsc::Sender<IncrementalVacuumCommand>>>,
-    online_backup_sender: Mutex<Option<mpsc::Sender<OnlineBackupCommand>>>,
     checkpoint_sender: Mutex<Option<mpsc::Sender<CheckpointCommand>>>,
     shutdown_sender: Option<mpsc::UnboundedSender<()>>,
     join: Option<JoinHandle<()>>,
@@ -623,7 +616,6 @@ impl PersistentWriter {
         // spurious Busy error from the transport's single-slot channel.
         let (exact_sql_sender, exact_sql_receiver) = mpsc::channel(capacity);
         let (incremental_vacuum_sender, incremental_vacuum_receiver) = mpsc::channel(1);
-        let (online_backup_sender, online_backup_receiver) = mpsc::channel(1);
         let (checkpoint_sender, checkpoint_receiver) = mpsc::channel(1);
         let (shutdown_sender, shutdown_receiver) = mpsc::unbounded_channel();
         let (checkpoint_status_tx, checkpoint_status) = watch::channel(CheckpointStatus::default());
@@ -641,7 +633,6 @@ impl PersistentWriter {
             receiver,
             exact_sql_receiver,
             incremental_vacuum_receiver,
-            online_backup_receiver,
             checkpoint_receiver,
             shutdown_receiver,
             persistence,
@@ -668,7 +659,6 @@ impl PersistentWriter {
                 sender: Mutex::new(Some(sender)),
                 exact_sql_sender: Mutex::new(Some(exact_sql_sender)),
                 incremental_vacuum_sender: Mutex::new(Some(incremental_vacuum_sender)),
-                online_backup_sender: Mutex::new(Some(online_backup_sender)),
                 checkpoint_sender: Mutex::new(Some(checkpoint_sender)),
                 shutdown_sender: Some(shutdown_sender),
                 join: Some(join),
@@ -873,82 +863,6 @@ impl PersistentWriter {
         response.await.map_err(|_| WriterActorError::ReplyDropped)?
     }
 
-    #[hotpath::skip]
-    pub async fn snapshot_to(
-        &self,
-        destination: PathBuf,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-    ) -> Result<OnlineBackupReceipt, WriterActorError> {
-        self.enqueue_online_backup(destination, None, authority)
-            .await
-    }
-
-    #[hotpath::skip]
-    pub async fn snapshot_to_interruptible(
-        &self,
-        destination: PathBuf,
-        probe: Arc<dyn RuntimeRequestProbeV1>,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-    ) -> Result<OnlineBackupReceipt, WriterActorError> {
-        self.enqueue_online_backup(destination, Some(probe), authority)
-            .await
-    }
-
-    #[hotpath::skip]
-    async fn enqueue_online_backup(
-        &self,
-        destination: PathBuf,
-        probe: Option<Arc<dyn RuntimeRequestProbeV1>>,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-    ) -> Result<OnlineBackupReceipt, WriterActorError> {
-        authority
-            .verify(RuntimeWriteAuthorityStage::BeforeAdmission)
-            .map_err(|_| WriterActorError::AuthorityDenied {
-                stage: RuntimeWriteAuthorityStage::BeforeAdmission,
-            })?;
-        if let Some(interruption) = probe.as_ref().and_then(|probe| probe.interruption()) {
-            return Err(WriterActorError::OnlineBackupFailed(match interruption {
-                tracedecay_store::RuntimeInterruptionV1::Cancelled => {
-                    WriterOnlineBackupError::Cancelled
-                }
-                tracedecay_store::RuntimeInterruptionV1::DeadlineExceeded => {
-                    WriterOnlineBackupError::DeadlineExceeded
-                }
-            }));
-        }
-        let destination = validate_destination(&self.path, &destination)
-            .map_err(WriterActorError::OnlineBackupFailed)?;
-        if self.state() != WriterState::Ready {
-            return Err(WriterActorError::OnlineBackupFailed(
-                WriterOnlineBackupError::WriterShuttingDown,
-            ));
-        }
-        let (reply, response) = oneshot::channel();
-        let command = OnlineBackupCommand::new(destination, probe, authority, reply);
-        let send_result = {
-            let sender = self
-                .online_backup_sender
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.state() != WriterState::Ready {
-                Err(mpsc::error::TrySendError::Closed(command))
-            } else if let Some(sender) = sender.as_ref() {
-                sender.try_send(command)
-            } else {
-                Err(mpsc::error::TrySendError::Closed(command))
-            }
-        };
-        send_result.map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => {
-                WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::Busy)
-            }
-            mpsc::error::TrySendError::Closed(_) => {
-                WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::WriterShuttingDown)
-            }
-        })?;
-        response.await.map_err(|_| WriterActorError::ReplyDropped)?
-    }
-
     fn unavailable(&self) -> RuntimeSubmitOutcomeV1 {
         RuntimeSubmitOutcomeV1::Unavailable {
             reason: self.state().unavailable_reason(),
@@ -971,10 +885,6 @@ impl PersistentWriter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         self.incremental_vacuum_sender
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        self.online_backup_sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();

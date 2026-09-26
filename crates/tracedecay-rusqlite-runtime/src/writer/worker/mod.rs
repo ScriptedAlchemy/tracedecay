@@ -48,7 +48,6 @@ use crate::{
 
 use super::{
     WriterActorError, WriterPersistence, WriterStartError, WriterState,
-    backup::{OnlineBackupCommand, run_online_backup},
     request::{
         AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
         IncrementalVacuumCommand, SharedReply,
@@ -65,7 +64,7 @@ use ingress::{
 };
 use rejection::{
     cancel_waiting, reject_all, reject_all_exact_sql, reject_all_incremental_vacuum,
-    reject_all_online_backup, reject_incremental_vacuum, reject_online_backup, reject_unauthorized,
+    reject_incremental_vacuum, reject_unauthorized,
 };
 
 const HARD_CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -220,20 +219,17 @@ async fn dwell_for_batch(
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     exact_sql_receiver: &mut mpsc::Receiver<ExactSqlWriterCommand>,
     incremental_vacuum_receiver: &mut mpsc::Receiver<IncrementalVacuumCommand>,
-    online_backup_receiver: &mut mpsc::Receiver<OnlineBackupCommand>,
     checkpoint_receiver: &mut mpsc::Receiver<CheckpointCommand>,
     shutdown_receiver: &mut mpsc::UnboundedReceiver<()>,
     queue: &mut FairQueue<AcceptedRequest>,
     inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     exact_sql_queue: &mut VecDeque<ExactSqlWriterCommand>,
     incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
-    online_backup_queue: &mut VecDeque<OnlineBackupCommand>,
     checkpoint_queue: &mut VecDeque<CheckpointCommand>,
     telemetry: &WriterTelemetry,
     input_closed: &mut bool,
     exact_sql_closed: &mut bool,
     incremental_vacuum_closed: &mut bool,
-    online_backup_closed: &mut bool,
     checkpoint_closed: &mut bool,
 ) {
     loop {
@@ -246,13 +242,11 @@ async fn dwell_for_batch(
                 receiver,
                 exact_sql_receiver,
                 incremental_vacuum_receiver,
-                online_backup_receiver,
                 checkpoint_receiver,
                 shutdown_receiver,
                 *input_closed,
                 *exact_sql_closed,
                 *incremental_vacuum_closed,
-                *online_backup_closed,
                 *checkpoint_closed,
                 None,
             ),
@@ -289,13 +283,11 @@ async fn dwell_for_batch(
                     inflight,
                     exact_sql_queue,
                     incremental_vacuum_queue,
-                    online_backup_queue,
                     checkpoint_queue,
                     telemetry,
                     input_closed,
                     exact_sql_closed,
                     incremental_vacuum_closed,
-                    online_backup_closed,
                     checkpoint_closed,
                 );
                 return;
@@ -315,7 +307,6 @@ pub(super) struct Worker {
     pub(super) receiver: mpsc::Receiver<AcceptedRequest>,
     pub(super) exact_sql_receiver: mpsc::Receiver<ExactSqlWriterCommand>,
     pub(super) incremental_vacuum_receiver: mpsc::Receiver<IncrementalVacuumCommand>,
-    pub(super) online_backup_receiver: mpsc::Receiver<OnlineBackupCommand>,
     pub(super) checkpoint_receiver: mpsc::Receiver<CheckpointCommand>,
     pub(super) shutdown_receiver: mpsc::UnboundedReceiver<()>,
     pub(super) persistence: Box<dyn WriterPersistence>,
@@ -478,12 +469,10 @@ impl Worker {
         let mut inflight = HashMap::new();
         let mut exact_sql_queue = VecDeque::new();
         let mut incremental_vacuum_queue = VecDeque::new();
-        let mut online_backup_queue = VecDeque::new();
         let mut checkpoint_queue = VecDeque::new();
         let mut input_closed = false;
         let mut exact_sql_closed = false;
         let mut incremental_vacuum_closed = false;
-        let mut online_backup_closed = false;
         let mut checkpoint_closed = false;
         let mut prefer_auxiliary = true;
         let mut next_auxiliary = AuxiliaryWork::IncrementalVacuum;
@@ -512,17 +501,11 @@ impl Worker {
                     &mut incremental_vacuum_queue,
                     &mut incremental_vacuum_closed,
                 );
-                drain_command_ingress(
-                    &mut self.online_backup_receiver,
-                    &mut online_backup_queue,
-                    &mut online_backup_closed,
-                );
             });
             if self.shutdown_requested.load(Ordering::Acquire)
                 && queue.is_empty()
                 && exact_sql_queue.is_empty()
                 && incremental_vacuum_queue.is_empty()
-                && online_backup_queue.is_empty()
             {
                 checkpoint_queue.clear();
                 break;
@@ -531,12 +514,10 @@ impl Worker {
                 reject_all(&mut queue, &self.telemetry);
                 reject_all_exact_sql(&mut exact_sql_queue);
                 reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
-                reject_all_online_backup(&mut online_backup_queue);
                 checkpoint_queue.clear();
                 if input_closed
                     && exact_sql_closed
                     && incremental_vacuum_closed
-                    && online_backup_closed
                     && checkpoint_closed
                 {
                     break;
@@ -545,13 +526,11 @@ impl Worker {
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
-                    &mut self.online_backup_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
                     exact_sql_closed,
                     incremental_vacuum_closed,
-                    online_backup_closed,
                     checkpoint_closed,
                     None,
                 ));
@@ -561,13 +540,11 @@ impl Worker {
                     &mut inflight,
                     &mut exact_sql_queue,
                     &mut incremental_vacuum_queue,
-                    &mut online_backup_queue,
                     &mut checkpoint_queue,
                     &self.telemetry,
                     &mut input_closed,
                     &mut exact_sql_closed,
                     &mut incremental_vacuum_closed,
-                    &mut online_backup_closed,
                     &mut checkpoint_closed,
                 );
                 continue;
@@ -599,13 +576,11 @@ impl Worker {
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
-                    &mut self.online_backup_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
                     exact_sql_closed,
                     incremental_vacuum_closed,
-                    online_backup_closed,
                     checkpoint_closed,
                     Some(retry_due.saturating_duration_since(now)),
                 ));
@@ -622,13 +597,11 @@ impl Worker {
                         &mut inflight,
                         &mut exact_sql_queue,
                         &mut incremental_vacuum_queue,
-                        &mut online_backup_queue,
                         &mut checkpoint_queue,
                         &self.telemetry,
                         &mut input_closed,
                         &mut exact_sql_closed,
                         &mut incremental_vacuum_closed,
-                        &mut online_backup_closed,
                         &mut checkpoint_closed,
                     );
                 }
@@ -638,7 +611,6 @@ impl Worker {
             if let Some(auxiliary) = select_auxiliary_work(
                 !exact_sql_queue.is_empty(),
                 !incremental_vacuum_queue.is_empty(),
-                !online_backup_queue.is_empty(),
                 queue.is_empty(),
                 prefer_auxiliary,
                 next_auxiliary,
@@ -685,26 +657,6 @@ impl Worker {
                         } else {
                             reject_incremental_vacuum(command);
                         }
-                        next_auxiliary = AuxiliaryWork::OnlineBackup;
-                    }
-                    AuxiliaryWork::OnlineBackup => {
-                        let command = online_backup_queue
-                            .pop_front()
-                            .expect("online backup queue checked non-empty");
-                        if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            crate::hotpath_observe::record_online_backup_dispatch();
-                            hotpath::measure_block!("rusqlite.writer.online_backup", {
-                                run_online_backup(
-                                    checkpoint.connection_mut(),
-                                    &self.binding,
-                                    &self.watermark_publisher,
-                                    &self.shutdown_requested,
-                                    command,
-                                );
-                            });
-                        } else {
-                            reject_online_backup(command);
-                        }
                         next_auxiliary = AuxiliaryWork::ExactSql;
                     }
                 }
@@ -717,7 +669,6 @@ impl Worker {
                 if input_closed
                     && exact_sql_closed
                     && incremental_vacuum_closed
-                    && online_backup_closed
                     && checkpoint_closed
                 {
                     break;
@@ -726,13 +677,11 @@ impl Worker {
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
-                    &mut self.online_backup_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
                     exact_sql_closed,
                     incremental_vacuum_closed,
-                    online_backup_closed,
                     checkpoint_closed,
                     None,
                 ));
@@ -742,13 +691,11 @@ impl Worker {
                     &mut inflight,
                     &mut exact_sql_queue,
                     &mut incremental_vacuum_queue,
-                    &mut online_backup_queue,
                     &mut checkpoint_queue,
                     &self.telemetry,
                     &mut input_closed,
                     &mut exact_sql_closed,
                     &mut incremental_vacuum_closed,
-                    &mut online_backup_closed,
                     &mut checkpoint_closed,
                 );
                 continue;
@@ -774,20 +721,17 @@ impl Worker {
                         &mut self.receiver,
                         &mut self.exact_sql_receiver,
                         &mut self.incremental_vacuum_receiver,
-                        &mut self.online_backup_receiver,
                         &mut self.checkpoint_receiver,
                         &mut self.shutdown_receiver,
                         &mut queue,
                         &mut inflight,
                         &mut exact_sql_queue,
                         &mut incremental_vacuum_queue,
-                        &mut online_backup_queue,
                         &mut checkpoint_queue,
                         &self.telemetry,
                         &mut input_closed,
                         &mut exact_sql_closed,
                         &mut incremental_vacuum_closed,
-                        &mut online_backup_closed,
                         &mut checkpoint_closed,
                     ));
                 });
@@ -1499,17 +1443,14 @@ mod auxiliary_scheduling_tests {
         );
         let (_exact_sql_tx, mut exact_sql_rx) = mpsc::channel(1);
         let (_vacuum_tx, mut vacuum_rx) = mpsc::channel(1);
-        let (_backup_tx, mut backup_rx) = mpsc::channel(1);
         let (_checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
         let (_shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
         let mut exact_sql_queue = VecDeque::new();
         let mut vacuum_queue = VecDeque::new();
-        let mut backup_queue = VecDeque::new();
         let mut checkpoint_queue = VecDeque::new();
         let mut input_closed = false;
         let mut exact_sql_closed = false;
         let mut vacuum_closed = false;
-        let mut backup_closed = false;
         let mut checkpoint_closed = false;
         let runtime = Builder::new_current_thread()
             .enable_time()
@@ -1521,20 +1462,17 @@ mod auxiliary_scheduling_tests {
             &mut write_rx,
             &mut exact_sql_rx,
             &mut vacuum_rx,
-            &mut backup_rx,
             &mut checkpoint_rx,
             &mut shutdown_rx,
             &mut queue,
             &mut inflight,
             &mut exact_sql_queue,
             &mut vacuum_queue,
-            &mut backup_queue,
             &mut checkpoint_queue,
             &telemetry,
             &mut input_closed,
             &mut exact_sql_closed,
             &mut vacuum_closed,
-            &mut backup_closed,
             &mut checkpoint_closed,
         ));
 
@@ -1841,18 +1779,11 @@ mod auxiliary_scheduling_tests {
     #[test]
     fn auxiliary_work_cannot_starve_product_writes() {
         assert_eq!(
-            select_auxiliary_work(
-                true,
-                true,
-                false,
-                false,
-                true,
-                AuxiliaryWork::IncrementalVacuum,
-            ),
+            select_auxiliary_work(true, true, false, true, AuxiliaryWork::IncrementalVacuum),
             Some(AuxiliaryWork::IncrementalVacuum)
         );
         assert_eq!(
-            select_auxiliary_work(true, true, false, false, false, AuxiliaryWork::ExactSql,),
+            select_auxiliary_work(true, true, false, false, AuxiliaryWork::ExactSql),
             None
         );
     }
@@ -1860,23 +1791,16 @@ mod auxiliary_scheduling_tests {
     #[test]
     fn auxiliary_work_alternates_when_product_queue_is_empty() {
         assert_eq!(
-            select_auxiliary_work(
-                true,
-                true,
-                false,
-                true,
-                false,
-                AuxiliaryWork::IncrementalVacuum,
-            ),
+            select_auxiliary_work(true, true, true, false, AuxiliaryWork::IncrementalVacuum),
             Some(AuxiliaryWork::IncrementalVacuum)
         );
         assert_eq!(
-            select_auxiliary_work(true, true, false, true, false, AuxiliaryWork::ExactSql,),
+            select_auxiliary_work(true, true, true, false, AuxiliaryWork::ExactSql),
             Some(AuxiliaryWork::ExactSql)
         );
         assert_eq!(
-            select_auxiliary_work(true, true, true, true, false, AuxiliaryWork::OnlineBackup,),
-            Some(AuxiliaryWork::OnlineBackup)
+            select_auxiliary_work(false, true, true, false, AuxiliaryWork::ExactSql),
+            Some(AuxiliaryWork::IncrementalVacuum)
         );
     }
 

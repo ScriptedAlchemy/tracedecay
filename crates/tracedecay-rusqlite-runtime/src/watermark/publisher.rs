@@ -110,6 +110,7 @@ impl CommittedWatermarkPublisher {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn current(&self, shard_id: &StoreShardIdV1) -> Option<ShardWatermarkV1> {
         self.channels
             .by_shard

@@ -15,8 +15,7 @@ use crate::{
 };
 
 use super::super::{
-    WriterActorError, WriterOnlineBackupError,
-    backup::OnlineBackupCommand,
+    WriterActorError,
     request::{AcceptedRequest, IncrementalVacuumCommand},
     settlement::{interruption_outcome, missing_authority},
 };
@@ -69,18 +68,6 @@ pub(super) fn reject_all(queue: &mut FairQueue<AcceptedRequest>, telemetry: &Wri
 pub(super) fn reject_all_exact_sql(queue: &mut VecDeque<ExactSqlWriterCommand>) {
     for command in queue.drain(..) {
         reject_writer_command(command);
-    }
-}
-
-pub(super) fn reject_online_backup(command: OnlineBackupCommand) {
-    command.settle(Err(WriterActorError::OnlineBackupFailed(
-        WriterOnlineBackupError::WriterShuttingDown,
-    )));
-}
-
-pub(super) fn reject_all_online_backup(queue: &mut VecDeque<OnlineBackupCommand>) {
-    for command in queue.drain(..) {
-        reject_online_backup(command);
     }
 }
 

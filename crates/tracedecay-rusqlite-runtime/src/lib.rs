@@ -2,7 +2,6 @@
 
 mod admission;
 mod authority;
-pub mod backup;
 mod checkpoint;
 mod connection;
 pub use connection::{
@@ -58,6 +57,6 @@ pub use telemetry::{
 };
 pub use writer::{
     CheckpointControlError, CheckpointHandle, CheckpointRequest, CheckpointTicket,
-    ExistingWriterLocator, MaintenanceCheckpointRequest, OnlineBackupReceipt, PersistentWriter,
-    WriterActorError, WriterOnlineBackupError, WriterStartError, WriterState,
+    ExistingWriterLocator, MaintenanceCheckpointRequest, PersistentWriter, WriterActorError,
+    WriterStartError, WriterState,
 };

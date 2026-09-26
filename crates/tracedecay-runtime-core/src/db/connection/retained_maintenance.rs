@@ -279,41 +279,4 @@ impl Database {
                 operation: "run bounded SQLite-store compaction".to_owned(),
             })
     }
-
-    /// Produces an online snapshot through this database's canonical writer
-    /// runtime. Read-only clients cannot request a snapshot because the
-    /// writer samples the retained write authority throughout publication.
-    #[hotpath::skip]
-    pub async fn snapshot_to(&self, destination: &std::path::Path) -> Result<()> {
-        let authority = self.write_authority()?;
-        self.client
-            .runtime()
-            .snapshot_to(destination.to_path_buf(), authority)
-            .await
-            .map(|_| ())
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to snapshot SQLite store: {error:?}"),
-                operation: "snapshot SQLite store".to_owned(),
-            })
-    }
-
-    /// Produces an interruption-aware online snapshot through this database's
-    /// canonical writer runtime. The caller supplies only request control;
-    /// this guarded facade retains and revalidates the exact write authority.
-    #[hotpath::skip]
-    pub async fn snapshot_to_interruptible(
-        &self,
-        destination: &std::path::Path,
-        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
-    ) -> Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt> {
-        let authority = self.write_authority()?;
-        self.client
-            .runtime()
-            .snapshot_to_interruptible(destination.to_path_buf(), probe, authority)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to snapshot SQLite store: {error:?}"),
-                operation: "snapshot SQLite store".to_owned(),
-            })
-    }
 }
