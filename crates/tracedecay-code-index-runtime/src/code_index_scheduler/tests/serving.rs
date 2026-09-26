@@ -63,6 +63,7 @@ use super::{
     rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
     settle_text_projection, test_project_id, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
+    wait_for_settled_owner,
 };
 use crate::{
     code_index::production::{
@@ -881,6 +882,9 @@ async fn dashboard_freshness_does_not_join_a_text_projection_slice() {
     while !latest.query_owners_are_ready() {
         latest.advance_text_serving(1).expect("advance text build");
     }
+    // The text seat is published inside the owner pass. Clone index stays stale
+    // for as long as that pass still reports a refresh.
+    wait_for_settled_owner(&registry, fixture.path()).await;
 
     let held_slot = latest.text_projection_build.lock_slot();
     let freshness = tokio::time::timeout(
