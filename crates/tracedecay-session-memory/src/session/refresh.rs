@@ -182,6 +182,11 @@ pub enum SessionRefreshOutcome {
     Denied,
     WrongScope,
     Stale,
+    /// The requested window no longer contains the committed projection
+    /// frontier; the caller rebuilds the request from that frontier.
+    StaleFrontier {
+        active_projection_frontier: u64,
+    },
     NotFound,
     Aborted,
     DeadlineExceeded,
@@ -347,6 +352,14 @@ where
             Ok(Err(SessionStoreError::IdempotencyConflict { .. })) => {
                 return SessionRefreshOutcome::Busy;
             }
+            Ok(Err(SessionStoreError::StaleRefreshFrontier {
+                active_projection_frontier,
+                ..
+            })) => {
+                return SessionRefreshOutcome::StaleFrontier {
+                    active_projection_frontier,
+                };
+            }
             Ok(Err(error)) => {
                 return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
                     &error,
@@ -354,11 +367,22 @@ where
             }
             Err(outcome) => return outcome,
         };
+        // The store begins the window at the committed projection frontier,
+        // which may have advanced past the caller's view but never past the
+        // requested target; the handle binds the window that actually began.
+        let effective = receipt.target_frontier();
+        let requested = target.frozen_frontier();
         if receipt.session_id() != target.session_id()
-            || receipt.target_frontier() != target.frozen_frontier()
+            || effective.observed_through() != requested.observed_through()
+            || effective.committed_through() < requested.committed_through()
         {
             return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::ReceiptMismatch);
         }
+        let target = SessionRefreshTarget {
+            frozen_frontier: effective,
+            ..target
+        };
+        let digests = refresh_digests(context, binding, &target, &grant, &self.configuration);
         let handle = SessionRefreshHandle {
             operation_id: receipt.operation_id().clone(),
             target,

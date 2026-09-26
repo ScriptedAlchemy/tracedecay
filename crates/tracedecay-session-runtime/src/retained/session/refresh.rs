@@ -1,12 +1,12 @@
 //! Typed retained projections for daemon-owned session refresh outcomes.
 
-use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{
     RetainedErrorV1, RetainedOutcomeStatusV1, RetainedSurfaceResultV1, SessionRefreshBeginResultV1,
     SessionRefreshCancelResultV1, SessionRefreshFrontierResultV1, SessionRefreshProgressV1,
     SessionRefreshReceiptV1, SessionRefreshScopeV1, SessionRefreshStatusResultV1,
     SessionRefreshTerminalStateResultV1, TemporalCoverageV1,
 };
+use tracedecay_contracts::{ApplicationProblem, RetainedSurfaceExecutionErrorV1, SafeDiagnostic};
 
 use tracedecay_session_memory::session::{
     SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshProgressView,
@@ -54,6 +54,13 @@ pub(super) fn status_result(
             RetainedOutcomeStatusV1::WrongScope,
             "refresh_wrong_scope",
             "the refresh handle does not belong to the requested scope",
+        ),
+        SessionRefreshServiceOutcome::StaleFrontier {
+            active_projection_frontier,
+        } => refresh_problem(
+            RetainedOutcomeStatusV1::Stale,
+            "refresh_frontier_stale",
+            &stale_frontier_message(active_projection_frontier),
         ),
         SessionRefreshServiceOutcome::Stale => refresh_problem(
             RetainedOutcomeStatusV1::Stale,
@@ -236,6 +243,14 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
         SessionRefreshServiceOutcome::Stale => RetainedSurfaceExecutionErrorV1::Stale,
+        SessionRefreshServiceOutcome::StaleFrontier {
+            active_projection_frontier,
+        } => RetainedSurfaceExecutionErrorV1::ApplicationProblem(ApplicationProblem::stale(
+            SafeDiagnostic {
+                code: "application.retained.refresh-frontier-stale".to_owned(),
+                message: stale_frontier_message(active_projection_frontier),
+            },
+        )),
         SessionRefreshServiceOutcome::Aborted => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_contracts::CancellationStage::DuringRead,
         ),
@@ -263,6 +278,14 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
             )
         }
     }
+}
+
+fn stale_frontier_message(active_projection_frontier: u64) -> String {
+    format!(
+        "The refresh window no longer contains the committed projection frontier \
+         {active_projection_frontier}; begin again from source frontier \
+         {active_projection_frontier}."
+    )
 }
 
 fn refresh_problem(
@@ -408,6 +431,36 @@ mod tests {
 
         assert!(projected.reconciliation_required);
         assert_eq!(projected.operation_id, "refresh.operation.fixture");
+    }
+
+    #[test]
+    fn a_stale_begin_frontier_is_a_stale_problem_naming_the_committed_frontier() {
+        let error = begin_result(
+            SessionRefreshServiceOutcome::StaleFrontier {
+                active_projection_frontier: 80,
+            },
+            &profile_scope(),
+        )
+        .err()
+        .expect("a stale window must not begin");
+        let RetainedSurfaceExecutionErrorV1::ApplicationProblem(problem) = error else {
+            panic!("expected a typed stale problem, got {error:?}");
+        };
+        assert_eq!(
+            problem.kind(),
+            tracedecay_contracts::ApplicationProblemKind::Stale
+        );
+        assert_eq!(
+            problem.legal_actions(),
+            &[tracedecay_contracts::LegalAction::Refresh]
+        );
+        assert_eq!(
+            serde_json::to_value(&problem).expect("serialized problem")["diagnostic"],
+            serde_json::json!({
+                "code": "application.retained.refresh-frontier-stale",
+                "message": "The refresh window no longer contains the committed projection frontier 80; begin again from source frontier 80."
+            })
+        );
     }
 
     #[test]

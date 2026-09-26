@@ -269,6 +269,17 @@ pub enum SessionStoreError {
     },
     #[error("session temporal receipt identity mismatch in {context}")]
     ReceiptIdentityMismatch { context: &'static str },
+    /// The refresh window no longer contains the session's committed
+    /// projection frontier: the store already moved past its target, or the
+    /// request claims more than was committed.
+    #[error(
+        "session refresh frontier {committed_through}..{observed_through} is stale: the active projection frontier is {active_projection_frontier}"
+    )]
+    StaleRefreshFrontier {
+        observed_through: u64,
+        committed_through: u64,
+        active_projection_frontier: u64,
+    },
     #[error("session temporal idempotency conflict in {context}")]
     IdempotencyConflict { context: &'static str },
     #[error("invalid session temporal state transition in {context}")]
