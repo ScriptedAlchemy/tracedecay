@@ -46,7 +46,7 @@ where
     let original_operation =
         source_edit_operation(request.kind).map_err(application_contract_error)?;
     let durability = SourceEditDurability::for_graph(graph);
-    let _lock = durability.lock()?;
+    let _lock = durability.lock().await?;
     if let Some(stored) =
         recover_reconciliation_attempt(&durability, &request, &attempt_input_digest)?
     {
