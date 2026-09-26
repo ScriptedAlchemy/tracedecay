@@ -12,9 +12,8 @@ pub enum LockAdmissionError {
 // Avoid spinning while the admitted writer completes durable filesystem work.
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
-/// Takes `file`'s exclusive lock, waiting for a contended holder until
-/// `deadline`. An acquisition that lands after the deadline is released and
-/// reported as timed out, so an expired attempt never crosses admission.
+/// Exclusive-locks `file`, waiting until `deadline`.
+/// A lock taken after the deadline is released and the call times out.
 #[hotpath::measure(label = "private_fs.lock.admission")]
 pub fn lock_until(file: &File, deadline: Instant) -> Result<(), LockAdmissionError> {
     loop {

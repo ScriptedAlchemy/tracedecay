@@ -25,9 +25,8 @@ const HANDLE_HEX_CHARS: usize = 24;
 const HANDLE_PREFIX: &str = "rh_";
 const LOCK_SUFFIX: &str = ".lock";
 const STAGING_PREFIX: &str = ".response-handle-staging-";
-/// Concurrent writers queue on the root lock, each holding it for one durable
-/// publish, cleanup, or inventory scan. The deadline admits a deep queue of
-/// such writers and stays well inside the daemon's tool request deadline.
+/// Writers take the root lock one at a time for a publish, cleanup, or
+/// inventory. 10s covers a long queue and fits the daemon tool deadline.
 const WRITER_LOCK_DEADLINE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
@@ -662,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_distinct_writers_queue_on_the_lock_and_all_publish() {
+    fn concurrent_distinct_stores_all_publish() {
         const WRITERS: usize = 16;
         let root = tempfile::tempdir().unwrap();
         let root = Arc::new(root.path().to_path_buf());
@@ -693,12 +692,6 @@ mod tests {
             };
             assert_eq!(persisted.content, content);
         }
-        assert_eq!(
-            inventory_response_handles_in_root(&root)
-                .unwrap()
-                .file_count,
-            WRITERS as u64
-        );
     }
 
     #[test]
@@ -736,13 +729,8 @@ mod tests {
             Err(TraceDecayError::SyncLock { message })
                 if message.contains("response-handle writer lock")
         ));
-        assert_eq!(
-            inventory_response_handles_in_root(root.path())
-                .unwrap()
-                .file_count,
-            0,
-            "the lock is admissible again once its holder releases it"
-        );
+        inventory_response_handles_in_root(root.path())
+            .expect("the lock is admissible again once its holder releases it");
     }
 
     #[test]

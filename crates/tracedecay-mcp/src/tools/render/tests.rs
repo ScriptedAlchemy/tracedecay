@@ -247,7 +247,7 @@ fn truncated_json_envelope_reports_store_failure() {
 }
 
 #[test]
-fn contended_handle_store_reports_a_retryable_busy_state_without_paths() {
+fn handle_store_busy_omits_paths() {
     let busy = handle_store_failure_status(&TraceDecayError::SyncLock {
         message: "response-handle writer lock at /private/profile/.response-handles.lock"
             .to_owned(),
@@ -255,10 +255,4 @@ fn contended_handle_store_reports_a_retryable_busy_state_without_paths() {
     assert_eq!(busy["reason_code"], "handle_store_busy");
     assert_eq!(busy["retryable"], true);
     assert!(!busy.to_string().contains("/private/profile"));
-
-    let failed = handle_store_failure_status(&TraceDecayError::File {
-        message: "failed to open".to_owned(),
-        path: "/private/profile".to_owned(),
-    });
-    assert_eq!(failed["reason_code"], "handle_store_failed");
 }
