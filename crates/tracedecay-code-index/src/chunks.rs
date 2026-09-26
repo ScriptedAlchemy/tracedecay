@@ -231,6 +231,24 @@ where
 }
 
 impl ExactExtractionAuthorityV1 {
+    /// Bytes this authority's map holds beyond the minted rows it shares with
+    /// its file's chunks.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let owned = self
+            .chunk_digests
+            .iter()
+            .fold(0_usize, |bytes, (id, minted)| {
+                bytes
+                    .saturating_add(id.as_str().len())
+                    .saturating_add(minted.digest.get().map_or(0, String::capacity))
+            });
+        crate::production::resident_bytes::btree_bytes(
+            self.chunk_digests.len(),
+            std::mem::size_of::<(CodeSearchChunkId, MintedChunkAuthorityV1)>(),
+        )
+        .saturating_add(owned)
+    }
+
     fn mint(chunks: &[Arc<CodeSearchChunkV1>]) -> Self {
         Self {
             chunk_digests: chunks

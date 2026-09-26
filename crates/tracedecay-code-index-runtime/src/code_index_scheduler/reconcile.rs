@@ -60,6 +60,7 @@ use crate::code_index::{
 use super::freshness_witness::{
     ReconciledSourceWitnessV1, RestoreFreshnessWitnessV1, SourceContentManifestV1,
 };
+use super::publication_store::GenerationDecodeBudgetV1;
 use super::{
     CodeGraphActivationStateV1, CodeGraphReplayBindingV1, CodeIndexBuildProgressSlotStateV1,
     CodeIndexBuildProgressSlotV1, CodeIndexBuildProgressStateV1, CodeIndexHintPolicyV1,
@@ -425,6 +426,11 @@ impl CodeIndexSchedulerErrorV1 {
             Self::Production(CodeIndexProductionErrorV1::Publication(
                 CodeIndexPublicationStoreErrorV1::Unavailable(detail),
             )) => detail == super::publication_store::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1,
+            // A whole-generation decode that does not fit yet: other holders
+            // give the memory back, not anything about this input.
+            Self::Production(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_),
+            )) => true,
             _ => false,
         }
     }
@@ -1111,6 +1117,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             progress_daemon_incarnation: 1,
             progress_producer_incarnation: 1,
         };
+        scheduler.bind_publication_decode_admission();
         Ok(scheduler)
     }
 
@@ -1123,10 +1130,24 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// this scheduler's private standalone authority.
     pub fn bind_resident_memory(&mut self, resident_memory: Arc<ProcessResidentMemoryV1>) {
         self.resident_memory = resident_memory;
+        self.bind_publication_decode_admission();
     }
 
     pub fn bind_resident_owners(&mut self, resident_owners: Arc<ResidentOwnersV1>) {
         self.resident_owners = resident_owners;
+        self.bind_publication_decode_admission();
+    }
+
+    /// Whole-generation decodes of this worktree's store charge the same
+    /// process authority and inventory the scheduler's other work does.
+    fn bind_publication_decode_admission(&self) {
+        self.publication
+            .bind_decode_admission(GenerationDecodeBudgetV1 {
+                resident_memory: Arc::clone(&self.resident_memory),
+                resident_owners: Arc::clone(&self.resident_owners),
+                project_id: self.project_id.clone(),
+                worktree_id: self.worktree_id.clone(),
+            });
     }
 
     /// Give this scheduler the worker runtime its builds run under.

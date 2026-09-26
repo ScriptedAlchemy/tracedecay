@@ -8,8 +8,11 @@ use tempfile::TempDir;
 use tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1;
 use tracedecay_domain::{ProjectId, configuration::CodeIndexWorkerSelectionV1};
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryPressureV1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryPressureV1,
 };
+
+use crate::code_index::production::CodeIndexPublicationStoreErrorV1;
 
 use super::tests::OwnerSignals;
 use super::{
@@ -464,5 +467,86 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
         scheduler
             .reserve_worker_memory()
             .expect("admission is retryable once measured pressure falls to the low watermark"),
+    );
+}
+
+/// The seal hands the decoded generation back so the text build has the
+/// memory; decoding it again must fit the process budget. Here another holder
+/// keeps all but a sliver below the admission watermark, so the decode waits
+/// (typed refusal, no decode, the ledger untouched) instead of materializing
+/// the generation into the kill line, and runs once that holder lets go.
+#[test]
+fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-decode-admission").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let limit = NonZeroU64::new(16 * GIB).expect("limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let high_watermark = pressure.high_watermark_bytes();
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+    assert!(matches!(
+        scheduler.reconcile_now().expect("publish generation"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    scheduler
+        .publication
+        .release_decoded_active_after_seal()
+        .expect("release the sealed decode");
+    let decodes_before = scheduler.sealed_decode_count();
+
+    let holder = authority
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-text-build").expect("component"),
+            NonZeroU64::new(high_watermark - 1024).expect("holder bytes"),
+        )
+        .expect("the holder fits the ledger");
+    let used_while_held = authority.snapshot().used_bytes;
+
+    assert!(
+        scheduler.latest_complete().is_none(),
+        "a decode that does not fit must not materialize the generation"
+    );
+    assert!(matches!(
+        scheduler.publication.load_active_shared(),
+        Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_))
+    ));
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        decodes_before,
+        "nothing was decoded"
+    );
+    assert_eq!(authority.snapshot().used_bytes, used_while_held);
+
+    drop(holder);
+    let decoded = scheduler
+        .latest_complete()
+        .expect("the decode runs once the memory is given back");
+    assert_eq!(scheduler.sealed_decode_count(), decodes_before + 1);
+    assert_eq!(
+        decoded
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs::retained_generation"]
+    );
+    assert_eq!(
+        authority.snapshot().used_bytes,
+        scheduler
+            .retained_snapshot_bytes
+            .iter()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>(),
+        "the decode's charge is released once it completes"
     );
 }

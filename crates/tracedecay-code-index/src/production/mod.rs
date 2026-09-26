@@ -12,14 +12,14 @@ use tracedecay_code_extraction::ExtractedSchemaEvidenceV1;
 use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
-    CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, CodeSearchChunkV1,
-    ComponentVersion, CoverageSummaryV1, ExactTechnicalTermV1, ExtractorRevision, FileOccurrenceId,
-    GenerationTestAttributionV1, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId,
-    ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionReplayReasonV1, ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1,
-    SnapshotFileDispositionV1, SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros,
-    ValidatedCodeFileV1, WorktreeId, canonical_sha256,
+    CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, ComponentVersion,
+    CoverageSummaryV1, ExtractorRevision, FileOccurrenceId, GenerationTestAttributionV1,
+    LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
+    ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_graph_db::{
     GraphGenerationManifest, GraphProjectionIdentity, GraphProjectorRevision,
@@ -47,10 +47,7 @@ use super::{
         SanitizedCodeIntake, SanitizedSnapshotCapabilityV1,
     },
     languages::{LanguageRegistry, StaticLanguageRegistry},
-    lineage::{
-        GenerationSymbolIndexV1, LineageResolutionErrorV1, LineageSymbolRecordV1,
-        SymbolLineageResolver,
-    },
+    lineage::{GenerationSymbolIndexV1, LineageResolutionErrorV1, SymbolLineageResolver},
     projection::{
         CodeChunkProjectionSink, ProjectionPublicationErrorV1, ProjectionPublicationHandoffV1,
         expected_request_digest, project_for_publication,
@@ -102,6 +99,7 @@ pub use lexical_page_source::{
     VerifiedSealedTextGenerationMetadataV1,
 };
 mod partitioned_codec;
+pub(crate) mod resident_bytes;
 pub use partitioned_codec::{
     SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
     SealedGenerationSegmentReadV1,
@@ -303,6 +301,10 @@ pub enum CodeIndexPublicationStoreErrorV1 {
     CorruptionResetRequired(String),
     #[error("the publication authority is unavailable: {0}")]
     Unavailable(String),
+    /// Materializing the whole generation does not fit the process
+    /// resident-memory budget now; it succeeds once memory is given back.
+    #[error("decoding the generation does not fit the resident-memory budget: {0}")]
+    ResidentMemoryRefused(String),
 }
 
 /// Canonical active-generation slot inside one repository-owned code-index
@@ -1012,91 +1014,7 @@ impl CodeIndexPublishedGenerationV1 {
     }
 
     fn measure_decode_bytes(&self) -> usize {
-        use std::mem::size_of;
-        let chunk_bytes = |chunk: &CodeSearchChunkV1| {
-            size_of::<CodeSearchChunkV1>()
-                .saturating_add(chunk.id.as_str().len())
-                .saturating_add(chunk.content_digest.as_str().len())
-                .saturating_add(chunk.sanitized_text.as_str().len())
-                .saturating_add(chunk.exact_terms.iter().fold(0, |bytes, term| {
-                    bytes
-                        .saturating_add(size_of::<ExactTechnicalTermV1>())
-                        .saturating_add(term.original_bytes().len())
-                        .saturating_add(term.canonical_bytes().len())
-                }))
-                .saturating_add(chunk.subtokens.iter().fold(0, |bytes, subtoken| {
-                    bytes
-                        .saturating_add(size_of::<String>())
-                        .saturating_add(subtoken.len())
-                }))
-        };
-        let symbol_bytes = |symbol: &LineageSymbolRecordV1| {
-            size_of::<LineageSymbolRecordV1>()
-                .saturating_add(symbol.occurrence.as_str().len())
-                .saturating_add(symbol.qualified_name.len())
-                .saturating_add(symbol.simple_name.len())
-                .saturating_add(symbol.kind.len())
-                .saturating_add(symbol.visibility.len())
-                .saturating_add(symbol.signature.as_ref().map_or(0, String::len))
-        };
-        let file_bytes = |file: &FileGenerationArtifactsV1| {
-            let artifacts = &file.artifacts;
-            size_of::<FileGenerationArtifactsV1>()
-                .saturating_add(
-                    artifacts
-                        .edges
-                        .len()
-                        .saturating_mul(size_of::<CanonicalRelationEdgeV1>()),
-                )
-                .saturating_add(
-                    artifacts
-                        .imports
-                        .len()
-                        .saturating_mul(size_of::<CodeIndexImportEvidenceV1>()),
-                )
-                .saturating_add(
-                    artifacts
-                        .unresolved_references
-                        .len()
-                        .saturating_mul(size_of::<CodeIndexUnresolvedReferenceV1>()),
-                )
-                .saturating_add(artifacts.clone_bodies.iter().fold(0, |bytes, body| {
-                    bytes
-                        .saturating_add(size_of::<CodeIndexCloneBodyV1>())
-                        .saturating_add(body.retained_owned_bytes())
-                }))
-        };
-        // Chunks and symbols are `Arc`-shared between the files and the
-        // generation-wide indices; count each allocation once, from the index.
-        self.chunks
-            .chunks()
-            .iter()
-            .fold(0_usize, |bytes, chunk| {
-                bytes.saturating_add(chunk_bytes(chunk))
-            })
-            .saturating_add(self.symbols.symbols.iter().fold(0, |bytes, symbol| {
-                bytes.saturating_add(symbol_bytes(symbol))
-            }))
-            .saturating_add(
-                self.files
-                    .iter()
-                    .fold(0, |bytes, file| bytes.saturating_add(file_bytes(file))),
-            )
-            .saturating_add(
-                self.edges
-                    .len()
-                    .saturating_mul(size_of::<CanonicalRelationEdgeV1>()),
-            )
-            .saturating_add(
-                self.lineage
-                    .len()
-                    .saturating_mul(size_of::<SymbolLineageCandidateV1>()),
-            )
-            .saturating_add(self.snapshot.files.iter().fold(0, |bytes, file| {
-                bytes
-                    .saturating_add(size_of::<SanitizedCodeFileV1>())
-                    .saturating_add(file.logical_path.len())
-            }))
+        self.measure_resident_bytes()
     }
 
     /// Build the production generation-bound affected-test authority.

@@ -4250,12 +4250,12 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
 
 /// Every function body keeps a conservative and a rename clone-token stream
 /// for the life of the generation, so their resident form bounds what one
-/// index holds. On this 500-file fixture one 48-byte enum per token, with the
-/// rename stream repeated in full, left the generation retaining 12,045,818
-/// bytes; the compact streams retain 5,110,538.
+/// index holds. On this 500-file fixture the generation retains 12,203,554
+/// bytes with compact streams; one 48-byte enum per token, with the rename
+/// stream repeated in full, held another 6.9 MB of token streams on top.
 #[test]
 fn a_500_file_generation_holds_its_clone_streams_within_the_resident_budget() {
-    const RESIDENT_BUDGET_BYTES: u64 = 6_000_000;
+    const RESIDENT_BUDGET_BYTES: u64 = 13_500_000;
 
     let mut request = request("file.resident.seed", 1_100_000);
     request.snapshot.files.clear();
