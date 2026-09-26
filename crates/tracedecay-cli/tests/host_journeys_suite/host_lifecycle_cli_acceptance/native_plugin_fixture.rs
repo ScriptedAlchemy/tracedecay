@@ -32,6 +32,24 @@ if args == ["plugin", "marketplace", "add", str(deploy_dir)]:
     }
     marketplace_path.write_text(json.dumps(marketplaces, indent=2))
 elif args == ["plugin", "install", "tracedecay@tracedecay"]:
+    installed_path = home / ".claude/plugins/installed_plugins.json"
+    installed = (
+        json.loads(installed_path.read_text())
+        if installed_path.exists()
+        else {"version": 2, "plugins": {}}
+    )
+    plugins = installed.get("plugins")
+    entry = plugins.get("tracedecay@tracedecay") if isinstance(plugins, dict) else None
+    if isinstance(entry, list):
+        already_installed = len(entry) > 0
+    elif isinstance(entry, dict):
+        already_installed = len(entry) > 0
+    else:
+        already_installed = entry is not None
+    if already_installed:
+        # Stock `plugin install` of a plugin Claude already records exits 0
+        # and leaves that version's cache untouched.
+        sys.exit(0)
     manifest = json.loads((deploy_dir / ".claude-plugin/plugin.json").read_text())
     cache = home / ".claude/plugins/cache/tracedecay/tracedecay" / manifest["version"]
     shutil.rmtree(cache, ignore_errors=True)
@@ -40,12 +58,35 @@ elif args == ["plugin", "install", "tracedecay@tracedecay"]:
     settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
     settings.setdefault("enabledPlugins", {})["tracedecay@tracedecay"] = True
     settings_path.write_text(json.dumps(settings, indent=2))
+    if not isinstance(plugins, dict):
+        plugins = {}
+        installed["plugins"] = plugins
+    installed["version"] = 2
+    plugins["tracedecay@tracedecay"] = [
+        {
+            "scope": "user",
+            "installPath": str(cache),
+            "version": manifest["version"],
+        }
+    ]
+    installed_path.parent.mkdir(parents=True, exist_ok=True)
+    installed_path.write_text(json.dumps(installed, indent=2))
 elif args == ["plugin", "uninstall", "tracedecay"]:
     settings_path = home / ".claude/settings.json"
-    settings = json.loads(settings_path.read_text())
-    settings["enabledPlugins"].pop("tracedecay@tracedecay", None)
-    settings_path.write_text(json.dumps(settings, indent=2))
+    if settings_path.exists():
+        settings = json.loads(settings_path.read_text())
+        enabled = settings.get("enabledPlugins")
+        if isinstance(enabled, dict):
+            enabled.pop("tracedecay@tracedecay", None)
+            settings_path.write_text(json.dumps(settings, indent=2))
     shutil.rmtree(home / ".claude/plugins/cache/tracedecay", ignore_errors=True)
+    installed_path = home / ".claude/plugins/installed_plugins.json"
+    if installed_path.exists():
+        installed = json.loads(installed_path.read_text())
+        plugins = installed.get("plugins")
+        if isinstance(plugins, dict):
+            plugins.pop("tracedecay@tracedecay", None)
+            installed_path.write_text(json.dumps(installed, indent=2))
 elif args == ["plugin", "marketplace", "remove", "tracedecay"]:
     marketplace_path = home / ".claude/plugins/known_marketplaces.json"
     marketplaces = json.loads(marketplace_path.read_text())

@@ -1404,6 +1404,253 @@ fn claude_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
     );
 }
 
+/// An older Claude plugin this profile has no receipt for: marketplace source
+/// with a retired skill, the previous version cache, and Claude's own
+/// marketplace and installed-plugin records. `update-plugin --adopt` must
+/// take that over and land on the plugin a clean install writes.
+#[cfg(unix)]
+#[test]
+fn claude_adopt_replaces_an_unrecorded_plugin_install() {
+    let adopted = IsolatedCli::new();
+    let case = host_case(HostKindV1::ClaudeCode);
+    seed_host(case, &adopted);
+    seed_unrecorded_claude_plugin(&adopted);
+    let claude_invocations = install_current_claude_cli(adopted.home.path(), &adopted.bin_dir);
+
+    let output = adopted.run(&["update-plugin", "--yes", "--adopt"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        !stderr.contains("atomic filesystem operation failed"),
+        "adopt rolled back the Claude registration:\n{stderr}"
+    );
+    assert_success(case.id, "adopt an unrecorded Claude plugin", output);
+
+    let invocations = recorded_claude_invocations(&claude_invocations);
+    assert!(
+        invocations
+            .iter()
+            .any(|line| line == "plugin uninstall tracedecay"),
+        "adopt left the recorded older plugin installed: {invocations:?}"
+    );
+    let stale = adopted
+        .home
+        .path()
+        .join(".claude/plugins/cache/tracedecay/tracedecay/0.1.0-beta.21");
+    assert!(
+        !stale.exists(),
+        "stale Claude cache remained at {}",
+        stale.display()
+    );
+    assert!(
+        !adopted
+            .home
+            .path()
+            .join(".claude/plugins/marketplaces/tracedecay/skills/retired-beta21")
+            .exists(),
+        "retired marketplace skill remained"
+    );
+    assert_no_plugin_backups(&adopted.home.path().join(".claude/plugins"));
+
+    let clean = IsolatedCli::new();
+    seed_host(case, &clean);
+    install_current_claude_cli(clean.home.path(), &clean.bin_dir);
+    assert_success(
+        case.id,
+        "clean install",
+        clean.run(&["install", "--agent", case.id]),
+    );
+
+    let marketplace = ".claude/plugins/marketplaces/tracedecay";
+    assert_eq!(
+        plugin_tree_rewritten(adopted.home.path(), clean.home.path(), marketplace),
+        plugin_tree(clean.home.path(), marketplace),
+        "adopted marketplace differs from a clean Claude install"
+    );
+    let cache_relative = format!(
+        ".claude/plugins/cache/tracedecay/tracedecay/{}",
+        tracedecay_agent_hosts::PRODUCT_VERSION
+    );
+    assert_eq!(
+        plugin_tree_rewritten(adopted.home.path(), clean.home.path(), &cache_relative),
+        plugin_tree(clean.home.path(), &cache_relative),
+        "adopted plugin cache differs from a clean Claude install"
+    );
+    for relative in [
+        ".claude/settings.json",
+        ".claude/plugins/known_marketplaces.json",
+        ".claude/plugins/installed_plugins.json",
+    ] {
+        assert_eq!(
+            json_rewritten(adopted.home.path(), clean.home.path(), relative),
+            json_file(&clean.home.path().join(relative)),
+            "{relative} differs from a clean Claude install"
+        );
+    }
+    assert_eq!(
+        fs::read(
+            adopted
+                .home
+                .path()
+                .join(".claude/plugins/foreign/manifest.json")
+        )
+        .unwrap(),
+        fs::read(
+            clean
+                .home
+                .path()
+                .join(".claude/plugins/foreign/manifest.json")
+        )
+        .unwrap(),
+        "adopt changed the foreign Claude plugin"
+    );
+}
+
+#[cfg(unix)]
+fn seed_unrecorded_claude_plugin(cli: &IsolatedCli) {
+    let home = cli.home.path();
+    let deploy = home.join(".claude/plugins/marketplaces/tracedecay");
+    fs::create_dir_all(deploy.join(".claude-plugin")).unwrap();
+    fs::write(
+        deploy.join(".claude-plugin/marketplace.json"),
+        br#"{"name":"tracedecay","plugins":[{"name":"tracedecay","source":"./"}]}
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(deploy.join("skills/retired-beta21")).unwrap();
+    fs::write(
+        deploy.join("skills/retired-beta21/SKILL.md"),
+        b"---\nname: retired-beta21\ndescription: old\n---\n",
+    )
+    .unwrap();
+    let stale = home.join(".claude/plugins/cache/tracedecay/tracedecay/0.1.0-beta.21");
+    fs::create_dir_all(stale.join(".claude-plugin")).unwrap();
+    fs::write(
+        stale.join(".claude-plugin/plugin.json"),
+        br#"{"name":"tracedecay","version":"0.1.0-beta.21"}
+"#,
+    )
+    .unwrap();
+    let mut marketplaces: serde_json::Value = serde_json::from_slice(
+        &fs::read(home.join(".claude/plugins/known_marketplaces.json")).unwrap(),
+    )
+    .unwrap();
+    marketplaces["tracedecay"] = serde_json::json!({
+        "source": {"source": "directory", "path": &deploy},
+        "installLocation": &deploy,
+    });
+    fs::write(
+        home.join(".claude/plugins/known_marketplaces.json"),
+        serde_json::to_vec_pretty(&marketplaces).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        home.join(".claude/plugins/installed_plugins.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 2,
+            "plugins": {
+                "tracedecay@tracedecay": [{
+                    "scope": "user",
+                    "installPath": &stale,
+                    "version": "0.1.0-beta.21"
+                }]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn plugin_tree(home: &std::path::Path, relative: &str) -> BTreeMap<PathBuf, Vec<u8>> {
+    let root = home.join(relative);
+    assert!(root.is_dir(), "missing plugin tree {}", root.display());
+    let mut files = BTreeMap::new();
+    collect_plugin_files(&root, &root, &mut files);
+    files
+}
+
+#[cfg(unix)]
+fn collect_plugin_files(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_plugin_files(root, &path, files);
+        } else if path.is_file() {
+            files.insert(
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                fs::read(&path).unwrap(),
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn plugin_tree_rewritten(
+    home: &std::path::Path,
+    other_home: &std::path::Path,
+    relative: &str,
+) -> BTreeMap<PathBuf, Vec<u8>> {
+    let from = home.to_string_lossy().into_owned();
+    let to = other_home.to_string_lossy().into_owned();
+    plugin_tree(home, relative)
+        .into_iter()
+        .map(|(path, bytes)| (path, rewrite_home_bytes(bytes, &from, &to)))
+        .collect()
+}
+
+#[cfg(unix)]
+fn json_file(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+#[cfg(unix)]
+fn json_rewritten(
+    home: &std::path::Path,
+    other_home: &std::path::Path,
+    relative: &str,
+) -> serde_json::Value {
+    let from = home.to_string_lossy().into_owned();
+    let to = other_home.to_string_lossy().into_owned();
+    let bytes = rewrite_home_bytes(fs::read(home.join(relative)).unwrap(), &from, &to);
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[cfg(unix)]
+fn rewrite_home_bytes(bytes: Vec<u8>, from: &str, to: &str) -> Vec<u8> {
+    match String::from_utf8(bytes) {
+        Ok(text) => text.replace(from, to).into_bytes(),
+        Err(error) => error.into_bytes(),
+    }
+}
+
+#[cfg(unix)]
+fn assert_no_plugin_backups(root: &std::path::Path) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.contains("backup") && !name.contains(".bak"),
+                "backup copy left behind at {}",
+                entry.path().display()
+            );
+            if entry.path().is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+}
+
 #[test]
 fn kimi_lifecycle_reports_official_activation_deferral() {
     let cli = IsolatedCli::new();
