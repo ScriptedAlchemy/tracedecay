@@ -170,8 +170,7 @@ fn reject_occupied_destination_family(destination: &Path) -> io::Result<()> {
 /// own family and fails the backup instead. `SQLite` durability is a
 /// family-level invariant: pathname existence cannot prove which main a later
 /// sidecar belongs to, so a displaced family can only be handled by an owner
-/// with lifecycle exclusion (see
-/// [`crate::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically`]).
+/// with lifecycle exclusion.
 /// Production callers publish into a directory they exclusively created and
 /// swap that directory themselves.
 ///

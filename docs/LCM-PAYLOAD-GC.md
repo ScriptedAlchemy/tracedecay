@@ -492,8 +492,6 @@ nor MCP accepts GC policy or invokes maintenance.
 | `lcm_payload_reap_missing_metadata_after_seconds` | u64 | `604800` (7d) | `0` = never | Window after which a *missing* payload (row+ref, no file) becomes eligible for tombstoning. |
 | `lcm_payload_reap_missing_metadata_enabled` | bool | `false` | — | Master opt-in for Phase C auto-tombstone. `false` ⇒ missing payloads reported forever (contract §9 caution). |
 | `lcm_payload_gc_max_batch_size` | usize | `500` (== `SQLITE_IN_BATCH_SIZE`) | ≥1 | Caps refs reaped per run; bounds txn/lock time. Excess candidates wait for the next run. |
-| `lcm_payload_gc_interval_seconds` | u64 | `21600` (6h) | — | Daemon maintenance cadence; the store records `last_gc_at` and the owner skips if too recent. |
-| `lcm_payload_gc_enabled` | bool | `true` | — | Master switch for daemon-scheduled GC. An explicitly authorized owner run may be invoked independently of the scheduler. |
 
 **No zero-grace escape hatch.** The 300 s floor is enforced in the config parser
 (contract GP-1) so a misconfiguration cannot create a near-zero grace that races
@@ -570,31 +568,26 @@ post-reap counts.
 
 ---
 
-## 12. Scheduling & manual invocation
+## 12. Scheduling
 
-**No background thread in the store (v1).** Mirroring the contract's SD-2
-rationale (keep the hot path simple), GC does **not** piggyback on ingest and
-does **not** spawn its own scheduler. It exposes `run_payload_gc` for any caller
-and records `last_gc_at`; scheduling is host-driven.
+GC has no scheduler, interval, or on/off switch of its own. The daemon's
+retention maintenance tick applies it to every mounted session store, after
+that store's session retention pass, so the payloads of raw rows retention or
+projection retirement just dropped are reconciled by the same tick. The tick
+already owns the fail-closed ordering GC needs: it runs only under the shared
+background-CPU admission, takes each store's writer with a non-blocking try
+(a busy store defers only itself), and stops between stores on cancellation.
+Exact, lexical, graph, and ordinary retrieval never wait on it. The tick's
+cadence is `retention.interval_hours` (daily by default); the grace windows in
+§9 and the two-scan marks in §5, not the cadence, decide what is collectable.
 
-**Manual / owner invocation:**
-
-- The daemon maintenance coordinator may schedule `run_payload_gc` and perform
-  an apply run under its write ownership. An explicit owner API may do the same
-  after validating the active write scope and recording the report.
+- `lcm_status` reports the outcome of the last applied run (`last_gc_at`,
+  `last_gc_status`, reaped refs and bytes, `last_error`) and the next
+  eligibility time. A failed run logs `retention_degraded pass=lcm_payload_gc`;
+  a run that reaped anything logs `retention_lcm_payload_gc`.
 - `lcm_doctor` remains a read-only diagnosis/evidence surface. It may expose GC
   candidate counts and the last run status, but it has no `gc` mode, no `apply`
-  flag, and no destructive alias. A separate owner operation is required for
-  any mutation.
-- `lcm_status` gains the GC health fields below (read-only). A `gc_config`
-  argument carries `LcmGcConfig` (§9) for the daemon/owner entry point.
-
-**Recommended scheduling:** the daemon owner may run a frequent **dry-run**
-report (e.g. every 1–6 h) for visibility and a less frequent **apply** (e.g.
-daily) gated by `lcm_payload_gc_interval_seconds` and `last_gc_at`. The dry-run
-is cheap (no I/O mutations, no locks beyond reads) and safe to run any time. An
-apply run is skipped if `now - last_gc_at < gc_interval_seconds` unless the
-authorized owner explicitly forces it.
+  flag, and no destructive alias.
 
 **Per-store, not global.** Each resolved project store (user-level shard,
 explicit local store, or legacy local store) is GC'd independently against its

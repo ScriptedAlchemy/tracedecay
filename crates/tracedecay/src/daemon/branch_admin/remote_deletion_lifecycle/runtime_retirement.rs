@@ -34,7 +34,6 @@ impl StoreAdministration {
             &self.project_server_retirements,
             profile_root,
             project_id,
-            None,
         )
         .await
     }

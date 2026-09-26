@@ -22,9 +22,7 @@ use tracedecay_contracts::remote::query::{
     RemoteQueryRequestV1, RemoteQueryResultV1, remote_exact_observation_query_result_contract_v1,
 };
 use tracedecay_contracts::remote::recovery::{
-    BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
-    StagedRestoreConfirmationV1, StagedRestoreProgressV1, remote_backup_result_contract_v1,
-    remote_promotion_result_contract_v1, remote_restore_result_contract_v1,
+    PromotionCasReceiptV1, PromotionConfirmationV1, remote_promotion_result_contract_v1,
 };
 use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
 use tracedecay_contracts::remote::transfer::{
@@ -272,32 +270,6 @@ impl EnrolledRemoteClient {
             remote_exact_observation_query_result_contract_v1(),
             RemoteSuccessKind::Evidence,
             |result: &RemoteQueryResultV1| result.validate().is_ok(),
-        )
-    }
-
-    pub fn backup(
-        &self,
-        request: &RemoteProtocolRequestV1<BackupRequestV1>,
-    ) -> Result<RemoteProtocolResponseV1<BackupOperationStateV1>, RemoteClientError> {
-        self.execute_authenticated(
-            "backup",
-            request,
-            remote_backup_result_contract_v1().map_err(protocol_error)?,
-            RemoteSuccessKind::Effect,
-            |_| true,
-        )
-    }
-
-    pub fn restore(
-        &self,
-        request: &RemoteProtocolRequestV1<StagedRestoreConfirmationV1>,
-    ) -> Result<RemoteProtocolResponseV1<StagedRestoreProgressV1>, RemoteClientError> {
-        self.execute_authenticated(
-            "restore",
-            request,
-            remote_restore_result_contract_v1().map_err(protocol_error)?,
-            RemoteSuccessKind::Effect,
-            |_| true,
         )
     }
 

@@ -44,15 +44,10 @@ where
                 .map_err(|_| RemoteRecoveryOperationErrorV1::Unavailable)?;
             return Ok(BeginOperationV1::Completed(Box::new(committed)));
         }
-        if matches!(
-            existing.state.as_str(),
-            "cancelled" | "timed_out" | "rolled_back"
-        ) {
-            return Err(match existing.state.as_str() {
-                "cancelled" => RemoteRecoveryOperationErrorV1::Cancelled,
-                "timed_out" => RemoteRecoveryOperationErrorV1::TimedOut,
-                _ => RemoteRecoveryOperationErrorV1::RecoveryRequired,
-            });
+        match existing.state.as_str() {
+            "cancelled" => return Err(RemoteRecoveryOperationErrorV1::Cancelled),
+            "timed_out" => return Err(RemoteRecoveryOperationErrorV1::TimedOut),
+            _ => {}
         }
         retained_pre_state_digest = Some(existing.pre_state_digest);
     }
@@ -372,7 +367,6 @@ pub(super) fn record_physical_failure(
     observed_at: UtcMicros,
 ) -> Result<(), RemoteRecoveryOperationErrorV1> {
     let state = match error {
-        RemoteRecoveryPhysicalEffectErrorV1::RolledBack => "rolled_back",
         RemoteRecoveryPhysicalEffectErrorV1::Cancelled => "cancelled",
         RemoteRecoveryPhysicalEffectErrorV1::TimedOut => "timed_out",
         RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired

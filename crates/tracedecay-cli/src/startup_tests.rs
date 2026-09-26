@@ -696,3 +696,51 @@ fn claude_and_kiro_hooks_skip_startup_maintenance() {
 // install mutations, status network paths, and hook process outcomes) is
 // documented in docs/archive/MAIN-RUN-DISPATCH-NOTE.md §5 and remains covered, where
 // appropriate, by spawn-the-binary integration tests instead.
+
+#[test]
+fn copy_producing_commands_are_unknown_beside_their_surviving_siblings() {
+    let remote = [
+        "--endpoint",
+        "https://brain.example/remote/",
+        "--credential-file",
+        "cred.bin",
+        "--request-file",
+        "request.json",
+    ];
+    let with_remote_args = |action: &'static str| {
+        let mut args = vec!["remote", action];
+        args.extend(remote);
+        args
+    };
+    for args in [
+        vec!["storage", "backup", "--to", "/tmp/out", "--backup-id", "b1"],
+        vec![
+            "storage",
+            "rehearse-backup",
+            "--backup",
+            "/tmp/b1",
+            "--restore",
+            "/tmp/r1",
+        ],
+        vec!["profile", "backup"],
+        with_remote_args("backup"),
+        with_remote_args("restore"),
+    ] {
+        let error = Cli::try_parse_from(iter::once("tracedecay").chain(args.iter().copied()))
+            .err()
+            .unwrap_or_else(|| panic!("{args:?} must not parse"));
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::InvalidSubcommand,
+            "{args:?}"
+        );
+    }
+    assert!(matches!(
+        parse_command(&["storage", "report"]),
+        Commands::Storage { .. }
+    ));
+    assert!(matches!(
+        parse_command(&with_remote_args("failover")),
+        Commands::Remote { .. }
+    ));
+}

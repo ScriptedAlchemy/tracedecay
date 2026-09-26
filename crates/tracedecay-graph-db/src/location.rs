@@ -203,9 +203,7 @@ const TIERED_MEMORY_FRACTION: f64 = 0.25;
 /// `write_and_mmap_spill_file` (and the query-spill path in `session/mod.rs`)
 /// already `create_dir_all` the parent on first use, so an open that never
 /// spills leaves no trace on disk. Creating it eagerly would plant an empty
-/// directory beside every database, including the short-lived
-/// `*.tracedecay-restore-*.grafeo` staging stores whose parent directory
-/// `backup_contract::assert_no_staging_residue` requires to be clean.
+/// directory beside every database.
 ///
 /// Note for whoever makes this default: once a section *does* spill, the
 /// directory becomes real and nothing currently removes it when a staging

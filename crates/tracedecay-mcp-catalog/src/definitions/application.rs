@@ -237,7 +237,7 @@ pub(super) fn def_remote_status_read() -> ToolDefinition {
     def(
         "tracedecay_remote_status",
         "Read Remote Brain status",
-        "Read the Remote Brain operational plane: listener, enrollment, spool, replay coverage, backup verification, and failover/recovery state.",
+        "Read the Remote Brain operational plane: listener, enrollment, spool, replay coverage, and failover/recovery state.",
         closed_object_schema(json!({}), &[]),
     )
 }

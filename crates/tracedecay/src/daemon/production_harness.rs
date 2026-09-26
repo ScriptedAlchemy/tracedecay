@@ -400,10 +400,7 @@ async fn install_production_composition_profile_workers(
                     profile_identity.profile_id(),
                 )
                 .await?;
-            store_administration.install_remote_recovery_project_lifecycle(
-                invocation.clone(),
-                Arc::clone(project_open_gates),
-            )?;
+            store_administration.install_remote_recovery_project_lifecycle()?;
             install_http_application_cold_resolver(
                 http_application_registry,
                 store_administration.clone(),

@@ -30,6 +30,26 @@ use tracedecay_runtime_core::config::{
 
 pub(super) const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
 
+fn refresh_in_quiesced_window(
+    runner: ServiceRunner,
+    spec: &DaemonServiceSpec,
+) -> tracedecay_domain::errors::Result<Option<PathBuf>> {
+    let mut guard = QuiescedDaemonLifecycle::acquire_with_runner_and_timeout(
+        "daemon service refresh",
+        TEST_BUILD_VERSION,
+        runner,
+        super::QUIESCED_LEASE_RELEASE_TIMEOUT,
+    )?;
+    let refreshed = super::refresh_installed_service_with_state_and_runner(
+        &guard.runner,
+        spec,
+        None,
+        TEST_BUILD_VERSION,
+    );
+    let restored = guard.restore();
+    super::combine_operation_and_restore("daemon service refresh", refreshed, restored)
+}
+
 use super::isolated_profile::EnvVarGuard;
 
 #[cfg(target_os = "linux")]
@@ -1614,20 +1634,7 @@ fn refresh_installed_service_skips_missing_unit() {
     };
 
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
-    let outcome = super::with_quiesced_installed_service_with_runner(
-        runner,
-        "daemon service refresh",
-        TEST_BUILD_VERSION,
-        |_, runner| {
-            super::refresh_installed_service_with_state_and_runner(
-                runner,
-                &spec,
-                None,
-                TEST_BUILD_VERSION,
-            )
-        },
-    )
-    .expect("refresh service");
+    let outcome = refresh_in_quiesced_window(runner, &spec).expect("refresh service");
 
     assert_eq!(outcome, None);
     assert!(!service_path.exists());
@@ -2298,20 +2305,7 @@ fn refresh_installed_service_preserves_stopped_state() {
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
-    super::with_quiesced_installed_service_with_runner(
-        runner,
-        "daemon service refresh",
-        TEST_BUILD_VERSION,
-        |_, runner| {
-            super::refresh_installed_service_with_state_and_runner(
-                runner,
-                &spec,
-                None,
-                TEST_BUILD_VERSION,
-            )
-        },
-    )
-    .expect("refresh service");
+    refresh_in_quiesced_window(runner, &spec).expect("refresh service");
 
     let commands = std::fs::read_to_string(log).expect("systemctl log");
     assert!(commands.contains("--user is-active tracedecay.service"));

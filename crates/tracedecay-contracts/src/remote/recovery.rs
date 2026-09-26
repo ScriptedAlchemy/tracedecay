@@ -1,4 +1,4 @@
-//! Application-facing backup, restore, promotion, and rejoin contracts.
+//! Application-facing promotion and rejoin contracts.
 //!
 //! Physical locators and authority storage are intentionally absent. Adapters
 //! may present these records but cannot infer confirmation or promotion.
@@ -13,12 +13,10 @@ use super::protocol::RemoteProtocolBodyV1;
 mod service;
 
 pub use service::{
-    REMOTE_BACKUP_USE_CASE_ID_V1, REMOTE_PROMOTION_USE_CASE_ID_V1, REMOTE_RESTORE_USE_CASE_ID_V1,
-    RemoteRecoveryCallerV1, RemoteRecoveryCommittedV1, RemoteRecoveryControlPortV1,
-    RemoteRecoveryInterruptionV1, RemoteRecoveryOperationErrorV1, RemoteRecoveryOperationPortV1,
-    RemoteRecoveryOperationReceiptV1, RemoteRecoveryProtocolOwnerV1, RemoteRecoveryTerminationV1,
-    remote_backup_result_contract_v1, remote_promotion_result_contract_v1,
-    remote_restore_result_contract_v1,
+    REMOTE_PROMOTION_USE_CASE_ID_V1, RemoteRecoveryCallerV1, RemoteRecoveryCommittedV1,
+    RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1, RemoteRecoveryOperationErrorV1,
+    RemoteRecoveryOperationPortV1, RemoteRecoveryOperationReceiptV1, RemoteRecoveryProtocolOwnerV1,
+    RemoteRecoveryTerminationV1, remote_promotion_result_contract_v1,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,142 +61,6 @@ impl RecoveryAuthorityExpectationV1 {
             && self.authority_node_id == writer.authority_node_id.as_str()
             && self.placement_revision == writer.placement_revision.get()
             && self.authority_epoch == writer.authority_epoch.0
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct BackupRequestV1 {
-    pub operation_id: String,
-    pub expected: RecoveryAuthorityExpectationV1,
-    pub expires_at_micros: i64,
-}
-
-impl BackupRequestV1 {
-    pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
-        validate_identifier("backup operation id", &self.operation_id)?;
-        self.expected.validate()?;
-        if now_micros >= self.expires_at_micros {
-            return Err(ApplicationContractError::InvalidRange {
-                field: "backup request expiry",
-            });
-        }
-        Ok(())
-    }
-}
-
-impl RemoteProtocolBodyV1 for BackupRequestV1 {
-    fn validate_remote_protocol_body(
-        &self,
-        sent_at: UtcMicros,
-    ) -> Result<(), ApplicationContractError> {
-        self.validate(sent_at.0)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "state")]
-pub enum BackupOperationStateV1 {
-    Pending,
-    Snapshotting,
-    Verifying,
-    Available {
-        backup_id: String,
-        manifest_digest: [u8; 32],
-    },
-    Failed {
-        reason_code: String,
-    },
-    RecoveryRequired {
-        reason_code: String,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct StagedRestorePreviewV1 {
-    pub preview_id: String,
-    pub backup_id: String,
-    pub manifest_digest: [u8; 32],
-    pub expected: RecoveryAuthorityExpectationV1,
-    pub current_policy_digest: [u8; 32],
-    pub expires_at_micros: i64,
-}
-
-impl StagedRestorePreviewV1 {
-    pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
-        validate_identifier("restore preview id", &self.preview_id)?;
-        validate_identifier("restore backup id", &self.backup_id)?;
-        self.expected.validate()?;
-        if self.manifest_digest == [0; 32] || self.current_policy_digest == [0; 32] {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "restore preview digest",
-            });
-        }
-        if now_micros >= self.expires_at_micros {
-            return Err(ApplicationContractError::InvalidRange {
-                field: "restore preview expiry",
-            });
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct StagedRestoreConfirmationV1 {
-    pub preview_id: String,
-    pub backup_id: String,
-    pub manifest_digest: [u8; 32],
-    pub expected_authority_epoch: u64,
-    pub expected_placement_revision: u64,
-    pub expected_policy_digest: [u8; 32],
-    pub expires_at_micros: i64,
-}
-
-impl StagedRestoreConfirmationV1 {
-    pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
-        validate_identifier("restore preview id", &self.preview_id)?;
-        validate_identifier("restore backup id", &self.backup_id)?;
-        if self.manifest_digest == [0; 32]
-            || self.expected_authority_epoch == 0
-            || self.expected_placement_revision == 0
-            || self.expected_policy_digest == [0; 32]
-            || now_micros >= self.expires_at_micros
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "restore confirmation",
-            });
-        }
-        Ok(())
-    }
-}
-
-impl RemoteProtocolBodyV1 for StagedRestoreConfirmationV1 {
-    fn validate_remote_protocol_body(
-        &self,
-        sent_at: UtcMicros,
-    ) -> Result<(), ApplicationContractError> {
-        self.validate(sent_at.0)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "state")]
-pub enum StagedRestoreProgressV1 {
-    Isolated,
-    DestinationBytesVerified,
-    ReferenceClosureVerified,
-    ReplayingCurrentPolicy,
-    ReadyForPublication,
-    RolledBackBeforePublication { reason_code: String },
-    ForwardRecoveryRequired { reason_code: String },
-    Published { receipt_id: String },
-}
-
-impl StagedRestoreProgressV1 {
-    pub fn serving(&self) -> bool {
-        matches!(self, Self::Published { .. })
     }
 }
 
@@ -395,21 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_and_promotion_confirmations_require_exact_expectations() {
-        let mut restore = StagedRestoreConfirmationV1 {
-            preview_id: "restore.1".into(),
-            backup_id: "backup.1".into(),
-            manifest_digest: [1; 32],
-            expected_authority_epoch: 8,
-            expected_placement_revision: 4,
-            expected_policy_digest: [2; 32],
-            expires_at_micros: 20,
-        };
-        assert!(restore.validate(10).is_ok());
-        assert!(restore.validate(20).is_err());
-        restore.expected_authority_epoch = 0;
-        assert!(restore.validate(10).is_err());
-
+    fn promotion_confirmation_requires_exact_expectations() {
         let mut promotion = PromotionConfirmationV1 {
             preview_id: "promotion.1".into(),
             expected_authority_epoch: 8,

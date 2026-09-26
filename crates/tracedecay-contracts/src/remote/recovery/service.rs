@@ -1,4 +1,4 @@
-//! Authenticated application owner for backup, staged restore, and promotion.
+//! Authenticated application owner for promotion.
 //!
 //! The owner retains no path, database, transport, or credential bytes. A
 //! registered durable adapter performs the effects and returns an exact receipt
@@ -13,10 +13,7 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{EffectClass, SchemaId, UseCaseId};
 
-use super::{
-    BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
-    RecoveryAuthorityExpectationV1, StagedRestoreConfirmationV1, StagedRestoreProgressV1,
-};
+use super::{PromotionCasReceiptV1, PromotionConfirmationV1, RecoveryAuthorityExpectationV1};
 use crate::remote::auth::OpaqueRemoteCredential;
 use crate::remote::credential_admission::{
     RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionErrorV1,
@@ -32,8 +29,6 @@ use crate::{
     OperationReceipt, OperationTermination, ReconciliationState, RequestId, ResultContractRef,
 };
 
-pub const REMOTE_BACKUP_USE_CASE_ID_V1: &str = "use-case.remote.backup";
-pub const REMOTE_RESTORE_USE_CASE_ID_V1: &str = "use-case.remote.restore";
 pub const REMOTE_PROMOTION_USE_CASE_ID_V1: &str = "use-case.remote.promotion";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -68,7 +63,6 @@ pub enum RemoteRecoveryTerminationV1 {
     Completed,
     CancelledBeforeEffect,
     TimedOutBeforeEffect,
-    RolledBackBeforePublication,
     ForwardRecoveryRequired,
 }
 
@@ -162,20 +156,6 @@ pub trait RemoteRecoveryOperationPortV1: Send + Sync {
         expected: &RecoveryAuthorityExpectationV1,
         observed_at: UtcMicros,
     ) -> CurrentRemoteAuthorityStateV1;
-
-    fn create_backup(
-        &self,
-        request: &RemoteProtocolRequestV1<BackupRequestV1>,
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-    ) -> Result<RemoteRecoveryCommittedV1<BackupOperationStateV1>, RemoteRecoveryOperationErrorV1>;
-
-    fn publish_staged_restore(
-        &self,
-        request: &RemoteProtocolRequestV1<StagedRestoreConfirmationV1>,
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-    ) -> Result<RemoteRecoveryCommittedV1<StagedRestoreProgressV1>, RemoteRecoveryOperationErrorV1>;
 
     fn promote(
         &self,
@@ -397,12 +377,6 @@ fn termination_evidence(
             }),
             ReconciliationState::Reconciled,
         ),
-        RemoteRecoveryTerminationV1::RolledBackBeforePublication => (
-            EffectTermination::Failed,
-            OperationTermination::Failed,
-            None,
-            ReconciliationState::Reconciled,
-        ),
         RemoteRecoveryTerminationV1::ForwardRecoveryRequired => (
             EffectTermination::EffectUnknown,
             OperationTermination::EffectUnknown,
@@ -418,14 +392,6 @@ fn result_contract(schema_id: &str) -> Result<ResultContractRef, ApplicationCont
             field: "remote recovery result schema",
         })?;
     ResultContractRef::new(schema_id, 1)
-}
-
-pub fn remote_backup_result_contract_v1() -> Result<ResultContractRef, ApplicationContractError> {
-    result_contract("remote.backup.result")
-}
-
-pub fn remote_restore_result_contract_v1() -> Result<ResultContractRef, ApplicationContractError> {
-    result_contract("remote.restore.result")
 }
 
 pub fn remote_promotion_result_contract_v1() -> Result<ResultContractRef, ApplicationContractError>
@@ -533,46 +499,6 @@ macro_rules! impl_recovery_protocol {
     };
 }
 
-impl_recovery_protocol!(
-    BackupRequestV1,
-    BackupOperationStateV1,
-    RemoteCredentialUseV1::CreateBackup,
-    false,
-    create_backup,
-    REMOTE_BACKUP_USE_CASE_ID_V1,
-    "remote.backup.result",
-    |request: &RemoteProtocolRequestV1<BackupRequestV1>| request.body.expected.clone()
-);
-impl_recovery_protocol!(
-    StagedRestoreConfirmationV1,
-    StagedRestoreProgressV1,
-    RemoteCredentialUseV1::PublishRestore,
-    true,
-    publish_staged_restore,
-    REMOTE_RESTORE_USE_CASE_ID_V1,
-    "remote.restore.result",
-    |request: &RemoteProtocolRequestV1<StagedRestoreConfirmationV1>| {
-        request
-            .expected_authority
-            .as_ref()
-            .map(|writer| RecoveryAuthorityExpectationV1 {
-                brain_id: writer.brain_id.as_str().to_owned(),
-                shard_id: writer.shard_id.as_str().to_owned(),
-                generation_id: writer.generation_id.as_str().to_owned(),
-                authority_node_id: writer.authority_node_id.as_str().to_owned(),
-                placement_revision: request.body.expected_placement_revision,
-                authority_epoch: request.body.expected_authority_epoch,
-            })
-            .unwrap_or_else(|| RecoveryAuthorityExpectationV1 {
-                brain_id: request.brain_id.as_str().to_owned(),
-                shard_id: "unavailable".to_owned(),
-                generation_id: "unavailable".to_owned(),
-                authority_node_id: "unavailable".to_owned(),
-                placement_revision: request.body.expected_placement_revision,
-                authority_epoch: request.body.expected_authority_epoch,
-            })
-    }
-);
 impl_recovery_protocol!(
     PromotionConfirmationV1,
     PromotionCasReceiptV1,

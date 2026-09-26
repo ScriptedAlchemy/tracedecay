@@ -36,7 +36,6 @@ pub struct RemoteOperationalStatusV1 {
     pub authority: CurrentRemoteAuthorityStateV1,
     pub spool: RemoteSpoolOperationalStatusV1,
     pub replay_coverage_complete: bool,
-    pub current_backup_verified: bool,
     pub failover_in_progress: bool,
     pub recovery_required: bool,
     pub observed_at: UtcMicros,
@@ -52,7 +51,6 @@ impl RemoteOperationalStatusV1 {
         authority: CurrentRemoteAuthorityStateV1,
         spool: RemoteSpoolOperationalStatusV1,
         replay_coverage_complete: bool,
-        current_backup_verified: bool,
         failover_in_progress: bool,
         recovery_required: bool,
         observed_at: UtcMicros,
@@ -62,7 +60,6 @@ impl RemoteOperationalStatusV1 {
             && spool.quarantined_count == 0
             && !spool.has_sequence_gap
             && replay_coverage_complete
-            && current_backup_verified
             && !failover_in_progress
             && !recovery_required;
         let readiness = if recovery_required {
@@ -80,7 +77,6 @@ impl RemoteOperationalStatusV1 {
             authority,
             spool,
             replay_coverage_complete,
-            current_backup_verified,
             failover_in_progress,
             recovery_required,
             observed_at,
@@ -96,7 +92,6 @@ impl RemoteOperationalStatusV1 {
             && self.spool.quarantined_count == 0
             && !self.spool.has_sequence_gap
             && self.replay_coverage_complete
-            && self.current_backup_verified
             && !self.failover_in_progress
             && !self.recovery_required;
         if (self.readiness == RemoteOperationalReadinessV1::Ready) != ready
@@ -153,7 +148,6 @@ impl RemoteOperationalStatusReadV1 {
                 pending_spool_items: status.spool.pending_count,
                 quarantined_spool_items: status.spool.quarantined_count,
                 replay_coverage_complete: status.replay_coverage_complete,
-                backup_verified: status.current_backup_verified,
                 failover_in_progress: status.failover_in_progress,
                 recovery_required: status.recovery_required,
                 coverage: *coverage,
@@ -218,7 +212,6 @@ mod tests {
             available_authority(),
             clean_spool.clone(),
             true,
-            true,
             false,
             false,
             UtcMicros(10),
@@ -234,7 +227,6 @@ mod tests {
                 quarantined_count: 2,
                 has_sequence_gap: false,
             },
-            false,
             false,
             false,
             true,
@@ -254,7 +246,6 @@ mod tests {
             },
             clean_spool,
             true,
-            false,
             false,
             false,
             UtcMicros(10),
@@ -277,7 +268,6 @@ mod tests {
                 has_sequence_gap: false,
             },
             false,
-            true,
             false,
             false,
             UtcMicros(10),
@@ -296,7 +286,6 @@ mod tests {
                 pending_spool_items: 3,
                 quarantined_spool_items: 0,
                 replay_coverage_complete: false,
-                backup_verified: true,
                 failover_in_progress: false,
                 recovery_required: false,
                 coverage: DoctorCoverageCompletenessV1::Complete,
@@ -328,7 +317,6 @@ mod tests {
                 has_sequence_gap: false,
             },
             replay_coverage_complete: true,
-            current_backup_verified: true,
             failover_in_progress: false,
             recovery_required: false,
             observed_at: UtcMicros(10),

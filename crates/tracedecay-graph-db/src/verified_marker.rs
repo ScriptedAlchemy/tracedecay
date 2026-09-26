@@ -127,9 +127,7 @@ const MARKER_VERSION: u32 = 1;
 /// refusing to read an arbitrarily large file found at the marker path.
 const MAX_MARKER_BYTES: usize = 8 * 1024 * 1024;
 
-/// Temp-file discriminator for the atomic publish. Deliberately free of the
-/// `.tracedecay-` substring that the backup contract treats as staging
-/// residue.
+/// Temp-file discriminator for the atomic publish.
 const MARKER_TEMP_KIND: &str = "verified-marker";
 
 /// How a generation's recovered digest was established on this open.

@@ -4980,7 +4980,6 @@ export type RemoteListenerKindV1 = z.infer<typeof RemoteListenerKindV1Schema>;
 export const RemoteOperationalStatusPayloadV1Schema = z.discriminatedUnion("kind", [z.object({
   authority: z.lazy(() => RemoteAuthoritySummaryV1Schema),
   coverage: z.lazy(() => DoctorCoverageCompletenessV1Schema),
-  current_backup_verified: z.boolean(),
   enrollment_configured: z.boolean(),
   failover_in_progress: z.boolean(),
   kind: z.literal("observed"),

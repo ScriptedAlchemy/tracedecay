@@ -1,5 +1,4 @@
 mod adjacency_id_index;
-mod backup;
 mod bundle;
 mod corrupt_store;
 mod epoch_cache;
@@ -26,7 +25,6 @@ mod state;
 mod traversal;
 mod verified_marker;
 
-pub use backup::GraphBackupReceipt;
 pub use bundle::{
     MAX_SEALED_READ_BUNDLE_ARTIFACT_BYTES_V1, SEALED_READ_BUNDLE_FORMAT_V1,
     SealedReadBundleArtifactStateV1, SealedReadBundleArtifactV1, SealedReadBundleManifestV1,

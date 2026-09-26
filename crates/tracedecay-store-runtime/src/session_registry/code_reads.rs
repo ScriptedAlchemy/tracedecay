@@ -72,19 +72,14 @@ impl DaemonSessionRuntimeRegistryV1 {
                     ));
                 }
                 Some(
-                    super::ProjectRuntimeOwnerStateV1::Retiring
+                    state @ (super::ProjectRuntimeOwnerStateV1::Retiring
                     | super::ProjectRuntimeOwnerStateV1::ReplacingSessions
-                    | super::ProjectRuntimeOwnerStateV1::Recovering
                     | super::ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
-                    | super::ProjectRuntimeOwnerStateV1::Faulted(_),
+                    | super::ProjectRuntimeOwnerStateV1::Faulted(_)),
                 ) => {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
-                    return Err(TraceDecayError::project_route(
-                        "project_runtime_retiring",
-                        true,
-                        "Project runtime is unavailable while retirement is terminal or in progress",
-                    ));
+                    return Err(state.unavailable_route_error());
                 }
                 None => false,
             }
