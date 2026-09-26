@@ -358,13 +358,30 @@ impl CodeIndexSchedulerErrorV1 {
         )
     }
 
+    /// A failure the unchanged source reproduces on every pass: not an
+    /// interruption, not capacity another holder releases, not an activation
+    /// or publication race a later pass re-drives, and not the corrupt
+    /// publication the worker resets itself. Retrying it over the same bytes
+    /// only repeats the whole build, so the worker parks it typed until the
+    /// input changes.
+    pub fn reproduces_on_unchanged_input(&self) -> bool {
+        self.reconcile_interruption().is_none()
+            && !self.is_transient_capacity_failure()
+            && !self.is_retryable_activation()
+            && !self.is_publication_authority_corruption()
+            && !matches!(self, Self::PublicationConflict(_))
+    }
+
     pub fn is_graph_activation_refusal(&self) -> bool {
-        matches!(self, Self::GraphActivationRefused(_))
-            || matches!(
-                self,
-                Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { budget, .. })
-                    if budget == tracedecay_graph_db::GraphBudgetKind::ResidentMemory.as_str()
-            )
+        matches!(self, Self::GraphActivationRefused(_)) || self.is_resident_memory_graph_refusal()
+    }
+
+    /// The native graph publication stopped at the measured-RSS watermark.
+    pub fn is_resident_memory_graph_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::GraphProjection(error) if super::graph_activation::is_resident_memory_refusal(error)
+        )
     }
 
     /// A refusal that is transient *by construction*: this pass was turned away

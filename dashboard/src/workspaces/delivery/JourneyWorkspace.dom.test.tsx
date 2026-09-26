@@ -8,9 +8,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** PR #42 over OVERVIEW_ALPHA: 1 objective + 1 session (undated), 2 commits,
- * 1 PR identity + 1 provider read, 2 reviews, 2 checks; releases not served. */
-const EPISODES_42 = 10;
+/** PR #42 over OVERVIEW_ALPHA: 1 objective + 1 session + 2 agent-usage rows
+ * (undated), 2 commits, 1 PR identity + 1 provider read, 2 reviews, 2 checks;
+ * releases not served. */
+const EPISODES_42 = 12;
+const DATED_42 = 8;
 
 describe('JourneyWorkspace', () => {
   it('renders the field, the exact table with one row per episode, and the readouts', async () => {
@@ -24,10 +26,10 @@ describe('JourneyWorkspace', () => {
     expect(within(table).getAllByRole('row')).toHaveLength(EPISODES_42 + 1);
 
     const readings = screen.getByLabelText('Journey readings');
-    expect(within(readings).getByText('episodes').nextElementSibling?.textContent).toContain('10');
+    expect(within(readings).getByText('episodes').nextElementSibling?.textContent).toContain('12');
     expect(within(readings).getByText('dated').nextElementSibling?.textContent).toContain('8');
-    expect(within(readings).getByText('undated').nextElementSibling?.textContent).toContain('2');
-    expect(within(readings).getByText('lanes served').nextElementSibling?.textContent).toContain('6');
+    expect(within(readings).getByText('undated').nextElementSibling?.textContent).toContain('4');
+    expect(within(readings).getByText('lanes served').nextElementSibling?.textContent).toContain('7');
     expect(within(readings).getByText('8 total')).toBeTruthy();
     expect(within(readings).getByText(/05-09 15:00 → 05-09 21:00/)).toBeTruthy();
 
@@ -51,7 +53,7 @@ describe('JourneyWorkspace', () => {
 
     const rows = within(table).getAllByRole('row').slice(1);
     const undatedIndex = rows.findIndex((row) => row.textContent?.startsWith('undated'));
-    expect(undatedIndex).toBe(EPISODES_42 - 2);
+    expect(undatedIndex).toBe(DATED_42);
     expect(within(table).getAllByText('OBSERVED').length).toBeGreaterThan(0);
     expect(within(table).getAllByText('EVENT').length).toBeGreaterThan(0);
   });
@@ -60,10 +62,40 @@ describe('JourneyWorkspace', () => {
     renderDelivery(INBOX, { route: `/delivery?mode=journey&pr=${PR_42}`, overview: OVERVIEW_ALPHA });
     const gaps = await screen.findByRole('region', { name: 'Journey gaps' });
     expect(within(gaps).getByText(/requires github_read_authority/)).toBeTruthy();
-    expect(within(gaps).getByText(/No agent attribution/)).toBeTruthy();
     expect(within(gaps).getByText('Releases')).toBeTruthy();
-    expect(within(gaps).getByText('Agents')).toBeTruthy();
+    // Agent usage is served on this branch, so the agents lane is not a gap.
+    expect(within(gaps).queryByText('Agents')).toBeNull();
     expect(within(gaps).queryByText('No gap reported by the joined authorities.')).toBeNull();
+  });
+
+  it('names the correlation authority when no session span places agents on the branch', async () => {
+    renderDelivery(INBOX, {
+      route: `/delivery?mode=journey&pr=${PR_42}`,
+      overview: {
+        ...OVERVIEW_ALPHA,
+        agent_usage: {
+          state: 'not_published',
+          reason: 'no session has recorded a Git branch span yet',
+          required_authority: 'session-Git correlation index',
+        },
+      },
+    });
+    const gaps = await screen.findByRole('region', { name: 'Journey gaps' });
+    expect(within(gaps).getByText('Agents')).toBeTruthy();
+    expect(within(gaps).getByText(/requires session-Git correlation index/)).toBeTruthy();
+    const ledger = screen.getByText('Agent usage').closest('li')!;
+    expect(within(ledger).getByText('source · session usage')).toBeTruthy();
+  });
+
+  it('reads per-agent tokens and tool calls in the inspector', async () => {
+    const user = userEvent.setup();
+    renderDelivery(INBOX, { route: `/delivery?mode=journey&pr=${PR_42}`, overview: OVERVIEW_ALPHA });
+    const episodes = await screen.findByRole('region', { name: 'Journey episodes' });
+    await user.click(within(within(episodes).getByRole('table')).getByRole('button', { name: 'planner' }));
+    const inspector = screen.getByRole('region', { name: 'Episode detail' });
+    expect(within(inspector).getByText('21,500 tokens')).toBeTruthy();
+    expect(within(inspector).getByText('41')).toBeTruthy();
+    expect(within(inspector).getByText('2 · 2 with usage')).toBeTruthy();
 
   });
 

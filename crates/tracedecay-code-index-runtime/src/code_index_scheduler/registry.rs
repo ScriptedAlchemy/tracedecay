@@ -825,6 +825,26 @@ const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon l
      abnormal text-projection failure; indexing retries when a new generation seals over \
      changed input";
 
+/// Remediation when a background reconcile fails the same way over unchanged
+/// source. Passes stay held until the input changes, so the operator either
+/// changes what the named failure points at or installs a build that no
+/// longer refuses it; both retry through an ordinary path.
+const CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1: &str = "indexing this worktree fails \
+     the same way on every pass over unchanged source; fix what the named failure points at, \
+     then run `tracedecay sync` to retry; if it names an internal indexing contract, run \
+     `tracedecay upgrade` (a restarted daemon retries automatically) and report the failure if \
+     it persists";
+
+/// Remediation when the native graph publication stopped at the measured-RSS
+/// watermark. The refused generation keeps serving exact and lexical reads and
+/// does not re-attempt its graph in this daemon; a restart or a new generation
+/// does.
+const CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1: &str = "the native code graph \
+     was refused because daemon memory reached its admission watermark; exact and lexical \
+     search keep serving; free memory or raise the daemon's memory limit, then run \
+     `tracedecay daemon restart` to rebuild the graph (a source change that seals a new \
+     generation also retries it)";
+
 /// Remediation when the derived publication was already deleted and rebuilt
 /// once in this mount and is corrupt again. The daemon deletes and rebuilds a
 /// corrupt derived store automatically; a repeat is bounded to one attempt per
@@ -937,18 +957,32 @@ fn convergence_park_retries_on_wake(slot: &RwLock<Option<CodeIndexConvergencePar
 /// violation is no longer the current convergence obstacle.
 ///
 /// Terminal publication-authority corruption is preserved until the worktree
-/// is retired and remounted over a repaired store.
+/// is retired and remounted over a repaired store. A resident-memory graph
+/// refusal is preserved too: text progress does not activate the refused
+/// graph, so only [`clear_graph_resident_memory_park`] retires it.
 fn clear_convergence_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
     let mut slot = slot
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot
-        .as_ref()
-        .is_some_and(is_terminal_publication_authority_park)
-    {
+    if slot.as_ref().is_some_and(|parked| {
+        is_terminal_publication_authority_park(parked)
+            || parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+    }) {
         return;
     }
     *slot = None;
+}
+
+/// Retire a resident-memory graph refusal once a native graph activated.
+fn clear_graph_resident_memory_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
+    let mut slot = slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.as_ref().is_some_and(|parked| {
+        parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+    }) {
+        *slot = None;
+    }
 }
 
 #[cfg(test)]

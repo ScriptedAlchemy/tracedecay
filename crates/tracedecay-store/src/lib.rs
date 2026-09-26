@@ -148,8 +148,8 @@ pub use observation::{
 };
 pub use projection::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationProjection, ObservationProjectionStore,
-    PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation, ProjectionBatchItem,
-    ProjectionCheckpoint, ProjectionDrainBatch, ProjectionPersistOutcome,
+    PROJECTION_TERMINAL_RETRY_MICROS, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation,
+    ProjectionBatchItem, ProjectionCheckpoint, ProjectionDrainBatch, ProjectionPersistOutcome,
     ProjectionPredecessorConvergence, ProjectionProvenance, ProjectionRebuildOutcome,
     ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,

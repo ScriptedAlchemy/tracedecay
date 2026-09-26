@@ -5,7 +5,7 @@
 //! façade methods.
 
 use std::borrow::Borrow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -20,6 +20,8 @@ use crate::{
     RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, VerifiedGraphRuntimePortV1,
     VerifiedGraphRuntimeWeakProxyV1,
 };
+#[cfg(test)]
+use tracedecay_sessions::runtime::git_correlation::recover_git_evidence_projection;
 use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BackfillStats, BoundedBackfillOutcome,
     BoundedGitControl, CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth,
@@ -28,9 +30,8 @@ use tracedecay_sessions::runtime::git_correlation::{
     SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
     git_evidence_projection_identity, open_git_evidence_graph_view,
     pending_git_evidence_publication_count, read_meta_value, rebuild_pre_index_git_evidence,
-    recover_git_evidence_projection, replay_pending_git_evidence_publications,
-    replay_pending_git_evidence_publications_outcome, run_bounded_history_index_page,
-    run_incremental_backfill, run_incremental_backfill_outcome,
+    replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
+    run_bounded_history_index_page, run_incremental_backfill, run_incremental_backfill_outcome,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::git_correlation::{
@@ -55,6 +56,15 @@ struct GitEvidencePublicationAuthorityRoutes {
 static GIT_EVIDENCE_PUBLICATION_AUTHORITIES: OnceLock<
     Mutex<BTreeMap<String, GitEvidencePublicationAuthorityRoutes>>,
 > = OnceLock::new();
+
+/// Git evidence recorded for a bounded set of sessions, bound to the verified
+/// generation that served it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitSessionEvidence {
+    pub generation: String,
+    pub spans: Vec<SessionGitSpan>,
+    pub commits: Vec<CommitSessionRecord>,
+}
 
 /// Typed result of one bounded production convergence pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,13 +486,12 @@ where
     }
 
     /// Recovers the complete projection: every span and commit payload is
-    /// decoded and the generation identity re-derived. This is the export
-    /// surface (dashboard rows); bounded queries use
-    /// [`Self::git_evidence_graph_view`].
+    /// decoded and the generation identity re-derived. Production reads use
+    /// the bounded [`Self::git_evidence_graph_view`].
     ///
     /// `Ok(None)` means the projection has never published a verified head:
     /// the project has no recorded Git evidence yet.
-    #[hotpath::measure(label = "global_db.git_correlation.projection")]
+    #[cfg(test)]
     pub fn git_evidence_projection(
         &self,
     ) -> Result<Option<GitEvidenceProjectionStore>, GitCorrelationError> {
@@ -506,6 +515,25 @@ where
             git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
         open_git_evidence_graph_view(self.graph_runtime()?, &identity, Arc::new(NeverCancelled))?
             .into_indexed()
+    }
+
+    /// The verified generation and every span and commit attribution recorded
+    /// for `session_ids`, hydrated per session through the bounded view.
+    /// `Ok(None)` is the never-published empty start.
+    #[hotpath::measure(label = "global_db.git_correlation.session_evidence")]
+    pub fn git_evidence_for_sessions(
+        &self,
+        session_ids: &BTreeSet<String>,
+    ) -> Result<Option<GitSessionEvidence>, GitCorrelationError> {
+        let Some(view) = self.git_evidence_graph_view()? else {
+            return Ok(None);
+        };
+        let (spans, commits) = view.session_evidence(session_ids)?;
+        Ok(Some(GitSessionEvidence {
+            generation: view.verified_snapshot().generation().as_str().to_owned(),
+            spans,
+            commits,
+        }))
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

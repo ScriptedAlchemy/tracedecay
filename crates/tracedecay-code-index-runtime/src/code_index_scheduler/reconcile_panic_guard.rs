@@ -14,7 +14,8 @@
 //! the worker stops re-attempting until the input actually changes (the
 //! code-index control epoch advances) or a pass makes progress. The shape
 //! mirrors the sealed-generation activation backoff already used by the
-//! registry worker; tests shrink the clock, not the shape.
+//! registry worker; tests shrink the clock, not the shape. A typed failure
+//! the same input reproduces shares the quarantine without the backoff.
 
 use std::time::Duration;
 
@@ -108,6 +109,16 @@ impl ReconcilePanicGuardV1 {
             .saturating_mul(2)
             .min(RECONCILE_PANIC_BACKOFF_CEILING);
         ReconcilePanicDecisionV1::RetryAfter(delay)
+    }
+
+    /// Quarantine after one pass: a deterministic failure over unchanged
+    /// input reproduces byte-for-byte, so backoff retries would only repeat
+    /// the whole build. `epoch` is the control epoch the failing pass began
+    /// under; any later advance is new input and lifts the quarantine.
+    pub fn quarantine_unchanged_input(&mut self, epoch: u64) {
+        self.quarantined = true;
+        self.quarantined_at_epoch = epoch;
+        self.next_attempt_at = None;
     }
 
     /// Consecutive panics observed since the last progressing pass. Reported

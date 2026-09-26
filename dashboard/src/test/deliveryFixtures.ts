@@ -466,6 +466,49 @@ export const OVERVIEW_ALPHA: DeliveryOverviewV1 = {
     state: 'ready',
     value: { comparison: 'current', head_commit: HEAD_ALPHA, indexed_commit: HEAD_ALPHA },
   },
+  agent_usage: {
+    state: 'ready',
+    value: {
+      branch: 'feature/delivery',
+      sessions: 3,
+      truncated: false,
+      usage_coverage: 'complete',
+      agents: [
+        {
+          agent: 'planner',
+          provider: 'claude',
+          sessions: 2,
+          sessions_with_usage: 2,
+          usage_complete: true,
+          counters: {
+            input_tokens: 18_400,
+            output_tokens: 3_100,
+            cache_read_tokens: null,
+            cache_write_tokens: null,
+            reasoning_tokens: null,
+            total_tokens: null,
+          },
+          tool_calls: 41,
+        },
+        {
+          agent: null,
+          provider: 'codex',
+          sessions: 1,
+          sessions_with_usage: 0,
+          usage_complete: false,
+          counters: {
+            input_tokens: null,
+            output_tokens: null,
+            cache_read_tokens: null,
+            cache_write_tokens: null,
+            reasoning_tokens: null,
+            total_tokens: null,
+          },
+          tool_calls: 6,
+        },
+      ],
+    },
+  },
 };
 
 /** A project whose provider authority is absent: local Git remains useful. */
