@@ -83,6 +83,9 @@ wire_enum! {
         TypeAlias => "type_alias",
         Field => "field",
         Macro => "macro",
+        /// An item-position macro invocation whose body is not an item list;
+        /// it owns the calls written in that unexpanded body.
+        MacroInvocation => "macro_invocation",
         Use => "use",
         // Java-specific
         Class => "class",

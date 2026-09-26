@@ -1920,8 +1920,13 @@ pub(crate) const CROSS_FILE_REFERENCE_BLOCKLIST: &[&str] = &[
 /// paths never lead to a project symbol. Retention cannot tell `std::fs`
 /// from a workspace module, so sealing re-applies the member's verdict when
 /// the owner is not attested by the referencing file's imports, crate roots,
-/// or modules.
-pub(crate) fn cross_file_reference_name_is_blocklisted(reference_name: &str) -> bool {
+/// or modules. The reverse holds for the owner: `status::module` behind the
+/// file's own `mod status;` is a project path even though `status` is a
+/// blocklisted name, so `path_head_is_project` waives only that owner check.
+pub(crate) fn cross_file_reference_name_is_blocklisted(
+    reference_name: &str,
+    path_head_is_project: bool,
+) -> bool {
     let Some((owner_path, member)) = reference_name.rsplit_once("::") else {
         return reference_name.is_empty()
             || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&reference_name);
@@ -1930,7 +1935,16 @@ pub(crate) fn cross_file_reference_name_is_blocklisted(reference_name: &str) -> 
     member.is_empty()
         || owner.is_empty()
         || owner == "Self"
-        || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&owner)
+        || (!path_head_is_project && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&owner))
+}
+
+/// Whether a qualified Rust path starts at project code the referencing file
+/// itself attests: a `crate`/`self`/`super` path or a module the file
+/// declares at its root.
+fn rust_path_head_is_declared(reference_name: &str, root_modules: &HashSet<&str>) -> bool {
+    reference_name.split_once("::").is_some_and(|(head, _)| {
+        matches!(head, "crate" | "self" | "super") || root_modules.contains(head)
+    })
 }
 
 /// Map a Rust UFCS trait-impl method path `<Type as Trait>::method` to the
@@ -2177,6 +2191,17 @@ fn resolve_file_references(
             ))
         })
         .collect::<BTreeSet<_>>();
+    let rust_root_modules = if language == "rust" {
+        symbols
+            .iter()
+            .filter(|symbol| symbol.kind == NodeKind::Module.as_str())
+            .filter_map(|symbol| symbol.qualified_name.split_once("::"))
+            .map(|(_, relative)| relative)
+            .filter(|relative| !relative.contains("::"))
+            .collect::<HashSet<&str>>()
+    } else {
+        HashSet::new()
+    };
     let mut resolved = Vec::new();
     let mut retained = Vec::new();
     for reference in unresolved {
@@ -2228,36 +2253,46 @@ fn resolve_file_references(
             })
             .unwrap_or_default();
         match compatible.as_slice() {
-            [target] => {
-                if target.node_id == reference.from_node_id
-                    && dotted_duplicate_sites.contains(&(
-                        reference.from_node_id.as_str(),
-                        reference.line,
-                        reference.column,
-                        reference.reference_name.as_str(),
-                    ))
-                {
-                    continue;
-                }
+            // Rust admits one definition per name and scope, so same-named
+            // same-kind definitions are `#[cfg]` variants of one identity; the
+            // call binds it at every definition site. Other languages'
+            // overloads stay ambiguous.
+            [first, rest @ ..]
+                if rest.is_empty()
+                    || (language == "rust"
+                        && rest.iter().all(|target| {
+                            target.qualified_name == first.qualified_name
+                                && target.kind == first.kind
+                        })) =>
+            {
                 let Some(Some(from)) = by_node_id.get(reference.from_node_id.as_str()) else {
                     continue;
                 };
                 let Some(kind) = canonical_relation_kind(&reference.reference_kind) else {
                     continue;
                 };
-                resolved.push(CanonicalRelationEdgeV1 {
-                    from_occurrence: from.occurrence.clone(),
-                    to_occurrence: target.occurrence.clone(),
-                    kind,
-                    authority: EdgeAuthorityV1::SyntaxExact,
-                    evidence_span: reference_evidence_span(
-                        source,
-                        offsets,
-                        &references_by_site,
-                        reference,
-                    )
-                    .unwrap_or(from.span),
-                });
+                let evidence_span =
+                    reference_evidence_span(source, offsets, &references_by_site, reference)
+                        .unwrap_or(from.span);
+                for target in &compatible {
+                    if target.node_id == reference.from_node_id
+                        && dotted_duplicate_sites.contains(&(
+                            reference.from_node_id.as_str(),
+                            reference.line,
+                            reference.column,
+                            reference.reference_name.as_str(),
+                        ))
+                    {
+                        continue;
+                    }
+                    resolved.push(CanonicalRelationEdgeV1 {
+                        from_occurrence: from.occurrence.clone(),
+                        to_occurrence: target.occurrence.clone(),
+                        kind,
+                        authority: EdgeAuthorityV1::SyntaxExact,
+                        evidence_span,
+                    });
+                }
             }
             [] => {
                 if let Some(candidate) = cross_file_reference_candidate(
@@ -2267,6 +2302,7 @@ fn resolve_file_references(
                     reference,
                     &by_node_id,
                     &imported_locals,
+                    &rust_root_modules,
                 ) {
                     retained.push(candidate);
                 }
@@ -2305,9 +2341,11 @@ fn cross_file_reference_candidate(
     reference: &UnresolvedRef,
     by_node_id: &BTreeMap<&str, Option<&SymbolRow>>,
     imported_locals: &HashSet<&str>,
+    rust_root_modules: &HashSet<&str>,
 ) -> Option<CodeIndexUnresolvedReferenceV1> {
+    let rust = reference.file_path.ends_with(".rs");
     let receiver_call = reference.reference_kind == EdgeKind::Calls
-        && reference.file_path.ends_with(".rs")
+        && rust
         && reference.reference_name.contains('.');
     let typescript = typescript_family_path(&reference.file_path);
     let explicitly_imported =
@@ -2322,7 +2360,13 @@ fn cross_file_reference_candidate(
         && !imported_member_call
         && (reference.reference_name.contains('.')
             || (!explicitly_imported
-                && cross_file_reference_name_is_blocklisted(&reference.reference_name)))
+                && cross_file_reference_name_is_blocklisted(
+                    &reference.reference_name,
+                    rust && rust_path_head_is_declared(
+                        &reference.reference_name,
+                        rust_root_modules,
+                    ),
+                )))
     {
         return None;
     }
