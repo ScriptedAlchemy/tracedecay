@@ -2,6 +2,8 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
@@ -56,6 +58,66 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
     match path.parent() {
         Some(parent) => sync_directory(parent, policy),
         None => Ok(()),
+    }
+}
+
+/// New files whose contents become durable together, before any is renamed
+/// into place.
+///
+/// On Linux one `syncfs(2)` through a directory opened before the first
+/// write replaces a fsync per file: it flushes every dirty inode of that
+/// filesystem, and the kernel reports writeback errors raised after the
+/// directory was opened. Other platforms fsync each file as it is written.
+pub struct DurableFileBatch {
+    #[cfg(target_os = "linux")]
+    anchor: File,
+}
+
+impl DurableFileBatch {
+    /// Open the batch on `directory` before writing any of its files.
+    pub fn open(directory: &Path) -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                anchor: File::open(directory)?,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = directory;
+            Ok(Self {})
+        }
+    }
+
+    /// Record one fully written member file.
+    pub fn written(&self, file: &File) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = file;
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            sync_owned_file(file)
+        }
+    }
+
+    /// Make every member file's contents durable.
+    #[hotpath::measure(label = "private_fs.framed_log.sync_file_batch")]
+    pub fn sync(&self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: `anchor` owns an open descriptor for the whole call.
+            if unsafe { libc::syncfs(self.anchor.as_raw_fd()) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
     }
 }
 

@@ -58,13 +58,15 @@ use super::schema::{
     stage_row_dictionary,
 };
 use super::{
-    ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    ARTIFACT_SQLITE_CACHE_BYTES, BuilderDurabilityV1,
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1, CodeLexicalArtifactBatchLimitV1,
     CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
-    open_builder_connection, sqlite_corrupt, sqlite_error,
+    enter_resumable_journal, leave_resumable_journal, open_builder_connection, sqlite_corrupt,
+    sqlite_error,
 };
 use crate::retrieval::lexical::LexicalFieldV1;
 
@@ -1595,6 +1597,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )
         )?;
+        enter_resumable_journal(&self.connection)?;
         let mutation_gate = &self.mutation_gate;
         super::with_memory_statement_journals(&mut self.connection, |connection| {
             hotpath::measure_block!("query.artifact.batch.sqlite", {
@@ -1717,6 +1720,7 @@ impl CodeLexicalArtifactBuilderV1 {
             record_finalization_step(&step);
             return Ok(step);
         }
+        enter_resumable_journal(&self.connection)?;
 
         if load_finalization_state(&self.connection)?.is_none() {
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
@@ -1954,6 +1958,9 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact staging path is not UTF-8".to_owned(),
             )
         })?;
+        // The staging WAL is named after the path the compacted file takes
+        // over, so it must be folded away before the rename.
+        leave_resumable_journal(&self.connection)?;
         with_cancellable_sqlite_statement(&self.connection, control, || {
             self.connection
                 .execute("VACUUM INTO ?1", [target])
@@ -1999,6 +2006,7 @@ impl CodeLexicalArtifactBuilderV1 {
     /// connection writes the file again, and both are set to one value.
     fn canonicalize_sealed_header(&self) -> Result<(), CodeLexicalArtifactErrorV1> {
         self.verify_path_binding()?;
+        leave_resumable_journal(&self.connection)?;
         let mut file = &self.private_file;
         for offset in SQLITE_HEADER_COMMIT_COUNTER_OFFSETS {
             file.seek(SeekFrom::Start(offset))
@@ -2064,18 +2072,19 @@ fn publish_initialized_staging(
         Err(error) => return Err(private_staging_error(error)),
     }
     let metadata_bytes = content_metadata_bytes(metadata)?;
-    let (connection, private_file, _) =
+    let (mut connection, private_file, _) =
         create_private_builder_connection(&initializing, memory_budget_bytes)?;
     let _mutation_gate = register_builder_mutation_gate(&connection)?;
-    create_schema(&connection)?;
-    verify_builder_mutation_gate_schema(&connection)?;
+    let initialization = connection.transaction().map_err(sqlite_error)?;
+    create_schema(&initialization)?;
+    verify_builder_mutation_gate_schema(&initialization)?;
     #[cfg(test)]
     if take_failed_staging_initialization() {
         return Err(CodeLexicalArtifactErrorV1::Contract(
             "injected lexical artifact staging initialization failure".to_owned(),
         ));
     }
-    connection
+    initialization
         .execute(
             "INSERT INTO artifact_state(singleton, format_revision, metadata, metadata_digest, receipt) VALUES (1, ?1, ?2, ?3, ?4)",
             params![
@@ -2086,9 +2095,12 @@ fn publish_initialized_staging(
             ],
         )
         .map_err(sqlite_error)?;
+    initialization.commit().map_err(sqlite_error)?;
     // SQLite names a rollback journal after the path its connection opened, so
     // the initializing connection closes before the rename; appends run under a
-    // connection bound to the visible staging path.
+    // connection bound to the visible staging path. The sibling's commit did
+    // not sync, so this fsync is what makes the initialized state durable
+    // before it is named.
     drop(connection);
     private_file
         .sync_all()
@@ -2139,7 +2151,12 @@ fn create_private_builder_connection(
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let private_file = create_private_file_retained(path)
         .map_err(|failure| private_staging_error(failure.into_error()))?;
-    open_bound_builder_connection(path, private_file, memory_budget_bytes)
+    open_bound_builder_connection(
+        path,
+        private_file,
+        BuilderDurabilityV1::Unpublished,
+        memory_budget_bytes,
+    )
 }
 
 fn open_private_builder_connection(
@@ -2147,16 +2164,22 @@ fn open_private_builder_connection(
     memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let private_file = open_private_file(path).map_err(private_staging_error)?;
-    open_bound_builder_connection(path, private_file, memory_budget_bytes)
+    open_bound_builder_connection(
+        path,
+        private_file,
+        BuilderDurabilityV1::Resumable,
+        memory_budget_bytes,
+    )
 }
 
 fn open_bound_builder_connection(
     path: &Path,
     private_file: File,
+    durability: BuilderDurabilityV1,
     memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let identity = stable_file_identity(&private_file)?;
-    let connection = open_builder_connection(path, memory_budget_bytes)?;
+    let connection = open_builder_connection(path, durability, memory_budget_bytes)?;
     let rebound = open_private_file(path).map_err(private_staging_error)?;
     if stable_file_identity(&rebound)? != identity {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(

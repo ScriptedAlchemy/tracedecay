@@ -1075,6 +1075,86 @@ pub(crate) fn projection_metadata(
     }
 }
 
+/// Appends do not sync, so a killed builder leaves exactly the bytes it
+/// wrote: the staging file and its WAL. Resuming from those bytes must pick
+/// up at the last committed page and seal the same file an uninterrupted
+/// build seals.
+#[test]
+fn killed_builder_resumes_from_its_unsynced_commits_and_seals_identical_bytes() {
+    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(pages.len() >= 2, "the fixture must span several pages");
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+
+    let uninterrupted_path = directory.path().join("uninterrupted.staging");
+    {
+        let mut builder =
+            CodeLexicalArtifactBuilderV1::create(&uninterrupted_path, fixture.metadata.clone())
+                .expect("create uninterrupted artifact");
+        for page in &pages {
+            builder.append_page(page, &control).expect("append page");
+        }
+        builder
+            .rebuild_and_finalize(&mut fixture.open_source(1), &control)
+            .expect("seal uninterrupted artifact");
+    }
+
+    let live_path = directory.path().join("live.staging");
+    let killed_path = directory.path().join("killed.staging");
+    let mut live = CodeLexicalArtifactBuilderV1::create(&live_path, fixture.metadata.clone())
+        .expect("create live artifact");
+    live.append_page(&pages[0], &control)
+        .expect("append the first page");
+    // The process image at a SIGKILL: every byte written so far, no close.
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let from = PathBuf::from(format!("{}{suffix}", live_path.display()));
+        if from.exists() {
+            std::fs::copy(&from, format!("{}{suffix}", killed_path.display()))
+                .expect("capture the killed builder's file");
+        }
+    }
+    assert!(
+        PathBuf::from(format!("{}-wal", killed_path.display())).exists(),
+        "an unsynced append must live in the staging WAL"
+    );
+    drop(live);
+
+    let sealed = {
+        let mut resumed =
+            CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &killed_path,
+                fixture.metadata.clone(),
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+                &control,
+            )
+            .expect("resume the killed builder's staging");
+        assert_eq!(
+            resumed
+                .progress()
+                .expect("resumed progress")
+                .next_page_ordinal,
+            1,
+            "the resumed staging must keep exactly the committed page"
+        );
+        for page in &pages[1..] {
+            resumed.append_page(page, &control).expect("append page");
+        }
+        resumed
+            .rebuild_and_finalize(&mut fixture.open_source(1), &control)
+            .expect("seal the resumed artifact");
+        std::fs::read(&killed_path).expect("read resumed artifact")
+    };
+    assert!(
+        !PathBuf::from(format!("{}-wal", killed_path.display())).exists(),
+        "the seal must fold the WAL into the one sealed file"
+    );
+    assert_eq!(
+        Sha256::digest(&sealed),
+        Sha256::digest(std::fs::read(&uninterrupted_path).expect("read uninterrupted artifact")),
+        "a resumed build must seal the uninterrupted build's bytes"
+    );
+}
+
 #[test]
 fn disk_artifact_resume_and_reopen_serve_lexical_results() {
     let (fixture, pages, source_receipt) = real_verified_pages();

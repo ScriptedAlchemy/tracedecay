@@ -828,6 +828,18 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
     // Linked worktrees share this directory; a sibling's pack may be in flight.
     let sibling_path = segments_root.join(".evidence-pack-publication.sibling.4242.tmp");
     std::fs::write(&sibling_path, b"sibling in flight").expect("write sibling pack");
+    // A seal killed before its segment flush leaves each segment it wrote
+    // under a temporary name.
+    let orphan_segment_path = segments_root.join(format!(
+        ".segment-publication.{scope}.4242.{}.tmp",
+        "a".repeat(64)
+    ));
+    std::fs::write(&orphan_segment_path, b"unflushed segment").expect("write segment orphan");
+    let sibling_segment_path = segments_root.join(format!(
+        ".segment-publication.sibling.4242.{}.tmp",
+        "a".repeat(64)
+    ));
+    std::fs::write(&sibling_segment_path, b"sibling segment").expect("write sibling segment");
     let _reopened = super::super::DaemonCodeIndexPublicationStoreV1::new(
         store.path(),
         fixture.path(),
@@ -842,6 +854,14 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
     assert!(
         sibling_path.exists(),
         "restart must not remove another worktree scope's evidence pack"
+    );
+    assert!(
+        !orphan_segment_path.exists(),
+        "restart must clean a killed seal's unflushed segment"
+    );
+    assert!(
+        sibling_segment_path.exists(),
+        "restart must not remove another worktree scope's segment in flight"
     );
 }
 
@@ -930,6 +950,21 @@ fn retired_fence_cancels_a_generation_seal_between_segments() {
     assert_eq!(
         leftover, 0,
         "a cancelled seal must leave no manifest behind"
+    );
+    let segments = std::fs::read_dir(code_generation_segments_root(target_store.path()))
+        .expect("read target segments")
+        .map(|entry| {
+            entry
+                .expect("segment entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        segments,
+        Vec::<String>::new(),
+        "a cancelled seal must neither name nor strand the segment it wrote"
     );
 }
 
