@@ -182,12 +182,16 @@ macro_rules! host_lifecycle_exit_status {
 
 Exit status:
   0   every host completed, or was skipped: not applicable, or its host CLI
-      is not installed and TraceDecay only found leftover config for it
-  1   a host failed: the lifecycle ran and failed, or a tracked or named
-      host's CLI is not installed; the per-host summary names each one
-  75  nothing failed, but a host needs an interactive operator step (Kimi
-      Code's `/plugins install`); run the printed command, then rerun.
-      `tracedecay doctor` reports the step until it is done"
+      is not installed and TraceDecay only found leftover config for it.
+      `uninstall` stops tracking a host whose CLI is not installed and
+      leaves the host-owned registration in place
+  1   a host failed: the lifecycle ran and failed, or an untracked host
+      named with --agent has no host CLI; the per-host summary names each one
+  75  nothing failed, but a host needs an operator step: an interactive
+      host step (Kimi Code's `/plugins install`; `tracedecay doctor` reports
+      it until it is done), or a tracked host's CLI is not installed (install
+      it, or `tracedecay uninstall --agent <host>` to stop tracking it);
+      act on the printed step, then rerun"
     };
 }
 
@@ -357,8 +361,10 @@ Exit status (a completed binary upgrade stays installed in every case):
       its host CLI is not installed and only leftover config was found
   1   the upgrade failed, or the refresh failed for a host or for the daemon;
       the per-host summary names each failed host
-  75  the refresh waits on an interactive operator step (Kimi Code's
-      `/plugins install`); run the printed command, then rerun
+  75  the refresh waits on an operator step: an interactive host step (Kimi
+      Code's `/plugins install`), or a tracked host whose CLI is not
+      installed (install it, or `tracedecay uninstall --agent <host>` to
+      stop tracking it); act on the printed step, then rerun
 
 Related: tracedecay upgrade (refresh only after a real install),
 tracedecay update-plugin (plugins only), tracedecay channel.";

@@ -98,13 +98,9 @@ fn update_plugin_skips_a_leftover_host_whose_cli_is_not_installed() {
     );
 }
 
-#[test]
-fn update_plugin_fails_a_tracked_host_whose_cli_is_not_installed() {
-    let cli = IsolatedCli::new();
-    install_cline(&cli);
-    seed_leftover_kiro_registration(&cli);
+fn track_kiro(cli: &IsolatedCli) {
     let config = cli.profile.join("config.toml");
-    let tracked = tracked_agents(&cli);
+    let tracked = tracked_agents(cli);
     fs::write(
         &config,
         tracked.replace(
@@ -113,16 +109,117 @@ fn update_plugin_fails_a_tracked_host_whose_cli_is_not_installed() {
         ),
     )
     .unwrap();
+}
+
+const KIRO_PENDING_HOST_CLI: &str = "  kiro: pending operator action: install the kiro CLI, or run \
+     `tracedecay uninstall --agent kiro` to stop tracking it\n      config error: host bundle \
+     lifecycle failed: Kiro host CLI is unavailable; install the host CLI or add it to PATH \
+     before retrying\n";
+
+#[test]
+fn update_plugin_waits_on_the_operator_for_a_tracked_host_whose_cli_is_not_installed() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    seed_leftover_kiro_registration(&cli);
+    track_kiro(&cli);
 
     let output = cli.run_without_host_clis(&["update-plugin"]);
 
     let stderr = stderr(&output);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("cline: refreshed"), "{stderr}");
-    assert!(
-        stderr.contains("kiro: failed, host CLI not installed"),
+    assert_eq!(
+        output.status.code(),
+        Some(PENDING_OPERATOR_ACTION_EXIT),
         "{stderr}"
     );
+    assert!(stderr.contains("  cline: refreshed\n"), "{stderr}");
+    assert!(stderr.contains(KIRO_PENDING_HOST_CLI), "{stderr}");
+    let tracked = tracked_agents(&cli);
+    assert!(
+        tracked.contains("\"kiro\""),
+        "the pending host stays tracked until the operator decides: {tracked}"
+    );
+
+    let untrack = cli.run_without_host_clis(&["uninstall", "--agent", "kiro"]);
+    let untrack_stderr = self::stderr(&untrack);
+    assert_eq!(untrack.status.code(), Some(0), "{untrack_stderr}");
+    assert!(
+        untrack_stderr.contains(
+            "  kiro: no longer tracked; the host CLI is not installed, so its host-owned \
+             registration was left in place (config error: host bundle lifecycle failed: Kiro \
+             host CLI is unavailable; install the host CLI or add it to PATH before retrying)\n"
+        ),
+        "{untrack_stderr}"
+    );
+    let tracked = tracked_agents(&cli);
+    assert!(
+        !tracked.contains("\"kiro\"") && tracked.contains("\"cline\""),
+        "the printed uninstall stops tracking only that host: {tracked}"
+    );
+
+    let after = cli.run_without_host_clis(&["update-plugin"]);
+    let after_stderr = self::stderr(&after);
+    assert_eq!(after.status.code(), Some(0), "{after_stderr}");
+    assert!(
+        after_stderr.contains("  kiro: skipped, host CLI not installed; only leftover"),
+        "the untracked leftover is skipped, not pending: {after_stderr}"
+    );
+}
+
+#[test]
+fn install_fails_an_untracked_named_host_whose_cli_is_not_installed() {
+    let cli = IsolatedCli::new();
+
+    let output = cli.run_without_host_clis(&["install", "--agent", "kiro"]);
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(
+            "  kiro: failed, host CLI not installed: config error: host bundle lifecycle \
+             failed: Kiro host CLI is unavailable; install the host CLI or add it to PATH \
+             before retrying\n"
+        ),
+        "{stderr}"
+    );
+}
+
+/// The operator's `tracedecay update` journey: a tracked host whose CLI is
+/// gone must not mask the pending Kimi step behind a failure exit.
+#[test]
+fn post_update_reports_a_tracked_host_without_its_cli_as_pending_beside_kimi() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    track_kiro(&cli);
+    let _ = cli.run(&["install", "--agent", "kimi"]);
+
+    // Post-update still needs the service manager, so only Kiro's CLI goes.
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(cli.bin_dir.clone())
+            .chain(std::env::split_paths(&inherited).filter(|dir| {
+                !dir.join("kiro-cli").exists() && !dir.join("kiro-cli.exe").exists()
+            })),
+    )
+    .unwrap();
+    let output = cli
+        .command(&["post-update"])
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    let stderr = stderr(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(PENDING_OPERATOR_ACTION_EXIT),
+        "{stderr}"
+    );
+    assert!(stderr.contains("  cline: refreshed\n"), "{stderr}");
+    assert!(stderr.contains(KIRO_PENDING_HOST_CLI), "{stderr}");
+    assert!(
+        stderr.contains("  kimi: pending operator action: `/plugins install"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("reinstall failed for"), "{stderr}");
 }
 
 #[test]
