@@ -40,7 +40,7 @@ use tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1;
 use tracedecay_contracts::git::GitReadRequestV1;
 use tracedecay_domain::feedback::{
     CiFailureKindV1, GitHubReviewAuthorClassV1, GitHubReviewCoverageV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewLifecycleV1,
+    GitHubReviewIngressProviderOutcomeV1, GitHubReviewLifecycleV1, GitHubReviewQuarantineReasonV1,
     GitHubReviewRateLimitCheckpointV1, GitHubReviewReadOperationV1, GitHubReviewStateV1,
 };
 use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1, GitOperationStateV1};
@@ -319,7 +319,22 @@ pub struct DeliveryGitHubOperationSnapshotV1 {
     pub merge_base_commit_id: String,
     pub outcome: DeliveryGitHubOutcomeV1,
     pub coverage: DeliveryGitHubCoverageV1,
+    /// Comments the read observed but withheld from ingest, each with why.
+    pub quarantined: Vec<DeliveryGitHubQuarantinedCommentV1>,
     pub fetched_at_micros: i64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryGitHubQuarantinedCommentV1 {
+    pub comment_id: String,
+    pub reason: DeliveryGitHubQuarantineReasonV1,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryGitHubQuarantineReasonV1 {
+    PrivacySanitizer,
+    BodyOutOfBounds,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -1872,6 +1887,21 @@ fn map_github_snapshot(
         merge_base_commit_id: snapshot.merge_base_commit_id.as_str().to_owned(),
         outcome: map_github_outcome(snapshot.outcome),
         coverage: map_github_coverage(snapshot.coverage),
+        quarantined: snapshot
+            .quarantined
+            .into_iter()
+            .map(|item| DeliveryGitHubQuarantinedCommentV1 {
+                comment_id: item.comment_id.as_str().to_owned(),
+                reason: match item.reason {
+                    GitHubReviewQuarantineReasonV1::PrivacySanitizer => {
+                        DeliveryGitHubQuarantineReasonV1::PrivacySanitizer
+                    }
+                    GitHubReviewQuarantineReasonV1::BodyOutOfBounds => {
+                        DeliveryGitHubQuarantineReasonV1::BodyOutOfBounds
+                    }
+                },
+            })
+            .collect(),
         fetched_at_micros: snapshot.fetched_at.0,
     }
 }

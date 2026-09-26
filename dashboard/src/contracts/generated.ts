@@ -1600,11 +1600,21 @@ export const DeliveryGitHubOperationSnapshotV1Schema = z.object({
   outcome: z.lazy(() => DeliveryGitHubOutcomeV1Schema),
   provider_base_commit_id: z.string(),
   provider_head_commit_id: z.string(),
+  quarantined: z.array(z.lazy(() => DeliveryGitHubQuarantinedCommentV1Schema)),
 });
 export type DeliveryGitHubOperationSnapshotV1 = z.infer<typeof DeliveryGitHubOperationSnapshotV1Schema>;
 
 export const DeliveryGitHubOutcomeV1Schema = z.enum(["complete", "denied", "failed", "partial", "rate_limited", "stale", "unavailable"]);
 export type DeliveryGitHubOutcomeV1 = z.infer<typeof DeliveryGitHubOutcomeV1Schema>;
+
+export const DeliveryGitHubQuarantinedCommentV1Schema = z.object({
+  comment_id: z.string(),
+  reason: z.lazy(() => DeliveryGitHubQuarantineReasonV1Schema),
+});
+export type DeliveryGitHubQuarantinedCommentV1 = z.infer<typeof DeliveryGitHubQuarantinedCommentV1Schema>;
+
+export const DeliveryGitHubQuarantineReasonV1Schema = z.enum(["body_out_of_bounds", "privacy_sanitizer"]);
+export type DeliveryGitHubQuarantineReasonV1 = z.infer<typeof DeliveryGitHubQuarantineReasonV1Schema>;
 
 export const DeliveryGitHubReadOperationV1Schema = z.enum(["pull_request", "review_comments", "review_threads", "reviews"]);
 export type DeliveryGitHubReadOperationV1 = z.infer<typeof DeliveryGitHubReadOperationV1Schema>;

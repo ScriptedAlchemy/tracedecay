@@ -4247,6 +4247,7 @@ function inboxPullRequest(
             outcome: options.state === 'stale' ? 'stale' : 'complete',
             provider_base_commit_id: 'dfc669d9'.padEnd(40, '0'),
             provider_head_commit_id: head,
+            quarantined: [],
           },
           latest_attempt: null,
         }),

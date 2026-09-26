@@ -280,6 +280,7 @@ fn delivery_http_admission_pull_request(
                     .unwrap(),
                 outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
                 coverage: GitHubReviewCoverageV1::Complete,
+                quarantined: Vec::new(),
                 fetched_at: UtcMicros(20),
                 checkpoint: GitHubReviewReadCheckpointV1 {
                     etag: None,

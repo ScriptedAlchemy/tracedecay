@@ -390,6 +390,7 @@ fn github_stack_layer(
         outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
         coverage: GitHubReviewCoverageV1::Complete,
         items: vec![],
+        quarantined: Vec::new(),
         pull_request: Some(GitHubPullRequestSnapshotV1 {
             title: "stack layer fixture".to_owned(),
             state: GitHubPullRequestStateV1::Open,

@@ -215,6 +215,7 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
             },
             observed_at: UtcMicros(1),
         }],
+        quarantined: Vec::new(),
         pull_request: None,
         fetched_at: UtcMicros(2),
     };

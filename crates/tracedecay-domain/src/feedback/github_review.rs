@@ -445,6 +445,26 @@ fn safe_github_url(value: &str) -> bool {
         && url.query().is_none()
 }
 
+/// Why one provider comment was withheld from ingest while the rest of the
+/// read was retained.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewQuarantineReasonV1 {
+    /// The privacy sanitizer refused to retain the body.
+    PrivacySanitizer,
+    /// The body is empty or larger than the retained-body bound.
+    BodyOutOfBounds,
+}
+
+/// A provider comment the read observed but did not ingest. It carries no
+/// body, author, or anchor: only the identity coverage needs to count it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewQuarantinedItemV1 {
+    pub comment_id: GitHubReviewCommentIdV1,
+    pub reason: GitHubReviewQuarantineReasonV1,
+}
+
 /// Read-only connector output. Partial and stale outcomes may still include
 /// previously observed items, whose lifecycle remains independently typed.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -460,6 +480,10 @@ pub struct GitHubReviewIngressResultV1 {
     pub outcome: GitHubReviewIngressProviderOutcomeV1,
     pub coverage: GitHubReviewCoverageV1,
     pub items: Vec<GitHubReviewItemV1>,
+    /// Comments observed by this read but withheld from `items`, ordered by
+    /// comment id and disjoint from `items`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined: Vec<GitHubReviewQuarantinedItemV1>,
     /// Present exactly for every complete `RestGetPullRequest` read; every
     /// other operation observes review items only and never a PR identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -542,6 +566,23 @@ impl GitHubReviewIngressResultV1 {
                     field: "github review ingress item scope",
                 });
             }
+        }
+        for quarantined in &self.quarantined {
+            quarantined.comment_id.validate()?;
+        }
+        if self
+            .quarantined
+            .windows(2)
+            .any(|pair| pair[0].comment_id.as_str() >= pair[1].comment_id.as_str())
+            || self.quarantined.iter().any(|quarantined| {
+                self.items
+                    .iter()
+                    .any(|item| item.comment_id == quarantined.comment_id)
+            })
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github review ingress quarantined items",
+            });
         }
         Ok(())
     }
