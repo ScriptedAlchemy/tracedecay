@@ -1373,15 +1373,30 @@ impl GraphDb {
         }
     }
 
-    /// Heap bytes the resident engine attributes to its stores, indexes,
-    /// versions, caches and string pools, or `None` when it is not resident.
+    /// Heap bytes the resident engine attributes to itself, or `None` when it
+    /// is not resident: its compact base (node and relation columns, CSR
+    /// structures, id maps, property indexes) plus the mutable store, indexes,
+    /// versions, caches and string pools `memory_usage` reports. A sealed
+    /// generation serves almost entirely from the compact base, which
+    /// `memory_usage` alone leaves out.
     pub(crate) fn resident_engine_bytes(&self) -> Result<Option<u64>, GraphDbError> {
         self.inner
             .database
             .read()
             .map(|database| {
                 database.as_ref().map(|database| {
-                    u64::try_from(database.memory_usage().total_bytes).unwrap_or(u64::MAX)
+                    let compact_base = database.layered_store().map_or(0, |layered| {
+                        layered
+                            .memory_bytes()
+                            .saturating_sub(layered.overlay_memory_bytes())
+                    });
+                    u64::try_from(
+                        database
+                            .memory_usage()
+                            .total_bytes
+                            .saturating_add(compact_base),
+                    )
+                    .unwrap_or(u64::MAX)
                 })
             })
             .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))
