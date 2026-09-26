@@ -1,15 +1,24 @@
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
+use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 use tracedecay_runtime_core::resident_memory::{
-    ResidentOwnerKindV1, ResidentOwnerReleaseCauseV1, ResidentOwnersReportV1, ResidentOwnersV1,
+    ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryPressureV1, ResidentOwnerBytesV1, ResidentOwnerKindV1,
+    ResidentOwnerReleaseCauseV1, ResidentOwnerReleaseV1, ResidentOwnerSampleV1,
+    ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersReportV1, ResidentOwnersV1,
 };
 
+use super::super::{
+    CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1, CodeIndexWorkerPhaseV1,
+};
 use super::{
     CodeIndexSchedulerRegistryV1, GitFixture, core_search_request, git,
-    mounted_core_query_worktree_in, wait_for_generation_change, wait_for_live_complete_generation,
+    mounted_core_query_worktree_in, test_project_id, wait_for_generation_change,
+    wait_for_live_complete_generation, wait_for_queryable_text_generation, wait_for_worker_phase,
 };
 
 const IDLE_WINDOW: Duration = Duration::from_mins(10);
@@ -60,6 +69,8 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
     let decoded_bytes = used.measured_bytes;
     assert_ne!(decoded_bytes, 0, "the decode reports the bytes it holds");
 
+    let mut receipts = registry.subscribe_cadence_receipts();
+    receipts.borrow_and_update();
     let later = Instant::now() + IDLE_WINDOW;
     let released = owners.release_idle(later);
     assert_eq!(
@@ -76,6 +87,12 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
     let idle = owners.report(later);
     assert_eq!(rows(&idle), []);
     assert_eq!(idle.measured_bytes, 0);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !receipts.has_changed().unwrap(),
+        "a worktree with no refused work is not woken, so nothing re-decodes"
+    );
+    assert_eq!(owners.report(later).measured_bytes, 0);
 
     let staleness = registry
         .dashboard_freshness_read(fixture.path())
@@ -155,6 +172,216 @@ async fn generation_swaps_keep_retained_bytes_flat() {
         "each return to the first tree retains exactly what the previous return did"
     );
     assert_eq!([retained[5]], [retained[3]]);
+
+    registry.shutdown().await;
+}
+
+async fn next_receipt_trigger(
+    receipts: &mut tokio::sync::watch::Receiver<CodeIndexCadenceTelemetryV1>,
+) -> CodeIndexCadenceTriggerV1 {
+    tokio::time::timeout(Duration::from_mins(1), async {
+        loop {
+            receipts
+                .changed()
+                .await
+                .expect("the cadence channel stays open while the registry lives");
+            if let Some(receipt) = receipts.borrow_and_update().latest().cloned() {
+                return receipt.trigger;
+            }
+        }
+    })
+    .await
+    .expect("a pass records its receipt")
+}
+
+/// Mount a worktree whose first text build the resident-memory authority
+/// refuses: the ledger leaves 1 GiB below the watermark, under the builder's
+/// 1.5 GiB floor, until the returned reservation drops.
+async fn mount_with_refused_text_build(
+    fixture: &GitFixture,
+    store: &TempDir,
+    owners: &Arc<ResidentOwnersV1>,
+) -> (
+    CodeIndexSchedulerRegistryV1,
+    ProcessSharedMemoryReservationV1,
+    tokio::sync::watch::Receiver<CodeIndexCadenceTelemetryV1>,
+) {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let limit = NonZeroU64::new(16 * GIB).unwrap();
+    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let high_watermark = pressure.high_watermark_bytes();
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let blocker = resident_memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-held-memory").unwrap(),
+            NonZeroU64::new(high_watermark - GIB).unwrap(),
+        )
+        .expect("the blocker fits the ledger");
+    let registry = CodeIndexSchedulerRegistryV1::with_resident_memory(1, resident_memory)
+        .with_resident_owners(Arc::clone(owners));
+    let mut receipts = registry.subscribe_cadence_receipts();
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+    receipts.borrow_and_update();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !receipts.has_changed().unwrap(),
+        "a refused build parks the worker instead of spinning continuations"
+    );
+    assert!(
+        registry
+            .latest_text_serving_for_root(fixture.path())
+            .await
+            .is_none(),
+        "the refused build left no queryable text owner"
+    );
+    (registry, blocker, receipts)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_text_build_refused_for_memory_retries_when_memory_is_given_back() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, blocker, mut receipts) =
+        mount_with_refused_text_build(&fixture, &store, &owners).await;
+
+    drop(blocker);
+    owners.note_headroom();
+
+    assert_eq!(
+        next_receipt_trigger(&mut receipts).await,
+        CodeIndexCadenceTriggerV1::MemoryHeadroom
+    );
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    assert!(text.query_owners_are_ready());
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_text_build_retries_after_its_delay_when_rss_falls_without_a_release() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, blocker, mut receipts) =
+        mount_with_refused_text_build(&fixture, &store, &owners).await;
+
+    drop(blocker);
+
+    assert_eq!(
+        next_receipt_trigger(&mut receipts).await,
+        CodeIndexCadenceTriggerV1::MemoryRetry
+    );
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    assert!(
+        text.query_owners_are_ready(),
+        "the delayed retry finds the headroom no owner release announced"
+    );
+
+    registry.shutdown().await;
+}
+
+/// Retained state another worktree holds, modelled as a ledger reservation so
+/// releasing it gives the build real headroom.
+struct HeldMemoryOwner {
+    held: std::sync::Mutex<Option<ProcessSharedMemoryReservationV1>>,
+    bytes: u64,
+    last_used: Instant,
+}
+
+impl ResidentOwnerV1 for HeldMemoryOwner {
+    fn sample(&self) -> Option<ResidentOwnerSampleV1> {
+        self.held
+            .lock()
+            .unwrap()
+            .is_some()
+            .then(|| ResidentOwnerSampleV1 {
+                generation_id: CodeGenerationId::new("generation.v1.superseded").unwrap(),
+                bytes: ResidentOwnerBytesV1::Measured(self.bytes),
+                last_used: self.last_used,
+                serving: false,
+            })
+    }
+
+    fn release(&self) -> ResidentOwnerReleaseV1 {
+        match self.held.lock().unwrap().take() {
+            Some(_) => ResidentOwnerReleaseV1::Released {
+                bytes: ResidentOwnerBytesV1::Measured(self.bytes),
+            },
+            None => ResidentOwnerReleaseV1::Empty,
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_text_build_sheds_retained_state_before_it_refuses() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let limit = NonZeroU64::new(16 * GIB).unwrap();
+    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let held_bytes = pressure.high_watermark_bytes() - GIB;
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let held = Arc::new(HeldMemoryOwner {
+        held: std::sync::Mutex::new(Some(
+            resident_memory
+                .reserve_process_shared(
+                    ResidentMemoryComponentIdV1::new("test-superseded-decode").unwrap(),
+                    NonZeroU64::new(held_bytes).unwrap(),
+                )
+                .expect("the held state fits the ledger"),
+        )),
+        bytes: held_bytes,
+        last_used: Instant::now(),
+    });
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let held_owner: Arc<dyn ResidentOwnerV1> = Arc::clone(&held) as Arc<dyn ResidentOwnerV1>;
+    let _registration = owners
+        .register(
+            ResidentOwnerScopeV1 {
+                project_id: ProjectId::new("project.other").unwrap(),
+                worktree_id: WorktreeId::new("worktree.other").unwrap(),
+            },
+            ResidentOwnerKindV1::SupersededGeneration,
+            Arc::downgrade(&held_owner),
+        )
+        .unwrap();
+    assert_eq!(owners.report(Instant::now()).measured_bytes, held_bytes);
+    let registry = CodeIndexSchedulerRegistryV1::with_resident_memory(1, resident_memory)
+        .with_resident_owners(Arc::clone(&owners));
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    assert!(
+        text.query_owners_are_ready(),
+        "the build shed the superseded decode and finished instead of refusing"
+    );
+    assert!(held.held.lock().unwrap().is_none());
+    assert_eq!(
+        owners
+            .report(Instant::now())
+            .owners
+            .iter()
+            .filter(|row| row.kind == ResidentOwnerKindV1::SupersededGeneration)
+            .count(),
+        0
+    );
 
     registry.shutdown().await;
 }

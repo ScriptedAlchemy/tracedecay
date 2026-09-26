@@ -180,6 +180,10 @@ enum PublishedTextProjectionOutcomeV1 {
     /// contract violation (parked on the owner), a failure, or an abnormal
     /// task exit. The owner carries the typed state; the pass seats nothing.
     Unfinished,
+    /// The resident-memory authority refused the build. Unfinished, but a
+    /// continuation would only repeat the refusal: the worker retries when
+    /// the resident owners report memory given back.
+    WaitingForMemory,
     /// Shutdown retired the text control mid-slice.
     Shutdown,
 }
@@ -1355,6 +1359,54 @@ struct PendingWakeStateV1 {
     attributable: bool,
 }
 
+/// Delayed retry for a text build the resident-memory authority refused.
+///
+/// Memory given back through the resident owners wakes the worktree at once.
+/// RSS can also fall with no owner released (a build elsewhere finished), so
+/// a refusal also retries after a delay that doubles up to a ceiling instead
+/// of waiting for an unrelated wake.
+#[derive(Default)]
+struct MemoryRefusalRetryV1 {
+    delay_secs: AtomicU64,
+}
+
+impl MemoryRefusalRetryV1 {
+    const FIRST_DELAY_SECS: u64 = 5;
+    const MAX_DELAY_SECS: u64 = 300;
+
+    fn schedule(&self, pending_wake: &Arc<PendingWakeV1>, wake: &Arc<tokio::sync::Notify>) {
+        let previous = self
+            .delay_secs
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |delay| {
+                Some(match delay {
+                    0 => Self::FIRST_DELAY_SECS.saturating_mul(2),
+                    delay => delay.saturating_mul(2).min(Self::MAX_DELAY_SECS),
+                })
+            })
+            .unwrap_or_else(|delay| delay);
+        let delay = Duration::from_secs(match previous {
+            0 => Self::FIRST_DELAY_SECS,
+            delay => delay,
+        });
+        let pending_wake = Arc::downgrade(pending_wake);
+        let wake = Arc::downgrade(wake);
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            if let (Some(pending_wake), Some(wake)) = (pending_wake.upgrade(), wake.upgrade()) {
+                CodeIndexSchedulerRegistryV1::note_wake_if_idle(
+                    &pending_wake,
+                    &wake,
+                    CodeIndexCadenceTriggerV1::MemoryRetry,
+                );
+            }
+        });
+    }
+
+    fn reset(&self) {
+        self.delay_secs.store(0, Ordering::Release);
+    }
+}
+
 /// The single synchronization authority for one worktree's coalesced wake.
 /// The state lock makes timestamp, trigger, and claim ownership one
 /// linearizable transition: no producer can arrive between a claim's owner
@@ -2244,6 +2296,8 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeIndexCadenceTriggerV1::QueryAdmission => 4,
             CodeIndexCadenceTriggerV1::BusyFollowUp => 5,
             CodeIndexCadenceTriggerV1::GitWatcher => 6,
+            CodeIndexCadenceTriggerV1::MemoryHeadroom => 7,
+            CodeIndexCadenceTriggerV1::MemoryRetry => 8,
         }
     }
 
@@ -2254,6 +2308,8 @@ impl CodeIndexSchedulerRegistryV1 {
             4 => CodeIndexCadenceTriggerV1::QueryAdmission,
             5 => CodeIndexCadenceTriggerV1::BusyFollowUp,
             6 => CodeIndexCadenceTriggerV1::GitWatcher,
+            7 => CodeIndexCadenceTriggerV1::MemoryHeadroom,
+            8 => CodeIndexCadenceTriggerV1::MemoryRetry,
             _ => CodeIndexCadenceTriggerV1::Mount,
         }
     }
@@ -2587,6 +2643,16 @@ impl CodeIndexSchedulerRegistryV1 {
                             "published text projection stopped before graph seating"
                         );
                         return PublishedTextProjectionOutcomeV1::Shutdown;
+                    } else if let tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(
+                        detail,
+                    ) = &error
+                    {
+                        tracing::info!(
+                            event = "code_index_text_projection_waiting_for_memory",
+                            detail = %detail,
+                            "published text projection waits for resident memory to be given back"
+                        );
+                        return PublishedTextProjectionOutcomeV1::WaitingForMemory;
                     } else {
                         tracing::warn!(
                             event = "code_index_text_projection_failed",

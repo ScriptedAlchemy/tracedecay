@@ -962,7 +962,8 @@ where
                             ),
                         )
                         | QuerySearchExecutionErrorV1::Retrieval(
-                            tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_),
+                            tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_)
+                            | tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(_),
                         ) => (
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable

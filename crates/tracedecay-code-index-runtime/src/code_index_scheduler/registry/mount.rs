@@ -139,6 +139,7 @@ impl CodeIndexSchedulerRegistryV1 {
         )
         .map(|mut scheduler| {
             scheduler.bind_resident_memory(Arc::clone(&self.resident_memory));
+            scheduler.bind_resident_owners(Arc::clone(&self.resident_owners));
             scheduler
                 .bind_progress_incarnations(self.progress_daemon_incarnation, producer_incarnation);
             scheduler
@@ -280,6 +281,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
         let open_resident_memory = Arc::clone(&self.resident_memory);
+        let open_resident_owners = Arc::clone(&self.resident_owners);
         let progress_daemon_incarnation = self.progress_daemon_incarnation;
         let progress_producer_incarnation = self.mint_progress_producer_incarnation()?;
         let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
@@ -295,6 +297,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Self::finish_cold_mount_open_for_test(&open_project_root);
             let mut opened = opened?;
             opened.bind_resident_memory(open_resident_memory);
+            opened.bind_resident_owners(open_resident_owners);
             opened.bind_progress_incarnations(
                 progress_daemon_incarnation,
                 progress_producer_incarnation,
@@ -370,6 +373,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // are no longer the bytes it is being asked to index.
         let worker_control_epoch = Arc::clone(&epoch);
         let worker_pending_wake = Arc::clone(&pending_wake);
+        let worker_memory_retry = super::MemoryRefusalRetryV1::default();
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_build_publication_lock = Arc::clone(&build_publication_lock);
@@ -1293,7 +1297,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                     text.text_projection_needs_work()
                                 }
                                 PublishedTextProjectionOutcomeV1::Unfinished => true,
-                                PublishedTextProjectionOutcomeV1::Shutdown => false,
+                                PublishedTextProjectionOutcomeV1::WaitingForMemory
+                                | PublishedTextProjectionOutcomeV1::Shutdown => false,
                             };
                             if schedule_continuation {
                                 Self::note_worker_continuation(
@@ -1956,6 +1961,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                         other => other,
                     };
+                    if matches!(outcome, PublishedTextProjectionOutcomeV1::Finished) {
+                        worker_memory_retry.reset();
+                    }
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished => {
                             // The seat needs only the ready owners. Text work
@@ -2033,6 +2041,13 @@ impl CodeIndexSchedulerRegistryV1 {
                             )
                             .await;
                             return;
+                        }
+                        PublishedTextProjectionOutcomeV1::WaitingForMemory => {
+                            if let Ok((_, latest, replay_binding)) = &mut result {
+                                *latest = None;
+                                *replay_binding = None;
+                            }
+                            worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
                         }
                         PublishedTextProjectionOutcomeV1::Unfinished => {
                             if let Ok((_, latest, replay_binding)) = &mut result {
@@ -2593,6 +2608,9 @@ impl CodeIndexSchedulerRegistryV1 {
                             PublishedTextProjectionOutcomeV1::Unfinished
                         }
                     };
+                    if matches!(outcome, PublishedTextProjectionOutcomeV1::Finished) {
+                        worker_memory_retry.reset();
+                    }
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished
                             if !retained_head_recovered_without_complete_replay
@@ -2638,6 +2656,9 @@ impl CodeIndexSchedulerRegistryV1 {
                             // follow-up notify prevented.
                             Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                         }
+                        PublishedTextProjectionOutcomeV1::WaitingForMemory => {
+                            worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                        }
                     }
                     // The continuation is already in the slot. Dropping here
                     // is the first moment this pass looks idle.
@@ -2681,6 +2702,39 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree_id: worktree_id.clone(),
             },
         );
+        // A text-artifact build refused for memory records no retry of its
+        // own; memory given back anywhere in the process is its retry. Only
+        // a missing or unfinished text owner wakes: a pass on a finished
+        // worktree would re-seat the decode a release just gave back. The
+        // watcher holds no strong reference, so it ends with the worktree.
+        let mut headroom = self.resident_owners.subscribe_headroom();
+        let headroom_pending_wake = Arc::downgrade(&pending_wake);
+        let headroom_wake = Arc::downgrade(&wake);
+        let headroom_text = Arc::downgrade(&text_generation);
+        tokio::spawn(async move {
+            while headroom.changed().await.is_ok() {
+                let (Some(pending_wake), Some(wake), Some(text)) = (
+                    headroom_pending_wake.upgrade(),
+                    headroom_wake.upgrade(),
+                    headroom_text.upgrade(),
+                ) else {
+                    return;
+                };
+                let text_unfinished = text
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .is_none_or(LatestCodeTextGenerationV1::text_projection_needs_work);
+                if !text_unfinished {
+                    continue;
+                }
+                Self::note_wake_if_idle(
+                    &pending_wake,
+                    &wake,
+                    CodeIndexCadenceTriggerV1::MemoryHeadroom,
+                );
+            }
+        });
         entry.insert(MountedCodeIndexWorktreeV1 {
             residency,
             _residency_registration: residency_registration,
