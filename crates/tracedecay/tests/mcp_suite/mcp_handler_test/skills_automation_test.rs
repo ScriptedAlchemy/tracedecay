@@ -9,7 +9,7 @@ use tracedecay::mcp::McpServer;
 #[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    create_managed_skill,
+    ManagedSupportFileExt, create_managed_skill,
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
@@ -88,15 +88,14 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     .await
     .unwrap();
 
-    let markdown_result = handle_tool_call(
-        &cg,
-        "tracedecay_automation_run_artifact_view",
-        json!({"run_id": run_id, "kind": "codex_handoff"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let server = real_mcp_server(cg).await;
+    let markdown_result = server
+        .call_tool_for_test(
+            "tracedecay_automation_run_artifact_view",
+            json!({"run_id": run_id, "kind": "codex_handoff"}),
+        )
+        .await
+        .unwrap();
     let markdown_text = extract_text(&markdown_result.value);
     assert!(markdown_text.starts_with("## Automation Run Artifact"));
     assert!(markdown_text.contains("**run_id:** run-mcp-artifact"));
@@ -104,15 +103,13 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     assert!(markdown_text.contains("ready_for_review"));
     assert!(!markdown_text.contains("|"));
 
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_automation_run_artifact_view",
-        json!({"run_id": run_id, "kind": "codex_handoff", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = server
+        .call_tool_for_test(
+            "tracedecay_automation_run_artifact_view",
+            json!({"run_id": run_id, "kind": "codex_handoff", "format": "json"}),
+        )
+        .await
+        .unwrap();
     let payload = extract_json(&result.value);
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["run_id"], run_id);
@@ -123,22 +120,20 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
         "inspect artifact through MCP"
     );
 
-    let missing = handle_tool_call(
-        &cg,
-        "tracedecay_automation_run_artifact_view",
-        json!({"run_id": run_id, "kind": "generated_evals"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap_err();
+    let missing = server
+        .call_tool_for_test(
+            "tracedecay_automation_run_artifact_view",
+            json!({"run_id": run_id, "kind": "generated_evals"}),
+        )
+        .await
+        .unwrap_err();
     assert!(
         missing
             .to_string()
             .contains("automation run artifact not found")
     );
 
-    close_test_graph(cg).await;
+    drop(server);
 }
 
 #[cfg(feature = "test-transport")]

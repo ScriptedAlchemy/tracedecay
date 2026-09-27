@@ -283,7 +283,7 @@ async fn analytics_rejects_unknown_scope_and_section() {
     assert_eq!(response["error"]["code"].as_i64(), Some(-32603));
     assert_eq!(
         response["error"]["message"],
-        "tool execution failed: config error: unknown scope for tracedecay_analytics: bogus (use 'project' or 'all')"
+        "tool execution failed: config error: invalid arguments for tracedecay_analytics: unknown variant `bogus`, expected `project` or `all`"
     );
 
     let response = handle_real_server_tool_call_raw(
@@ -295,7 +295,7 @@ async fn analytics_rejects_unknown_scope_and_section() {
     assert_eq!(response["error"]["code"].as_i64(), Some(-32603));
     assert_eq!(
         response["error"]["message"],
-        "tool execution failed: config error: unknown section for tracedecay_analytics: bogus (use 'tools', 'hints', 'facts', or 'automation')"
+        "tool execution failed: config error: invalid arguments for tracedecay_analytics: unknown variant `bogus`, expected one of `tools`, `hints`, `facts`, `automation`"
     );
     drop(server);
     fixture.harness.shutdown().await;
@@ -1003,7 +1003,7 @@ async fn analytics_scope_all_counts_foreign_project_events_and_keeps_project_fac
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn analytics_clamps_window_days_and_applies_the_clamped_window() {
+async fn analytics_applies_the_requested_window_and_refuses_one_out_of_range() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let now = current_timestamp();
@@ -1021,7 +1021,7 @@ async fn analytics_clamps_window_days_and_applies_the_clamped_window() {
         &handle_real_server_tool_call(
             &server,
             "tracedecay_analytics",
-            json!({"section": "tools", "window_days": 400, "format": "json"}),
+            json!({"section": "tools", "window_days": 365, "format": "json"}),
         )
         .await,
     );
@@ -1050,7 +1050,7 @@ async fn analytics_clamps_window_days_and_applies_the_clamped_window() {
         &handle_real_server_tool_call(
             &server,
             "tracedecay_analytics",
-            json!({"section": "tools", "window_days": 0, "format": "json"}),
+            json!({"section": "tools", "window_days": 1, "format": "json"}),
         )
         .await,
     );
@@ -1073,6 +1073,19 @@ async fn analytics_clamps_window_days_and_applies_the_clamped_window() {
             },
         ])
     );
+    for window_days in [0, 366] {
+        let refused = handle_real_server_tool_call_raw(
+            &server,
+            "tracedecay_analytics",
+            json!({"section": "tools", "window_days": window_days}),
+        )
+        .await;
+        assert_eq!(
+            refused["error"]["message"],
+            "tool execution failed: config error: invalid arguments for tracedecay_analytics: window_days must be between 1 and 365",
+            "{refused}"
+        );
+    }
     drop(server);
     fixture.harness.shutdown().await;
 }

@@ -43,8 +43,8 @@ use crate::handlers::support::{
     unknown_tool_error,
 };
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
-use crate::tools::render;
 use crate::tools::response_trailers::ResponseTrailer;
+use crate::tools::{render, renderers};
 use crate::{McpToolContext, ToolResult};
 
 /// Computes one graph-tool operation's typed result on the owner's side.
@@ -290,6 +290,39 @@ pub fn render_graph_tool(
         GraphToolResultV1::AstGrepSearch(search) => {
             render_ast_grep_search(response_handle_root, args, search)?
         }
+        GraphToolResultV1::AutomationRunList(_) => render_value_markdown(
+            response_handle_root,
+            args,
+            &result,
+            renderers::automation_run_list_md,
+        )?,
+        GraphToolResultV1::AutomationRunView(_) => render_value_markdown(
+            response_handle_root,
+            args,
+            &result,
+            renderers::automation_run_view_md,
+        )?,
+        GraphToolResultV1::AutomationRunArtifactView(_) => render_value_markdown(
+            response_handle_root,
+            args,
+            &result,
+            renderers::automation_artifact_md,
+        )?,
+        GraphToolResultV1::SkillList(_) => render_value_markdown(
+            response_handle_root,
+            args,
+            &result,
+            renderers::skill_list_md,
+        )?,
+        GraphToolResultV1::SkillView(_) => render_value_markdown(
+            response_handle_root,
+            args,
+            &result,
+            renderers::skill_view_md,
+        )?,
+        GraphToolResultV1::Analytics(_) => {
+            render_value_markdown(response_handle_root, args, &result, renderers::analytics_md)?
+        }
         _ => generic_tool_result(
             response_handle_root,
             args,
@@ -312,6 +345,23 @@ pub fn render_graph_tool(
         Some(analytics) => rendered.with_internal_analytics(analytics.ledger_value()),
         None => rendered,
     })
+}
+
+/// Renders a result through a markdown renderer that reads its JSON value.
+fn render_value_markdown(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+    result: &GraphToolResultV1,
+    markdown: fn(&Value) -> String,
+) -> Result<ToolResult> {
+    let value = result.result_value()?;
+    Ok(rendered_tool_result(
+        response_handle_root,
+        args,
+        &value,
+        Vec::new(),
+        || markdown(&value),
+    ))
 }
 
 #[cfg(test)]

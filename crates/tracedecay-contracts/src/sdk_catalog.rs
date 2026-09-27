@@ -157,7 +157,14 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
         | ApplicationSurfaceOperation::Config
-        | ApplicationSurfaceOperation::Retrieve) => {
+        | ApplicationSurfaceOperation::Retrieve
+        | ApplicationSurfaceOperation::AutomationRunList
+        | ApplicationSurfaceOperation::AutomationRunView
+        | ApplicationSurfaceOperation::AutomationRunArtifactView
+        | ApplicationSurfaceOperation::SkillList
+        | ApplicationSurfaceOperation::SkillView
+        | ApplicationSurfaceOperation::HermesSkillBridge
+        | ApplicationSurfaceOperation::Analytics) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList

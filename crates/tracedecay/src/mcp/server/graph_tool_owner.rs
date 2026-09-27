@@ -46,6 +46,13 @@ impl McpServer {
     ) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
         let (cg, _live_branch) = self.reopen_if_branch_drifted_memoized().await;
         let options = ToolCallRegistryOptions {
+            global_db: self.registry_db.as_ref(),
+            accounting_db: self.accounting_db.as_deref(),
+            profile: self.profile.as_ref(),
+            session_authorities: tracedecay_mcp::handlers::SessionAuthorities::new(
+                self.project_session_db.as_ref(),
+                self.profile_session_db.as_ref(),
+            ),
             registered_project_session_db: self.project_session_db.clone(),
             application_request_id: Some(invocation.request_id),
             application_deadline: Some(invocation.deadline),

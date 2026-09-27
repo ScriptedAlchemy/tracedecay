@@ -36,7 +36,7 @@ pub(crate) use tracedecay_automation_runtime::automation::config::{
 };
 pub(crate) use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSupportFile, create_managed_skill, load_managed_skill,
+    ManagedSupportFile, ManagedSupportFileExt, create_managed_skill, load_managed_skill,
 };
 pub(crate) use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,

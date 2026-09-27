@@ -6,7 +6,10 @@ use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{AnalyticsEventQuery, AnalyticsEventRecord, RegisteredGlobalDb};
 
 use super::store;
-use super::{SkillUsageAction, SkillUsageEvent, SkillUsageRecord, config_error, ledger_skill_id};
+use super::{
+    SkillUsageAction, SkillUsageEvent, SkillUsageRecord, config_error, ledger_skill_id,
+    record_usage_event,
+};
 
 pub async fn ingest_analytics_events(
     profile_root: &Path,
@@ -37,12 +40,15 @@ pub async fn ingest_analytics_events(
                 timestamp,
                 dedupe,
                 move |record| {
-                    record.record(&SkillUsageEvent {
-                        skill_name,
-                        action,
-                        timestamp,
-                        target: Some(provider),
-                    });
+                    record_usage_event(
+                        record,
+                        &SkillUsageEvent {
+                            skill_name,
+                            action,
+                            timestamp,
+                            target: Some(provider),
+                        },
+                    );
                 },
             )
             .await?

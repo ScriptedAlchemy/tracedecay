@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::config_error;
-use super::managed_skills::{ManagedSkill, ManagedSkillSource, ManagedSkillState};
+use super::managed_skills::ManagedSkill;
+pub use tracedecay_contracts::automation::{
+    SkillImprovementRecommendation, SkillStaleRecommendation, SkillUsageRecord,
+};
 use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
@@ -40,44 +43,6 @@ pub struct SkillUsageEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillUsageRecord {
-    pub schema_version: u32,
-    pub skill_id: String,
-    pub title: Option<String>,
-    pub category: Option<String>,
-    pub state: Option<ManagedSkillState>,
-    pub pinned: bool,
-    pub created_by: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance_source: Option<ManagedSkillSource>,
-    #[serde(default)]
-    pub targets: Vec<String>,
-    pub view_count: u64,
-    pub use_count: u64,
-    pub patch_count: u64,
-    pub first_seen_at: i64,
-    pub last_activity_at: i64,
-    pub last_viewed_at: Option<i64>,
-    pub last_used_at: Option<i64>,
-    pub last_patched_at: Option<i64>,
-    /// When the skill last transitioned into the active state; mirrors the
-    /// managed skill metadata so outcome scoring works from summaries alone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activated_at: Option<i64>,
-    /// View/use totals captured at activation time so activity since activation
-    /// is an exact delta rather than a heuristic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view_count_at_activation: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub use_count_at_activation: Option<u64>,
-    /// Import keys that already counted toward this skill. They are not a
-    /// store-wide set: each key names this skill, so another skill must not
-    /// share the write.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub imported_analytics_events: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillUsageLedger {
     pub schema_version: u32,
     #[serde(default)]
@@ -87,27 +52,6 @@ pub struct SkillUsageLedger {
 }
 
 pub type SkillUsageSummary = SkillUsageRecord;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillStaleRecommendation {
-    pub skill_id: String,
-    pub stale: bool,
-    pub recommendation: String,
-    pub reason: String,
-    #[serde(default)]
-    pub evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillImprovementRecommendation {
-    pub skill_id: String,
-    pub improvement: bool,
-    pub recommendation: String,
-    pub reason: String,
-    pub priority: String,
-    #[serde(default)]
-    pub evidence: Vec<String>,
-}
 
 impl Default for SkillUsageLedger {
     fn default() -> Self {
@@ -119,69 +63,67 @@ impl Default for SkillUsageLedger {
     }
 }
 
-impl SkillUsageRecord {
-    fn new(skill_id: String, timestamp: i64) -> Self {
-        Self {
-            schema_version: 2,
-            skill_id,
-            title: None,
-            category: None,
-            state: None,
-            pinned: false,
-            created_by: None,
-            provenance_source: None,
-            targets: Vec::new(),
-            view_count: 0,
-            use_count: 0,
-            patch_count: 0,
-            first_seen_at: timestamp,
-            last_activity_at: timestamp,
-            last_viewed_at: None,
-            last_used_at: None,
-            last_patched_at: None,
-            activated_at: None,
-            view_count_at_activation: None,
-            use_count_at_activation: None,
-            imported_analytics_events: BTreeSet::new(),
+pub(super) fn new_usage_record(skill_id: String, timestamp: i64) -> SkillUsageRecord {
+    SkillUsageRecord {
+        schema_version: 2,
+        skill_id,
+        title: None,
+        category: None,
+        state: None,
+        pinned: false,
+        created_by: None,
+        provenance_source: None,
+        targets: Vec::new(),
+        view_count: 0,
+        use_count: 0,
+        patch_count: 0,
+        first_seen_at: timestamp,
+        last_activity_at: timestamp,
+        last_viewed_at: None,
+        last_used_at: None,
+        last_patched_at: None,
+        activated_at: None,
+        view_count_at_activation: None,
+        use_count_at_activation: None,
+        imported_analytics_events: BTreeSet::new(),
+    }
+}
+
+fn merge_skill_metadata(record: &mut SkillUsageRecord, skill: &ManagedSkill) {
+    record.schema_version = 2;
+    record.title = Some(skill.metadata.title.clone());
+    record.category = Some(skill.metadata.category.clone());
+    record.state = Some(skill.metadata.state);
+    record.pinned = skill.metadata.pinned;
+    record.created_by = Some(skill.metadata.provenance.actor.clone());
+    record.provenance_source = Some(skill.metadata.provenance.source);
+    if record.activated_at != skill.metadata.activated_at {
+        record.activated_at = skill.metadata.activated_at;
+        if record.activated_at.is_some() {
+            record.view_count_at_activation = Some(record.view_count);
+            record.use_count_at_activation = Some(record.use_count);
         }
     }
+}
 
-    fn merge_skill_metadata(&mut self, skill: &ManagedSkill) {
-        self.schema_version = 2;
-        self.title = Some(skill.metadata.title.clone());
-        self.category = Some(skill.metadata.category.clone());
-        self.state = Some(skill.metadata.state);
-        self.pinned = skill.metadata.pinned;
-        self.created_by = Some(skill.metadata.provenance.actor.clone());
-        self.provenance_source = Some(skill.metadata.provenance.source);
-        if self.activated_at != skill.metadata.activated_at {
-            self.activated_at = skill.metadata.activated_at;
-            if self.activated_at.is_some() {
-                self.view_count_at_activation = Some(self.view_count);
-                self.use_count_at_activation = Some(self.use_count);
-            }
-        }
+pub(super) fn record_usage_event(record: &mut SkillUsageRecord, event: &SkillUsageEvent) {
+    record.first_seen_at = record.first_seen_at.min(event.timestamp);
+    record.last_activity_at = record.last_activity_at.max(event.timestamp);
+    if let Some(target) = event.target.as_deref().and_then(normalize_target) {
+        insert_sorted_unique(&mut record.targets, target);
     }
-
-    fn record(&mut self, event: &SkillUsageEvent) {
-        self.first_seen_at = self.first_seen_at.min(event.timestamp);
-        self.last_activity_at = self.last_activity_at.max(event.timestamp);
-        if let Some(target) = event.target.as_deref().and_then(normalize_target) {
-            insert_sorted_unique(&mut self.targets, target);
+    match event.action {
+        SkillUsageAction::View => {
+            record.view_count = record.view_count.saturating_add(1);
+            record.last_viewed_at = Some(max_optional(record.last_viewed_at, event.timestamp));
         }
-        match event.action {
-            SkillUsageAction::View => {
-                self.view_count = self.view_count.saturating_add(1);
-                self.last_viewed_at = Some(max_optional(self.last_viewed_at, event.timestamp));
-            }
-            SkillUsageAction::Use => {
-                self.use_count = self.use_count.saturating_add(1);
-                self.last_used_at = Some(max_optional(self.last_used_at, event.timestamp));
-            }
-            SkillUsageAction::Patch => {
-                self.patch_count = self.patch_count.saturating_add(1);
-                self.last_patched_at = Some(max_optional(self.last_patched_at, event.timestamp));
-            }
+        SkillUsageAction::Use => {
+            record.use_count = record.use_count.saturating_add(1);
+            record.last_used_at = Some(max_optional(record.last_used_at, event.timestamp));
+        }
+        SkillUsageAction::Patch => {
+            record.patch_count = record.patch_count.saturating_add(1);
+            record.last_patched_at = Some(max_optional(record.last_patched_at, event.timestamp));
         }
     }
 }
@@ -199,7 +141,7 @@ pub async fn sync_skill_usage_metadata(profile_root: &Path, skill: &ManagedSkill
     let skill = skill.clone();
     let skill_id = skill.metadata.id.clone();
     store::update_record(profile_root, &skill_id, 0, move |record| {
-        record.merge_skill_metadata(&skill);
+        merge_skill_metadata(record, &skill);
     })
     .await
     .map(|_| ())
@@ -214,9 +156,9 @@ pub async fn record_skill_usage_event(
     let skill = skill.cloned();
     store::update_record(profile_root, &skill_id, event.timestamp, move |record| {
         if let Some(skill) = skill.as_ref() {
-            record.merge_skill_metadata(skill);
+            merge_skill_metadata(record, skill);
         }
-        record.record(&event);
+        record_usage_event(record, &event);
     })
     .await
 }
@@ -241,13 +183,16 @@ pub async fn record_skill_usage(
         .filter(|key| !key.is_empty())
         .map(str::to_string);
     store::update_record(profile_root, &skill_id, timestamp, move |record| {
-        record.merge_skill_metadata(&skill);
-        record.record(&SkillUsageEvent {
-            skill_name: skill.metadata.id.clone(),
-            action,
-            timestamp,
-            target,
-        });
+        merge_skill_metadata(record, &skill);
+        record_usage_event(
+            record,
+            &SkillUsageEvent {
+                skill_name: skill.metadata.id.clone(),
+                action,
+                timestamp,
+                target,
+            },
+        );
         for target in targets {
             if let Some(target) = normalize_target(&target) {
                 insert_sorted_unique(&mut record.targets, target);
@@ -341,8 +286,8 @@ fn ledger_skill_id(raw: &str) -> Result<String> {
 }
 
 fn summarize_skill(skill: &ManagedSkill, record: Option<SkillUsageRecord>) -> SkillUsageSummary {
-    let mut record = record.unwrap_or_else(|| SkillUsageRecord::new(skill.metadata.id.clone(), 0));
-    record.merge_skill_metadata(skill);
+    let mut record = record.unwrap_or_else(|| new_usage_record(skill.metadata.id.clone(), 0));
+    merge_skill_metadata(&mut record, skill);
     record
 }
 

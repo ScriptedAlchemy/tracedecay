@@ -76,6 +76,14 @@ use crate::retrieval::symbol_graph::{
     ImplementationRecord, SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord,
     TypeHierarchyRecord,
 };
+use crate::retrieval::{
+    AnalyticsResultV1, AnalyticsSurfaceRequestV1, AutomationRunArtifactViewResultV1,
+    AutomationRunArtifactViewSurfaceRequestV1, AutomationRunListResultV1,
+    AutomationRunListSurfaceRequestV1, AutomationRunViewResultV1,
+    AutomationRunViewSurfaceRequestV1, HermesSkillBridgeResultV1,
+    HermesSkillBridgeSurfaceRequestV1, SkillListResultV1, SkillListSurfaceRequestV1,
+    SkillViewResultV1, SkillViewSurfaceRequestV1,
+};
 use crate::surface_contracts::{
     CodeCallersSurfaceRequest, CodeImplementationsSurfaceRequest,
     CodeSignatureSearchSurfaceRequest, CodeSymbolSearchSurfaceRequest,
@@ -238,6 +246,13 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("files"),
     graph_report_spec("config"),
     graph_report_spec("retrieve"),
+    graph_report_spec("automation_run_list"),
+    graph_report_spec("automation_run_view"),
+    graph_report_spec("automation_run_artifact_view"),
+    graph_report_spec("skill_list"),
+    graph_report_spec("skill_view"),
+    graph_report_spec("hermes_skill_bridge"),
+    graph_report_spec("analytics"),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
     git_context_spec("changelog"),
@@ -279,16 +294,62 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
     match spec.operation {
         // The project's graph-tool owner answers these for the tool surfaces
         // only; their typed results render as the established tool output.
-        "context" | "node" | "impact" | "similar" | "redundancy" | "rename_preview"
-        | "port_status" | "port_order" | "todos" | "test_map" | "test_risk" | "gini"
-        | "dependency_depth" | "health" | "dsm" | "diagnose" | "dead_code" | "circular"
-        | "hotspots" | "unmounted_files" | "rank" | "largest" | "coupling"
-        | "inheritance_depth" | "distribution" | "recursion" | "complexity" | "doc_coverage"
-        | "god_class" | "unsafe_patterns" | "constructors" | "field_sites"
-        | "find_exact_symbol" | "by_qualified_name" | "signature" | "derives" | "grep"
-        | "ast_grep_search" | "affected" | "diff_context" | "changelog" | "commit_context"
-        | "pr_context" | "branch_search" | "branch_diff" | "branch_list" | "files" | "config"
-        | "retrieve" => &CLI_MCP_PRIMITIVE_SURFACES,
+        "context"
+        | "node"
+        | "impact"
+        | "similar"
+        | "redundancy"
+        | "rename_preview"
+        | "port_status"
+        | "port_order"
+        | "todos"
+        | "test_map"
+        | "test_risk"
+        | "gini"
+        | "dependency_depth"
+        | "health"
+        | "dsm"
+        | "diagnose"
+        | "dead_code"
+        | "circular"
+        | "hotspots"
+        | "unmounted_files"
+        | "rank"
+        | "largest"
+        | "coupling"
+        | "inheritance_depth"
+        | "distribution"
+        | "recursion"
+        | "complexity"
+        | "doc_coverage"
+        | "god_class"
+        | "unsafe_patterns"
+        | "constructors"
+        | "field_sites"
+        | "find_exact_symbol"
+        | "by_qualified_name"
+        | "signature"
+        | "derives"
+        | "grep"
+        | "ast_grep_search"
+        | "affected"
+        | "diff_context"
+        | "changelog"
+        | "commit_context"
+        | "pr_context"
+        | "branch_search"
+        | "branch_diff"
+        | "branch_list"
+        | "files"
+        | "config"
+        | "retrieve"
+        | "automation_run_list"
+        | "automation_run_view"
+        | "automation_run_artifact_view"
+        | "skill_list"
+        | "skill_view"
+        | "hermes_skill_bridge"
+        | "analytics" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -485,6 +546,27 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "retrieve" => {
             "Read one bounded page of a truncated tool response cached in the project's store."
+        }
+        "automation_run_list" => {
+            "List the newest durable automation run ledger records for the active project."
+        }
+        "automation_run_view" => {
+            "Read one exact durable automation run ledger record from the active project by run id."
+        }
+        "automation_run_artifact_view" => {
+            "Read and hash-verify one durable automation run artifact payload from the active project."
+        }
+        "skill_list" => {
+            "List agent-managed profile skills with their usage summaries and recommendations."
+        }
+        "skill_view" => {
+            "Read one agent-managed profile skill package and record the view in its usage summary."
+        }
+        "hermes_skill_bridge" => {
+            "Read skills, pending approvals, usage telemetry and archive counts owned by the standard Hermes install."
+        }
+        "analytics" => {
+            "Roll up tool, hint, fact-funnel and automation-run analytics for the resolved project."
         }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
@@ -928,6 +1010,29 @@ fn primitive_executable_schemas(
     add!("files", FilesSurfaceRequestV1, FilesResultV1);
     add!("config", ConfigSurfaceRequestV1, ConfigResultV1);
     add!("retrieve", RetrieveSurfaceRequestV1, RetrieveResultV1);
+    add!(
+        "automation_run_list",
+        AutomationRunListSurfaceRequestV1,
+        AutomationRunListResultV1
+    );
+    add!(
+        "automation_run_view",
+        AutomationRunViewSurfaceRequestV1,
+        AutomationRunViewResultV1
+    );
+    add!(
+        "automation_run_artifact_view",
+        AutomationRunArtifactViewSurfaceRequestV1,
+        AutomationRunArtifactViewResultV1
+    );
+    add!("skill_list", SkillListSurfaceRequestV1, SkillListResultV1);
+    add!("skill_view", SkillViewSurfaceRequestV1, SkillViewResultV1);
+    add!(
+        "hermes_skill_bridge",
+        HermesSkillBridgeSurfaceRequestV1,
+        HermesSkillBridgeResultV1
+    );
+    add!("analytics", AnalyticsSurfaceRequestV1, AnalyticsResultV1);
     Ok(schemas)
 }
 

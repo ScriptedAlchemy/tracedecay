@@ -149,7 +149,14 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
         | ApplicationSurfaceOperation::Config
-        | ApplicationSurfaceOperation::Retrieve => return None,
+        | ApplicationSurfaceOperation::Retrieve
+        | ApplicationSurfaceOperation::AutomationRunList
+        | ApplicationSurfaceOperation::AutomationRunView
+        | ApplicationSurfaceOperation::AutomationRunArtifactView
+        | ApplicationSurfaceOperation::SkillList
+        | ApplicationSurfaceOperation::SkillView
+        | ApplicationSurfaceOperation::HermesSkillBridge
+        | ApplicationSurfaceOperation::Analytics => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

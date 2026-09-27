@@ -166,8 +166,7 @@ use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 use super::LegacyToolCompatibilityOwner;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_application_surface_tools, dispatch_graph_tools,
-    dispatch_health_tools, dispatch_info_tools, dispatch_memory_tools,
-    dispatch_session_workflow_tools,
+    dispatch_health_tools, dispatch_info_tools, dispatch_session_workflow_tools,
 };
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
@@ -636,9 +635,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 }
                 Some(McpToolDispatchGroup::Health) => {
                     boxed_send(dispatch_health_tools(tool_name, cg, args, options)).await
-                }
-                Some(McpToolDispatchGroup::Memory) => {
-                    boxed_send(dispatch_memory_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::SessionWorkflow) => {
                     boxed_send(dispatch_session_workflow_tools(

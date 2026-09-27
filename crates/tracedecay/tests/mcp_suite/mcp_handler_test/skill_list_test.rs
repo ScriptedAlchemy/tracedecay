@@ -9,7 +9,8 @@
 use serde_json::{Value, json};
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSupportFile, SkillInstallTarget, create_managed_skill, set_managed_skill_state,
+    ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget, create_managed_skill,
+    set_managed_skill_state,
 };
 
 use crate::support::{ProductionCompositionFixture, production_composition_fixture};
@@ -120,7 +121,7 @@ async fn skill_list_returns_stored_skills_for_the_requested_state() {
             "id": 1,
             "error": {
                 "code": -32603,
-                "message": "tool execution failed: config error: unknown managed skill state: retired",
+                "message": "tool execution failed: config error: invalid arguments for tracedecay_skill_list: unknown variant `retired`, expected one of `active`, `disabled`, `archived`",
                 "data": {
                     "tool": "tracedecay_skill_list",
                     "cli_fallback": CLI_FALLBACK,

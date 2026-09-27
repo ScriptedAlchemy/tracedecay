@@ -193,20 +193,14 @@ _No automation runs recorded._
         })
     );
 
-    let bounded = list_call(&served.server, json!({"format": "json", "limit": 201})).await;
-    assert_eq!(
-        tool_json(&bounded),
-        json!({
-            "status": "ok",
-            "scope": "active_project",
-            "runs": [],
-            "count": 0,
-            "limit": 200,
-            "has_more": false,
-            "malformed_row_count": 0,
-            "completeness": "known"
-        })
-    );
+    for limit in [0, 201] {
+        let refused = list_call(&served.server, json!({"format": "json", "limit": limit})).await;
+        assert_eq!(
+            refused["error"]["message"],
+            "tool execution failed: config error: invalid arguments for tracedecay_automation_run_list: limit must be between 1 and 200",
+            "{refused}"
+        );
+    }
 }
 
 #[tokio::test]

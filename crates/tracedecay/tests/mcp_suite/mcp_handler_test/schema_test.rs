@@ -511,7 +511,11 @@ fn managed_skill_tool_definitions_are_read_only() {
     assert_eq!(list.annotations.as_ref().unwrap()["readOnlyHint"], true);
     assert_eq!(view.annotations.as_ref().unwrap()["readOnlyHint"], true);
     assert_eq!(
-        list.input_schema["properties"]["state"]["enum"],
+        list.input_schema["properties"]["state"]["anyOf"],
+        json!([{"$ref": "#/$defs/ManagedSkillState"}, {"type": "null"}])
+    );
+    assert_eq!(
+        list.input_schema["$defs"]["ManagedSkillState"]["enum"],
         json!(["active", "disabled", "archived"])
     );
     assert_eq!(view.input_schema["required"], json!(["id"]));

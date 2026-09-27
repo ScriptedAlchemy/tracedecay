@@ -6,10 +6,10 @@
 //! enumerate the ledger.
 
 use super::support::{jsonrpc_request, response_with_id, run_server_with_messages};
+use crate::support::{init_test_project, real_mcp_server};
 use serde_json::{Value, json};
 use std::fs;
 use tempfile::TempDir;
-use tracedecay::mcp::McpServer;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
@@ -133,15 +133,28 @@ fn invalid_params(id: i64, message: &str, reason_code: &str) -> Value {
     })
 }
 
+fn config_refusal(id: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32603,
+            "message": format!("tool execution failed: config error: {message}"),
+            "data": {
+                "tool": "tracedecay_automation_run_view",
+                "cli_fallback": "This tool is also available from the shell: `tracedecay tool automation_run_view ...` (`tracedecay tool automation_run_view --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
+            }
+        }
+    })
+}
+
 #[tokio::test]
 async fn automation_run_view_returns_the_exact_active_project_record() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    let cg = Box::pin(tracedecay_project::project::TraceDecay::init(project))
-        .await
-        .unwrap();
+    let (cg, _env) = init_test_project(project).await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
 
     let mut queued = base_record(
@@ -202,7 +215,7 @@ async fn automation_run_view_returns_the_exact_active_project_record() {
 
     let ledger_path = run_ledger_path(&dashboard_root);
     let ledger_before = fs::read(&ledger_path).unwrap();
-    let server = Box::pin(McpServer::new(cg, None)).await;
+    let server = real_mcp_server(cg).await;
     let responses = run_server_with_messages(
         server,
         vec![
@@ -226,18 +239,16 @@ async fn automation_run_view_returns_the_exact_active_project_record() {
     );
     assert_eq!(
         response_with_id(&responses, json!(5)),
-        invalid_params(
+        config_refusal(
             5,
-            "missing required parameter: run_id",
-            "missing_required_parameter"
+            "invalid arguments for tracedecay_automation_run_view: run_id must not be empty"
         )
     );
     assert_eq!(
         response_with_id(&responses, json!(6)),
-        invalid_params(
+        config_refusal(
             6,
-            "missing required parameter: run_id",
-            "missing_required_parameter"
+            "invalid arguments for tracedecay_automation_run_view: missing field `run_id`"
         )
     );
 

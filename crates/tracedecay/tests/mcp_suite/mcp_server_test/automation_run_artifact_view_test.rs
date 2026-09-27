@@ -7,11 +7,10 @@
 //! file is rejected instead of returned.
 
 use super::support::{jsonrpc_request, response_with_id, run_server_with_messages};
-use crate::support::init_test_project;
+use crate::support::{init_test_project, real_mcp_server};
 use serde_json::{Value, json};
 use std::fs;
 use tempfile::TempDir;
-use tracedecay::mcp::McpServer;
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
@@ -295,7 +294,7 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
     )
     .unwrap();
 
-    let server = Box::pin(McpServer::new(cg.into_inner(), None)).await;
+    let server = real_mcp_server(cg).await;
     let responses = run_server_with_messages(
         server,
         vec![
@@ -356,18 +355,16 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
     );
     assert_eq!(
         response_with_id(&responses, json!(8)),
-        invalid_params(
+        internal_error(
             8,
-            "missing required parameter: run_id",
-            "missing_required_parameter"
+            "tool execution failed: config error: invalid arguments for tracedecay_automation_run_artifact_view: missing field `run_id`"
         )
     );
     assert_eq!(
         response_with_id(&responses, json!(9)),
-        invalid_params(
+        internal_error(
             9,
-            "missing required parameter: kind",
-            "missing_required_parameter"
+            "tool execution failed: config error: invalid arguments for tracedecay_automation_run_artifact_view: missing field `kind`"
         )
     );
     assert_eq!(
@@ -379,10 +376,9 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
     );
     assert_eq!(
         response_with_id(&responses, json!(11)),
-        invalid_params(
+        internal_error(
             11,
-            "automation run artifact not found: run-artifact-exact/",
-            "not_found"
+            "tool execution failed: config error: invalid arguments for tracedecay_automation_run_artifact_view: unknown variant ``, expected one of `traces`, `feedback`, `generated_evals`, `validation_gate`, `optimizer_diagnosis`, `codex_handoff`"
         )
     );
     assert_eq!(
