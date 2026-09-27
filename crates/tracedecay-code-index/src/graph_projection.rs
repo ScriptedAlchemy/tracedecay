@@ -76,8 +76,9 @@ const ADJACENCY_SEED_CHUNK: usize = 4_096;
 /// kind, so adjacency filters kinds without decoding the edge. v10 stores each
 /// code edge as one relation from its source symbol to its target symbol that
 /// carries the edge record, instead of an edge entity between two relations,
-/// and stores every record as compact text (`schema::compact_record`).
-pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v10";
+/// and stores every record as compact text (`schema::compact_record`). v11
+/// names a symbol record's occurrence once, through its metadata when present.
+pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v11";
 
 /// Every semantic edge kind, at its [`relation_edge_kind_index`].
 const RELATION_EDGE_KINDS: [RelationEdgeKindV1; 9] = [
@@ -256,12 +257,54 @@ pub struct CodeGraphSymbolBindingV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "StoredSymbolRecordV1", into = "StoredSymbolRecordV1")]
 struct SymbolRecordV1 {
     occurrence: SymbolOccurrenceId,
     binding: Option<CodeGraphSymbolBindingV1>,
     metadata: Option<LineageSymbolRecordV1>,
     unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+}
+
+/// A stored symbol record names its occurrence once: metadata carries it
+/// when present, and the top-level field only spells it otherwise.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSymbolRecordV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    occurrence: Option<SymbolOccurrenceId>,
+    binding: Option<CodeGraphSymbolBindingV1>,
+    metadata: Option<LineageSymbolRecordV1>,
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+}
+
+impl From<SymbolRecordV1> for StoredSymbolRecordV1 {
+    fn from(record: SymbolRecordV1) -> Self {
+        Self {
+            occurrence: record.metadata.is_none().then_some(record.occurrence),
+            binding: record.binding,
+            metadata: record.metadata,
+            unresolved_calls: record.unresolved_calls,
+        }
+    }
+}
+
+impl TryFrom<StoredSymbolRecordV1> for SymbolRecordV1 {
+    type Error = &'static str;
+
+    fn try_from(stored: StoredSymbolRecordV1) -> Result<Self, Self::Error> {
+        let occurrence = match (stored.occurrence, &stored.metadata) {
+            (Some(occurrence), None) => occurrence,
+            (None, Some(metadata)) => metadata.occurrence.clone(),
+            (Some(_), Some(_)) => return Err("symbol record names its occurrence twice"),
+            (None, None) => return Err("symbol record names no occurrence"),
+        };
+        Ok(Self {
+            occurrence,
+            binding: stored.binding,
+            metadata: stored.metadata,
+            unresolved_calls: stored.unresolved_calls,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
