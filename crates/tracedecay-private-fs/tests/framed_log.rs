@@ -5,6 +5,11 @@ use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 
+#[cfg(target_os = "linux")]
+use std::io::Write;
+
+#[cfg(target_os = "linux")]
+use tracedecay_private_fs::framed_log::DurableFileBatch;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write_prepared, read_bounded};
 
 #[test]
@@ -108,4 +113,52 @@ fn prepared_publish_is_private_and_readable_through_the_adapter() {
             0o600
         );
     }
+}
+
+/// A batch makes its own members durable and nothing else: syncing one small
+/// member must not wait for another writer's dirty data on the same
+/// filesystem. Asserted as a latency class against the cost of flushing that
+/// unrelated data afterwards, on disk under the target directory (a tmpfs
+/// would make both free).
+#[cfg(target_os = "linux")]
+#[test]
+fn durable_batch_sync_is_sized_to_its_members_not_the_filesystem() {
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("batch fixture root");
+    // Incompressible, so a compressing filesystem still has to write it.
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let chunk = (0..1 << 20)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect::<Vec<_>>();
+    let mut unrelated = fs::File::create(root.path().join("unrelated")).expect("unrelated file");
+    for round in 0..128_u8 {
+        let mut block = chunk.clone();
+        block[0] = round;
+        unrelated.write_all(&block).expect("unrelated dirty data");
+    }
+
+    let member_path = root.path().join("member.tmp");
+    let mut member = fs::File::create(&member_path).expect("member file");
+    member.write_all(b"sealed segment").expect("member bytes");
+    let mut batch = DurableFileBatch::new();
+    batch.written(&member_path, &member).expect("record member");
+    let started = std::time::Instant::now();
+    batch.sync().expect("batch sync");
+    let batch_sync = started.elapsed();
+    let started = std::time::Instant::now();
+    unrelated.sync_all().expect("unrelated sync");
+    let unrelated_sync = started.elapsed();
+
+    assert_eq!(
+        fs::read(&member_path).expect("member readback"),
+        b"sealed segment"
+    );
+    assert!(
+        batch_sync * 4 < unrelated_sync,
+        "one-member batch sync took {batch_sync:?}; flushing the unrelated 128 MiB took {unrelated_sync:?}"
+    );
 }

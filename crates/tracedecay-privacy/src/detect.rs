@@ -564,11 +564,13 @@ pub(crate) fn redact_sensitive_values(
     if !quarantine_findings.is_empty() {
         hotpath::gauge!("runtime_core.privacy.quarantines").inc(quarantine_findings.len() as f64);
     }
-    Ok(DetectionResult {
-        payload,
-        findings,
-        quarantine_findings,
-    })
+    patterns
+        .checked(DetectionResult {
+            payload,
+            findings,
+            quarantine_findings,
+        })
+        .map_err(|_| DetectionError::Initialization)
 }
 
 pub fn verify_sanitized_json_payload(

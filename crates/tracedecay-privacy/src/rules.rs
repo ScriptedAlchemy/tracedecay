@@ -20,10 +20,17 @@
 //! document and the offending rule id. It is never an empty ruleset, a
 //! detector that silently stops detecting is the one failure mode a privacy
 //! boundary cannot have.
+//!
+//! Rule regexes compile on first evaluation. Every vendored rule is gated on
+//! its keywords, so a typical input runs a handful of them, and compiling the
+//! whole catalogue up front put ~140 ms on the first scan of every process.
+//! A regex that fails to compile records its [`CredentialRuleSetError`] in the
+//! ruleset, and every scan checks that record before it returns.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ops::{Deref, Range};
+use std::sync::{Arc, OnceLock};
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use regex::{Captures, Match, Regex};
@@ -124,7 +131,64 @@ pub enum CredentialRuleSetError {
     KeywordMatcher,
 }
 
-/// One compiled ruleset and its shared ASCII-case-insensitive keyword gate.
+/// The first regex compile failure of one loaded ruleset.
+///
+/// Shared by every rule and allowlist regex the load produced. A regex that
+/// fails to compile evaluates as no match and records the failure here; a
+/// scan's result is only returned after this record is checked, so the
+/// failure reaches the caller as the typed error rather than as a rule that
+/// quietly stopped detecting.
+#[derive(Default)]
+struct RuleSetCompilation {
+    failure: OnceLock<CredentialRuleSetError>,
+}
+
+/// One rule or allowlist regex, compiled on its first evaluation.
+struct RuleRegex {
+    document: &'static str,
+    rule_id: String,
+    source: String,
+    compiled: OnceLock<Option<Regex>>,
+    compilation: Arc<RuleSetCompilation>,
+}
+
+impl RuleRegex {
+    fn new(
+        document: &'static str,
+        rule_id: &str,
+        source_regex: &str,
+        compilation: &Arc<RuleSetCompilation>,
+    ) -> Self {
+        Self {
+            document,
+            rule_id: rule_id.to_owned(),
+            source: re2_compatible_regex(source_regex).into_owned(),
+            compiled: OnceLock::new(),
+            compilation: Arc::clone(compilation),
+        }
+    }
+
+    /// `None` once compilation has failed; the failure is then recorded in
+    /// the ruleset's [`RuleSetCompilation`].
+    fn get(&self) -> Option<&Regex> {
+        self.compiled
+            .get_or_init(|| {
+                let compiled = Regex::new(&self.source).ok();
+                if compiled.is_none() {
+                    self.compilation
+                        .failure
+                        .get_or_init(|| CredentialRuleSetError::Regex {
+                            document: self.document,
+                            rule_id: self.rule_id.clone(),
+                        });
+                }
+                compiled
+            })
+            .as_ref()
+    }
+}
+
+/// One loaded ruleset and its shared ASCII-case-insensitive keyword gate.
 ///
 /// The catalogue evaluates every rule against the same source value. Compiling
 /// all keyword preconditions into one automaton makes that a single source
@@ -133,19 +197,33 @@ pub enum CredentialRuleSetError {
 pub(crate) struct CredentialPatternSet {
     patterns: Vec<CredentialPattern>,
     keyword_matcher: KeywordMatcher,
+    compilation: Arc<RuleSetCompilation>,
 }
 
 impl CredentialPatternSet {
-    fn new(patterns: Vec<CredentialPattern>) -> Result<Self, CredentialRuleSetError> {
+    fn new(
+        patterns: Vec<CredentialPattern>,
+        compilation: Arc<RuleSetCompilation>,
+    ) -> Result<Self, CredentialRuleSetError> {
         let keyword_matcher = KeywordMatcher::from_patterns(&patterns)?;
         Ok(Self {
             patterns,
             keyword_matcher,
+            compilation,
         })
     }
 
     pub(crate) fn keyword_presence(&self, text: &str) -> Vec<bool> {
         self.keyword_matcher.presence(text, &self.patterns)
+    }
+
+    /// Returns `value`, the result of a scan over this ruleset, unless one of
+    /// its regexes has failed to compile.
+    pub(crate) fn checked<T>(&self, value: T) -> Result<T, &CredentialRuleSetError> {
+        match self.compilation.failure.get() {
+            Some(failure) => Err(failure),
+            None => Ok(value),
+        }
     }
 
     #[cfg(test)]
@@ -243,7 +321,7 @@ impl KeywordMatcher {
 pub struct CredentialPattern {
     id: String,
     kind: CredentialPatternKind,
-    regex: Regex,
+    regex: RuleRegex,
     /// Upstream `keywords`, lowercased. Empty means the rule always runs.
     ///
     /// These are not an optimisation. Gitleaks only evaluates a rule when one
@@ -274,17 +352,22 @@ impl CredentialPattern {
         &self.id
     }
 
-    pub fn is_match(&self, text: &str) -> bool {
+    /// Fails when a regex this rule, or any rule loaded with it, needed has
+    /// failed to compile.
+    pub fn is_match(&self, text: &str) -> Result<bool, &CredentialRuleSetError> {
         // Keyword gate first, exactly as upstream orders it: it is both the
         // rule's precondition and the cheapest possible reject, which is what
         // keeps a 200-rule catalogue affordable inline at ingest.
         let keywords_present = self.keywords_present(text);
-        if !keywords_present || !self.regex.is_match(text) {
-            return false;
+        let matched = keywords_present
+            && self.regex.get().is_some_and(|regex| regex.is_match(text))
+            && !self
+                .ranges_when_keywords_present(text, keywords_present)
+                .is_empty();
+        match self.regex.compilation.failure.get() {
+            Some(failure) => Err(failure),
+            None => Ok(matched),
         }
-        !self
-            .ranges_when_keywords_present(text, keywords_present)
-            .is_empty()
     }
 
     fn keywords_present(&self, text: &str) -> bool {
@@ -313,16 +396,19 @@ impl CredentialPattern {
         if !keywords_present {
             return Vec::new();
         }
+        let Some(regex) = self.regex.get() else {
+            return Vec::new();
+        };
         if let Some(min_len) = self.assignment_min_len {
             return credential_assignment_ranges(
                 text,
-                &self.regex,
+                regex,
                 min_len,
                 self.id == SOURCE_ASSIGNMENT_RULE_ID,
             )
             .collect();
         }
-        self.regex
+        regex
             .captures_iter(text)
             .filter_map(|captures| {
                 let whole = captures.get(0)?;
@@ -369,7 +455,8 @@ struct CompiledAllowlist {
     /// `condition = "AND"`: every criterion the allowlist declares must hit.
     all_of: bool,
     target: AllowlistTarget,
-    regexes: Vec<Regex>,
+    /// Shared, so a document allowlist attached to every rule compiles once.
+    regexes: Vec<Arc<RuleRegex>>,
     /// Lowercased at load; compared as substrings, as upstream does.
     stopwords: Vec<String>,
 }
@@ -385,10 +472,11 @@ impl CompiledAllowlist {
             AllowlistTarget::Match => whole.as_str(),
             AllowlistTarget::Line => line_containing(text, whole.start()),
         };
-        let regex_hit = self
-            .regexes
-            .iter()
-            .any(|regex| regex.is_match(regex_target));
+        let regex_hit = self.regexes.iter().any(|regex| {
+            regex
+                .get()
+                .is_some_and(|regex| regex.is_match(regex_target))
+        });
         let stopword_hit = self
             .stopwords
             .iter()
@@ -438,17 +526,26 @@ fn line_containing(text: &str, offset: usize) -> &str {
 pub fn compile_credential_patterns(
     profile: CredentialPatternProfile,
 ) -> Result<Vec<CredentialPattern>, CredentialRuleSetError> {
+    load_credential_patterns(profile, &Arc::default())
+}
+
+fn load_credential_patterns(
+    profile: CredentialPatternProfile,
+    compilation: &Arc<RuleSetCompilation>,
+) -> Result<Vec<CredentialPattern>, CredentialRuleSetError> {
     let mut patterns = compile_document(
         SUPPLEMENT_SOURCE,
         SUPPLEMENT_RULES_TOML,
         RuleOrigin::Supplement,
         profile,
+        compilation,
     )?;
     patterns.extend(compile_document(
         VENDORED_SOURCE,
         VENDORED_RULES_TOML,
         RuleOrigin::Vendored,
         profile,
+        compilation,
     )?);
 
     let mut seen = BTreeSet::new();
@@ -467,7 +564,11 @@ pub fn compile_credential_patterns(
 pub(crate) fn compile_credential_pattern_set(
     profile: CredentialPatternProfile,
 ) -> Result<CredentialPatternSet, CredentialRuleSetError> {
-    CredentialPatternSet::new(compile_credential_patterns(profile)?)
+    let compilation = Arc::default();
+    CredentialPatternSet::new(
+        load_credential_patterns(profile, &compilation)?,
+        compilation,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -484,6 +585,7 @@ fn compile_document(
     text: &str,
     origin: RuleOrigin,
     profile: CredentialPatternProfile,
+    compilation: &Arc<RuleSetCompilation>,
 ) -> Result<Vec<CredentialPattern>, CredentialRuleSetError> {
     let parsed: RuleDocumentToml =
         toml::from_str(text).map_err(|error| CredentialRuleSetError::Document {
@@ -497,7 +599,9 @@ fn compile_document(
     // send the next reader to the wrong line.
     let mut shared_allowlists = Vec::new();
     for allowlist in parsed.allowlist.iter().chain(parsed.allowlists.iter()) {
-        if let Some(compiled) = compile_allowlist(document, DOCUMENT_ALLOWLIST_ID, allowlist)? {
+        if let Some(compiled) =
+            compile_allowlist(document, DOCUMENT_ALLOWLIST_ID, allowlist, compilation)
+        {
             shared_allowlists.push(compiled);
         }
     }
@@ -553,11 +657,11 @@ fn compile_document(
             continue;
         }
 
-        let regex = compile_regex(document, &rule.id, source_regex)?;
+        let regex = RuleRegex::new(document, &rule.id, source_regex, compilation);
 
         let mut allowlists = Vec::new();
         for allowlist in rule.allowlist.iter().chain(rule.allowlists.iter()) {
-            if let Some(compiled) = compile_allowlist(document, &rule.id, allowlist)? {
+            if let Some(compiled) = compile_allowlist(document, &rule.id, allowlist, compilation) {
                 allowlists.push(compiled);
             }
         }
@@ -589,11 +693,12 @@ fn compile_allowlist(
     document: &'static str,
     rule_id: &str,
     allowlist: &AllowlistToml,
-) -> Result<Option<CompiledAllowlist>, CredentialRuleSetError> {
+    compilation: &Arc<RuleSetCompilation>,
+) -> Option<CompiledAllowlist> {
     // Nothing evaluable: a path-only allowlist cannot excuse an in-memory
     // record, so it is dropped rather than treated as vacuously satisfied.
     if allowlist.regexes.is_empty() && allowlist.stopwords.is_empty() {
-        return Ok(None);
+        return None;
     }
     let all_of = allowlist
         .condition
@@ -603,15 +708,16 @@ fn compile_allowlist(
     // in, it would excuse nothing and cost a scan; dropped, TraceDecay simply
     // redacts where upstream would have excused. That is the safe direction.
     if all_of && (!allowlist.paths.is_empty() || allowlist.path.is_some()) {
-        return Ok(None);
+        return None;
     }
 
-    let mut regexes = Vec::with_capacity(allowlist.regexes.len());
-    for source_regex in &allowlist.regexes {
-        regexes.push(compile_regex(document, rule_id, source_regex)?);
-    }
+    let regexes = allowlist
+        .regexes
+        .iter()
+        .map(|source_regex| Arc::new(RuleRegex::new(document, rule_id, source_regex, compilation)))
+        .collect();
 
-    Ok(Some(CompiledAllowlist {
+    Some(CompiledAllowlist {
         all_of,
         target: match allowlist.regex_target.as_deref() {
             Some("match") => AllowlistTarget::Match,
@@ -624,17 +730,6 @@ fn compile_allowlist(
             .iter()
             .map(|stopword| stopword.to_ascii_lowercase())
             .collect(),
-    }))
-}
-
-fn compile_regex(
-    document: &'static str,
-    rule_id: &str,
-    source_regex: &str,
-) -> Result<Regex, CredentialRuleSetError> {
-    Regex::new(&re2_compatible_regex(source_regex)).map_err(|_| CredentialRuleSetError::Regex {
-        document,
-        rule_id: rule_id.to_string(),
     })
 }
 
@@ -1176,9 +1271,24 @@ mod tests {
             .unwrap_or_else(|| panic!("rule `{id}` is loaded"))
     }
 
+    fn matches(pattern: &CredentialPattern, text: &str) -> bool {
+        pattern.is_match(text).expect("rule regexes compile")
+    }
+
+    /// Every rule and allowlist regex `pattern` would ever evaluate.
+    fn regexes(pattern: &CredentialPattern) -> impl Iterator<Item = &RuleRegex> {
+        std::iter::once(&pattern.regex).chain(
+            pattern
+                .allowlists
+                .iter()
+                .flat_map(|allowlist| allowlist.regexes.iter().map(Arc::as_ref)),
+        )
+    }
+
     /// The whole catalogue compiles under Rust's regex engine. Upstream targets
     /// Go's RE2, which shares the no-backreference/no-lookaround restriction,
     /// and this test is what would tell us if that ever stopped being true.
+    /// Scans compile only the rules they reach, so every regex is forced here.
     #[test]
     fn both_documents_compile_for_every_profile() {
         for profile in [
@@ -1186,6 +1296,15 @@ mod tests {
             CredentialPatternProfile::Memory,
         ] {
             let compiled = patterns(profile);
+            for pattern in &compiled {
+                for regex in regexes(pattern) {
+                    assert!(
+                        regex.get().is_some(),
+                        "rule `{}` regex does not compile",
+                        regex.rule_id
+                    );
+                }
+            }
             assert!(
                 compiled.len() > 200,
                 "expected the vendored catalogue, got {} rules",
@@ -1205,14 +1324,14 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
 
         let aws = rule(&compiled, "aws-access-token");
-        assert!(aws.is_match("aws_key = AKIA4S27TQXBVCZ5MJ6L"));
+        assert!(matches(aws, "aws_key = AKIA4S27TQXBVCZ5MJ6L"));
         // Upstream deliberately excuses AWS's own documented example key, and
         // that allowlist has to keep working or the catalogue is not loaded.
-        assert!(!aws.is_match("aws_key = AKIAIOSFODNN7EXAMPLE"));
+        assert!(!matches(aws, "aws_key = AKIAIOSFODNN7EXAMPLE"));
         assert_eq!(aws.kind(), CredentialPatternKind::KnownCredential);
 
         let github = rule(&compiled, "github-pat");
-        assert!(github.is_match("ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ"));
+        assert!(matches(github, "ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ"));
         assert_eq!(github.kind(), CredentialPatternKind::KnownCredential);
 
         let private_key = rule(&compiled, "private-key");
@@ -1227,7 +1346,10 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
         let generic = rule(&compiled, "generic-api-key");
         assert_eq!(generic.kind(), CredentialPatternKind::CredentialAssignment);
-        assert!(generic.is_match(r#"let auth = "Zx9Kq2Lm7Pv4Ns8Rt3Wy6Bd1";"#));
+        assert!(matches(
+            generic,
+            r#"let auth = "Zx9Kq2Lm7Pv4Ns8Rt3Wy6Bd1";"#
+        ));
     }
 
     /// The rule's own entropy floor, scored by our kernel.
@@ -1235,7 +1357,7 @@ mod tests {
     fn vendored_entropy_floor_rejects_structureless_values() {
         let compiled = patterns(CredentialPatternProfile::Observation);
         let generic = rule(&compiled, "generic-api-key");
-        assert!(!generic.is_match(r#"let auth = "aaaaaaaaaaaaaaaa";"#));
+        assert!(!matches(generic, r#"let auth = "aaaaaaaaaaaaaaaa";"#));
     }
 
     /// Upstream stopwords are what keep the generic rule from redacting prose.
@@ -1243,7 +1365,10 @@ mod tests {
     fn vendored_allowlists_excuse_upstream_false_positives() {
         let compiled = patterns(CredentialPatternProfile::Observation);
         let generic = rule(&compiled, "generic-api-key");
-        assert!(!generic.is_match(r#"let auth = "Zx9Kq2Lm7swagger4Ns8Rt3Wy6";"#));
+        assert!(!matches(
+            generic,
+            r#"let auth = "Zx9Kq2Lm7swagger4Ns8Rt3Wy6";"#
+        ));
     }
 
     #[test]
@@ -1251,18 +1376,21 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
 
         let openai = rule(&compiled, "tracedecay-openai-family-key");
-        assert!(openai.is_match("api_key=sk-lcm-canonical-detector-1234567890abcdef"));
-        assert!(openai.is_match("use sk-test-742913 for dry runs"));
+        assert!(matches(
+            openai,
+            "api_key=sk-lcm-canonical-detector-1234567890abcdef"
+        ));
+        assert!(matches(openai, "use sk-test-742913 for dry runs"));
         assert_eq!(openai.kind(), CredentialPatternKind::KnownCredential);
 
         let bearer = rule(&compiled, "tracedecay-bearer-token-observation");
-        assert!(bearer.is_match("Authorization: Bearer abcdef123456"));
+        assert!(matches(bearer, "Authorization: Bearer abcdef123456"));
 
         // Truncated PEM: upstream `private-key` needs the closing armour.
         let truncated = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA";
         let block = rule(&compiled, "tracedecay-private-key-block");
         assert_eq!(block.ranges(truncated), vec![0..truncated.len()]);
-        assert!(!rule(&compiled, "private-key").is_match(truncated));
+        assert!(!matches(rule(&compiled, "private-key"), truncated));
     }
 
     #[test]
@@ -1297,10 +1425,10 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
         let assignment = rule(&compiled, "tracedecay-credential-assignment-observation");
 
-        assert!(assignment.is_match(r#"password = "p@ssw0rd!""#));
-        assert!(assignment.is_match("password = p@ssw0rd!"));
-        assert!(assignment.is_match(r#"passphrase = "p@ssw0rd!""#));
-        assert!(assignment.is_match("password = \"truncated!"));
+        assert!(matches(assignment, r#"password = "p@ssw0rd!""#));
+        assert!(matches(assignment, "password = p@ssw0rd!"));
+        assert!(matches(assignment, r#"passphrase = "p@ssw0rd!""#));
+        assert!(matches(assignment, "password = \"truncated!"));
 
         let escaped_quote = r#"password = "abcdef\"tailsecret""#;
         assert_eq!(
@@ -1315,12 +1443,16 @@ mod tests {
     /// boundary cannot have is a detector that quietly holds no rules.
     #[test]
     fn rule_document_failures_are_typed_and_never_empty() {
-        let malformed = compile_document(
-            "fixture",
-            "[[rules]\nid = 'x'",
-            RuleOrigin::Vendored,
-            CredentialPatternProfile::Observation,
-        );
+        let fixture = |text: &str, origin| {
+            compile_document(
+                "fixture",
+                text,
+                origin,
+                CredentialPatternProfile::Observation,
+                &Arc::default(),
+            )
+        };
+        let malformed = fixture("[[rules]\nid = 'x'", RuleOrigin::Vendored);
         assert!(matches!(
             malformed,
             Err(CredentialRuleSetError::Document {
@@ -1329,12 +1461,7 @@ mod tests {
             })
         ));
 
-        let empty = compile_document(
-            "fixture",
-            "title = 'no rules here'\n",
-            RuleOrigin::Vendored,
-            CredentialPatternProfile::Observation,
-        );
+        let empty = fixture("title = 'no rules here'\n", RuleOrigin::Vendored);
         assert!(matches!(
             empty,
             Err(CredentialRuleSetError::Empty {
@@ -1344,11 +1471,9 @@ mod tests {
 
         // A document of nothing but path-selected rules yields no usable rule,
         // and that is reported as empty rather than accepted as a ruleset.
-        let path_only = compile_document(
-            "fixture",
+        let path_only = fixture(
             "[[rules]]\nid = 'path-only'\npath = '''\\.php$'''\n",
             RuleOrigin::Vendored,
-            CredentialPatternProfile::Observation,
         );
         assert!(matches!(
             path_only,
@@ -1357,27 +1482,100 @@ mod tests {
             })
         ));
 
-        let bad_regex = compile_document(
-            "fixture",
-            "[[rules]]\nid = 'broken'\nregex = '''('''\n",
-            RuleOrigin::Vendored,
-            CredentialPatternProfile::Observation,
-        );
-        assert!(matches!(
-            bad_regex,
-            Err(CredentialRuleSetError::Regex { document: "fixture", rule_id }) if rule_id == "broken"
-        ));
-
-        let unlabelled_supplement = compile_document(
-            "fixture",
+        let unlabelled_supplement = fixture(
             "[[rules]]\nid = 'local'\nregex = '''abc'''\n",
             RuleOrigin::Supplement,
-            CredentialPatternProfile::Observation,
         );
         assert!(matches!(
             unlabelled_supplement,
             Err(CredentialRuleSetError::Rule { rule_id, .. }) if rule_id == "local"
         ));
+    }
+
+    /// Loading a ruleset compiles none of its regexes, so a first scan pays
+    /// only for the rules its text reaches. Asserted as a latency class
+    /// against compiling the rest of the catalogue afterwards, which keeps
+    /// the check calibrated to the host.
+    #[test]
+    fn a_first_scan_compiles_only_the_rules_its_text_reaches() {
+        let scan = |set: &CredentialPatternSet, text: &str| {
+            set.iter()
+                .zip(set.keyword_presence(text))
+                .filter_map(|(pattern, present)| {
+                    let ranges = pattern.ranges_when_keywords_present(text, present);
+                    (!ranges.is_empty()).then(|| (pattern.id().to_owned(), ranges))
+                })
+                .collect::<Vec<_>>()
+        };
+        let started = std::time::Instant::now();
+        let set = pattern_set(CredentialPatternProfile::Observation);
+        let clean = scan(&set, "pub fn alpha() -> u32 { 1 }\n");
+        let first_scan = started.elapsed();
+        assert_eq!(clean, Vec::new());
+
+        let token = "ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ";
+        let leaked = format!("let token = \"{token}\";\n");
+        let start = leaked.find(token).expect("token offset");
+        assert!(
+            scan(&set, &leaked)
+                .iter()
+                .any(|(id, ranges)| id == "github-pat"
+                    && ranges.len() == 1
+                    && ranges[0] == (start..start + token.len())),
+            "a lazily compiled rule still detects its credential"
+        );
+        assert!(set.checked(()).is_ok());
+
+        let started = std::time::Instant::now();
+        for pattern in set.iter() {
+            for regex in regexes(pattern) {
+                assert!(regex.get().is_some(), "rule `{}` compiles", regex.rule_id);
+            }
+        }
+        let rest_of_catalogue = started.elapsed();
+        assert!(
+            first_scan * 4 < rest_of_catalogue,
+            "load and first scan took {first_scan:?}; compiling the rest took {rest_of_catalogue:?}"
+        );
+    }
+
+    /// A regex that does not compile fails the first scan that reaches it, and
+    /// every scan of that ruleset after it, with the typed error naming the
+    /// rule. A scan that never needed the rule is unaffected.
+    #[test]
+    fn a_broken_rule_regex_fails_the_scan_that_reaches_it() {
+        let compilation = Arc::default();
+        let loaded = compile_document(
+            "fixture",
+            "[[rules]]\nid = 'working'\nregex = '''tok_[a-z]{4}'''\n\
+             [[rules]]\nid = 'broken'\nregex = '''('''\nkeywords = ['gated']\n",
+            RuleOrigin::Vendored,
+            CredentialPatternProfile::Observation,
+            &compilation,
+        )
+        .expect("a broken regex does not fail the load");
+        let set =
+            CredentialPatternSet::new(loaded, Arc::clone(&compilation)).expect("fixture ruleset");
+
+        let ungated = "tok_abcd";
+        assert_eq!(set[0].is_match(ungated).map_err(|_| ()), Ok(true));
+        assert_eq!(set[1].is_match(ungated).map_err(|_| ()), Ok(false));
+        assert!(set.checked(()).is_ok());
+
+        let gated = "gated tok_abcd";
+        let failure = set[1].is_match(gated).expect_err("the broken rule ran");
+        assert!(matches!(
+            failure,
+            CredentialRuleSetError::Regex { document: "fixture", rule_id } if rule_id == "broken"
+        ));
+        assert!(matches!(
+            set.checked(()),
+            Err(CredentialRuleSetError::Regex { rule_id, .. }) if rule_id == "broken"
+        ));
+        assert!(
+            set[0].is_match(ungated).is_err(),
+            "a ruleset with a failed regex fails every later scan"
+        );
     }
 
     #[test]
@@ -1443,8 +1641,14 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
         let sourcegraph = rule(&compiled, "sourcegraph-access-token");
 
-        assert!(!sourcegraph.is_match("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"));
-        assert!(sourcegraph.is_match("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"));
+        assert!(!matches(
+            sourcegraph,
+            "commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"
+        ));
+        assert!(matches(
+            sourcegraph,
+            "sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"
+        ));
     }
 
     /// `redact_text` calls `ranges` directly, never `is_match`, so the
@@ -1508,9 +1712,15 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
         let generic = rule(&compiled, "generic-api-key");
 
-        assert!(generic.is_match(r#"let auth = "Zx9Kq2Lm7Pv4Ns8Rt3Wy6Bd1";"#));
+        assert!(matches(
+            generic,
+            r#"let auth = "Zx9Kq2Lm7Pv4Ns8Rt3Wy6Bd1";"#
+        ));
         // A stopword inside the secret still excuses it.
-        assert!(!generic.is_match(r#"let auth = "Zx9Kq2Lm7swagger4Ns8Rt3Wy6";"#));
+        assert!(!matches(
+            generic,
+            r#"let auth = "Zx9Kq2Lm7swagger4Ns8Rt3Wy6";"#
+        ));
     }
 
     #[test]
@@ -1536,9 +1746,9 @@ mod tests {
             );
         }
 
-        assert!(assignment.is_match(r#"token: "actual-secret""#));
-        assert!(assignment.is_match("token: actual-secret"));
-        assert!(assignment.is_match(r#"token: Some("actual-secret")"#));
-        assert!(assignment.is_match("token: ActualSecret,"));
+        assert!(matches(assignment, r#"token: "actual-secret""#));
+        assert!(matches(assignment, "token: actual-secret"));
+        assert!(matches(assignment, r#"token: Some("actual-secret")"#));
+        assert!(matches(assignment, "token: ActualSecret,"));
     }
 }
