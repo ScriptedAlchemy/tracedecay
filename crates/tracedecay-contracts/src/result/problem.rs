@@ -213,6 +213,7 @@ pub enum ApplicationProblem {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     Saturated {
         diagnostic: SafeDiagnostic,
@@ -285,6 +286,8 @@ enum ApplicationProblemWire {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     Saturated {
         diagnostic: SafeDiagnostic,
@@ -392,10 +395,12 @@ impl From<ApplicationProblem> for ApplicationProblemWire {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::ResetRequired {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblem::Saturated {
                 diagnostic,
@@ -537,10 +542,12 @@ impl ApplicationProblem {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::ResetRequired {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblemWire::Saturated {
                 diagnostic,
@@ -885,6 +892,12 @@ impl ApplicationProblem {
                 legal_actions: vec![LegalAction::Retry],
                 detail: Some(Box::new(detail)),
             },
+            ApplicationProblemDetailV1::ResetRequired { .. } => Self::ResetRequired {
+                diagnostic,
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::Reset],
+                detail: Some(Box::new(detail)),
+            },
         }
     }
 
@@ -892,6 +905,7 @@ impl ApplicationProblem {
         match self {
             Self::Stale { detail, .. }
             | Self::Unavailable { detail, .. }
+            | Self::ResetRequired { detail, .. }
             | Self::Saturated { detail, .. } => detail.as_deref(),
             Self::InvalidRequest { .. }
             | Self::NotFoundOrNotAuthorized { .. }
@@ -899,7 +913,6 @@ impl ApplicationProblem {
             | Self::PartialEffect { .. }
             | Self::Unsupported { .. }
             | Self::ExecutionFailed { .. }
-            | Self::ResetRequired { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. } => None,
         }
@@ -966,6 +979,7 @@ impl ApplicationProblem {
             diagnostic,
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::Reset],
+            detail: None,
         }
     }
 

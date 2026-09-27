@@ -270,7 +270,6 @@ fn maintenance_window_waits_out_the_lease_of_the_daemon_it_just_stopped() {
 #[cfg(target_os = "linux")]
 #[test]
 fn restore_check_accepts_a_reset_required_daemon_and_returns_its_pending_reset() {
-    let _env_lock = lock_user_data_dir_test_env();
     let fixture = DrainingDaemonFixture::new();
     let authority = super::tests::seed_socket_authority(&fixture.socket_path);
     let listener = UnixListener::bind(&fixture.socket_path).expect("bind restored daemon");
@@ -292,9 +291,12 @@ fn restore_check_accepts_a_reset_required_daemon_and_returns_its_pending_reset()
         authority.auth_token().to_owned(),
     );
 
-    let (state, _, socket, protocol) =
-        super::installed_service_status_snapshot(&fixture.runner, super::tests::TEST_BUILD_VERSION)
-            .expect("restored service snapshot");
+    let (state, _, socket, protocol) = super::installed_service_status_snapshot(
+        &fixture.profile,
+        &fixture.runner,
+        super::tests::TEST_BUILD_VERSION,
+    )
+    .expect("restored service snapshot");
     server.join().expect("join restored daemon");
 
     assert!(

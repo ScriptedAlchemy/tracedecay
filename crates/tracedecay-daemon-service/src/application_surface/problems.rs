@@ -3,8 +3,9 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use tracedecay_contracts::{
-    ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, LegalAction,
-    ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+    ApplicationContractError, ApplicationProblem, ApplicationProblemDetailV1,
+    ApplicationProblemEnvelope, LegalAction, ProblemOwningLayer, RequestId, ResultContractRef,
+    RetryDirective, SafeDiagnostic,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, CatalogBindingResolver, DispatchError,
@@ -118,27 +119,20 @@ pub(super) fn http_adapter_problem(
 /// The refusal settles before any project server exists, so the MCP boundary
 /// cannot route the call to its handler; the truthful answer for the named
 /// operation is the reset-required terminal under its own mounted MCP result
-/// contract, naming `reset_command`, the exact command that performs the one
-/// legal action, so the agent can relay it. Returns `None` for tools without
-/// a mounted application binding.
+/// contract, whose typed detail names the refused authority, its versions,
+/// and the exact command that performs the one legal action, so the agent can
+/// relay it. Returns `None` for tools without a mounted application binding.
 pub fn mcp_project_open_reset_refusal(
     tool_name: &str,
     request_id: RequestId,
-    authority: &str,
-    reason: &str,
-    reset_command: &str,
+    detail: ApplicationProblemDetailV1,
 ) -> Option<ApplicationProblemEnvelope> {
     let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
     let catalog = application_surface_catalog_ref().ok()?;
     let resolver = CatalogBindingResolver::new(catalog);
     let binding = resolve_application_binding(&resolver, BindingSurface::Mcp, operation)?;
     let contract = ResultContractRef::from_schema(&binding.result_schema);
-    let problem = ApplicationProblem::reset_required(SafeDiagnostic {
-        code: "application.surface.reset_required".to_owned(),
-        message: format!(
-            "The {authority} requires an explicit reset: {reason}. Reset it with `{reset_command}`"
-        ),
-    });
+    let problem = ApplicationProblem::from_detail(detail);
     ApplicationProblemEnvelope::new(contract, request_id, problem)
         .ok()
         .map(|envelope| envelope.with_owning_layer(ProblemOwningLayer::Runtime))

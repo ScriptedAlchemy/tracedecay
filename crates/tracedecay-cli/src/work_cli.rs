@@ -633,6 +633,7 @@ mod tests {
             diagnostic,
             retry,
             legal_actions,
+            ..
         } = problem
         else {
             panic!("work reset must remain a typed reset-required problem");

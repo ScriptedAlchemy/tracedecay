@@ -395,6 +395,13 @@ export const ApplicationProblemDetailV1Schema = z.discriminatedUnion("kind", [z.
   remedy: z.string(),
   retries_on_wake: z.boolean(),
 }).strict(), z.object({
+  authority: z.string(),
+  found_version: z.number().int().safe().nullable(),
+  kind: z.literal("reset_required"),
+  reason: z.string(),
+  remedy: z.string(),
+  required_version: z.number().int().safe().nullable(),
+}).strict(), z.object({
   active: z.number().int().safe().min(0),
   committed: z.number().int().safe().min(0),
   kind: z.literal("stale_refresh_frontier"),

@@ -387,6 +387,7 @@ mod tests {
             diagnostic,
             retry,
             legal_actions,
+            ..
         } = daemon_problem(DaemonInvocationProblem::ResetRequired)
         else {
             panic!("multi-root reset must remain reset-required");

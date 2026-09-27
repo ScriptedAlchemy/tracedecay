@@ -273,6 +273,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
             wire.kind,
             ApplicationProblemKind::Stale
                 | ApplicationProblemKind::Unavailable
+                | ApplicationProblemKind::ResetRequired
                 | ApplicationProblemKind::Saturated
         );
         if detail.is_some() && !detailed_kind {
@@ -356,6 +357,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                     diagnostic,
                     retry: wire.retry,
                     legal_actions: legal_actions.clone(),
+                    detail: detail.clone().map(Box::new),
                 }
             }
             (ApplicationProblemKind::Saturated, Some(diagnostic), None) => {

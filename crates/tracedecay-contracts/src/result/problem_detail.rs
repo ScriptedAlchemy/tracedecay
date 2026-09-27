@@ -27,6 +27,16 @@ pub enum ApplicationProblemDetailV1 {
     /// A writer lock stayed held by other writers past its admission
     /// deadline.
     LockDeadline { resource: String, deadline_ms: u64 },
+    /// A persisted store whose shape this binary does not open. It is served
+    /// in this typed state until the operator runs `remedy`, which deletes
+    /// the old data; nothing is migrated or backed up.
+    ResetRequired {
+        authority: String,
+        found_version: Option<i64>,
+        required_version: Option<i64>,
+        reason: String,
+        remedy: String,
+    },
 }
 
 impl ApplicationProblemDetailV1 {
@@ -44,12 +54,41 @@ impl ApplicationProblemDetailV1 {
         }
     }
 
+    /// The typed detail of a persisted-shape refusal, reset by `remedy`.
+    pub fn from_reset_required(error: &TraceDecayError, remedy: impl Into<String>) -> Option<Self> {
+        let (authority, found_version, required_version) = match error {
+            TraceDecayError::ResetRequired { authority, .. } => (authority.clone(), None, None),
+            TraceDecayError::ProfileResetRequired {
+                component,
+                found_version,
+                required_version,
+            } => (
+                (*component).to_owned(),
+                *found_version,
+                Some(*required_version),
+            ),
+            _ => return None,
+        };
+        let reason = match error {
+            TraceDecayError::ResetRequired { reason, .. } => reason.clone(),
+            _ => error.to_string(),
+        };
+        Some(Self::ResetRequired {
+            authority,
+            found_version,
+            required_version,
+            reason,
+            remedy: remedy.into(),
+        })
+    }
+
     /// Stable diagnostic code of the problem this detail names.
     pub const fn code(&self) -> &'static str {
         match self {
             Self::Parked { .. } => "application.code-index.parked",
             Self::StaleRefreshFrontier { .. } => "application.retained.refresh-frontier-stale",
             Self::LockDeadline { .. } => "application.lock-deadline",
+            Self::ResetRequired { .. } => "application.reset-required",
         }
     }
 
@@ -72,6 +111,13 @@ impl ApplicationProblemDetailV1 {
                 "The {resource} stayed busy past its {deadline_ms}ms admission deadline; retry \
                  the operation."
             ),
+            // The remedy leads so a long reason is what the bound cuts.
+            Self::ResetRequired {
+                authority,
+                reason,
+                remedy,
+                ..
+            } => format!("The {authority} requires an explicit reset with `{remedy}`: {reason}"),
         };
         let folded = tracedecay_domain::fold_control_characters(&text);
         tracedecay_domain::utf8_prefix_at_or_before(folded.trim(), MAX_RENDERED_MESSAGE_BYTES)
@@ -107,6 +153,28 @@ impl ApplicationProblemDetailV1 {
                 ("Lock resource", resource.clone()),
                 ("Lock deadline", format!("{deadline_ms}ms")),
             ],
+            Self::ResetRequired {
+                authority,
+                found_version,
+                required_version,
+                reason,
+                remedy,
+            } => {
+                let mut fields = vec![("Reset authority", authority.clone())];
+                if let Some(required_version) = required_version {
+                    fields.push((
+                        "Found version",
+                        found_version.map_or_else(
+                            || "unversioned".to_owned(),
+                            |version| version.to_string(),
+                        ),
+                    ));
+                    fields.push(("Required version", required_version.to_string()));
+                }
+                fields.push(("Reset reason", reason.clone()));
+                fields.push(("Reset remedy", remedy.clone()));
+                fields
+            }
         }
     }
 }

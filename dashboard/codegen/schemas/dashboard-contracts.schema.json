@@ -1418,6 +1418,48 @@
             "deadline_ms"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A persisted store whose shape this binary does not open. It is served\nin this typed state until the operator runs `remedy`, which deletes\nthe old data; nothing is migrated or backed up.",
+          "properties": {
+            "authority": {
+              "type": "string"
+            },
+            "found_version": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "reset_required",
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "remedy": {
+              "type": "string"
+            },
+            "required_version": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "authority",
+            "found_version",
+            "required_version",
+            "reason",
+            "remedy"
+          ],
+          "type": "object"
         }
       ]
     },
