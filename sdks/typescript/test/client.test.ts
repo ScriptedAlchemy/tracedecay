@@ -9,7 +9,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { OPERATIONS } from "../src/operations";
-import { factStoreCurateTerminalMatches } from "../src/automation-terminal";
+import { factStoreCurateReceiptMatches } from "../src/automation-receipt";
 import {
   decodeCanonicalSchema,
   decodeHttpSuccessEnvelope,
@@ -70,105 +70,6 @@ async function canonicalDigest(value: unknown): Promise<string> {
     byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-async function curationEnvelope() {
-  const owner = { kind: "profile" };
-  const ownerDigest = await canonicalDigest(["fact-owner.v1", owner]);
-  const ownerBinding = ownerDigest.slice("sha256:".length);
-  const sourceFactId = `fact.v1.${ownerBinding}.${"a".repeat(64)}`;
-  const targetFactId = `fact.v1.${ownerBinding}.${"b".repeat(64)}`;
-  const receipt = {
-    owner,
-    operation_id: "operation.sdk.curate",
-    input_digest: "c".repeat(64),
-    automation_run_id: "request.sdk.curate",
-    operation_effects: [{
-      kind: "link_facts",
-      source_fact_id: sourceFactId,
-      target_fact_id: targetFactId,
-      relation: {
-        kind: "supports",
-        evidence_fact_ids: [sourceFactId],
-        confidence_millionths: 900_000,
-        provenance: {
-          source_label: "sdk fixture",
-          sanitization_receipt: {
-            receipt: {
-              receipt_id: "receipt.sdk",
-              sanitizer_version: "sanitizer.sdk",
-            },
-            disposition: "redacted",
-            sensitivity: "secret",
-            payload: { digest: `sha256:${"d".repeat(64)}`, byte_len: 1 },
-          },
-        },
-      },
-      disposition: "linked",
-      commit: {
-        disposition: "committed",
-        fact_id: sourceFactId,
-        owner,
-        committed_event_ids: ["event.sdk"],
-        last_event_id: "event.sdk",
-        active_assertion_id: "assertion.sdk",
-      },
-    }],
-    replay_fact_id: sourceFactId,
-    replay_event_id: "event.sdk",
-    changed_fact_ids: [sourceFactId, targetFactId],
-    accepted_operations: 1,
-    facts_added: 0,
-    facts_updated: 0,
-    facts_merged: 0,
-    facts_removed: 0,
-    normalized_tags: 0,
-    facts_linked: 1,
-  };
-  const requestDigest = await canonicalDigest([
-    "tracedecay.automation-run.request-identity.v1",
-    {
-      kind: "memory_curator",
-      options: { fact_review_limit: 24, min_confidence_millionths: 720_000 },
-    },
-  ]);
-  const result = {
-    run_id: "request.sdk.curate",
-    task: "memory_curator",
-    request_digest: requestDigest,
-    terminal: {
-      status: "completed",
-      summary: {
-        reviewed_count: 1,
-        accepted_count: 1,
-        rejected_count: 0,
-        skipped_count: 0,
-      },
-    },
-    committed_receipts: [{
-      kind: "curation",
-      receipt: {
-        receipt,
-        canonical_digest: await canonicalDigest([
-          "tracedecay.automation-run.curation-receipt.v1",
-          receipt,
-        ]),
-      },
-    }],
-  };
-  return {
-    request_id: "request.sdk.curate",
-    outcome: { outcome: "effect", value: { payload: result } },
-  };
-}
-
-async function resealCurationEnvelope(envelope: Awaited<ReturnType<typeof curationEnvelope>>) {
-  const settled = envelope.outcome.value.payload.committed_receipts[0]!.receipt;
-  settled.canonical_digest = await canonicalDigest([
-    "tracedecay.automation-run.curation-receipt.v1",
-    settled.receipt,
-  ]);
-  return envelope;
-}
-
 function successEnvelope(payload: unknown, cursor: unknown = null) {
   return {
     kind: "success",
@@ -209,6 +110,29 @@ function successEnvelope(payload: unknown, cursor: unknown = null) {
       future_envelope_field: "preserved",
     },
   };
+}
+
+/** The `fact_store_curate` answer at admission: a pending effect receipt. */
+function curateSuccessEnvelope(payload: unknown) {
+  const envelope = successEnvelope(payload);
+  envelope.value.binding_id = "binding.http.fact_store_curate.v1";
+  envelope.value.contract.schema_id = "schema.application.retained.fact-store-curate.result";
+  envelope.value.request_id = "request.sdk.curate";
+  envelope.value.outcome = {
+    outcome: "effect",
+    value: {
+      effect_id: "effect.retained.fact_store_curate.request.sdk.curate",
+      effect_class: "administrative",
+      idempotency_key: "idempotency.retained.fact_store_curate.sdk",
+      authority: {},
+      expected_state: "sha256:" + "0".repeat(64),
+      reconciliation: "pending",
+      receipt: { outcome: "effect_unknown", committed_state: null },
+      payload,
+      execution: { ...structuredClone(RECEIPT), termination: "effect_unknown" },
+    },
+  } as unknown as typeof envelope.value.outcome;
+  return envelope;
 }
 
 /** A retained fact-store evidence envelope for the named HTTP binding. */
@@ -538,97 +462,82 @@ describe("TraceDecayClient generated operation bindings", () => {
     )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
   });
 
-  it("binds structurally valid automatic-curation terminals to the replay handle", async () => {
-    const digest = await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(JSON.stringify([
-        "tracedecay.automation-run.request-identity.v1",
-        {
-          kind: "memory_curator",
-          options: {
-            fact_review_limit: 24,
-            min_confidence_millionths: 720_000,
-          },
-        },
-      ])),
-    );
-    const requestDigest = `sha256:${Array.from(new Uint8Array(digest), (byte) =>
-      byte.toString(16).padStart(2, "0")).join("")}`;
-    const result = {
+  it("accepts only the started receipt of the run the request admitted", async () => {
+    const requestDigest = await canonicalDigest([
+      "tracedecay.automation-run.request-identity.v1",
+      {
+        kind: "memory_curator",
+        options: { fact_review_limit: 24, min_confidence_millionths: 720_000 },
+      },
+    ]);
+    const receipt = {
       run_id: "request.sdk.curate",
       task: "memory_curator",
       request_digest: requestDigest,
+      state: "started",
+    };
+    const envelope = (payload: unknown) => ({
+      request_id: "request.sdk.curate",
+      outcome: { outcome: "effect", value: { reconciliation: "pending", payload } },
+    });
+
+    await expect(factStoreCurateReceiptMatches({}, envelope(receipt))).resolves.toBe(true);
+    await expect(factStoreCurateReceiptMatches({}, envelope({
+      ...receipt,
+      run_id: "request.foreign",
+    }))).resolves.toBe(false);
+    await expect(factStoreCurateReceiptMatches(
+      { fact_review_limit: 25 },
+      envelope(receipt),
+    )).resolves.toBe(false);
+    await expect(factStoreCurateReceiptMatches({}, envelope({
+      ...receipt,
+      state: "completed",
+    }))).resolves.toBe(false);
+    const { state: _state, ...withoutState } = receipt;
+    await expect(factStoreCurateReceiptMatches({}, envelope({
+      ...withoutState,
       terminal: {
         status: "completed",
-        summary: {
-          reviewed_count: 0,
-          accepted_count: 0,
-          rejected_count: 0,
-          skipped_count: 0,
-        },
+        summary: { reviewed_count: 0, accepted_count: 0, rejected_count: 0, skipped_count: 0 },
       },
       committed_receipts: [],
-    };
-    const envelope = {
-      request_id: "request.sdk.curate",
-      outcome: { outcome: "effect", value: { payload: result } },
-    };
-
-    await expect(factStoreCurateTerminalMatches({}, envelope)).resolves.toBe(true);
-    await expect(factStoreCurateTerminalMatches({}, {
-      ...envelope,
-      outcome: {
-        outcome: "effect",
-        value: { payload: { ...result, run_id: "request.foreign" } },
-      },
-    })).resolves.toBe(false);
+    }))).resolves.toBe(false);
   });
 
-  it("matches Rust nested curation identity and sanitization rejections", async () => {
-    const valid = await curationEnvelope();
-    await expect(factStoreCurateTerminalMatches({}, valid)).resolves.toBe(true);
-
-    const invalidAssertion = structuredClone(valid);
-    invalidAssertion.outcome.value.payload.committed_receipts[0]!.receipt.receipt
-      .operation_effects[0]!.commit!.active_assertion_id = "";
-    await expect(factStoreCurateTerminalMatches(
-      {},
-      await resealCurationEnvelope(invalidAssertion),
-    )).resolves.toBe(false);
-
-    const invalidOwner = structuredClone(valid);
-    const invalidOwnerReceipt = invalidOwner.outcome.value.payload.committed_receipts[0]!.receipt
-      .receipt as unknown as Record<string, unknown>;
-    invalidOwnerReceipt.owner = {
-      kind: "project",
-      project_id: "",
+  it("returns the started receipt from the curate operation", async () => {
+    const requestDigest = await canonicalDigest([
+      "tracedecay.automation-run.request-identity.v1",
+      {
+        kind: "memory_curator",
+        options: { fact_review_limit: 24, min_confidence_millionths: 720_000 },
+      },
+    ]);
+    const receipt = {
+      run_id: "request.sdk.curate",
+      task: "memory_curator",
+      request_digest: requestDigest,
+      state: "started",
     };
-    await expect(factStoreCurateTerminalMatches(
-      {},
-      await resealCurationEnvelope(invalidOwner),
-    )).resolves.toBe(false);
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => new Response(JSON.stringify(curateSuccessEnvelope(receipt)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    });
 
-    for (const mutate of [
-      (sanitization: Record<string, unknown>) => {
-        sanitization.disposition = "accepted";
-        sanitization.sensitivity = "secret";
-      },
-      (sanitization: Record<string, unknown>) => {
-        (sanitization.receipt as Record<string, unknown>).receipt_id = "";
-      },
-      (sanitization: Record<string, unknown>) => {
-        (sanitization.payload as Record<string, unknown>).digest = "d".repeat(64);
-      },
-    ]) {
-      const invalid = structuredClone(valid);
-      const sanitization = invalid.outcome.value.payload.committed_receipts[0]!.receipt.receipt
-        .operation_effects[0]!.relation!.provenance.sanitization_receipt;
-      mutate(sanitization);
-      await expect(factStoreCurateTerminalMatches(
-        {},
-        await resealCurationEnvelope(invalid),
-      )).resolves.toBe(false);
-    }
+    const response = await client.operations.application_fact_store_curate(
+      {},
+      { requestId: "request.sdk.curate" },
+    );
+    expect(response.request_id).toBe("request.sdk.curate");
+    expect(response.outcome.outcome).toBe("effect");
+    if (response.outcome.outcome !== "effect") throw new Error("expected an effect outcome");
+    expect(response.outcome.value.reconciliation).toBe("pending");
+    expect(response.outcome.value.payload).toEqual(receipt);
   });
 
   it("fails closed on malformed typed Workflow requests before transport", async () => {

@@ -83,7 +83,7 @@ pub enum SdkRequestIdControlV1 {
 #[serde(rename_all = "snake_case")]
 pub enum SdkResultSemanticsV1 {
     SchemaOnly,
-    FactStoreCurateTerminal,
+    FactStoreCurateReceipt,
 }
 
 /// SDK-only transport and terminal controls derived from the application owner.
@@ -147,7 +147,7 @@ impl RetainedSurfaceOperation {
         match self {
             Self::FactStoreCurate => RetainedSdkOperationContractV1 {
                 request_id: SdkRequestIdControlV1::Required,
-                result_semantics: SdkResultSemanticsV1::FactStoreCurateTerminal,
+                result_semantics: SdkResultSemanticsV1::FactStoreCurateReceipt,
             },
             _ => RetainedSdkOperationContractV1::DEFAULT,
         }
@@ -289,11 +289,11 @@ fn retained_surface_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
     Ok(vec![
-        retained_surface_executable_schema::<FactStoreCurateRequestV1, AutomationRunResultV1>(
+        retained_surface_executable_schema::<FactStoreCurateRequestV1, FactStoreCurateResultV1>(
             contribution,
             RetainedSurfaceOperation::FactStoreCurate,
             "tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1",
-            "tracedecay_contracts::retained_surfaces::AutomationRunResultV1",
+            "tracedecay_contracts::retained_surfaces::FactStoreCurateResultV1",
         )?,
         retained_surface_executable_schema::<FactStoreAddRequestV1, FactStoreAddResultV1>(
             contribution,
@@ -825,7 +825,7 @@ mod tests {
         let operation = RetainedSurfaceOperation::FactStoreCurate;
         let capability = CapabilityId::new(capability_id(operation)).expect("capability id");
         let request_type = "tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1";
-        let result_type = "tracedecay_contracts::retained_surfaces::AutomationRunResultV1";
+        let result_type = "tracedecay_contracts::retained_surfaces::FactStoreCurateResultV1";
 
         assert!(RetainedSurfaceOperation::ALL.contains(&operation));
         assert!(RetainedSurfaceOperation::CALLABLE.contains(&operation));
@@ -904,7 +904,7 @@ mod tests {
             operation.sdk_operation_contract(),
             RetainedSdkOperationContractV1 {
                 request_id: SdkRequestIdControlV1::Required,
-                result_semantics: SdkResultSemanticsV1::FactStoreCurateTerminal,
+                result_semantics: SdkResultSemanticsV1::FactStoreCurateReceipt,
             }
         );
         retained_surface_application_operation(operation).expect("registered application use case");

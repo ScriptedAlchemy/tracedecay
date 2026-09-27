@@ -56,9 +56,22 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
             serde_json::from_str(&body).expect("fact_store_curate JSON response");
         assert_eq!(status, 200);
         let memory_run = &memory_payload["value"]["outcome"]["value"]["payload"];
-        assert_eq!(memory_run["terminal"]["status"], "skipped");
-        assert_eq!(memory_run["task"], "memory_curator");
-        assert_eq!(memory_run["terminal"]["reason"], "backend_disabled");
+        assert_eq!(
+            memory_run,
+            &serde_json::json!({
+                "run_id": "request.dashboard.fact-store-curate-single-launcher",
+                "task": "memory_curator",
+                "request_digest": memory_run["request_digest"],
+                "state": "started",
+            })
+        );
+        let settled = wait_for_settled_run(
+            &agent,
+            &base_url,
+            "request.dashboard.fact-store-curate-single-launcher",
+        );
+        assert_eq!(settled["status"], "skipped");
+        assert_eq!(settled["error"], "backend_disabled");
 
         let response = crate::common::http_call_with_retry(
             "POST fact_store_curate with caller-selected operations",
@@ -200,14 +213,16 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
             status, 200,
             "dashboard automation run failed: {completed}"
         );
-        let run = &completed["value"]["outcome"]["value"]["payload"];
-        let run_id = run["run_id"]
+        let receipt = &completed["value"]["outcome"]["value"]["payload"];
+        assert_eq!(receipt["state"], "started", "{completed}");
+        let run_id = receipt["run_id"]
             .as_str()
-            .unwrap_or_else(|| panic!("completed response should include run_id: {completed}"))
+            .unwrap_or_else(|| panic!("the curate receipt should include run_id: {completed}"))
             .to_string();
-        assert_eq!(run["terminal"]["status"], "completed");
-        assert_eq!(run["terminal"]["summary"]["accepted_count"], 1);
-        assert_eq!(run["terminal"]["summary"]["rejected_count"], 0);
+        let settled = wait_for_settled_run(&agent, &base_url, &run_id);
+        assert_eq!(settled["status"], "succeeded", "{settled}");
+        assert_eq!(settled["accepted_count"], 1);
+        assert_eq!(settled["rejected_count"], 0);
         let records = tracedecay_automation_runtime::automation::run_ledger::load_run_records(
             &dashboard_root,
             10,
@@ -392,6 +407,109 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
                 ),
             "successful dashboard automation run should be visible in history: {runs}"
         );
+
+        server.stop();
+    });
+}
+
+/// The curator can take as long as its backend does; the request answers at
+/// admission with the run's receipt, and the run settles on the daemon.
+#[test]
+fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
+    const CURATOR_TURN: Duration = Duration::from_secs(3);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let tmp_root = canonical_existing_identity(tmp.path())
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let global_db_path = tmp_root.join("global").join("global.db");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
+
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
+        let fixture = seed_memory_fixture(&cg).await;
+        let slow_codex = FakeCodexAppServer::new_memory_curator_answering_after(
+            fixture.near_duplicate_fact_id.clone(),
+            fixture.near_duplicate_last_event_id.clone(),
+            CURATOR_TURN,
+        );
+        let project_id = cg
+            .configuration_runtime()
+            .configuration_target()
+            .project_id
+            .as_str()
+            .to_owned();
+        let agent = http_agent();
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut server = spawn_dashboard_server_with_configuration_runtime(
+            cg,
+            host_runtime,
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
+        wait_for_dashboard(&agent, &base_url).await;
+        configure_codex_summarizer(&agent, &base_url, &project_id, &slow_codex.bin);
+        let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
+        let (status, current_config) = get_json(&agent, &config_url);
+        assert_eq!(status, 200, "config read should succeed: {current_config}");
+        let (status, config) = patch_json_body(
+            &agent,
+            &config_url,
+            &serde_json::json!({
+                "expected_revision_id": current_config["configuration_revision_id"],
+                "idempotency_key": "dashboard-slow-curator-receipt",
+                "enabled": true,
+                "backend": "codex_app_server",
+                "host_mode": "standalone",
+                "memory_curator": { "enabled": true, "schedule": "manual" }
+            }),
+        );
+        assert_eq!(status, 200, "automation config patch failed: {config}");
+
+        let run_id = "request.dashboard.slow-curator-receipt";
+        let started = Instant::now();
+        let response = agent
+            .post(format!(
+                "{base_url}/api/application/retained/fact_store_curate"
+            ))
+            .header(tracedecay_contracts::APPLICATION_REQUEST_ID_HEADER, run_id)
+            .send_json(serde_json::json!({
+                "fact_review_limit": 4,
+                "min_confidence_millionths": 500_000
+            }))
+            .unwrap_or_else(|error| panic!("POST fact_store_curate failed: {error}"));
+        let answered = started.elapsed();
+        let (status, receipt) = response_to_json(response);
+        assert_eq!(status, 200, "fact_store_curate failed: {receipt}");
+        let payload = &receipt["value"]["outcome"]["value"]["payload"];
+        assert_eq!(
+            payload,
+            &serde_json::json!({
+                "run_id": run_id,
+                "task": "memory_curator",
+                "request_digest": payload["request_digest"],
+                "state": "started",
+            })
+        );
+        assert_eq!(
+            receipt["value"]["outcome"]["value"]["reconciliation"],
+            "pending"
+        );
+        assert!(
+            answered < Duration::from_millis(250),
+            "fact_store_curate answered after {answered:?}, behind a {CURATOR_TURN:?} curator"
+        );
+
+        let settled = wait_for_settled_run(&agent, &base_url, run_id);
+        assert!(
+            started.elapsed() >= CURATOR_TURN,
+            "the run settled before its curator answered"
+        );
+        assert_eq!(settled["status"], "succeeded", "{settled}");
+        assert_eq!(settled["trigger"], "application");
+        assert_eq!(settled["accepted_count"], 1);
 
         server.stop();
     });
@@ -659,4 +777,31 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
 
         server.stop();
     });
+}
+
+/// The run's row in the dashboard's newest-first run history once it reaches a
+/// terminal status. `fact_store_curate` answers at admission; the run settles
+/// on the daemon afterwards.
+fn wait_for_settled_run(agent: &ureq::Agent, base_url: &str, run_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (status, runs) = get_json(agent, &format!("{base_url}/api/automation/runs?limit=50"));
+        assert_eq!(status, 200, "run history read failed: {runs}");
+        if let Some(run) = runs["runs"].as_array().and_then(|records| {
+            records.iter().find(|record| {
+                record["run_id"] == run_id
+                    && matches!(
+                        record["status"].as_str(),
+                        Some("succeeded" | "failed" | "skipped")
+                    )
+            })
+        }) {
+            return run.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "run {run_id} never settled: {runs}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }

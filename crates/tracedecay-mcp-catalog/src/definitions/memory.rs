@@ -94,7 +94,7 @@ const MEMORY_TOOLS: &[MemoryTool] = &[
     MemoryTool {
         operation: "fact_store_curate",
         title: "Fact Store Curate",
-        description: "Run the daemon-owned automatic Memory Curator. Callers may bound review size and confidence only; TraceDecay derives the run, operations, validation, policy, and apply authority. Inspect the durable terminal with the read-only automation run tools.",
+        description: "Start the daemon-owned automatic Memory Curator and return its run receipt (`run_id`, `state: started`) at admission. Callers may bound review size and confidence only; TraceDecay derives the run, operations, validation, policy, and apply authority. The run settles on the daemon; read its terminal with tracedecay_automation_run_view.",
         write: true,
     },
 ];

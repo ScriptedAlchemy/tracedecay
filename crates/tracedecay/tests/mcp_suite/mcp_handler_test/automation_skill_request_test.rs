@@ -43,6 +43,42 @@ async fn call_json(
     serde_json::from_str(text).unwrap_or_else(|error| panic!("{tool_name} JSON: {error}\n{text}"))
 }
 
+/// A curate receipt returns at admission; the run is readable through
+/// `tracedecay_automation_run_view` once it settles.
+async fn settled_run(fixture: &ProductionCompositionFixture, run_id: &str) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let response = fixture
+            .harness
+            .call_tool(
+                &fixture.project_root,
+                "tracedecay_automation_run_view",
+                json!({"run_id": run_id, "format": "json"}),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("automation run view invocation failed: {error}"));
+        let settled = response.error.is_none()
+            && response
+                .result
+                .as_ref()
+                .is_some_and(|result| result["isError"] != json!(true));
+        if settled {
+            return call_json(
+                fixture,
+                "tracedecay_automation_run_view",
+                json!({"run_id": run_id, "format": "json"}),
+            )
+            .await["run"]
+                .clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run {run_id} never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 async fn refusal(
     fixture: &ProductionCompositionFixture,
     tool_name: &str,
@@ -102,13 +138,18 @@ async fn curated_project() -> CuratedProject {
             }),
         )
         .await;
-        let run = &envelope["outcome"]["value"]["payload"];
-        if run["terminal"]["reason"] == "scheduler_lock_active" {
+        let receipt = &envelope["outcome"]["value"]["payload"];
+        assert_eq!(receipt["state"], "started", "{envelope}");
+        let run_id = receipt["run_id"]
+            .as_str()
+            .expect("curate run id")
+            .to_owned();
+        let settled = settled_run(&fixture, &run_id).await;
+        if settled["error"] == "scheduler_lock_active" {
             tokio::time::sleep(Duration::from_millis(250)).await;
             continue;
         }
-        assert_eq!(run["terminal"]["reason"], "nothing_to_review", "{envelope}");
-        let run_id = run["run_id"].as_str().expect("curate run id").to_owned();
+        assert_eq!(settled["error"], "nothing_to_review", "{settled}");
         let terminal_row = fs::read_to_string(dashboard_root.join("automation_runs.jsonl"))
             .expect("automation run ledger")
             .lines()

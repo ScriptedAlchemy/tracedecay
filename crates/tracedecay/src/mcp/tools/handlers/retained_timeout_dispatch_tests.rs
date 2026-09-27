@@ -7,9 +7,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_contracts::retained_surfaces::{
-    AutomationRunRequestV1, AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1,
-    AutomationTaskRequestV1, AutomationTaskV1, MemoryCuratorRunInputV1, RetainedSurfaceOperation,
-    RetainedSurfaceRequestV1, RetainedSurfaceResultV1,
+    AutomationRunRequestV1, AutomationTaskRequestV1, FactStoreCurateResultV1,
+    MemoryCuratorRunInputV1, RetainedSurfaceOperation, RetainedSurfaceRequestV1,
+    RetainedSurfaceResultV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblem, AuthorityReceipt, CancellationSignal,
@@ -97,28 +97,15 @@ fn fact_store_curate_run(
     run_id: &str,
     fact_review_limit: u32,
     min_confidence_millionths: u32,
-) -> AutomationRunResultV1 {
-    let request = AutomationRunRequestV1 {
+) -> FactStoreCurateResultV1 {
+    FactStoreCurateResultV1::started(&AutomationRunRequestV1 {
         run_id: RunId::new(run_id).expect("curation run id"),
         task: AutomationTaskRequestV1::MemoryCurator(MemoryCuratorRunInputV1 {
             fact_review_limit,
             min_confidence_millionths,
         }),
-    };
-    AutomationRunResultV1 {
-        run_id: request.run_id.clone(),
-        task: AutomationTaskV1::MemoryCurator,
-        request_digest: request.input_digest().expect("curation request digest"),
-        terminal: AutomationRunTerminalV1::Completed {
-            summary: AutomationRunSummaryV1 {
-                reviewed_count: 0,
-                accepted_count: 0,
-                rejected_count: 0,
-                skipped_count: 0,
-            },
-        },
-        committed_receipts: Vec::new(),
-    }
+    })
+    .expect("curation receipt")
 }
 
 fn fact_store_curate_effect(
@@ -426,10 +413,7 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
         payload["outcome"]["value"]["payload"]["task"],
         "memory_curator"
     );
-    assert_eq!(
-        payload["outcome"]["value"]["payload"]["terminal"]["summary"]["reviewed_count"],
-        0
-    );
+    assert_eq!(payload["outcome"]["value"]["payload"]["state"], "started");
     cg.close();
 }
 

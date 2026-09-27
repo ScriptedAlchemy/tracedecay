@@ -15,11 +15,11 @@ use tracedecay_contracts::retained_receipts::PreparedRetainedEffect;
 use tracedecay_contracts::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
     AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
-    AutomationTaskV1, RetainedSurfaceResultV1,
+    AutomationTaskV1, FactStoreCurateResultV1, RetainedSurfaceResultV1,
 };
 use tracedecay_contracts::{
-    ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal, ProblemOwningLayer,
-    RequestAdmission, RequestContext, RetainedSurfaceExecutionContextV1,
+    ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal,
+    ProblemOwningLayer, RequestAdmission, RequestContext, RetainedSurfaceExecutionContextV1,
     RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
     retained_surface_application_operation, retained_surface_execution_problem,
     retained_surface_outcome_matches_terminal, retained_surface_problem_matches_terminal,
@@ -48,7 +48,7 @@ use crate::automation::effect_runtime::projection::{
 };
 use crate::automation::effect_runtime::{
     AutomationSettledProblem, AutomationSettledTerminal, add_pending_blocking, contract_error,
-    digest, effect_authority_digest as calculate_effect_authority_digest,
+    curate_receipt_outcome, digest, effect_authority_digest as calculate_effect_authority_digest,
     finalize_terminal_housekeeping, journal, recovered_partial_terminal, remove_pending_blocking,
 };
 use crate::automation::run_ledger::{
@@ -549,6 +549,29 @@ pub fn pinned_automation_configuration_digest(
 }
 
 impl AutomationEffectAuthority {
+    /// The `fact_store_curate` receipt for this admitted run. The run and its
+    /// settlement continue after the admitting request returns it.
+    pub fn started_outcome(
+        &self,
+    ) -> std::result::Result<
+        ApplicationOutcome<RetainedSurfaceResultV1>,
+        RetainedSurfaceExecutionErrorV1,
+    > {
+        let receipt = FactStoreCurateResultV1::started(&self.admission.request).map_err(|_| {
+            RetainedSurfaceExecutionErrorV1::unavailable("the admitted run receipt is invalid")
+        })?;
+        let execution = RetainedSurfaceExecutionContextV1 {
+            request_context: &self.context,
+            cancellation_signal: &self.cancellation,
+            operation: &self.operation,
+            observed_at: tracedecay_contracts::now_micros(),
+        };
+        self.prepared.started(
+            &execution,
+            RetainedSurfaceResultV1::FactStoreCurate(receipt),
+        )
+    }
+
     pub fn start_retained_automation_settlement<T, P, R>(
         self,
         retained: RetainedAutomationRun<T>,
@@ -1475,7 +1498,7 @@ impl AutomationEffectAuthority {
             &execution,
             &committed_state,
             tracedecay_contracts::ReconciliationState::Reconciled,
-            RetainedSurfaceResultV1::FactStoreCurate(result),
+            result,
             None,
         );
         let outcome = match outcome {
@@ -1504,7 +1527,7 @@ impl AutomationEffectAuthority {
             RetainedSurfaceOperation::FactStoreCurate,
             self.context.request_id(),
             self.context.scope(),
-            &outcome,
+            &curate_receipt_outcome(outcome.clone()),
         ) {
             return Err(contract_error(
                 "memory automation outcome does not match its registered admission",

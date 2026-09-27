@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunResultV1, AutomationRunTerminalV1,
-    RetainedSurfaceOperation, RetainedSurfaceResultV1,
+    FactStoreCurateResultV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, ResolvedScope, retained_surface_outcome_matches_terminal,
@@ -21,11 +21,23 @@ pub type AutomationSettledProblem = AutomationRunProblemV1;
     deny_unknown_fields
 )]
 pub enum AutomationSettledTerminal {
+    /// The settled effect receipts carrying the run's own terminal. Callers
+    /// of the admitting operation see only its receipt, [`Self::into_outcome`].
     Outcome {
         scope: ResolvedScope,
-        outcome: Box<ApplicationOutcome<RetainedSurfaceResultV1>>,
+        outcome: Box<ApplicationOutcome<AutomationRunResultV1>>,
     },
     Problem(AutomationSettledProblem),
+}
+
+/// The `fact_store_curate` outcome for a settled run: the same effect
+/// receipts, carrying the run's receipt instead of its terminal.
+pub fn curate_receipt_outcome(
+    outcome: ApplicationOutcome<AutomationRunResultV1>,
+) -> ApplicationOutcome<RetainedSurfaceResultV1> {
+    outcome.map_payload(|run| {
+        RetainedSurfaceResultV1::FactStoreCurate(FactStoreCurateResultV1::for_run(&run))
+    })
 }
 
 impl AutomationSettledTerminal {
@@ -36,7 +48,7 @@ impl AutomationSettledTerminal {
         Box<AutomationSettledProblem>,
     > {
         match self {
-            Self::Outcome { outcome, .. } => Ok(*outcome),
+            Self::Outcome { outcome, .. } => Ok(curate_receipt_outcome(*outcome)),
             Self::Problem(problem) => Err(Box::new(problem)),
         }
     }
@@ -48,20 +60,19 @@ impl AutomationSettledTerminal {
                 outcome,
             } => {
                 terminal_scope == &admission.scope
+                    && matches!(
+                        outcome.as_ref(),
+                        ApplicationOutcome::Effect(effect)
+                            if effect
+                                .payload
+                                .as_ref()
+                                .is_some_and(|result| result.matches_admission(&admission.request))
+                    )
                     && retained_surface_outcome_matches_terminal(
                         RetainedSurfaceOperation::FactStoreCurate,
                         &admission.request_id,
                         &admission.scope,
-                        outcome,
-                    )
-                    && matches!(
-                        outcome.as_ref(),
-                        ApplicationOutcome::Effect(effect)
-                            if matches!(
-                                effect.payload.as_ref(),
-                                Some(RetainedSurfaceResultV1::FactStoreCurate(result))
-                                    if result.matches_admission(&admission.request)
-                            )
+                        &curate_receipt_outcome(outcome.as_ref().clone()),
                     )
             }
             Self::Problem(problem) => {
@@ -79,10 +90,7 @@ impl AutomationSettledTerminal {
         let ApplicationOutcome::Effect(effect) = outcome.as_ref() else {
             return None;
         };
-        let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
-            return None;
-        };
-        Some(result)
+        effect.payload.as_ref()
     }
 
     pub fn problem(&self) -> Option<&AutomationSettledProblem> {
@@ -93,15 +101,8 @@ impl AutomationSettledTerminal {
     }
 
     pub fn is_completed(&self) -> bool {
-        let Self::Outcome { outcome, .. } = self else {
-            return false;
-        };
-        let ApplicationOutcome::Effect(effect) = outcome.as_ref() else {
-            return false;
-        };
-        let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
-            return false;
-        };
-        matches!(result.terminal, AutomationRunTerminalV1::Completed { .. })
+        self.run_result().is_some_and(|result| {
+            matches!(result.terminal, AutomationRunTerminalV1::Completed { .. })
+        })
     }
 }

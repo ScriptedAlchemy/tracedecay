@@ -420,6 +420,58 @@ pub struct AutomationRunResultV1 {
     pub committed_receipts: Vec<AutomationCommittedReceiptV1>,
 }
 
+/// Lifecycle state a `fact_store_curate` receipt reports.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FactStoreCurateStateV1 {
+    /// The run was admitted and continues on the daemon.
+    Started,
+}
+
+/// Receipt of one admitted automatic curation.
+///
+/// The curator runs on the daemon after this receipt is returned. Its terminal
+/// is the automation run ledger record for `run_id`, read with
+/// `automation_run_view`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FactStoreCurateResultV1 {
+    pub run_id: RunId,
+    pub task: AutomationTaskV1,
+    pub request_digest: ManifestDigest,
+    pub state: FactStoreCurateStateV1,
+}
+
+impl FactStoreCurateResultV1 {
+    /// The receipt for the run `request` admits.
+    pub fn started(request: &AutomationRunRequestV1) -> Result<Self, ApplicationContractError> {
+        Ok(Self {
+            run_id: request.run_id.clone(),
+            task: request.task_kind(),
+            request_digest: request.input_digest()?,
+            state: FactStoreCurateStateV1::Started,
+        })
+    }
+
+    /// The receipt naming the run a settled terminal belongs to.
+    pub fn for_run(run: &AutomationRunResultV1) -> Self {
+        Self {
+            run_id: run.run_id.clone(),
+            task: run.task,
+            request_digest: run.request_digest.clone(),
+            state: FactStoreCurateStateV1::Started,
+        }
+    }
+
+    pub fn matches_admission(&self, request: &AutomationRunRequestV1) -> bool {
+        Self::started(request).is_ok_and(|expected| &expected == self)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.run_id.validate().is_ok() && self.request_digest.validate().is_ok()
+    }
+}
+
 /// Canonical admitted problem for one automation run.
 ///
 /// The generic application receipt binds the outer operation. The ordered
