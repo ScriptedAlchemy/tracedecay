@@ -142,9 +142,15 @@ pub enum EffectClass {
     /// Queues work on a daemon-owned scheduler; the call answers with the
     /// scheduler's admission, not the finished work.
     SchedulesWork,
+    /// Maintains bookkeeping the daemon keeps for the project or profile it
+    /// serves: resets a usage counter, records registry token accounting, or
+    /// reconciles automation schedulers with the saved configuration. Each
+    /// write settles within the call and answers its new state.
+    MaintainsOwnerState,
     /// Reads and rewrites the daemon profile's own state: its project
-    /// registry, accounting ledgers, and session stores, including registry
-    /// collection and transcript import.
+    /// registry, accounting ledgers, and session stores. Unlike bookkeeping,
+    /// it includes long work, a registry collection or a transcript import,
+    /// that a cancelled call stops.
     MaintainsProfileState,
 }
 
@@ -161,6 +167,7 @@ impl EffectClass {
             Self::SpawnsProcess
                 | Self::BindsServer
                 | Self::SchedulesWork
+                | Self::MaintainsOwnerState
                 | Self::MaintainsProfileState
         )
     }

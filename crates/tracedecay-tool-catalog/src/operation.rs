@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 macro_rules! application_surface_operations {
     (
@@ -220,6 +221,7 @@ application_surface_operations! {
     ProjectContext => "project_context";
     AdminSync => "admin_sync";
     AdminCli => "admin_cli";
+    AdminProject => "admin_project";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -355,6 +357,7 @@ impl ApplicationSurfaceOperation {
         Self::Runtime,
         Self::AdminSync,
         Self::AdminCli,
+        Self::AdminProject,
     ];
 
     /// Reads of the authenticated profile's project registry. They name no
@@ -366,7 +369,7 @@ impl ApplicationSurfaceOperation {
     /// Owner-served operations that first-party CLI commands and host hooks
     /// call by name. They are never advertised in `tools/list` or mounted on
     /// HTTP, so an agent cannot discover or select them.
-    pub const INTERNAL_OPERATIONS: &[Self] = &[Self::AdminSync, Self::AdminCli];
+    pub const INTERNAL_OPERATIONS: &[Self] = &[Self::AdminSync, Self::AdminCli, Self::AdminProject];
 
     pub fn is_graph_tool(self) -> bool {
         Self::GRAPH_TOOL_OPERATIONS.contains(&self)
@@ -378,6 +381,39 @@ impl ApplicationSurfaceOperation {
 
     pub fn is_profile_registry_read(self) -> bool {
         Self::PROFILE_REGISTRY_OPERATIONS.contains(&self)
+    }
+
+    /// Whether the daemon's profile owner, not a project's owner, answers
+    /// this call. A registry read always names no project; an operation
+    /// that is otherwise project-scoped reaches the profile owner only for
+    /// the requests that select the profile.
+    pub fn is_profile_owner_request(self, arguments: &serde_json::Map<String, Value>) -> bool {
+        let argument = |key: &str| arguments.get(key).and_then(Value::as_str);
+        match self {
+            Self::ProjectList | Self::ProjectSearch | Self::ProjectContext => true,
+            Self::AdminProject => {
+                argument("action") == Some("automation_reconcile")
+                    && argument("scope") == Some("profile")
+            }
+            // Registry, storage, and savings actions read only the profile;
+            // cost and analytics name the profile when run outside a project.
+            Self::AdminCli => match argument("action") {
+                Some(
+                    "registry_list"
+                    | "registry_context"
+                    | "registry_empty"
+                    | "registry_project_tokens"
+                    | "registry_gc"
+                    | "storage_report"
+                    | "gain_query",
+                ) => true,
+                Some("cost_summary" | "analytics_sync" | "analytics_diagnostics") => {
+                    argument("scope") == Some("profile")
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 }
 
@@ -404,6 +440,51 @@ mod tests {
             ApplicationSurfaceOperation::from_catalog_name("not_an_operation"),
             None
         );
+    }
+
+    #[test]
+    fn only_profile_selecting_requests_reach_the_profile_owner() {
+        let owner = |operation: ApplicationSurfaceOperation, arguments: serde_json::Value| {
+            operation.is_profile_owner_request(arguments.as_object().expect("object arguments"))
+        };
+        let profile_reconcile =
+            serde_json::json!({"action": "automation_reconcile", "scope": "profile"});
+        assert!(owner(
+            ApplicationSurfaceOperation::ProjectList,
+            serde_json::json!({})
+        ));
+        assert!(owner(
+            ApplicationSurfaceOperation::AdminProject,
+            profile_reconcile.clone()
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminProject,
+            serde_json::json!({"action": "automation_reconcile", "scope": "project"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminProject,
+            serde_json::json!({"action": "counter_get"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminSync,
+            profile_reconcile
+        ));
+        assert!(owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "registry_list", "limit": 10})
+        ));
+        assert!(owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "cost_summary", "range": "7d", "scope": "profile"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "cost_summary", "range": "7d", "scope": "project"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "sessions_import"})
+        ));
     }
 
     #[test]

@@ -55,6 +55,12 @@ impl ApplicationSurfaceOperation {
                 ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
                 identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
+            // A bench action runs every configured query over the graph.
+            Self::AdminProject => Some(OwnerSideEffectEntryV1 {
+                effect: EffectClass::MaintainsOwnerState,
+                ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
+                identical_calls: IdenticalCallPolicyV1::RunEach,
+            }),
             _ => None,
         }
     }
@@ -105,6 +111,14 @@ mod tests {
                     "admin_cli",
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::MaintainsProfileState,
+                        ceiling_millis: 600_000,
+                        identical_calls: IdenticalCallPolicyV1::RunEach,
+                    }
+                ),
+                (
+                    "admin_project",
+                    OwnerSideEffectEntryV1 {
+                        effect: EffectClass::MaintainsOwnerState,
                         ceiling_millis: 600_000,
                         identical_calls: IdenticalCallPolicyV1::RunEach,
                     }

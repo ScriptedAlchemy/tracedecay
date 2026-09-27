@@ -1153,10 +1153,10 @@ impl McpServer {
     #[hotpath::measure(label = "mcp.server.reconcile_automation", future = true)]
     pub(crate) async fn reconcile_automation_scheduler(
         &self,
-    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
+    ) -> tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome {
         match &self.automation_scheduler_reconciler {
             Some(reconcile) => reconcile().await,
-            None => tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
+            None => tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
         }
     }
 

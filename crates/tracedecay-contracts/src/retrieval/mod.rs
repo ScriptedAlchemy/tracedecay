@@ -1,4 +1,5 @@
 mod admin_cli_surface;
+mod admin_project_surface;
 mod analysis_report_surface;
 mod analytics_surface;
 mod automation_surface;
@@ -82,6 +83,16 @@ pub use admin_cli_surface::{
     AdminCliRegistryGcV1, AdminCliRegistryListV1, AdminCliRegistryUpdateV1, AdminCliResultV1,
     AdminCliScopeV1, AdminCliSessionSyncV1, AdminCliStorageReportV1, AdminCliSurfaceRequestV1,
     AdminCliUnfinishedSessionsV1,
+};
+pub use admin_project_surface::{
+    AdminProjectBenchV1, AdminProjectCounterResetV1, AdminProjectCounterV1,
+    AdminProjectGitignoreStatusV1, AdminProjectResultV1, AdminProjectStatusAccountingV1,
+    AdminProjectSurfaceRequestV1, AutomaticFactAddRequestV1, AutomaticFactEvidenceV1,
+    AutomaticFactReceiptAvailabilityV1, AutomaticFactReceiptListV1, AutomaticFactReceiptStateV1,
+    AutomaticFactReceiptV1, AutomaticFactReceiptViewV1, AutomationReconcileScope,
+    AutomationSchedulerOwnerReconcileOutcome, AutomationSchedulerReconcileOutcome,
+    ProfileAutomationReconcileReport, ProjectAutomationReconcileReport,
+    UncachedProjectReconcileOutcome,
 };
 pub use analysis_report_surface::{
     CircularCycleV1, CircularResultV1, CircularSurfaceRequestV1, ComplexityReportEntryV1,

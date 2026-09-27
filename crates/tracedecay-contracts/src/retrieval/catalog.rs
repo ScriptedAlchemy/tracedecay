@@ -1,4 +1,5 @@
 use crate::retrieval::admin_cli_surface::{AdminCliResultV1, AdminCliSurfaceRequestV1};
+use crate::retrieval::admin_project_surface::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use crate::retrieval::owner_effect_surface::{
     AdminSyncResultV1, AdminSyncSurfaceRequestV1, DashboardResultV1, DashboardSurfaceRequestV1,
     RunAffectedTestsResultV1, RunAffectedTestsSurfaceRequestV1,
@@ -281,6 +282,7 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("project_context"),
     owner_side_effect_spec(ApplicationSurfaceOperation::AdminSync),
     owner_side_effect_spec(ApplicationSurfaceOperation::AdminCli),
+    owner_side_effect_spec(ApplicationSurfaceOperation::AdminProject),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
     git_context_spec("changelog"),
@@ -390,6 +392,7 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "project_context"
         | "admin_sync"
         | "admin_cli" => &CLI_MCP_PRIMITIVE_SURFACES,
+        "admin_project" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -641,6 +644,9 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "admin_cli" => {
             "Run one first-party CLI profile action: registry, accounting, storage, analytics, or session-sync maintenance."
+        }
+        "admin_project" => {
+            "Maintain the served project's daemon bookkeeping: its usage counter, registry token accounting, gitignore status, bench report, automatic-fact receipts, and automation scheduler reconcile."
         }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
@@ -1203,6 +1209,11 @@ fn primitive_executable_schemas(
     );
     add!("admin_sync", AdminSyncSurfaceRequestV1, AdminSyncResultV1);
     add!("admin_cli", AdminCliSurfaceRequestV1, AdminCliResultV1);
+    add!(
+        "admin_project",
+        AdminProjectSurfaceRequestV1,
+        AdminProjectResultV1
+    );
     Ok(schemas)
 }
 

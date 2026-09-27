@@ -395,7 +395,7 @@ pub async fn invoke_application_surface<E: DaemonInvocationExecutor + ?Sized>(
             )
         }
         (InvocationTarget::Profile, ApplicationSurfaceRequest::GraphTool(arguments))
-            if operation.is_profile_registry_read() =>
+            if operation.is_profile_owner_request(&arguments) =>
         {
             DaemonInvocationRequest::profile_graph_tool(
                 request_id.as_str(),
@@ -929,6 +929,7 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::ProjectContext
         | ApplicationSurfaceOperation::AdminSync
         | ApplicationSurfaceOperation::AdminCli
+        | ApplicationSurfaceOperation::AdminProject
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

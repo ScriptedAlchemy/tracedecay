@@ -228,51 +228,13 @@ use tracedecay_runtime_core::storage::{StorageMode, StoreLayout};
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
 /// defaults; override with `--port`).
 pub const DEFAULT_PORT: u16 = 7341;
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutomationSchedulerReconcileOutcome {
-    Started,
-    RunningNotified,
-    Exiting,
-    Finished,
-    Retiring,
-    NotConfigured,
-    LifecycleInactive,
-    OwnerUnavailable,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutomationReconcileScope {
-    Project,
-    Profile,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UncachedProjectReconcileOutcome {
-    DeferredUntilProjectStartup,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct AutomationSchedulerOwnerReconcileOutcome {
-    pub project_id: Option<String>,
-    pub store_root: PathBuf,
-    pub graph_db_path: PathBuf,
-    pub scope_prefix: Option<String>,
-    pub outcome: AutomationSchedulerReconcileOutcome,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct ProfileAutomationReconcileReport {
-    pub scope: AutomationReconcileScope,
-    pub cached_owners: usize,
-    pub outcomes: Vec<AutomationSchedulerOwnerReconcileOutcome>,
-    pub uncached_projects: UncachedProjectReconcileOutcome,
-}
-
-pub type AutomationSchedulerReconcileFuture =
-    Pin<Box<dyn Future<Output = AutomationSchedulerReconcileOutcome> + Send + 'static>>;
+pub type AutomationSchedulerReconcileFuture = Pin<
+    Box<
+        dyn Future<Output = tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome>
+            + Send
+            + 'static,
+    >,
+>;
 pub type AutomationSchedulerReconciler =
     Arc<dyn Fn() -> AutomationSchedulerReconcileFuture + Send + Sync + 'static>;
 pub type DashboardAutomationObservationRecorderV1 = Arc<

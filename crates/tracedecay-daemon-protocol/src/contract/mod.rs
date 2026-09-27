@@ -691,8 +691,10 @@ pub enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
-    /// A read of the authenticated profile's project registry. It names no
-    /// project: the daemon composition root owns the profile registry.
+    /// A graph-tool request the daemon's profile owner answers: a read of
+    /// the authenticated profile's project registry, or another operation's
+    /// request that selects the profile. It names no project: the daemon
+    /// composition root owns the profile.
     ProfileGraphTool {
         surface_operation: ApplicationSurfaceOperation,
         arguments: serde_json::Map<String, serde_json::Value>,
@@ -1085,7 +1087,8 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::ProjectSearch
             | ApplicationSurfaceOperation::ProjectContext
             | ApplicationSurfaceOperation::AdminSync
-            | ApplicationSurfaceOperation::AdminCli => {
+            | ApplicationSurfaceOperation::AdminCli
+            | ApplicationSurfaceOperation::AdminProject => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate
@@ -2273,13 +2276,13 @@ impl DaemonInvocationRequest {
             }
             DaemonInvocationPayload::ProfileGraphTool {
                 surface_operation,
+                arguments,
                 observed_at,
                 deadline,
                 cancellation,
-                ..
             } => {
                 if !valid_observation_window(observed_at, deadline, cancellation)
-                    || !surface_operation.is_profile_registry_read()
+                    || !surface_operation.is_profile_owner_request(arguments)
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }

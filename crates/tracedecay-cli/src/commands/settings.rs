@@ -3,6 +3,9 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_contracts::now_micros;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::retrieval::{
+    AdminProjectGitignoreStatusV1, AdminProjectResultV1, AdminProjectSurfaceRequestV1,
+};
 use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, CancellationSignal, ComponentConfigurationState,
     Deadline, EffectReceipt, ResolvedSetting,
@@ -20,8 +23,6 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-
-use super::daemon::daemon_tool_json;
 
 fn configuration_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
@@ -469,20 +470,19 @@ fn handle_gitignore_inner(
             }
             None => {
                 let resolved = super::scope::resolve_project_scope(profile, project_path).await?;
-                let response = daemon_tool_json(
+                let AdminProjectResultV1::GitignoreStatus(AdminProjectGitignoreStatusV1 {
+                    git_ignore,
+                    ..
+                }) = super::admin_project(
                     profile,
-                    Some(&resolved.project_path),
-                    "tracedecay_admin_project",
-                    serde_json::json!({ "action": "gitignore_status" }),
+                    &resolved.project_path,
+                    AdminProjectSurfaceRequestV1::GitignoreStatus {},
                 )
-                .await?;
-                let enabled = response
-                    .get("git_ignore")
-                    .and_then(serde_json::Value::as_bool)
-                    .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "daemon gitignore status omitted git_ignore".to_string(),
-                    })?;
-                let status = if enabled { "on" } else { "off" };
+                .await?
+                else {
+                    return Err(super::unexpected_admin_project_result());
+                };
+                let status = if git_ignore { "on" } else { "off" };
                 eprintln!("gitignore: {status}");
             }
         }

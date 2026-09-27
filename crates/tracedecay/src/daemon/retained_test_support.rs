@@ -95,22 +95,36 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
                 ..
             } = request.payload
             {
-                let authority = async {
-                    self.profile_registry
-                        .clone()
-                        .ok_or_else(|| TraceDecayError::Config {
-                            message: "the test server mounts no profile registry".to_owned(),
-                        })
+                let compute = |arguments| async move {
+                    let (scope, registry) =
+                        self.profile_registry
+                            .clone()
+                            .ok_or_else(|| TraceDecayError::Config {
+                                message: "the test server mounts no profile registry".to_owned(),
+                            })?;
+                    if !surface_operation.is_profile_registry_read() {
+                        return Err(TraceDecayError::Config {
+                            message: "the test server's profile owner answers only registry reads"
+                                .to_owned(),
+                        });
+                    }
+                    let completion = super::profile_owner::registry_read(
+                        registry,
+                        Some(&self.project_root),
+                        surface_operation,
+                        arguments,
+                    )
+                    .await?;
+                    Ok((scope, completion))
                 };
-                return Ok(super::profile_registry::answer_profile_registry_read(
-                    authority,
-                    Some(&self.project_root),
+                return Ok(super::profile_owner::answer_profile_owner_operation(
                     request.request_id,
                     surface_operation,
                     arguments,
                     deadline,
                     context,
                     None,
+                    compute,
                 )
                 .await);
             }

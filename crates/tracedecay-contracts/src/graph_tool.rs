@@ -12,7 +12,7 @@ use crate::retrieval::{
     StatusResultV1,
 };
 use crate::retrieval::{
-    AdminCliResultV1, AdminSyncResultV1, AffectedResultV1, AnalyticsResultV1,
+    AdminCliResultV1, AdminProjectResultV1, AdminSyncResultV1, AffectedResultV1, AnalyticsResultV1,
     AstGrepSearchResultV1, AutomationRunArtifactViewResultV1, AutomationRunListResultV1,
     AutomationRunViewResultV1, BranchDiffResultV1, BranchListResultV1, BranchSearchResultV1,
     ByQualifiedNameResultV1, ChangelogResultV1, CircularResultV1, CommitContextResultV1,
@@ -100,6 +100,7 @@ pub enum GraphToolResultV1 {
     ProjectContext(ProjectContextResultV1),
     AdminSync(AdminSyncResultV1),
     AdminCli(Box<AdminCliResultV1>),
+    AdminProject(Box<AdminProjectResultV1>),
 }
 
 impl GraphToolResultV1 {
@@ -180,6 +181,7 @@ impl GraphToolResultV1 {
             Operation::ProjectContext => Self::ProjectContext(serde_json::from_value(value)?),
             Operation::AdminSync => Self::AdminSync(serde_json::from_value(value)?),
             Operation::AdminCli => Self::AdminCli(serde_json::from_value(value)?),
+            Operation::AdminProject => Self::AdminProject(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -259,6 +261,7 @@ impl GraphToolResultV1 {
             Self::ProjectContext(result) => serde_json::to_value(result),
             Self::AdminSync(result) => serde_json::to_value(result),
             Self::AdminCli(result) => serde_json::to_value(result),
+            Self::AdminProject(result) => serde_json::to_value(result),
         }
     }
 }

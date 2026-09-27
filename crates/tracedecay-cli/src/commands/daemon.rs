@@ -120,9 +120,11 @@ fn retained_decode_error(
     }
 }
 
-/// One `tracedecay_admin_cli` action under the shared CLI tool deadline,
-/// answered by the owner of `project_path` when it names a project and by the
-/// daemon's profile owner otherwise. A refusal is the command's error.
+/// One `tracedecay_admin_cli` action under the shared CLI tool deadline. The
+/// request selects its owner: the profile owner answers the profile's
+/// registry, storage, and savings actions and profile-scoped cost and
+/// analytics; the owner of `project_path` answers the rest. A refusal is the
+/// command's error.
 pub(crate) async fn admin_cli_result(
     profile: &ProfileRoot,
     project_path: Option<&std::path::Path>,
@@ -133,22 +135,13 @@ pub(crate) async fn admin_cli_result(
         .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: "the CLI tool deadline exceeds the supported monotonic range".to_owned(),
         })?;
-    let arguments = serde_json::to_value(request)?;
-    let result = match project_path {
-        Some(_) => {
-            crate::tool_command::owner_operation_result(
-                client_handshake(profile, project_path)?,
-                ApplicationSurfaceOperation::AdminCli,
-                arguments,
-                deadline,
-            )
-            .await?
-        }
-        None => GraphToolResultV1::from_result_value(
-            ApplicationSurfaceOperation::AdminCli,
-            daemon_tool_json(profile, None, "tracedecay_admin_cli", arguments).await?,
-        )?,
-    };
+    let result = crate::tool_command::owner_operation_result(
+        client_handshake(profile, project_path)?,
+        ApplicationSurfaceOperation::AdminCli,
+        serde_json::to_value(request)?,
+        deadline,
+    )
+    .await?;
     match result {
         GraphToolResultV1::AdminCli(result) => Ok(*result),
         _ => Err(admin_cli_result_mismatch("tracedecay_admin_cli")),

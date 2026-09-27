@@ -460,7 +460,7 @@ pub type GraphToolOutcome = std::result::Result<
 >;
 
 /// Invoke one graph-tool operation through the project's graph-tool owner, or
-/// one profile registry read through the daemon's profile owner, and return
+/// one profile-owner request through the daemon's profile owner, and return
 /// its typed result. Every refusal keeps the owner's whole problem record for
 /// the surface to render.
 #[allow(clippy::too_many_arguments)]
@@ -474,6 +474,9 @@ pub async fn execute_graph_tool_surface(
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<GraphToolOutcome> {
+    let profile_owner_request = args
+        .as_object()
+        .is_some_and(|arguments| operation.is_profile_owner_request(arguments));
     let request = parse_application_surface_request(operation, args).map_err(|error| {
         TraceDecayError::Config {
             message: match error {
@@ -511,9 +514,9 @@ pub async fn execute_graph_tool_surface(
         RequestedOutputFormat::Json,
     )
     .map_err(application_surface_dispatch_error)?;
-    // The profile registry names no project, so the daemon's profile owner
-    // answers it whatever project this caller's executor serves.
-    if operation.is_profile_registry_read() {
+    // A request that names no project, only the profile, is the daemon's
+    // profile owner's whatever project this caller's executor serves.
+    if profile_owner_request {
         dispatched.invocation.invocation.scope = InvocationTarget::Profile;
     }
     let binding_id = dispatched.invocation.binding_id.clone();

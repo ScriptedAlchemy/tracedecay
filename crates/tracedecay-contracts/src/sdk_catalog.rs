@@ -176,7 +176,8 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::ProjectSearch
         | ApplicationSurfaceOperation::ProjectContext
         | ApplicationSurfaceOperation::AdminSync
-        | ApplicationSurfaceOperation::AdminCli) => {
+        | ApplicationSurfaceOperation::AdminCli
+        | ApplicationSurfaceOperation::AdminProject) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList

@@ -317,6 +317,10 @@ mod tests {
                     "available",
                 ),
                 ("capability.application.primitive.admin-cli", "available"),
+                (
+                    "capability.application.primitive.admin-project",
+                    "available",
+                ),
                 ("capability.application.primitive.admin-sync", "available"),
                 ("capability.application.primitive.affected", "available"),
                 ("capability.application.primitive.analytics", "available"),
