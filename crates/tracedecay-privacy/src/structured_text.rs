@@ -159,6 +159,16 @@ pub(crate) fn sanitize_structured_text(
     raw: &str,
 ) -> Result<StructuredTextSanitizationV1, DetectionError> {
     let patterns = credential_patterns()?;
+    let sanitized = sanitize_structured_text_with(raw, patterns)?;
+    patterns
+        .checked(sanitized)
+        .map_err(|_| DetectionError::Initialization)
+}
+
+fn sanitize_structured_text_with(
+    raw: &str,
+    patterns: &CredentialPatternSet,
+) -> Result<StructuredTextSanitizationV1, DetectionError> {
     let no_configured_keys = BTreeSet::new();
     let policy = ConfiguredSensitiveKeyPolicy(&no_configured_keys);
 
@@ -629,7 +639,12 @@ pub fn sanitize_code_source_bytes(
     let invalid_utf8 = matches!(&source, std::borrow::Cow::Owned(_));
     let detected = match shape {
         CodeSourceShapeV1::StructuredData => sanitize_structured_text(&source)?,
-        CodeSourceShapeV1::CodeOrProse => raw_only(&source, credential_patterns()?),
+        CodeSourceShapeV1::CodeOrProse => {
+            let patterns = credential_patterns()?;
+            patterns
+                .checked(raw_only(&source, patterns))
+                .map_err(|_| DetectionError::Initialization)?
+        }
     };
     if !detected.quarantine_findings().is_empty() {
         return Err(quarantine_detection_error(detected.quarantine_findings()));

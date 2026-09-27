@@ -49,8 +49,10 @@ pub fn detect_secret_like(content: &str) -> Option<String> {
         return Some("credential detector unavailable".to_string());
     };
     for pattern in patterns {
-        if pattern.is_match(content) {
-            return Some(credential_reason(pattern.kind()).to_string());
+        match pattern.is_match(content) {
+            Ok(true) => return Some(credential_reason(pattern.kind()).to_string()),
+            Ok(false) => {}
+            Err(_) => return Some("credential detector unavailable".to_string()),
         }
     }
     for token in content.split_whitespace() {
