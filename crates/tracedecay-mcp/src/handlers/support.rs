@@ -6,37 +6,55 @@ use std::path::Path;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{
+    CursorBindingMismatchV1, CursorBindingV1, decode_bound_cursor, encode_bound_cursor,
+};
 
 use crate::ToolResult;
+use crate::tool_errors::cursor_refusal;
 use crate::tools::render;
 
-/// Decodes a paginated read's continuation from the transport arguments.
+/// A bound retrieval continuation stays inside the application cursor bound.
+const MAX_RETRIEVAL_CURSOR_BYTES: usize = 8_192;
+
+/// Decodes the authenticated retrieval continuation `encoded` names, when it
+/// was minted for `binding`.
 ///
 /// The cursor is caller-supplied, so it is bounded before parsing and then
 /// validated: a continuation that does not authenticate is rejected rather
 /// than treated as "start from the beginning", which would silently restart
 /// a page walk instead of reporting the tampered envelope.
-pub fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
-    decode_retrieval_cursor(args.get("cursor").and_then(Value::as_str))
-}
-
-/// Decodes and validates one encoded authenticated retrieval continuation.
 pub fn decode_retrieval_cursor(
+    binding: &CursorBindingV1,
     encoded: Option<&str>,
 ) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
     let Some(encoded) = encoded else {
         return Ok(None);
     };
-    if encoded.len() > 4_096 {
-        return Err(TraceDecayError::Config {
-            message: "cursor exceeds its bounded authenticated envelope".to_owned(),
-        });
+    if encoded.len() > MAX_RETRIEVAL_CURSOR_BYTES {
+        return Err(cursor_refusal(&CursorBindingMismatchV1::Foreign));
     }
-    let cursor: tracedecay_domain::RetrievalCursor = serde_json::from_str(encoded)?;
-    cursor.validate().map_err(|_| TraceDecayError::Config {
-        message: "cursor is not a valid authenticated retrieval continuation".to_owned(),
-    })?;
+    let cursor: tracedecay_domain::RetrievalCursor =
+        decode_bound_cursor(binding, encoded).map_err(|mismatch| cursor_refusal(&mismatch))?;
+    cursor
+        .validate()
+        .map_err(|_| cursor_refusal(&CursorBindingMismatchV1::Foreign))?;
     Ok(Some(cursor))
+}
+
+/// The continuation a caller presents with `binding`'s request to read the
+/// page after `cursor`.
+pub fn encode_retrieval_cursor(
+    binding: &CursorBindingV1,
+    cursor: Option<&tracedecay_domain::RetrievalCursor>,
+) -> Result<Option<String>> {
+    cursor
+        .map(|cursor| {
+            encode_bound_cursor(binding, cursor).map_err(|error| TraceDecayError::Config {
+                message: format!("failed to encode retrieval cursor: {error}"),
+            })
+        })
+        .transpose()
 }
 
 /// The single wrapper every MCP tool handler returns through.

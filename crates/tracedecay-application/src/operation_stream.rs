@@ -2061,7 +2061,7 @@ mod tests {
             reader
                 .latest_page("file:///workspace", &PageRequest::first(1).expect("page"),)
                 .await,
-            Err(ManagedTestRunUnavailableReason::FrontierExpired)
+            Err(OperationEventError::FrontierExpired)
         );
     }
 
@@ -2159,12 +2159,48 @@ mod tests {
             reader
                 .latest_current_page(
                     &current,
-                    &PageRequest::new(2, Some(tampered)).expect("tampered page"),
+                    &PageRequest::new(2, Some(tampered.clone())).expect("tampered page"),
                 )
                 .await,
             ManagedTestRunReadOutcome::Unavailable(
                 ManagedTestRunUnavailableReason::AuthorityFailure,
             )
+        );
+        assert_eq!(
+            reader
+                .latest_page(
+                    "file:///workspace",
+                    &PageRequest::new(2, Some(tampered)).expect("tampered page"),
+                )
+                .await
+                .map(|page| page.result_offset),
+            Err(OperationEventError::CursorRefused(
+                tracedecay_domain::CursorBindingMismatchV1::Foreign
+            ))
+        );
+        assert_eq!(
+            reader
+                .latest_page(
+                    "file:///workspace",
+                    &PageRequest::new(1, Some(cursor.clone())).expect("resized page"),
+                )
+                .await
+                .map(|page| page.result_offset),
+            Err(OperationEventError::CursorRefused(
+                tracedecay_domain::CursorBindingMismatchV1::ParameterChanged {
+                    parameter: "page_size"
+                }
+            ))
+        );
+        assert_eq!(
+            reader
+                .latest_page(
+                    "file:///workspace",
+                    &PageRequest::new(2, Some(cursor.clone())).expect("continuation page"),
+                )
+                .await
+                .map(|page| page.result_offset),
+            Ok(2)
         );
 
         let ManagedTestRunReadOutcome::Current(second) = reader

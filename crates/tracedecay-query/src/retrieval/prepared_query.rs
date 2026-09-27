@@ -253,6 +253,14 @@ impl PreparedQueryV1 {
             canonical_sha256(&candidates).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
         let start = match &self.cursor {
             Some(cursor) => {
+                // Authenticated by this authority already, so a changed request
+                // parameter is reported before the scope or generation it moved.
+                if let Some(mismatch) = cursor
+                    .payload
+                    .request_mismatch(&bindings.query_binding, page_size)
+                {
+                    return Err(mismatch);
+                }
                 if cursor.payload.scope_digest != bindings.scope_digest {
                     return Err(PreparedQueryErrorV1::Foreign);
                 }
@@ -261,12 +269,6 @@ impl PreparedQueryV1 {
                     || cursor.payload.candidate_set_digest != candidate_set_digest
                 {
                     return Err(PreparedQueryErrorV1::Stale);
-                }
-                if let Some(mismatch) = cursor
-                    .payload
-                    .request_mismatch(&bindings.query_binding, page_size)
-                {
-                    return Err(mismatch);
                 }
                 usize::try_from(cursor.payload.next_offset)
                     .map_err(|_| PreparedQueryErrorV1::Invalid)?

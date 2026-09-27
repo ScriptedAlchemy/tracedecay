@@ -598,6 +598,10 @@ mod tests {
         assert!(SourceReadAdapter::new_bound(matching, projection, scope, &admitted_root,).is_ok());
     }
 
+    fn lane(name: &'static str) -> tracedecay_domain::CursorBindingV1 {
+        tracedecay_domain::CursorBindingV1::new(name, Vec::new()).expect("lane binding")
+    }
+
     struct FixedSnapshotAuthority {
         snapshot: SymbolGraphCursorSnapshot,
     }
@@ -661,18 +665,18 @@ mod tests {
         );
 
         let claim = adapter
-            .claim_page(&context, "search", None, NOW)
+            .claim_page(&context, &lane("search"), None, NOW)
             .await
             .expect("claim page");
         assert_eq!(claim.offset(), 0, "a first page starts at the beginning");
         let cursor = adapter
-            .finish_page(&context, "search", &claim, 3, 8, true, NOW)
+            .finish_page(&context, &lane("search"), &claim, 3, 8, true, NOW)
             .await
             .expect("finish page")
             .expect("a page with more to serve mints a continuation");
         assert_eq!(
             adapter
-                .claim_page(&context, "search", Some(&cursor), NOW)
+                .claim_page(&context, &lane("search"), Some(&cursor), NOW)
                 .await
                 .expect("resume cursor")
                 .offset(),
@@ -680,7 +684,7 @@ mod tests {
         );
         assert!(
             adapter
-                .finish_page(&context, "search", &claim, 8, 8, false, NOW)
+                .finish_page(&context, &lane("search"), &claim, 8, 8, false, NOW)
                 .await
                 .expect("finish page")
                 .is_none(),
@@ -704,7 +708,7 @@ mod tests {
         );
         assert!(
             changed
-                .claim_page(&context, "search", Some(&cursor), NOW)
+                .claim_page(&context, &lane("search"), Some(&cursor), NOW)
                 .await
                 .is_err()
         );
@@ -712,7 +716,7 @@ mod tests {
             application_context_for_project("symbol-graph", "project.retrieval-primitives.other");
         assert!(
             adapter
-                .claim_page(&other_context, "search", Some(&cursor), NOW)
+                .claim_page(&other_context, &lane("search"), Some(&cursor), NOW)
                 .await
                 .is_err()
         );
@@ -742,11 +746,11 @@ mod tests {
         );
 
         let claim = adapter
-            .claim_page(&context, "search", None, NOW)
+            .claim_page(&context, &lane("search"), None, NOW)
             .await
             .expect("claim page");
         let failure = adapter
-            .finish_page(&context, "search", &claim, 3, 8, true, NOW)
+            .finish_page(&context, &lane("search"), &claim, 3, 8, true, NOW)
             .await
             .expect_err("a superseded generation must refuse the page");
         assert_eq!(failure.kind, PrimitiveFailureKind::Stale);
