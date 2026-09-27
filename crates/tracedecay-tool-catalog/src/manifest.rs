@@ -139,6 +139,9 @@ pub enum EffectClass {
     SpawnsProcess,
     /// Binds a listening server in the daemon process.
     BindsServer,
+    /// Queues work on a daemon-owned scheduler; the call answers with the
+    /// scheduler's admission, not the finished work.
+    SchedulesWork,
 }
 
 impl EffectClass {
@@ -149,7 +152,10 @@ impl EffectClass {
     /// An effect of an owner-served operation that settles within the call:
     /// it answers with an operation receipt and takes no idempotency key.
     pub const fn is_owner_side_effect(self) -> bool {
-        matches!(self, Self::SpawnsProcess | Self::BindsServer)
+        matches!(
+            self,
+            Self::SpawnsProcess | Self::BindsServer | Self::SchedulesWork
+        )
     }
 
     pub const fn is_read_only(self) -> bool {

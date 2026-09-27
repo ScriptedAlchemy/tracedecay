@@ -13,8 +13,8 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
 };
 use tracedecay_contracts::retrieval::{
-    ActiveProjectSurfaceRequestV1, RemoteStatusSurfaceRequestV1, RuntimeSurfaceRequestV1,
-    StatusSurfaceRequestV1,
+    ActiveProjectSurfaceRequestV1, AdminSyncSurfaceRequestV1, RemoteStatusSurfaceRequestV1,
+    RuntimeSurfaceRequestV1, StatusSurfaceRequestV1,
 };
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
 use tracedecay_mcp::handlers::health as portable_health;
@@ -107,21 +107,6 @@ async fn admitted_graph_query_for_operation(
         },
     );
     Ok(query)
-}
-
-/// Dispatch the daemon-only `tracedecay_admin_sync`.
-#[hotpath::measure(future = true, label = "mcp.dispatch.info")]
-pub(super) async fn dispatch_info_tools(
-    tool_name: &str,
-    cg: &TraceDecay,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    match tool_name {
-        "tracedecay_admin_sync" => {
-            info::handle_admin_sync(cg, options.code_index_reconcile_sink.as_ref()).await
-        }
-        _ => Err(unknown_tool_error(tool_name)),
-    }
 }
 
 /// Dispatch administrative tools (`tracedecay_hook_runtime`,
@@ -750,6 +735,13 @@ async fn compute_owner_side_effect(
                 options.application_cancellation.clone(),
             )
             .await;
+        }
+        ApplicationSurfaceOperation::AdminSync => {
+            let AdminSyncSurfaceRequestV1 {} =
+                decode_primitive_request(&args, operation.mcp_tool_name())?;
+            GraphToolResultV1::AdminSync(
+                info::admin_sync(cg, options.code_index_reconcile_sink.as_ref()).await?,
+            )
         }
         ApplicationSurfaceOperation::Dashboard => {
             let request = tracedecay_mcp::handlers::decode_primitive_request(

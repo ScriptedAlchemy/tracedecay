@@ -226,6 +226,7 @@ application_surface_operations! {
     ProjectList => "project_list";
     ProjectSearch => "project_search";
     ProjectContext => "project_context";
+    AdminSync => "admin_sync";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -359,6 +360,7 @@ impl ApplicationSurfaceOperation {
         Self::ActiveProject,
         Self::RemoteStatus,
         Self::Runtime,
+        Self::AdminSync,
     ];
 
     /// Reads of the authenticated profile's project registry. They name no
@@ -367,8 +369,17 @@ impl ApplicationSurfaceOperation {
     pub const PROFILE_REGISTRY_OPERATIONS: &[Self] =
         &[Self::ProjectList, Self::ProjectSearch, Self::ProjectContext];
 
+    /// Owner-served operations that first-party CLI commands and host hooks
+    /// call by name. They are never advertised in `tools/list` or mounted on
+    /// HTTP, so an agent cannot discover or select them.
+    pub const INTERNAL_OPERATIONS: &[Self] = &[Self::AdminSync];
+
     pub fn is_graph_tool(self) -> bool {
         Self::GRAPH_TOOL_OPERATIONS.contains(&self)
+    }
+
+    pub fn is_internal(self) -> bool {
+        Self::INTERNAL_OPERATIONS.contains(&self)
     }
 
     pub fn is_profile_registry_read(self) -> bool {

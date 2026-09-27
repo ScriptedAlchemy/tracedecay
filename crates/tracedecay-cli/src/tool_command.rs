@@ -129,7 +129,7 @@ fn tool_deadline_range_error() -> TraceDecayError {
     }
 }
 
-fn tool_command_deadline() -> Result<Duration> {
+pub(crate) fn tool_command_deadline() -> Result<Duration> {
     tool_request_deadline()
 }
 
@@ -805,10 +805,6 @@ async fn dispatch_cli_graph_tool(
             ),
         });
     }
-    let request_id =
-        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
-            message: "could not allocate an application surface request id".to_owned(),
-        })?;
     let handshake = tracedecay::daemon::handshake_for_current_client(
         profile,
         project.clone(),
@@ -816,11 +812,39 @@ async fn dispatch_cli_graph_tool(
         false,
         false,
     )?;
+    let outcome = invoke_cli_graph_tool(handshake, operation, &tool_args, deadline).await?;
+    let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
+    let mut result = match outcome {
+        Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+            response_handle_root.as_deref(),
+            &tool_args,
+            completion,
+        )?,
+        Err(refusal) => refusal.render(response_handle_root.as_deref(), &tool_args)?,
+    };
+    account_tool_result(project.as_deref(), &mut result);
+    tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+    print_tool_output(&result.value, raw_json);
+    tool_result_process_outcome(&result.value, tool_name)
+}
+
+/// Run one graph-tool owner operation for `project` through the daemon and
+/// return its settled outcome.
+async fn invoke_cli_graph_tool(
+    handshake: DaemonHandshake,
+    operation: ApplicationSurfaceOperation,
+    tool_args: &Value,
+    deadline: Instant,
+) -> Result<tracedecay::mcp::tools::GraphToolOutcome> {
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate an application surface request id".to_owned(),
+        })?;
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
-    let outcome = loop {
+    loop {
         let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
         let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
             tracedecay_tool_catalog::BindingSurface::Cli,
@@ -837,26 +861,27 @@ async fn dispatch_cli_graph_tool(
             .err()
             .and_then(|refusal| refusal.problem.problem.owner_mount_resend_delay())
         else {
-            break outcome;
+            return Ok(outcome);
         };
         if deadline.saturating_duration_since(Instant::now()) <= delay {
-            break outcome;
+            return Ok(outcome);
         }
         tokio::time::sleep(delay).await;
-    };
-    let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
-    let mut result = match outcome {
-        Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-            response_handle_root.as_deref(),
-            &tool_args,
-            completion,
-        )?,
-        Err(refusal) => refusal.render(response_handle_root.as_deref(), &tool_args)?,
-    };
-    account_tool_result(project.as_deref(), &mut result);
-    tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    print_tool_output(&result.value, raw_json);
-    tool_result_process_outcome(&result.value, tool_name)
+    }
+}
+
+/// The typed result a first-party command asks the project's owner for; a
+/// refusal is the command's error.
+pub(crate) async fn owner_operation_result(
+    handshake: DaemonHandshake,
+    operation: ApplicationSurfaceOperation,
+    arguments: Value,
+    deadline: Instant,
+) -> Result<tracedecay_contracts::graph_tool::GraphToolResultV1> {
+    match invoke_cli_graph_tool(handshake, operation, &arguments, deadline).await? {
+        Ok(completion) => Ok(completion.result),
+        Err(refusal) => Err(refusal.into_error()),
+    }
 }
 
 /// Run one profile registry read through the daemon's profile owner and print

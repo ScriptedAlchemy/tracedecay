@@ -386,7 +386,6 @@ pub(super) async fn concrete_dispatch_group_accepts(
         McpToolDispatchGroup::MultiRoot => {
             owned(handle_multi_root(tool_name, invalid_args, None, None, None, None).await)
         }
-        McpToolDispatchGroup::Info => owned(dispatch_info_tools(tool_name, cg, options).await),
         McpToolDispatchGroup::Admin => {
             owned(dispatch_admin_tools(tool_name, cg, invalid_args, options).await)
         }

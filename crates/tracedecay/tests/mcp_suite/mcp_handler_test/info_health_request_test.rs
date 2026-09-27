@@ -1,7 +1,8 @@
-//! The project-info, registry, and runtime reads decode their arguments
-//! against a typed request over the production MCP `tools/call` path: an
-//! argument outside the request contract is refused instead of being silently
-//! ignored, and a valid call answers the typed result through its owner.
+//! The project-info, registry, and runtime reads, and the admin sync the CLI
+//! requests, decode their arguments against a typed request over the
+//! production MCP `tools/call` path: an argument outside the request contract
+//! is refused instead of being silently ignored, and a valid call answers the
+//! typed result through its owner.
 
 #![cfg(feature = "test-transport")]
 
@@ -307,6 +308,42 @@ async fn info_and_runtime_reads_refuse_arguments_outside_their_typed_request() {
         invalid(
             "tracedecay_project_context",
             "unknown field `project`, expected `project_id`"
+        )
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+/// `tracedecay_admin_sync` is the owner's side effect the CLI's `init` and
+/// `sync` request by name: it answers the code-index scheduler's typed
+/// admission and refuses any argument, since it always reconciles the served
+/// project.
+#[tokio::test]
+async fn admin_sync_answers_the_scheduler_admission_and_refuses_arguments() {
+    let fixture = production_composition_fixture().await;
+    let root = canonical_existing_identity(&fixture.project_root)
+        .expect("canonical project root")
+        .display()
+        .to_string();
+
+    assert_eq!(
+        call_json(&fixture, "tracedecay_admin_sync", json!({})).await,
+        json!({
+            "reconcile_scope": "authoritative_project",
+            "status": "queued",
+            "project_root": root,
+        })
+    );
+    assert_eq!(
+        refusal(
+            &fixture,
+            "tracedecay_admin_sync",
+            json!({"project_root": "/elsewhere"})
+        )
+        .await,
+        invalid(
+            "tracedecay_admin_sync",
+            "unknown field `project_root`, there are no fields"
         )
     );
 

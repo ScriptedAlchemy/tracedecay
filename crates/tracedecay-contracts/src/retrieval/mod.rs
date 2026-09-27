@@ -178,6 +178,7 @@ pub use graph_report_surface::{
 };
 pub use grep_analysis::{DependencyDepthChainV1, DependencyDepthResultV1};
 pub use owner_effect_surface::{
+    AdminSyncAdmissionV1, AdminSyncReconcileScopeV1, AdminSyncResultV1, AdminSyncSurfaceRequestV1,
     AffectedTestErrorV1, AffectedTestOutcomeV1, AffectedTestRunV1, AffectedTestsNotRunV1,
     DashboardActionV1, DashboardBoundV1, DashboardResultV1, DashboardSurfaceRequestV1,
     ManagedTestTerminalV1, RunAffectedTestsResultV1, RunAffectedTestsSurfaceRequestV1,

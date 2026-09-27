@@ -1,18 +1,23 @@
-//! Daemon-only `tracedecay_admin_sync`, still needs the code-index reconcile sink.
+//! `tracedecay_admin_sync`: the operator's code-index reconcile, which needs
+//! the daemon's code-index reconcile sink.
 
-use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandV1,
 };
+use tracedecay_contracts::retrieval::{
+    AdminSyncAdmissionV1, AdminSyncReconcileScopeV1, AdminSyncResultV1,
+};
 
-/// Daemon-only sync entry point used by the first-party CLI. It is deliberately
-/// not advertised in the MCP catalog: external agents should rely on the
-/// daemon watcher while the CLI can request an explicit serialized refresh.
+use super::{Result, TraceDecay, TraceDecayError};
+
+/// Queues the reconcile the first-party CLI asks for (`tracedecay init` /
+/// `tracedecay sync`). It is never advertised: external agents rely on the
+/// daemon watcher.
 #[hotpath::measure(label = "mcp.info.admin_sync.total")]
-pub(crate) async fn handle_admin_sync(
+pub(crate) async fn admin_sync(
     cg: &TraceDecay,
     reconcile_sink: Option<&crate::mcp::server::CodeIndexReconcileSink>,
-) -> Result<ToolResult> {
+) -> Result<AdminSyncResultV1> {
     let project_root = cg.project_root().to_path_buf();
     let reconcile_sink = reconcile_sink.ok_or_else(|| {
         TraceDecayError::project_route(
@@ -21,16 +26,16 @@ pub(crate) async fn handle_admin_sync(
             "admin sync requires the daemon code-index scheduler",
         )
     })?;
-    // The operator named this route (`tracedecay init` / `tracedecay sync`):
-    // the one demand that may index a route the watcher policy keeps quiet.
+    // The operator named this route: the one demand that may index a route
+    // the watcher policy keeps quiet.
     let admission = hotpath::future!(
-        reconcile_sink(project_root.clone(), CodeIndexDemandV1::OperatorReconcile,),
+        reconcile_sink(project_root.clone(), CodeIndexDemandV1::OperatorReconcile),
         label = "mcp.info.admin_sync.reconcile"
     )
     .await;
     let status = match admission {
-        CodeIndexDemandAdmissionV1::Queued => "queued",
-        CodeIndexDemandAdmissionV1::NotApplicable => "not_applicable",
+        CodeIndexDemandAdmissionV1::Queued => AdminSyncAdmissionV1::Queued,
+        CodeIndexDemandAdmissionV1::NotApplicable => AdminSyncAdmissionV1::NotApplicable,
         CodeIndexDemandAdmissionV1::Terminal(parked) => {
             return Err(parked.publication_authority_corrupt_error());
         }
@@ -41,19 +46,9 @@ pub(crate) async fn handle_admin_sync(
             return Err(crate::mcp::server::code_index_unavailable_error(cause));
         }
     };
-    let output = json!({
-        "reconcile_scope": "authoritative_project",
-        "status": status,
-        "project_root": cg.project_root(),
-    });
-    let text = serde_json::to_string(&output)?;
-    Ok(ToolResult::new(
-        json!({
-            "content": [{
-                "type": "text",
-                "text": text,
-            }]
-        }),
-        Vec::new(),
-    ))
+    Ok(AdminSyncResultV1 {
+        reconcile_scope: AdminSyncReconcileScopeV1::AuthoritativeProject,
+        status,
+        project_root: project_root.to_string_lossy().into_owned(),
+    })
 }

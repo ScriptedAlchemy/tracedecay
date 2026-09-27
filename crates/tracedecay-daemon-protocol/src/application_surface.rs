@@ -950,7 +950,8 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::Runtime
         | ApplicationSurfaceOperation::ProjectList
         | ApplicationSurfaceOperation::ProjectSearch
-        | ApplicationSurfaceOperation::ProjectContext => match value {
+        | ApplicationSurfaceOperation::ProjectContext
+        | ApplicationSurfaceOperation::AdminSync => match value {
             Value::Object(arguments) => Ok(ApplicationSurfaceRequest::GraphTool(arguments)),
             _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(
                 "invalid arguments: {} expects a JSON object",

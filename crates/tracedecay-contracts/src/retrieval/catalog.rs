@@ -1,6 +1,6 @@
 use crate::retrieval::owner_effect_surface::{
-    DashboardResultV1, DashboardSurfaceRequestV1, RunAffectedTestsResultV1,
-    RunAffectedTestsSurfaceRequestV1,
+    AdminSyncResultV1, AdminSyncSurfaceRequestV1, DashboardResultV1, DashboardSurfaceRequestV1,
+    RunAffectedTestsResultV1, RunAffectedTestsSurfaceRequestV1,
 };
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
@@ -278,6 +278,7 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("project_list"),
     graph_report_spec("project_search"),
     graph_report_spec("project_context"),
+    owner_side_effect_spec(ApplicationSurfaceOperation::AdminSync),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
     git_context_spec("changelog"),
@@ -384,7 +385,8 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "runtime"
         | "project_list"
         | "project_search"
-        | "project_context" => &CLI_MCP_PRIMITIVE_SURFACES,
+        | "project_context"
+        | "admin_sync" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -631,6 +633,9 @@ fn primitive_read_description(operation: &str) -> &'static str {
         "project_context" => {
             "Read one registered project's metadata, aliases, and store instances."
         }
+        "admin_sync" => {
+            "Queue the operator's code-index reconcile of the served project and report the scheduler's admission."
+        }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
 }
@@ -679,7 +684,8 @@ const fn graph_report_spec(operation: &'static str) -> PrimitiveReadSpec {
 }
 
 /// A read observes cancellation until it answers. A spawned process is killed
-/// when its call is cancelled; binding a server is not interruptible.
+/// when its call is cancelled; binding a server or queueing scheduler work is
+/// not interruptible.
 fn primitive_cancellation(
     spec: &PrimitiveReadSpec,
 ) -> Result<CancellationContract, ApplicationContractError> {
@@ -700,9 +706,9 @@ fn primitive_cancellation(
 
 fn primitive_terminal_states(spec: &PrimitiveReadSpec) -> Vec<TerminalState> {
     let mut states = vec![TerminalState::Completed];
-    if !matches!(
+    if matches!(
         spec.side_effect.map(|entry| entry.effect),
-        Some(EffectClass::BindsServer)
+        None | Some(EffectClass::SpawnsProcess)
     ) {
         states.push(TerminalState::Cancelled);
     }
@@ -1188,6 +1194,7 @@ fn primitive_executable_schemas(
         ProjectContextSurfaceRequestV1,
         ProjectContextResultV1
     );
+    add!("admin_sync", AdminSyncSurfaceRequestV1, AdminSyncResultV1);
     Ok(schemas)
 }
 

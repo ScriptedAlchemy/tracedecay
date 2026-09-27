@@ -12,11 +12,11 @@ use crate::retrieval::{
     StatusResultV1,
 };
 use crate::retrieval::{
-    AffectedResultV1, AnalyticsResultV1, AstGrepSearchResultV1, AutomationRunArtifactViewResultV1,
-    AutomationRunListResultV1, AutomationRunViewResultV1, BranchDiffResultV1, BranchListResultV1,
-    BranchSearchResultV1, ByQualifiedNameResultV1, ChangelogResultV1, CircularResultV1,
-    CommitContextResultV1, ComplexityReportV1, ConfigResultV1, ConstructorsResultV1,
-    ContextResultV1, CouplingResultV1, DashboardResultV1, DeadCodeResultV1,
+    AdminSyncResultV1, AffectedResultV1, AnalyticsResultV1, AstGrepSearchResultV1,
+    AutomationRunArtifactViewResultV1, AutomationRunListResultV1, AutomationRunViewResultV1,
+    BranchDiffResultV1, BranchListResultV1, BranchSearchResultV1, ByQualifiedNameResultV1,
+    ChangelogResultV1, CircularResultV1, CommitContextResultV1, ComplexityReportV1, ConfigResultV1,
+    ConstructorsResultV1, ContextResultV1, CouplingResultV1, DashboardResultV1, DeadCodeResultV1,
     DependencyDepthResultV1, DerivesResultV1, DiagnoseResultV1, DiffContextResultV1,
     DistributionResultV1, DocCoverageResultV1, DsmResultV1, FieldSitesResultV1, FilesResultV1,
     FindExactSymbolResultV1, GiniResultV1, GodClassResultV1, GrepSearchResultV1, HealthResultV1,
@@ -98,6 +98,7 @@ pub enum GraphToolResultV1 {
     ProjectList(ProjectRegistryListingResultV1),
     ProjectSearch(ProjectRegistryListingResultV1),
     ProjectContext(ProjectContextResultV1),
+    AdminSync(AdminSyncResultV1),
 }
 
 impl GraphToolResultV1 {
@@ -176,6 +177,7 @@ impl GraphToolResultV1 {
             Operation::ProjectList => Self::ProjectList(serde_json::from_value(value)?),
             Operation::ProjectSearch => Self::ProjectSearch(serde_json::from_value(value)?),
             Operation::ProjectContext => Self::ProjectContext(serde_json::from_value(value)?),
+            Operation::AdminSync => Self::AdminSync(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -253,6 +255,7 @@ impl GraphToolResultV1 {
             Self::Runtime(result) => serde_json::to_value(result),
             Self::ProjectList(result) | Self::ProjectSearch(result) => serde_json::to_value(result),
             Self::ProjectContext(result) => serde_json::to_value(result),
+            Self::AdminSync(result) => serde_json::to_value(result),
         }
     }
 }

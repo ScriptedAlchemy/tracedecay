@@ -1,6 +1,6 @@
 //! Canonical CLI/MCP wire contracts for the side-effecting operations the
-//! project's graph-tool owner serves: a managed affected-test run and the
-//! project dashboard server.
+//! project's graph-tool owner serves: a managed affected-test run, the
+//! project dashboard server, and the operator's code-index reconcile.
 //!
 //! Presentation-only transport keys such as `format` are removed before these
 //! request bodies are decoded.
@@ -161,4 +161,34 @@ pub enum DashboardResultV1 {
         previous_url: String,
     },
     NotRunning,
+}
+
+/// `tracedecay_admin_sync` takes no arguments: it reconciles the served
+/// project.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminSyncSurfaceRequestV1 {}
+
+/// What the reconcile covers.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminSyncReconcileScopeV1 {
+    AuthoritativeProject,
+}
+
+/// The code-index scheduler's admission of the reconcile.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminSyncAdmissionV1 {
+    Queued,
+    /// Code indexing does not apply to this project.
+    NotApplicable,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminSyncResultV1 {
+    pub reconcile_scope: AdminSyncReconcileScopeV1,
+    pub status: AdminSyncAdmissionV1,
+    pub project_root: String,
 }
