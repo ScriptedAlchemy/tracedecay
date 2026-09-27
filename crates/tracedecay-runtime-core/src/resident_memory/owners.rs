@@ -902,7 +902,7 @@ mod tests {
     #[test]
     fn worktrees_sharing_one_content_report_one_row_that_counts_it_once() {
         let start = Instant::now();
-        let now = start + Duration::from_secs(60);
+        let now = start + Duration::from_mins(1);
         let owners = Arc::new(ResidentOwnersV1::new(Duration::from_mins(5)));
         let (_shared, shared) = content("a", 9_000);
         // Equal digest, separate allocation: two copies, never one row.
@@ -963,7 +963,7 @@ mod tests {
                 (
                     vec![("worktree.copied", "generation.copied")],
                     Some(9_070),
-                    Duration::from_secs(60),
+                    Duration::from_mins(1),
                 ),
                 (
                     vec![
@@ -976,7 +976,7 @@ mod tests {
                 (
                     vec![("worktree.other", "generation.other")],
                     Some(4_050),
-                    Duration::from_secs(60),
+                    Duration::from_mins(1),
                 ),
             ]
         );
