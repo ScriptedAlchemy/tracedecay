@@ -3,6 +3,7 @@ use std::time::Duration;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::cli::ProfileStorageAction;
+use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
 use tracedecay_global_db::profile_registry_maintenance::remove_store_directory;
 use tracedecay_runtime_core::lifecycle_lease::{
     ExclusiveLeaseAttempt, try_acquire_exclusive_for_profile,
@@ -312,27 +313,28 @@ async fn brokered_storage_report(
         // One entry per page: the call count exposes how many pages a report
         // walked, which is what makes a slow storage report diagnosable.
         let request = hotpath::future!(
-            super::daemon::daemon_tool_json(
+            super::daemon::admin_cli_result(
                 profile,
                 None,
-                "tracedecay_admin_cli",
-                serde_json::json!({
-                    "action": "storage_report",
-                    "project_id": project_id,
-                    "project_root": project_root,
-                    "cursor": cursor,
-                    "limit": PAGE_LIMIT,
-                }),
+                AdminCliSurfaceRequestV1::StorageReport {
+                    project_id: project_id.map(str::to_owned),
+                    project_root: project_root.map(Path::to_path_buf),
+                    cursor: cursor.clone(),
+                    limit: PAGE_LIMIT,
+                },
             ),
             label = "cli.profile_storage.report_page"
         );
-        let value = tokio::time::timeout(Duration::from_secs(10), request)
+        let result = tokio::time::timeout(Duration::from_secs(10), request)
             .await
             .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
                 message: "daemon storage report authority timed out after 10 seconds".to_string(),
             })??;
+        let AdminCliResultV1::StorageReport(page) = result else {
+            return Err(super::daemon::admin_cli_result_mismatch("storage_report"));
+        };
         let page: tracedecay_maintenance::retention::storage_report::StorageReport =
-            serde_json::from_value(value)?;
+            serde_json::from_value(serde_json::to_value(page)?)?;
         merge_storage_report_page(&mut report, page);
         if report.coverage.state
             == tracedecay_maintenance::retention::storage_report::StorageReportCoverageState::Complete
@@ -514,10 +516,7 @@ async fn handle_storage_report(
         format_bytes(report.unregistered_bytes)
     );
     if report.unregistered_dir_count > 0 {
-        println!(
-            "  run the daemon's automatic sweep, or `tracedecay tool tracedecay_admin_cli` \
-             orphan-store collection, to reclaim unregistered directories"
-        );
+        println!("  run the daemon's automatic sweep to reclaim unregistered directories");
     }
     if report.coverage.state
         == tracedecay_maintenance::retention::storage_report::StorageReportCoverageState::Partial

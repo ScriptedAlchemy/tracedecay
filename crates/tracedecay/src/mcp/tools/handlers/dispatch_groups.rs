@@ -110,7 +110,7 @@ async fn admitted_graph_query_for_operation(
 }
 
 /// Dispatch administrative tools (`tracedecay_hook_runtime`,
-/// `tracedecay_admin_cli`, `tracedecay_admin_project`).
+/// `tracedecay_admin_project`).
 #[hotpath::measure(future = true, label = "mcp.dispatch.admin")]
 pub(super) async fn dispatch_admin_tools(
     tool_name: &str,
@@ -138,21 +138,6 @@ fn dispatch_admin_tools_inner<'a>(
                     options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                     options.accounting_db,
                     options.session_authorities,
-                )
-                .await
-            }
-            "tracedecay_admin_cli" => {
-                admin_cli::handle_admin_cli(
-                    cg,
-                    args,
-                    options.global_db,
-                    options.accounting_db,
-                    options.profile.map(ProfileRoot::data_dir),
-                    options.session_authorities,
-                    options.session_sync_service,
-                    options.application_request_id.clone(),
-                    options.application_deadline.clone(),
-                    options.application_cancellation.clone(),
                 )
                 .await
             }
@@ -742,6 +727,24 @@ async fn compute_owner_side_effect(
             GraphToolResultV1::AdminSync(
                 info::admin_sync(cg, options.code_index_reconcile_sink.as_ref()).await?,
             )
+        }
+        ApplicationSurfaceOperation::AdminCli => {
+            let request = decode_primitive_request(&args, operation.mcp_tool_name())?;
+            GraphToolResultV1::AdminCli(Box::new(
+                admin_cli::compute_admin_cli(
+                    cg,
+                    request,
+                    options.global_db,
+                    options.accounting_db,
+                    options.profile.map(ProfileRoot::data_dir),
+                    options.session_authorities.clone(),
+                    options.session_sync_service,
+                    options.application_request_id.clone(),
+                    options.application_deadline.clone(),
+                    options.application_cancellation.clone(),
+                )
+                .await?,
+            ))
         }
         ApplicationSurfaceOperation::Dashboard => {
             let request = tracedecay_mcp::handlers::decode_primitive_request(

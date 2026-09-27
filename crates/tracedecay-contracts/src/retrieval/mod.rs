@@ -1,3 +1,4 @@
+mod admin_cli_surface;
 mod analysis_report_surface;
 mod analytics_surface;
 mod automation_surface;
@@ -74,6 +75,14 @@ fn validate_current_temporal_meta(
 
 /// The Remote Brain read is `tracedecay_remote_status`'s catalog result.
 pub use crate::remote::status::RemoteOperationalStatusReadV1;
+pub use admin_cli_surface::{
+    AdminCliAnalyticsImportV1, AdminCliCostSummaryV1, AdminCliCostTodayV1, AdminCliCostTotalsV1,
+    AdminCliGainDayV1, AdminCliGainHistoryV1, AdminCliGainTotalV1, AdminCliProjectTokenTotalV1,
+    AdminCliProjectTokensV1, AdminCliRegistryContextV1, AdminCliRegistryEmptyV1,
+    AdminCliRegistryGcV1, AdminCliRegistryListV1, AdminCliRegistryUpdateV1, AdminCliResultV1,
+    AdminCliSessionSyncV1, AdminCliStorageReportV1, AdminCliSurfaceRequestV1,
+    AdminCliUnfinishedSessionsV1,
+};
 pub use analysis_report_surface::{
     CircularCycleV1, CircularResultV1, CircularSurfaceRequestV1, ComplexityReportEntryV1,
     ComplexityReportV1, ComplexitySurfaceRequestV1, ConstructorFieldCoverageV1,

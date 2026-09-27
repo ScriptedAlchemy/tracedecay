@@ -626,17 +626,29 @@ async fn projectless_admin_cli_response(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
+    let request = match tracedecay_mcp::handlers::decode_primitive_request(
+        &arguments,
+        "tracedecay_admin_cli",
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+        }
+    };
     match boxed_projectless_phase(
-        tracedecay_mcp::handlers::admin_cli::handle_projectless_admin_cli(
-            arguments,
+        tracedecay_mcp::handlers::admin_cli::compute_projectless_admin_cli(
+            request,
             &global_db,
             tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
             &connection.client_identity.profile_root,
         ),
     )
     .await
+    .and_then(|result| Ok(serde_json::to_value(result)?))
     {
-        Ok(result) => JsonRpcResponse::success(id, result.value),
+        Ok(result) => {
+            JsonRpcResponse::success(id, tracedecay_mcp::handlers::json_result(&result).value)
+        }
         Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
 }

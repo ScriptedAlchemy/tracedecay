@@ -142,6 +142,10 @@ pub enum EffectClass {
     /// Queues work on a daemon-owned scheduler; the call answers with the
     /// scheduler's admission, not the finished work.
     SchedulesWork,
+    /// Reads and rewrites the daemon profile's own state: its project
+    /// registry, accounting ledgers, and session stores, including registry
+    /// collection and transcript import.
+    MaintainsProfileState,
 }
 
 impl EffectClass {
@@ -154,7 +158,10 @@ impl EffectClass {
     pub const fn is_owner_side_effect(self) -> bool {
         matches!(
             self,
-            Self::SpawnsProcess | Self::BindsServer | Self::SchedulesWork
+            Self::SpawnsProcess
+                | Self::BindsServer
+                | Self::SchedulesWork
+                | Self::MaintainsProfileState
         )
     }
 

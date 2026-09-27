@@ -48,6 +48,13 @@ impl ApplicationSurfaceOperation {
                 ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
                 identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
+            // A transcript import or registry collection is the operator's
+            // own long job.
+            Self::AdminCli => Some(OwnerSideEffectEntryV1 {
+                effect: EffectClass::MaintainsProfileState,
+                ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
+                identical_calls: IdenticalCallPolicyV1::RunEach,
+            }),
             _ => None,
         }
     }
@@ -90,6 +97,14 @@ mod tests {
                     "admin_sync",
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::SchedulesWork,
+                        ceiling_millis: 600_000,
+                        identical_calls: IdenticalCallPolicyV1::RunEach,
+                    }
+                ),
+                (
+                    "admin_cli",
+                    OwnerSideEffectEntryV1 {
+                        effect: EffectClass::MaintainsProfileState,
                         ceiling_millis: 600_000,
                         identical_calls: IdenticalCallPolicyV1::RunEach,
                     }

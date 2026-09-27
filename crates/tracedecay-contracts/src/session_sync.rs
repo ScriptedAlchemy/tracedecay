@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
@@ -181,7 +182,7 @@ pub struct SessionSyncAdmissionReceiptV1 {
     pub accepted_at: UtcMicros,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSyncStatsV1 {
     pub sessions_imported: u64,
     pub messages_imported: u64,
@@ -191,7 +192,7 @@ pub struct SessionSyncStatsV1 {
     pub skipped: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum SessionSyncCoverageV1 {
     Complete,
@@ -220,14 +221,14 @@ impl SessionSyncCoverageV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSyncSourceCoverageV1 {
     pub store_scope: String,
     pub coverage: SessionSyncCoverageV1,
 }
 
 /// Exact canonical observation cursor committed by one source/store authority.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSyncSourceFrontierV1 {
     pub store_scope: String,
     pub source_json: String,

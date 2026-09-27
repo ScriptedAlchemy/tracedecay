@@ -9,7 +9,11 @@ use tracedecay_global_db::profile_registry_maintenance::{
 
 use crate::global;
 
-use super::daemon::daemon_tool_json;
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
+
+use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
 
 /// Bounds the wait for the profile lifecycle lease after the managed daemon
 /// service is stopped. The stop itself is separately bounded by the service
@@ -710,21 +714,18 @@ fn handle_list_inner(
             return Ok(());
         }
 
-        let token_result = daemon_tool_json(
+        let token_rows = match admin_cli_result(
             profile,
             None,
-            "tracedecay_admin_cli",
-            serde_json::json!({
-                "action": "registry_project_tokens",
-                "project_args": &project_paths,
-            }),
+            AdminCliSurfaceRequestV1::RegistryProjectTokens {
+                project_args: project_paths.clone(),
+            },
         )
-        .await?;
-        let token_rows = token_result
-            .get("projects")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        .await?
+        {
+            AdminCliResultV1::RegistryProjectTokens(tokens) => tokens.projects,
+            _ => return Err(admin_cli_result_mismatch("registry_project_tokens")),
+        };
         let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
         let mut token_errors: Vec<String> = Vec::new();
 
@@ -733,26 +734,30 @@ fn handle_list_inner(
             if location.status == global::ProjectStorageStatus::Stale
                 && let Some(profile_root) = home_tracedecay.as_deref()
             {
-                let context = daemon_tool_json(
+                let stores = match admin_cli_result(
                     profile,
                     None,
-                    "tracedecay_admin_cli",
-                    serde_json::json!({
-                        "action": "registry_context",
-                        "project_arg": path,
-                    }),
+                    AdminCliSurfaceRequestV1::RegistryContext {
+                        project_arg: Some(path.clone()),
+                    },
                 )
-                .await?;
-                if let Some(store) = context
-                    .get("stores")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entry| entry.get("store"))
-                    .find(|store| {
-                        store.get("store_kind").and_then(serde_json::Value::as_str)
-                            == Some("code_project")
-                    })
+                .await?
+                {
+                    AdminCliResultV1::RegistryContext(AdminCliRegistryContextV1::Ok {
+                        stores,
+                        ..
+                    }) => stores,
+                    AdminCliResultV1::RegistryContext(_) => Vec::new(),
+                    _ => return Err(admin_cli_result_mismatch("registry_context")),
+                };
+                if let Some(store) =
+                    stores
+                        .iter()
+                        .filter_map(|entry| entry.get("store"))
+                        .find(|store| {
+                            store.get("store_kind").and_then(serde_json::Value::as_str)
+                                == Some("code_project")
+                        })
                     && let Some(registry_location) =
                         global::classify_registry_storage_value(path, profile_root, store)
                 {
@@ -767,23 +772,15 @@ fn handle_list_inner(
             };
             let project_key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(path);
             let token_row = token_rows.iter().find(|row| {
-                row.get("project")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|value| {
-                        tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(Path::new(
-                            value,
-                        )) == project_key
-                    })
+                tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(&row.project)
+                    == project_key
             });
             // `None` is a total this run could not read, which is not the same
             // answer as a project that has saved nothing.
-            let tokens = token_row
-                .and_then(|row| row.get("tokens"))
-                .and_then(serde_json::Value::as_u64);
+            let tokens = token_row.and_then(|row| row.tokens);
             if tokens.is_none() {
                 let reason = token_row
-                    .and_then(|row| row.get("error"))
-                    .and_then(serde_json::Value::as_str)
+                    .and_then(|row| row.error.as_deref())
                     .unwrap_or("no token total reported for this project");
                 token_errors.push(format!("{}: {reason}", path.display()));
             }

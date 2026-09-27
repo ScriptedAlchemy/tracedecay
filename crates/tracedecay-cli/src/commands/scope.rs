@@ -16,9 +16,11 @@
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use serde_json::Value;
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
 
-use super::daemon::daemon_tool_json;
+use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
 
 /// A CLI command's resolved project scope: the registered profile/project
 /// identities and canonical root used by the daemon application boundary.
@@ -36,96 +38,59 @@ pub(crate) async fn resolve_project_scope(
     profile: &ProfileRoot,
     project_path: PathBuf,
 ) -> tracedecay_domain::errors::Result<ResolvedCliScope> {
-    let payload = daemon_tool_json(
-        profile,
-        None,
-        "tracedecay_admin_cli",
-        serde_json::json!({
-            "action": "registry_context",
-            "project_arg": project_path,
-        }),
-    )
-    .await?;
-    scope_from_registry_payload(&project_path, &payload)
+    let request = AdminCliSurfaceRequestV1::RegistryContext {
+        project_arg: Some(project_path.clone()),
+    };
+    match admin_cli_result(profile, None, request).await? {
+        AdminCliResultV1::RegistryContext(context) => {
+            scope_from_registry_context(&project_path, &context)
+        }
+        _ => Err(admin_cli_result_mismatch("registry_context")),
+    }
 }
 
-fn scope_from_registry_payload(
+fn scope_from_registry_context(
     requested: &Path,
-    payload: &Value,
+    context: &AdminCliRegistryContextV1,
 ) -> tracedecay_domain::errors::Result<ResolvedCliScope> {
-    match payload.get("status").and_then(Value::as_str) {
-        Some("ok") => {}
-        Some("not_found") => {
+    let (profile_id, project) = match context {
+        AdminCliRegistryContextV1::Ok {
+            profile_id,
+            project,
+            ..
+        } => (profile_id, project),
+        AdminCliRegistryContextV1::NotFound { .. } => {
             return Err(config_error(format!(
                 "no registered TraceDecay project at exact root '{}'; run `tracedecay init` there (no fallback project is substituted)",
                 requested.display()
             )));
         }
-        Some("invalid") => {
+        AdminCliRegistryContextV1::Invalid { .. } => {
             return Err(config_error(format!(
                 "'{}' is not a usable project selector",
                 requested.display()
             )));
         }
-        Some("ambiguous") => {
-            return Err(config_error(format!(
-                "project selector '{}' is ambiguous; refusing to choose a project implicitly",
-                requested.display()
-            )));
-        }
-        Some(other) => {
-            return Err(config_error(format!(
-                "project registry returned unknown status '{other}' for '{}'",
-                requested.display()
-            )));
-        }
-        None => {
-            return Err(config_error(format!(
-                "project registry response for '{}' omitted status",
-                requested.display()
-            )));
-        }
-    }
-    let project = payload
-        .get("project")
-        .filter(|project| !project.is_null())
-        .ok_or_else(|| {
+    };
+    let profile_id = tracedecay_domain::configuration::UserProfileId::new(profile_id.as_str())
+        .map_err(|error| {
             config_error(format!(
-                "project registry response for '{}' omitted the project record",
+                "registry profile id for '{}' is not canonical: {error}",
                 requested.display()
             ))
         })?;
-    let profile_id = payload
-        .get("profile_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            config_error(format!(
-                "project registry response for '{}' omitted profile_id",
-                requested.display()
-            ))
-        })
-        .and_then(|profile_id| {
-            tracedecay_domain::configuration::UserProfileId::new(profile_id).map_err(|error| {
-                config_error(format!(
-                    "registry profile id for '{}' is not canonical: {error}",
-                    requested.display()
-                ))
-            })
-        })?;
-    let project_id = required_project_str(project, "project_id", requested)?;
-    let canonical_root = required_project_str(project, "canonical_root", requested)?;
     let canonical = canonicalize_absolute_root(
-        &PathBuf::from(canonical_root),
+        &PathBuf::from(&project.canonical_root),
         "registered project root",
         requested,
     )?;
-    let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
-        config_error(format!(
-            "registry project id for '{}' is not canonical: {error}",
-            requested.display()
-        ))
-    })?;
+    let project_id =
+        tracedecay_domain::ProjectId::new(project.project_id.as_str()).map_err(|error| {
+            config_error(format!(
+                "registry project id for '{}' is not canonical: {error}",
+                requested.display()
+            ))
+        })?;
     // The requested-root canonicalization, sibling-root authorization, and
     // scope-digest revalidation all live in the single canonical resolver; the
     // CLI keeps only the registry brokering and selector taxonomy above.
@@ -159,23 +124,6 @@ fn scope_from_registry_payload(
     })
 }
 
-fn required_project_str<'a>(
-    project: &'a Value,
-    field: &str,
-    requested: &Path,
-) -> tracedecay_domain::errors::Result<&'a str> {
-    project
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            config_error(format!(
-                "project registry response for '{}' omitted project.{field}",
-                requested.display()
-            ))
-        })
-}
-
 fn canonicalize_absolute_root(
     root: &Path,
     role: &str,
@@ -207,10 +155,10 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use serde_json::Value;
+    use tracedecay_contracts::retrieval::AdminCliRegistryContextV1;
     use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-    use super::{ResolvedCliScope, scope_from_registry_payload};
+    use super::{ResolvedCliScope, scope_from_registry_context};
 
     fn git_init(root: &Path) {
         let output = Command::new("git")
@@ -236,8 +184,8 @@ mod tests {
         );
     }
 
-    fn ok_payload(canonical_root: &Path) -> Value {
-        serde_json::json!({
+    fn ok_payload(canonical_root: &Path) -> AdminCliRegistryContextV1 {
+        serde_json::from_value(serde_json::json!({
             "status": "ok",
             "profile_id": "profile.cli-scope-test",
             "project": {
@@ -253,7 +201,8 @@ mod tests {
             },
             "aliases": [],
             "stores": [],
-        })
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -264,8 +213,8 @@ mod tests {
         write_identity_marker(&root, "project.cli-scope-test");
 
         let first: ResolvedCliScope =
-            scope_from_registry_payload(&root, &ok_payload(&root)).unwrap();
-        let second = scope_from_registry_payload(&root, &ok_payload(&root)).unwrap();
+            scope_from_registry_context(&root, &ok_payload(&root)).unwrap();
+        let second = scope_from_registry_context(&root, &ok_payload(&root)).unwrap();
 
         assert_eq!(first.project_path, root);
         assert_eq!(second.project_path, root);
@@ -282,7 +231,7 @@ mod tests {
         let subdir = root.join("src/deep");
         std::fs::create_dir_all(&subdir).unwrap();
 
-        let resolved = scope_from_registry_payload(&subdir, &ok_payload(&root)).unwrap();
+        let resolved = scope_from_registry_context(&subdir, &ok_payload(&root)).unwrap();
 
         assert_eq!(
             resolved.project_path, root,
@@ -337,7 +286,7 @@ mod tests {
         let linked = canonical_existing_identity(&linked).unwrap();
         write_identity_marker(&registered, "project.cli-scope-test");
 
-        let resolved = scope_from_registry_payload(&linked, &ok_payload(&registered)).unwrap();
+        let resolved = scope_from_registry_context(&linked, &ok_payload(&registered)).unwrap();
 
         assert_eq!(resolved.project_path, linked);
         assert_eq!(resolved.project_id.as_str(), "project.cli-scope-test");
@@ -349,9 +298,9 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("unregistered");
         std::fs::create_dir_all(&root).unwrap();
-        let payload = serde_json::json!({ "status": "not_found", "project": null });
+        let payload = AdminCliRegistryContextV1::NotFound { project: () };
 
-        let error = scope_from_registry_payload(&root, &payload).unwrap_err();
+        let error = scope_from_registry_context(&root, &payload).unwrap_err();
 
         let message = error.to_string();
         assert!(
@@ -367,9 +316,9 @@ mod tests {
     #[test]
     fn unusable_selector_fails_closed() {
         let root = PathBuf::from("/nonexistent/selector");
-        let payload = serde_json::json!({ "status": "invalid", "project": null });
+        let payload = AdminCliRegistryContextV1::Invalid { project: () };
 
-        let error = scope_from_registry_payload(&root, &payload).unwrap_err();
+        let error = scope_from_registry_context(&root, &payload).unwrap_err();
 
         assert!(
             error.to_string().contains("not a usable project selector"),
@@ -377,79 +326,46 @@ mod tests {
         );
     }
 
+    /// A registry answer outside the context contract (an unknown status, or
+    /// an `ok` without its project or profile) never reaches scope resolution.
     #[test]
-    fn ambiguous_selector_fails_closed() {
-        let root = PathBuf::from("/ambiguous/selector");
-        let payload = serde_json::json!({ "status": "ambiguous", "project": null });
-
-        let error = scope_from_registry_payload(&root, &payload).unwrap_err();
-
-        assert!(
-            error.to_string().contains("ambiguous"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn missing_or_unknown_registry_status_fails_closed() {
-        let root = PathBuf::from("/nonexistent/root");
-        for payload in [
-            serde_json::json!({ "project": null }),
-            serde_json::json!({ "status": "surprise", "project": null }),
+    fn registry_answers_outside_the_context_contract_are_refused() {
+        for (body, refusal) in [
+            (
+                serde_json::json!({ "status": "ambiguous", "project": null }),
+                "unknown variant `ambiguous`, expected one of `ok`, `invalid`, `not_found`",
+            ),
+            (
+                serde_json::json!({ "project": null }),
+                "missing field `status`",
+            ),
+            (
+                serde_json::json!({
+                    "status": "ok",
+                    "profile_id": "profile.cli-scope-test",
+                    "project": null,
+                    "aliases": [],
+                    "stores": [],
+                }),
+                "invalid type: null, expected struct PublicCodeProject",
+            ),
+            (
+                serde_json::json!({
+                    "status": "ok",
+                    "project": { "project_id": "project.cli-scope-test" },
+                    "aliases": [],
+                    "stores": [],
+                }),
+                "missing field `label`",
+            ),
         ] {
-            let error = scope_from_registry_payload(&root, &payload).unwrap_err();
-            assert!(
-                error.to_string().contains("status"),
-                "malformed status must fail closed: {error}"
+            assert_eq!(
+                serde_json::from_value::<AdminCliRegistryContextV1>(body)
+                    .unwrap_err()
+                    .to_string(),
+                refusal
             );
         }
-    }
-
-    #[test]
-    fn ok_payload_with_missing_project_fields_fails_closed() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let root = canonical_existing_identity(temp.path()).unwrap();
-        for payload in [
-            serde_json::json!({
-                "status": "ok",
-                "profile_id": "profile.cli-scope-test",
-                "project": null
-            }),
-            serde_json::json!({
-                "status": "ok",
-                "profile_id": "profile.cli-scope-test",
-                "project": { "canonical_root": root.to_string_lossy() },
-            }),
-            serde_json::json!({
-                "status": "ok",
-                "profile_id": "profile.cli-scope-test",
-                "project": { "project_id": "project.cli-scope-test" },
-            }),
-        ] {
-            let error = scope_from_registry_payload(&root, &payload).unwrap_err();
-            assert!(
-                error.to_string().contains("project"),
-                "incomplete registry payload must fail closed: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn missing_profile_identity_fails_closed() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let root = canonical_existing_identity(temp.path()).unwrap();
-        let mut payload = ok_payload(&root);
-        payload
-            .as_object_mut()
-            .expect("registry payload object")
-            .remove("profile_id");
-
-        let error = scope_from_registry_payload(&root, &payload).unwrap_err();
-
-        assert!(
-            error.to_string().contains("omitted profile_id"),
-            "unexpected error: {error}"
-        );
     }
 
     #[test]
@@ -457,9 +373,11 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let root = canonical_existing_identity(temp.path()).unwrap();
         let mut payload = ok_payload(&root);
-        payload["project"]["project_id"] = Value::String(" project.cli-scope-test".to_string());
+        if let AdminCliRegistryContextV1::Ok { project, .. } = &mut payload {
+            project.project_id = " project.cli-scope-test".to_owned();
+        }
 
-        let error = scope_from_registry_payload(&root, &payload).unwrap_err();
+        let error = scope_from_registry_context(&root, &payload).unwrap_err();
 
         assert!(
             error.to_string().contains("not canonical"),
@@ -472,7 +390,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("missing");
 
-        let error = scope_from_registry_payload(&root, &ok_payload(&root)).unwrap_err();
+        let error = scope_from_registry_context(&root, &ok_payload(&root)).unwrap_err();
 
         assert!(
             error.to_string().contains("could not be canonicalized"),
@@ -490,7 +408,7 @@ mod tests {
         git_init(&registered);
         git_init(&sibling);
 
-        let error = scope_from_registry_payload(&sibling, &ok_payload(&registered)).unwrap_err();
+        let error = scope_from_registry_context(&sibling, &ok_payload(&registered)).unwrap_err();
 
         assert!(
             error.to_string().contains("sibling root"),

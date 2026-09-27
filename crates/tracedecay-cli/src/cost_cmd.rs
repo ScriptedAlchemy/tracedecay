@@ -1,12 +1,12 @@
-use serde_json::Value;
+use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_session_memory::provider_usage::{
     ProviderUsageCostSummaryV1, ProviderUsageCoverageV1,
 };
 
 use crate::{
-    commands::daemon_tool_json,
-    cost_summary::{CostSummaryPayload, TodayCostPayload},
+    commands::{admin_cli_result, admin_cli_result_mismatch},
+    cost_summary::{CostAdminPayload, CostSummaryPayload},
 };
 
 #[hotpath::measure(label = "cli.cost.read", future = true)]
@@ -18,19 +18,19 @@ pub(crate) async fn handle_cost(
 ) -> tracedecay_domain::errors::Result<()> {
     let cwd = std::env::current_dir()?;
     let project_root = profile.discover_project_root(&cwd);
-    let payload = daemon_tool_json(
+    let cost = match admin_cli_result(
         profile,
         project_root.as_deref(),
-        "tracedecay_admin_cli",
-        serde_json::json!({ "action": "cost_summary", "range": &range }),
+        AdminCliSurfaceRequestV1::CostSummary {
+            range: range.clone(),
+        },
     )
-    .await?;
-    if payload.get("summary").is_none_or(Value::is_null) {
-        println!("Provider usage accounting is unavailable.");
-        return Ok(());
-    }
-    let summary: CostSummaryPayload = serde_json::from_value(payload["summary"].clone())?;
-    let today: TodayCostPayload = serde_json::from_value(payload["today"].clone())?;
+    .await?
+    {
+        AdminCliResultV1::CostSummary(cost) => cost,
+        _ => return Err(admin_cli_result_mismatch("cost_summary")),
+    };
+    let CostAdminPayload { summary, today } = CostAdminPayload::try_from(cost)?;
     if summary.provider_usage.coverage == ProviderUsageCoverageV1::Unavailable {
         println!("No canonical provider usage is available for this profile.");
         return Ok(());
