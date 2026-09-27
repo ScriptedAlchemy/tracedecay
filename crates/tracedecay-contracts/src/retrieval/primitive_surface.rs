@@ -404,7 +404,15 @@ pub struct ContextResultV1 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lexical_anchors: Vec<ContextLexicalAnchorV1>,
     pub symbols: Vec<PrimitiveSymbolLocationV1>,
+    /// Neighbors of `symbols`, ranked before the `max_nodes` cut: best edge
+    /// kind to a selected symbol (calls, implements, extends, `type_of`,
+    /// returns, receives, uses, annotates, contains), then total degree
+    /// descending, then qualified name.
     pub related_symbols: Vec<PrimitiveSymbolLocationV1>,
+    /// Present when related symbols were left out: by the `max_nodes` cut,
+    /// or because the neighbor walk stopped at its row limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_omission: Option<ContextRelatedOmissionV1>,
     pub code: Vec<ContextCodeBlockV1>,
     pub coverage: PrimitiveSearchCoverageV1,
     pub memory_matches: Vec<FactSearchHitV1>,
@@ -418,6 +426,19 @@ pub struct ContextResultV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<ContextPlanV1>,
     pub retrieval: ContextRetrievalPlanV1,
+}
+
+/// Related symbols `context` ranked but did not return.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextRelatedOmissionV1 {
+    /// Distinct related symbols the walk found and ranked.
+    pub total: usize,
+    /// Ranked related symbols the `max_nodes` cut dropped.
+    pub omitted: usize,
+    /// The neighbor walk stopped at its row limit, so `total` is a lower
+    /// bound.
+    pub total_is_lower_bound: bool,
 }
 
 /// What one `context` stage ran with and kept.
@@ -469,7 +490,7 @@ pub struct ContextRetrievalPlanV1 {
     pub search: ContextStageV1,
     /// Candidates resolved to verified graph symbols.
     pub graph: ContextStageV1,
-    /// Callers and callees of the selected symbols, bounded by `max_nodes`.
+    /// Ranked neighbors of the selected symbols, bounded by `max_nodes`.
     pub related: ContextStageV1,
     /// Source bodies for selected symbols, bounded by `max_code_blocks`.
     pub code: ContextStageV1,
@@ -865,6 +886,7 @@ mod tests {
             lexical_anchors: vec![],
             symbols: vec![],
             related_symbols: vec![],
+            related_omission: None,
             code: vec![],
             coverage: PrimitiveSearchCoverageV1 {
                 exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),

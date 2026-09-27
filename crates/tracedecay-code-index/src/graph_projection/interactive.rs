@@ -49,9 +49,9 @@ pub(super) use self::models::InteractiveCatalog;
 pub use self::models::{
     CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
     CodeGraphFileDependenciesV1, CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1,
-    CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphRankedSymbolV1,
-    CodeGraphRelationKeyV1, CodeGraphRelationKeysV1, CodeGraphSemanticEdgeV1,
-    CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolRefV1,
+    CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphRankedNeighborsV1,
+    CodeGraphRankedSymbolV1, CodeGraphRelationKeyV1, CodeGraphRelationKeysV1,
+    CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolRefV1,
     CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1,
 };
 
@@ -847,6 +847,124 @@ impl CodeGraphInteractiveReader {
                 })
                 .collect(),
             symbol_count: catalog.symbols.len(),
+        })
+    }
+
+    /// The seeds' neighbors over every edge kind in both directions, ranked
+    /// before the cut to `limit`: the lowest `kind_rank` of any edge joining
+    /// the neighbor to a seed, then total catalog degree descending, then
+    /// qualified name, then occurrence. Seeds are not their own neighbors.
+    ///
+    /// Each direction reads at most `max_relations` edge rows across all
+    /// seeds and takes the neighbor from the row's edge record; degrees,
+    /// names, and the kept summaries come from the catalog, so no symbol
+    /// entity is read.
+    pub fn ranked_neighbors(
+        &self,
+        seeds: &[SymbolOccurrenceId],
+        kind_rank: fn(RelationEdgeKindV1) -> u8,
+        max_relations: usize,
+        limit: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<CodeGraphRankedNeighborsV1, CodeGraphProjectionError> {
+        require_positive(max_relations, "code graph neighbor walk limit")?;
+        require_positive(limit, "code graph neighbor limit")?;
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let starts = entity_ids(seeds)?;
+        let every_kind = code_relation_kinds(&[])?;
+        let outgoing = self.snapshot.outgoing_relations_truncated(
+            &starts,
+            &every_kind,
+            max_relations,
+            Arc::clone(&cancellation),
+        )?;
+        let incoming = self.snapshot.incoming_relations_truncated(
+            &starts,
+            &every_kind,
+            max_relations,
+            Arc::clone(&cancellation),
+        )?;
+        if outgoing.len() != seeds.len() || incoming.len() != seeds.len() {
+            return Err(CodeGraphProjectionError::Corrupt(
+                "code graph neighbor batch shape does not match its seeds".to_owned(),
+            ));
+        }
+        let walk_truncated = [&outgoing, &incoming]
+            .iter()
+            .any(|rows| rows.iter().map(Vec::len).sum::<usize>() == max_relations);
+        let seed_set = seeds.iter().collect::<BTreeSet<_>>();
+        let mut best_rank = BTreeMap::<SymbolOccurrenceId, u8>::new();
+        for (direction, batches) in [
+            (AdjacencyDirection::Outgoing, outgoing),
+            (AdjacencyDirection::Incoming, incoming),
+        ] {
+            for (seed, relations) in seeds.iter().zip(batches) {
+                catalog::check_cancelled(cancellation.as_ref())?;
+                for relation in &relations {
+                    let edge = seed_edge_record(seed, relation, direction)?;
+                    let far = match direction {
+                        AdjacencyDirection::Outgoing => edge.to_occurrence,
+                        AdjacencyDirection::Incoming => edge.from_occurrence,
+                    };
+                    if seed_set.contains(&far) {
+                        continue;
+                    }
+                    let rank = kind_rank(edge.kind);
+                    best_rank
+                        .entry(far)
+                        .and_modify(|best| *best = (*best).min(rank))
+                        .or_insert(rank);
+                }
+            }
+        }
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let mut ranked = best_rank
+            .iter()
+            .map(|(occurrence, rank)| {
+                let record = catalog.symbols.get(occurrence).ok_or_else(|| {
+                    CodeGraphProjectionError::Corrupt(
+                        "code graph edge endpoint has no symbol entity".to_owned(),
+                    )
+                })?;
+                let name = record
+                    .metadata
+                    .as_ref()
+                    .map_or(occurrence.as_str(), |metadata| {
+                        metadata.qualified_name.as_str()
+                    });
+                Ok((
+                    *rank,
+                    record.outgoing.saturating_add(record.incoming),
+                    name,
+                    occurrence,
+                    record,
+                ))
+            })
+            .collect::<Result<Vec<_>, CodeGraphProjectionError>>()?;
+        catalog::check_cancelled(cancellation.as_ref())?;
+        let total = ranked.len();
+        type Ranked<'a> = (u8, u64, &'a str, &'a SymbolOccurrenceId, &'a CatalogSymbol);
+        let order = |left: &Ranked<'_>, right: &Ranked<'_>| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.2.cmp(right.2))
+                .then_with(|| left.3.cmp(right.3))
+        };
+        if ranked.len() > limit {
+            ranked.select_nth_unstable_by(limit - 1, order);
+            ranked.truncate(limit);
+        }
+        ranked.sort_unstable_by(order);
+        Ok(CodeGraphRankedNeighborsV1 {
+            neighbors: ranked
+                .into_iter()
+                .map(|(_, _, _, occurrence, record)| {
+                    InteractiveCatalog::symbol_summary(occurrence, record)
+                })
+                .collect(),
+            total,
+            walk_truncated,
         })
     }
 

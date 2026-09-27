@@ -105,6 +105,16 @@ pub struct CodeGraphRankedSymbolV1 {
     pub incoming: u64,
 }
 
+/// A seed set's neighbors, ranked before the cut. `total` counts every
+/// distinct neighbor the walk found; `walk_truncated` means a direction
+/// stopped at its row limit, so more neighbors may exist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeGraphRankedNeighborsV1 {
+    pub neighbors: Vec<CodeGraphSymbolSummaryV1>,
+    pub total: usize,
+    pub walk_truncated: bool,
+}
+
 /// The most-connected symbols of one generation, ranked over every symbol
 /// of the generation; `symbol_count` is that census size.
 #[derive(Clone, Debug, Eq, PartialEq)]
