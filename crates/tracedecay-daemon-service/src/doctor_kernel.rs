@@ -25,10 +25,10 @@ use tracedecay_contracts::doctor::{
     LanguageServerAnalyzerStateV1, LanguageServerAnalyzerV1, LanguageServerDoctorPort,
     LanguageServerReadV1, ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1,
     OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
-    RemoteOperationalReadV1, ResidentMemoryDoctorPort, ResidentMemoryOwnerReadV1,
-    ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
-    advisory_feedback_read_from_publication, merge_storage_reads, runtime_health_read,
-    storage_family_read,
+    RemoteOperationalReadV1, ResidentMemoryDoctorPort, ResidentMemoryHolderReadV1,
+    ResidentMemoryOwnerReadV1, ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
+    StorageDoctorPort, advisory_feedback_read_from_publication, merge_storage_reads,
+    runtime_health_read, storage_family_read,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
@@ -770,9 +770,16 @@ fn resident_memory_read() -> ResidentMemoryReadV1 {
             .into_iter()
             .map(|row| ResidentMemoryOwnerReadV1 {
                 kind: row.kind.as_str().to_owned(),
-                project_id: row.scope.project_id.as_str().to_owned(),
-                worktree_id: row.scope.worktree_id.as_str().to_owned(),
-                generation_id: row.generation_id.as_str().to_owned(),
+                project_id: row.project_id.as_str().to_owned(),
+                holders: row
+                    .holders
+                    .iter()
+                    .map(|holder| ResidentMemoryHolderReadV1 {
+                        worktree_id: holder.worktree_id.as_str().to_owned(),
+                        holding: holder.holding.as_str().to_owned(),
+                    })
+                    .collect(),
+                content_digest: row.content_digest.map(|digest| digest.as_str().to_owned()),
                 bytes: row.bytes.measured(),
                 idle_seconds: row.idle_for.as_secs(),
                 protected: row.protected,

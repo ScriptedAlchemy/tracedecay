@@ -10,18 +10,22 @@
 //! answer warming while the engine reopens from the durable graph, and the
 //! next read that needs the whole generation re-decodes it.
 
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::time::Instant;
 
 use tracedecay_code_index::graph_projection::{
     CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1,
 };
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_code_index::production::{
+    CodeIndexPublishedGenerationV1, DecodedGenerationContentV1,
+};
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_runtime_core::resident_memory::{
-    ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerRegistrationV1, ResidentOwnerReleaseV1,
-    ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1,
+    ResidentHoldingV1, ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerRegistrationV1,
+    ResidentOwnerReleaseV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1,
+    ResidentOwnersV1, ResidentSharedContentV1,
 };
 
 use super::reconcile::ReconcilePassesV1;
@@ -149,17 +153,80 @@ pub(super) struct WorktreeResidencyRegistrationV1 {
     _registrations: Vec<ResidentOwnerRegistrationV1>,
 }
 
-fn distinct_bytes(generations: &[Arc<CodeIndexPublishedGenerationV1>]) -> u64 {
-    generations
-        .iter()
-        .enumerate()
-        .filter(|(index, generation)| {
-            !generations[..*index]
-                .iter()
-                .any(|earlier| Arc::ptr_eq(earlier, generation))
+/// What a set of held generations retains: the decoded content the first of
+/// them shares with other worktrees, reported apart, and everything else,
+/// each distinct allocation once.
+struct HeldDecodesV1 {
+    own_bytes: u64,
+    shared: Option<Arc<DecodedGenerationContentV1>>,
+}
+
+impl HeldDecodesV1 {
+    fn of(generations: &[Arc<CodeIndexPublishedGenerationV1>]) -> Self {
+        let shared = generations
+            .first()
+            .and_then(|generation| generation.shared_content())
+            .cloned();
+        let own_bytes = generations
+            .iter()
+            .enumerate()
+            .filter(|(index, generation)| {
+                !generations[..*index]
+                    .iter()
+                    .any(|earlier| Arc::ptr_eq(earlier, generation))
+            })
+            .map(|(_, generation)| {
+                let content = generation
+                    .shared_content()
+                    .filter(|content| {
+                        shared
+                            .as_ref()
+                            .is_some_and(|shared| Arc::ptr_eq(shared, content))
+                    })
+                    .map_or(0, |content| content.retained_bytes());
+                generation.retained_bytes().saturating_sub(content)
+            })
+            .fold(0, u64::saturating_add);
+        Self { own_bytes, shared }
+    }
+
+    fn sample(
+        generations: &[Arc<CodeIndexPublishedGenerationV1>],
+        last_used: Instant,
+        serving: bool,
+    ) -> Option<ResidentOwnerSampleV1> {
+        let holding =
+            ResidentHoldingV1::Generation(generations.first()?.manifest().generation_id.clone());
+        let held = Self::of(generations);
+        Some(ResidentOwnerSampleV1 {
+            holding,
+            bytes: ResidentOwnerBytesV1::Measured(held.own_bytes),
+            last_used,
+            serving,
+            shared: held.shared.map(|content| ResidentSharedContentV1 {
+                digest: content.digest().clone(),
+                bytes: content.retained_bytes(),
+                allocation: Arc::downgrade(&content) as Weak<dyn Any + Send + Sync>,
+            }),
         })
-        .map(|(_, generation)| generation.retained_bytes())
-        .fold(0, u64::saturating_add)
+    }
+
+    /// Drop `generations` and report what that gave back: their own bytes,
+    /// and the shared content only once no other worktree references it.
+    fn release(generations: Vec<Arc<CodeIndexPublishedGenerationV1>>) -> ResidentOwnerReleaseV1 {
+        if generations.is_empty() {
+            return ResidentOwnerReleaseV1::Empty;
+        }
+        let Self { own_bytes, shared } = Self::of(&generations);
+        let content = shared.map(|content| (Arc::downgrade(&content), content.retained_bytes()));
+        drop(generations);
+        let freed_content = content
+            .filter(|(content, _)| content.strong_count() == 0)
+            .map_or(0, |(_, bytes)| bytes);
+        ResidentOwnerReleaseV1::Released {
+            bytes: ResidentOwnerBytesV1::Measured(own_bytes.saturating_add(freed_content)),
+        }
+    }
 }
 
 /// The generation the worktree serves: the serving seat and the publication
@@ -174,13 +241,7 @@ impl ResidentOwnerV1 for ServingDecodeOwnerV1 {
             .into_iter()
             .chain(residency.publication.decoded_active())
             .collect::<Vec<_>>();
-        let generation_id = held.first()?.manifest().generation_id.clone();
-        Some(ResidentOwnerSampleV1 {
-            generation_id,
-            bytes: ResidentOwnerBytesV1::Measured(distinct_bytes(&held)),
-            last_used: residency.last_used(),
-            serving: true,
-        })
+        HeldDecodesV1::sample(&held, residency.last_used(), true)
     }
 
     fn release(&self) -> ResidentOwnerReleaseV1 {
@@ -208,16 +269,12 @@ impl ResidentOwnerV1 for ServingDecodeOwnerV1 {
                 .fetch_add(1, Ordering::AcqRel);
             residency.serving_generation_changed.send_replace(());
         }
-        let released = seated
-            .into_iter()
-            .chain(residency.publication.release_decoded_active())
-            .collect::<Vec<_>>();
-        if released.is_empty() {
-            return ResidentOwnerReleaseV1::Empty;
-        }
-        ResidentOwnerReleaseV1::Released {
-            bytes: ResidentOwnerBytesV1::Measured(distinct_bytes(&released)),
-        }
+        HeldDecodesV1::release(
+            seated
+                .into_iter()
+                .chain(residency.publication.release_decoded_active())
+                .collect(),
+        )
     }
 }
 
@@ -226,24 +283,13 @@ struct SupersededDecodesOwnerV1(Arc<WorktreeResidencyV1>);
 
 impl ResidentOwnerV1 for SupersededDecodesOwnerV1 {
     fn sample(&self) -> Option<ResidentOwnerSampleV1> {
-        let held = self.0.publication.superseded_decodes();
-        let generation_id = held.last()?.manifest().generation_id.clone();
-        Some(ResidentOwnerSampleV1 {
-            generation_id,
-            bytes: ResidentOwnerBytesV1::Measured(distinct_bytes(&held)),
-            last_used: self.0.last_used(),
-            serving: false,
-        })
+        let mut held = self.0.publication.superseded_decodes();
+        held.reverse();
+        HeldDecodesV1::sample(&held, self.0.last_used(), false)
     }
 
     fn release(&self) -> ResidentOwnerReleaseV1 {
-        let released = self.0.publication.release_superseded_decodes();
-        if released.is_empty() {
-            return ResidentOwnerReleaseV1::Empty;
-        }
-        ResidentOwnerReleaseV1::Released {
-            bytes: ResidentOwnerBytesV1::Measured(distinct_bytes(&released)),
-        }
+        HeldDecodesV1::release(self.0.publication.release_superseded_decodes())
     }
 }
 
@@ -270,10 +316,13 @@ impl ResidentOwnerV1 for GraphCatalogOwnerV1 {
             .ok()?
             .interactive_catalog_bytes()?;
         Some(ResidentOwnerSampleV1 {
-            generation_id: text.metadata().manifest().generation_id.clone(),
+            holding: ResidentHoldingV1::Generation(
+                text.metadata().manifest().generation_id.clone(),
+            ),
             bytes: ResidentOwnerBytesV1::Measured(bytes),
             last_used: self.0.last_used(),
             serving: true,
+            shared: None,
         })
     }
 
@@ -305,10 +354,13 @@ impl ResidentOwnerV1 for GraphEngineOwnerV1 {
             Err(_) => ResidentOwnerBytesV1::Unmeasured,
         };
         Some(ResidentOwnerSampleV1 {
-            generation_id: text.metadata().manifest().generation_id.clone(),
+            holding: ResidentHoldingV1::Generation(
+                text.metadata().manifest().generation_id.clone(),
+            ),
             bytes,
             last_used: self.0.last_used(),
             serving: true,
+            shared: None,
         })
     }
 

@@ -6,10 +6,11 @@ use tempfile::TempDir;
 use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryPressureV1, ResidentOwnerBytesV1, ResidentOwnerKindV1,
-    ResidentOwnerReleaseCauseV1, ResidentOwnerReleaseV1, ResidentOwnerSampleV1,
-    ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersReportV1, ResidentOwnersV1,
+    ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentHoldingV1,
+    ResidentMemoryComponentIdV1, ResidentMemoryPressureV1, ResidentOwnerBytesV1,
+    ResidentOwnerKindV1, ResidentOwnerReleaseCauseV1, ResidentOwnerReleaseV1,
+    ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersReportV1,
+    ResidentOwnersV1,
 };
 
 use super::super::{
@@ -17,8 +18,9 @@ use super::super::{
 };
 use super::{
     CodeIndexSchedulerRegistryV1, GitFixture, core_search_request, git,
-    mounted_core_query_worktree_in, test_project_id, wait_for_generation_change,
-    wait_for_live_complete_generation, wait_for_queryable_text_generation, wait_for_worker_phase,
+    mounted_core_query_worktree_at, mounted_core_query_worktree_in, test_project_id,
+    wait_for_generation_change, wait_for_live_complete_generation,
+    wait_for_queryable_text_generation, wait_for_worker_phase,
 };
 
 const IDLE_WINDOW: Duration = Duration::from_mins(10);
@@ -27,12 +29,10 @@ fn rows(report: &ResidentOwnersReportV1) -> Vec<(ResidentOwnerKindV1, String, bo
     report
         .owners
         .iter()
-        .map(|row| {
-            (
-                row.kind,
-                row.generation_id.as_str().to_owned(),
-                row.protected,
-            )
+        .flat_map(|row| {
+            row.holders
+                .iter()
+                .map(|holder| (row.kind, holder.holding.as_str().to_owned(), row.protected))
         })
         .collect()
 }
@@ -118,6 +118,141 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
         after.authorized.fallback.ordered_candidates,
         fresh.authorized.fallback.ordered_candidates
     );
+
+    registry.shutdown().await;
+}
+
+/// A module with documented items, a struct with methods, cross-module calls
+/// and a clone-sized body, so a decode holds every kind of page record.
+fn linked_module(ordinal: usize) -> (String, String) {
+    let next = (ordinal + 1) % 24;
+    (
+        format!("src/module_{ordinal:02}.rs"),
+        format!(
+            "//! Module {ordinal}.\nuse crate::module_{next:02}::transform_{next};\n\n\
+             /// Transform the input for module {ordinal}.\n\
+             pub fn transform_{ordinal}(input: &str, limit: usize) -> usize {{\n    \
+             let mut total = 0;\n    for (index, part) in input.trim().split(',').enumerate() {{\n        \
+             if index >= limit {{ break; }}\n        total += part.len() * {ordinal};\n    }}\n    total\n}}\n\n\
+             pub fn describe_{ordinal}(value: u64) -> String {{\n    let label = format!(\"{{value}}-{ordinal}\");\n    \
+             transform_{next}(&label, 3);\n    label.to_uppercase()\n}}\n\n\
+             pub struct Holder{ordinal} {{\n    values: Vec<u32>,\n}}\n\n\
+             impl Holder{ordinal} {{\n    pub fn total(&self) -> u32 {{\n        self.values.iter().sum()\n    }}\n}}\n"
+        ),
+    )
+}
+
+/// Linked worktrees sealing identical content serve one decode between them.
+/// Each seals its own generation, yet the inventory reports a single
+/// `decoded_generation` row naming both worktrees, holding the content once
+/// plus each worktree's own evidence, and the idle window gives all of it
+/// back, down to the disk-backed state a restart leaves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
+    let modules = (0..24).map(linked_module).collect::<Vec<_>>();
+    let files = modules
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let linked_parent = TempDir::new().expect("linked worktree parent");
+    let linked = linked_parent.path().join("linked");
+    git(
+        fixture.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().expect("linked worktree path"),
+            "main",
+        ],
+    );
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, primary) = mounted_core_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(2).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().join("primary"),
+    )
+    .await;
+    registry
+        .execute_query_search(&primary, core_search_request("transform_3"))
+        .await
+        .expect("the primary worktree answers");
+    let alone = owners.report(Instant::now());
+
+    let (registry, secondary) =
+        mounted_core_query_worktree_at(registry, &linked, store.path().join("linked")).await;
+    registry
+        .execute_query_search(&secondary, core_search_request("transform_3"))
+        .await
+        .expect("the linked worktree answers");
+    let both = owners.report(Instant::now());
+
+    let decoded = |report: &ResidentOwnersReportV1| {
+        report
+            .owners
+            .iter()
+            .filter(|row| row.kind == ResidentOwnerKindV1::DecodedGeneration)
+            .map(|row| {
+                (
+                    row.holders
+                        .iter()
+                        .map(|holder| holder.worktree_id.clone())
+                        .collect::<Vec<_>>(),
+                    row.content_digest.is_some(),
+                    row.bytes.measured(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut worktrees = vec![primary.worktree_id.clone(), secondary.worktree_id.clone()];
+    worktrees.sort();
+    assert_eq!(
+        decoded(&alone),
+        [(vec![primary.worktree_id.clone()], true, Some(1_462_697))]
+    );
+    assert_eq!(alone.measured_bytes, 1_462_697);
+    // Two copies would hold 2,925,394 bytes; the linked worktree adds only
+    // the manifest, lineage, and projection evidence it sealed itself.
+    assert_eq!(
+        decoded(&both),
+        [(worktrees, true, Some(1_854_381))],
+        "one decode row for one content, naming both worktrees"
+    );
+    assert_eq!(both.measured_bytes, 1_854_381);
+
+    let later = Instant::now() + IDLE_WINDOW;
+    let released = owners.release_idle(later);
+    assert_eq!(
+        released
+            .iter()
+            .map(|release| (release.kind, release.cause))
+            .collect::<Vec<_>>(),
+        [
+            (
+                ResidentOwnerKindV1::DecodedGeneration,
+                ResidentOwnerReleaseCauseV1::Idle
+            ),
+            (
+                ResidentOwnerKindV1::DecodedGeneration,
+                ResidentOwnerReleaseCauseV1::Idle
+            ),
+        ]
+    );
+    assert_eq!(
+        released
+            .iter()
+            .map(|release| release.bytes.measured().unwrap_or(0))
+            .sum::<u64>(),
+        1_854_381,
+        "the two releases give back exactly what the shared row held"
+    );
+    let idle = owners.report(later);
+    assert_eq!(decoded(&idle), []);
+    assert_eq!(idle.measured_bytes, 0);
 
     registry.shutdown().await;
 }
@@ -305,10 +440,13 @@ impl ResidentOwnerV1 for HeldMemoryOwner {
             .unwrap()
             .is_some()
             .then(|| ResidentOwnerSampleV1 {
-                generation_id: CodeGenerationId::new("generation.v1.superseded").unwrap(),
+                holding: ResidentHoldingV1::Generation(
+                    CodeGenerationId::new("generation.v1.superseded").unwrap(),
+                ),
                 bytes: ResidentOwnerBytesV1::Measured(self.bytes),
                 last_used: self.last_used,
                 serving: false,
+                shared: None,
             })
     }
 

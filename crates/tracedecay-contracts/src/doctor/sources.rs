@@ -1604,14 +1604,24 @@ pub fn observability_finding(
     }
 }
 
-/// One retained owner as the resident-memory inventory reports it.
+/// One worktree holding a retained owner's memory, and what it holds: a
+/// generation id, or an LSP session id.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResidentMemoryHolderReadV1 {
+    pub worktree_id: String,
+    pub holding: String,
+}
+
+/// One retained owner as the resident-memory inventory reports it; linked
+/// worktrees sharing one decoded content are one owner with several holders.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResidentMemoryOwnerReadV1 {
     /// Owner kind label, one of the inventory's shed-order kinds.
     pub kind: String,
     pub project_id: String,
-    pub worktree_id: String,
-    pub generation_id: String,
+    pub holders: Vec<ResidentMemoryHolderReadV1>,
+    /// Digest of the decoded content the holders share, when they share one.
+    pub content_digest: Option<String>,
     /// Measured bytes, or `None` for an owner that cannot size itself.
     pub bytes: Option<u64>,
     pub idle_seconds: u64,
@@ -1700,9 +1710,15 @@ pub fn resident_memory_findings(
             |bytes| format!("{} MiB", bytes / MIB),
         );
         let statement = format!(
-            "{} of worktree {} holds {bytes}, idle {} s{}",
+            "{} of worktree{} {} holds {bytes}, idle {} s{}",
             owner.kind,
-            owner.worktree_id,
+            if owner.holders.len() > 1 { "s" } else { "" },
+            owner
+                .holders
+                .iter()
+                .map(|holder| holder.worktree_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             owner.idle_seconds,
             if owner.protected { ", serving" } else { "" },
         );
@@ -1965,8 +1981,11 @@ mod tests {
         let owner = |kind: &str, bytes: Option<u64>, protected: bool| ResidentMemoryOwnerReadV1 {
             kind: kind.to_owned(),
             project_id: "project.fixture".to_owned(),
-            worktree_id: "worktree.fixture".to_owned(),
-            generation_id: "generation.fixture".to_owned(),
+            holders: vec![ResidentMemoryHolderReadV1 {
+                worktree_id: "worktree.fixture".to_owned(),
+                holding: "generation.fixture".to_owned(),
+            }],
+            content_digest: None,
             bytes,
             idle_seconds: 42,
             protected,
@@ -1978,7 +1997,20 @@ mod tests {
             over_budget: false,
             retained_bytes: 300 * MIB,
             owners: vec![
-                owner("decoded_generation", Some(300 * MIB), true),
+                ResidentMemoryOwnerReadV1 {
+                    holders: vec![
+                        ResidentMemoryHolderReadV1 {
+                            worktree_id: "worktree.fixture".to_owned(),
+                            holding: "generation.fixture".to_owned(),
+                        },
+                        ResidentMemoryHolderReadV1 {
+                            worktree_id: "worktree.linked".to_owned(),
+                            holding: "generation.linked".to_owned(),
+                        },
+                    ],
+                    content_digest: Some(format!("sha256:{}", "a".repeat(64))),
+                    ..owner("decoded_generation", Some(300 * MIB), true)
+                },
                 owner("graph_engine", None, false),
             ],
         };
@@ -2000,7 +2032,7 @@ mod tests {
                 ),
                 (
                     DoctorEvidenceStateV1::HealthyCompleteCoverage,
-                    "decoded_generation of worktree worktree.fixture holds 300 MiB, idle 42 s, serving".to_owned()
+                    "decoded_generation of worktrees worktree.fixture, worktree.linked holds 300 MiB, idle 42 s, serving".to_owned()
                 ),
                 (
                     DoctorEvidenceStateV1::Partial,

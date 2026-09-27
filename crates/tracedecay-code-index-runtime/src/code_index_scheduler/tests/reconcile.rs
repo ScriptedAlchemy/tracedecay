@@ -18,9 +18,9 @@ use tracedecay_domain::{
     SensitivityLevelV1, UtcMicros, WorktreeId,
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentOwnerBytesV1,
-    ResidentOwnerKindV1, ResidentOwnerReleaseV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1,
-    ResidentOwnerV1, ResidentOwnersV1, sampled_process_resident_bytes_v1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentHoldingV1,
+    ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerReleaseV1, ResidentOwnerSampleV1,
+    ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1, sampled_process_resident_bytes_v1,
 };
 
 use super::{
@@ -8635,7 +8635,7 @@ async fn resident_memory_graph_refusal_serves_text_and_retries_when_memory_is_gi
     assert_eq!(
         released
             .iter()
-            .map(|release| release.generation_id.as_str())
+            .map(|release| release.holding.as_str())
             .collect::<Vec<_>>(),
         ["generation.v1.other"]
     );
@@ -8676,10 +8676,13 @@ impl ResidentOwnerV1 for IdleDecodeOwner {
         self.held
             .load(std::sync::atomic::Ordering::Acquire)
             .then(|| ResidentOwnerSampleV1 {
-                generation_id: CodeGenerationId::new("generation.v1.other").expect("generation id"),
+                holding: ResidentHoldingV1::Generation(
+                    CodeGenerationId::new("generation.v1.other").expect("generation id"),
+                ),
                 bytes: ResidentOwnerBytesV1::Measured(4_096),
                 last_used: Instant::now(),
                 serving: false,
+                shared: None,
             })
     }
 

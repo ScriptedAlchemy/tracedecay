@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tracedecay_code_index::production::{
-    CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
+    CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
 };
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, code_generation_segments_root, scoped_code_index_store_root,
@@ -405,33 +405,37 @@ fn read_active_code_generation(
     )
     .ok()?;
     let segments_root = code_generation_segments_root(&scope);
-    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&sealed, |request, buffer| {
-        let (digest, size_bytes, offset, length) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                (digest, size_bytes, 0, size_bytes)
-            }
-            SealedGenerationSegmentReadV1::Range {
-                digest,
+    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &sealed,
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| {
+            let (digest, size_bytes, offset, length) = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                    (digest, size_bytes, 0, size_bytes)
+                }
+                SealedGenerationSegmentReadV1::Range {
+                    digest,
+                    size_bytes,
+                    offset,
+                    length,
+                } => (digest, size_bytes, offset, length),
+            };
+            let digest_hex =
+                sha256_hex_suffix(digest.as_str()).expect("sealed segment digest is sha256");
+            let segment = std::fs::read(segments_root.join(format!("segment-{digest_hex}.json")))
+                .expect("sealed generation segment");
+            assert_eq!(
+                segment.len() as u64,
                 size_bytes,
-                offset,
-                length,
-            } => (digest, size_bytes, offset, length),
-        };
-        let digest_hex =
-            sha256_hex_suffix(digest.as_str()).expect("sealed segment digest is sha256");
-        let segment = std::fs::read(segments_root.join(format!("segment-{digest_hex}.json")))
-            .expect("sealed generation segment");
-        assert_eq!(
-            segment.len() as u64,
-            size_bytes,
-            "segment size matches manifest"
-        );
-        let start = usize::try_from(offset).expect("segment offset");
-        let end = start + usize::try_from(length).expect("segment length");
-        buffer.clear();
-        buffer.extend_from_slice(&segment[start..end]);
-        Ok(())
-    })
+                "segment size matches manifest"
+            );
+            let start = usize::try_from(offset).expect("segment offset");
+            let end = start + usize::try_from(length).expect("segment length");
+            buffer.clear();
+            buffer.extend_from_slice(&segment[start..end]);
+            Ok(())
+        },
+    )
     .ok()
 }
 

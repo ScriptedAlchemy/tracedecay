@@ -499,7 +499,7 @@ impl CodeFileIndexArtifactsV1 {
         if self.clone_bodies.iter().any(|body| {
             body.occurrence.project_id != authority.project_id
                 || body.occurrence.repository_id != authority.repository_id
-                || body.occurrence.worktree_id != authority.worktree_id
+                || body.occurrence.worktree_id.is_some()
                 || body.occurrence.source_generation != extraction.generation_id
                 || body.occurrence.path != authority.logical_path
         }) {

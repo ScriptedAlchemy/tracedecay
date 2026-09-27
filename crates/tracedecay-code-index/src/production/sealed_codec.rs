@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::ExtractedSchemaEvidenceV1;
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkLogicalIdentityV1, ChunkerRevision, CodeSearchChunkAnchorV1,
@@ -113,8 +114,6 @@ pub(super) struct PersistedFileGenerationArtifactsV2 {
 pub(super) struct FileScopeIdentityV1 {
     project_id: ProjectId,
     repository_id: RepositoryId,
-    worktree_id: Option<WorktreeId>,
-    reference: Option<RefId>,
 }
 
 impl FileScopeIdentityV1 {
@@ -125,8 +124,6 @@ impl FileScopeIdentityV1 {
         Self {
             project_id: manifest.project_id.clone(),
             repository_id: snapshot.repository.clone(),
-            worktree_id: snapshot.worktree.clone(),
-            reference: snapshot.reference.clone(),
         }
     }
 
@@ -135,8 +132,13 @@ impl FileScopeIdentityV1 {
             .as_str()
             .len()
             .saturating_add(self.repository_id.as_str().len())
-            .saturating_add(self.worktree_id.as_ref().map_or(0, |id| id.as_str().len()))
-            .saturating_add(self.reference.as_ref().map_or(0, |id| id.as_str().len()))
+    }
+
+    pub(super) fn update_content_digest(&self, hasher: &mut Sha256) {
+        hasher.update(self.project_id.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.repository_id.as_str().as_bytes());
+        hasher.update(b"\0");
     }
 }
 
@@ -637,8 +639,6 @@ impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         if authority.project_id != scope.project_id
             || authority.repository_id != scope.repository_id
-            || authority.worktree_id != scope.worktree_id
-            || authority.reference != scope.reference
         {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed file authority names another scope than its generation".to_owned(),
@@ -843,8 +843,6 @@ impl PersistedFileGenerationArtifactsV2 {
         let authority = ReceiptBoundCodeFileAuthorityV1 {
             project_id: scope.project_id.clone(),
             repository_id: scope.repository_id.clone(),
-            worktree_id: scope.worktree_id.clone(),
-            reference: scope.reference.clone(),
             logical_path: self.authority.logical_path,
             content_digest: self.authority.content_digest,
         };
@@ -1051,7 +1049,7 @@ pub(super) struct StreamingPersistedPublishedGenerationV1 {
     pub(super) repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     pub(super) ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     pub(super) ignored_source_admissions_digest: ManifestDigest,
-    pub(super) files: Vec<PersistedFileGenerationArtifactsV1>,
+    pub(super) content: Arc<DecodedGenerationContentV1>,
     pub(super) lineage: Vec<SymbolLineageCandidateV1>,
     pub(super) coverage: CoverageSummaryV1,
     pub(super) capability: CodeIndexCapabilityManifestV1,
@@ -1098,17 +1096,14 @@ pub(super) fn assemble_published_generation(
         repository_parse_identity,
         ignored_source_admissions,
         ignored_source_admissions_digest,
-        files,
+        content,
         lineage,
         coverage,
         capability,
         projection_request,
         projection_receipt,
     } = generation;
-    let files = hotpath::measure_block!(
-        "code_index.sealed_decode.page_restore",
-        restore_file_pages(files)
-    )?;
+    let files = content.files.clone();
     let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
         hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
             let ignored_source_roster =
@@ -1181,6 +1176,7 @@ pub(super) fn assemble_published_generation(
         repository_parse_identity,
         ignored_source_roster,
         files,
+        content: Some(content),
         chunks,
         symbols,
         lineage,

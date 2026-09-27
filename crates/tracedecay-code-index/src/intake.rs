@@ -10,9 +10,9 @@ use std::{collections::BTreeMap, ops::Deref};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    ContentDigest, DomainError, FileOccurrenceId, ManifestDigest, ProjectId, RefId, RepositoryId,
+    ContentDigest, DomainError, FileOccurrenceId, ManifestDigest, ProjectId, RepositoryId,
     SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
-    ValidatedCodeFileV1, WorktreeId, canonical_sha256,
+    ValidatedCodeFileV1, canonical_sha256,
 };
 
 use super::languages::LanguageRegistry;
@@ -105,13 +105,15 @@ impl SanitizedSnapshotCapabilityV1 {
 
 /// Opaque extraction input whose bytes, file digest, snapshot digest, and
 /// sanitization receipts were bound by [`CodeIndexIntake::bind_file`].
+///
+/// It names repository content, never the worktree or branch holding it:
+/// linked worktrees sealing identical files hold identical file pages, and
+/// each generation binds its own snapshot's worktree and reference.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReceiptBoundCodeFileAuthorityV1 {
     pub project_id: ProjectId,
     pub repository_id: RepositoryId,
-    pub worktree_id: Option<WorktreeId>,
-    pub reference: Option<RefId>,
     pub logical_path: String,
     pub content_digest: ContentDigest,
 }
@@ -319,8 +321,6 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
             let authority = ReceiptBoundCodeFileAuthorityV1 {
                 project_id: project_id.clone(),
                 repository_id: snapshot.repository.clone(),
-                worktree_id: snapshot.worktree.clone(),
-                reference: snapshot.reference.clone(),
                 logical_path: file.file.logical_path.clone(),
                 content_digest: file.file.content_digest.clone(),
             };

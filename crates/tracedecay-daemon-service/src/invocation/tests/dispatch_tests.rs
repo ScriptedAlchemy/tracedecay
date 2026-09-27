@@ -551,6 +551,251 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
     assert!(service.authorized_lsp_workspaces.lock().await.is_empty());
 }
 
+/// Send one client frame, then drain and acknowledge every frame the session
+/// queued in answer.
+async fn exchange_lsp_frame(
+    service: &DaemonInvocationService,
+    registry: &Arc<Mutex<LspSessionRegistry>>,
+    session: &DaemonLspSessionAccess,
+    frame: serde_json::Value,
+) {
+    let response = service
+        .invoke(
+            registry,
+            None,
+            None,
+            None,
+            None,
+            DaemonInvocationRequest::lsp_frame(
+                "request.frame",
+                session.clone(),
+                frame.to_string(),
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
+        )
+        .await;
+    assert!(
+        matches!(
+            response.outcome,
+            DaemonInvocationOutcome::LspFrameAccepted {
+                backpressured: false,
+                closed: false
+            }
+        ),
+        "{:?}",
+        response.outcome
+    );
+    loop {
+        let polled = service
+            .invoke(
+                registry,
+                None,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_poll(
+                    "request.poll",
+                    session.clone(),
+                    lsp_deadline(),
+                    lsp_cancellation(),
+                ),
+            )
+            .await;
+        let DaemonInvocationOutcome::LspFrame { frame: Some(_), .. } = polled.outcome else {
+            return;
+        };
+        service
+            .invoke(
+                registry,
+                None,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_acknowledge(
+                    "request.acknowledge",
+                    session.clone(),
+                    lsp_deadline(),
+                    lsp_cancellation(),
+                ),
+            )
+            .await;
+    }
+}
+
+/// An open LSP session is a `session` owner in the daemon's resident-memory
+/// inventory, under the worktree its grant names, measuring the unsaved
+/// document text it holds.
+#[tokio::test]
+async fn an_open_lsp_session_reports_its_unsaved_documents_as_a_session_owner() {
+    const UNSAVED: &str = "fn unsaved() -> u32 {\n    41 + 1\n}\n";
+    let service = DaemonInvocationService::default();
+    let home = tempfile::tempdir().expect("workspace root");
+    let root = home.path().join("session");
+    std::fs::create_dir(&root).expect("workspace root");
+    let root = root.canonicalize().expect("canonical workspace root");
+    let profile = UserProfileId::new("profile.session-residency").expect("profile");
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.session-residency").expect("project"),
+        RepositoryId::new("repository.session-residency").expect("repository"),
+        WorktreeId::new("worktree.session-residency").expect("worktree"),
+        None,
+    )
+    .expect("scope");
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.session-residency").expect("grant"),
+        1,
+        canonical_sha256(&("session residency grant", 1)).expect("grant digest"),
+        ActorId::new("actor.session-residency").expect("actor"),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        scope.clone(),
+        std::collections::BTreeSet::from([
+            CapabilityId::new(LSP_WORKSPACE_CAPABILITY_ID_V1).expect("capability")
+        ]),
+        std::collections::BTreeSet::from([
+            UseCaseId::new(LSP_WORKSPACE_USE_CASE_ID_V1).expect("use case")
+        ]),
+        DisclosureClass::Sensitive,
+    )
+    .expect("grant");
+    let owner = DaemonLspInvocationOwner::for_test_project(
+        unavailable_lsp_session_factory(),
+        profile.clone(),
+        scope.project_id.clone(),
+        root.clone(),
+    )
+    .with_scope_grant(grant);
+    DaemonLspOwnerRegistrar::new(&service)
+        .register_lsp_owner(root.clone(), owner.clone())
+        .await
+        .expect("register owner");
+    let uri = url::Url::from_directory_path(&root)
+        .expect("root URI")
+        .to_string();
+    let locator = RegisteredRootLocatorV1::new(
+        scope.project_id.clone(),
+        SharedProfileStoreLocatorV1::new(
+            BrainId::new("brain.fixture").unwrap(),
+            profile,
+            "store.session-residency",
+        )
+        .unwrap(),
+        root.clone(),
+    )
+    .expect("registered root");
+    let session_rows = || {
+        tracedecay_runtime_core::resident_memory::process_resident_owners_v1()
+            .report(std::time::Instant::now())
+            .owners
+            .into_iter()
+            .filter(|row| row.project_id == scope.project_id)
+            .map(|row| {
+                (
+                    row.kind.as_str(),
+                    row.holders
+                        .iter()
+                        .map(|holder| holder.worktree_id.as_str().to_owned())
+                        .collect::<Vec<_>>(),
+                    row.bytes.measured(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(session_rows(), []);
+
+    let workspace = service
+        .authorize_lsp_workspace(
+            vec![(root.clone(), uri.clone(), scope.clone(), locator)],
+            UtcMicros(1),
+        )
+        .await
+        .expect("authorize registered workspace");
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let opened = service
+        .invoke(
+            &registry,
+            Some(&root),
+            Some(workspace),
+            None,
+            None,
+            DaemonInvocationRequest::lsp_open(
+                "request.session-residency",
+                "client.session-residency",
+                Some(uri.clone()),
+                vec![uri.clone()],
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
+        )
+        .await;
+    let DaemonInvocationOutcome::LspOpened { session, .. } = opened.outcome else {
+        panic!(
+            "the granted workspace opens a session: {:?}",
+            opened.outcome
+        );
+    };
+    assert_eq!(
+        session_rows(),
+        [(
+            "session",
+            vec!["worktree.session-residency".to_owned()],
+            Some(0)
+        )]
+    );
+
+    exchange_lsp_frame(
+        &service,
+        &registry,
+        &session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": uri,
+                "capabilities": { "general": { "positionEncodings": ["utf-16"] } }
+            }
+        }),
+    )
+    .await;
+    exchange_lsp_frame(
+        &service,
+        &registry,
+        &session,
+        serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    )
+    .await;
+    exchange_lsp_frame(
+        &service,
+        &registry,
+        &session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": format!("{uri}src/unsaved.rs"),
+                    "languageId": "rust",
+                    "version": 1,
+                    "text": UNSAVED
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        session_rows(),
+        [(
+            "session",
+            vec!["worktree.session-residency".to_owned()],
+            Some(35)
+        )],
+        "the session reports the unsaved text it now holds"
+    );
+}
+
 #[tokio::test]
 async fn federated_lsp_admission_preserves_exact_profile_factory_and_root_pairing() {
     let service = DaemonInvocationService::default();

@@ -134,6 +134,9 @@ pub struct CloneBodyPayloadV1 {
 pub struct CloneBodyOccurrenceV1 {
     pub project_id: ProjectId,
     pub repository_id: RepositoryId,
+    /// `None` inside a generation's file pages, which name repository content
+    /// shared by every linked worktree sealing it; a serving route that
+    /// rebuilds an occurrence supplies its own worktree.
     pub worktree_id: Option<WorktreeId>,
     pub source_generation: CodeGenerationId,
     pub snapshot_digest: ManifestDigest,

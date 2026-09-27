@@ -565,11 +565,12 @@ fn prior_sealed_generation_is_rejected_before_manifest_decode() {
             r#"{{"state_digest":"{}","generation":{generation}}}"#,
             digest.as_str()
         );
-        let error =
-            CodeIndexPublishedGenerationV1::decode_partitioned_sealed(prior.as_bytes(), |_, _| {
-                panic!("a retired manifest must be refused before any segment read")
-            })
-            .expect_err("prior generation must require a rebuild");
+        let error = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            prior.as_bytes(),
+            &SharedDecodedContentPoolV1::default(),
+            |_, _| panic!("a retired manifest must be refused before any segment read"),
+        )
+        .expect_err("prior generation must require a rebuild");
         assert!(
             matches!(
                 error,
@@ -618,23 +619,29 @@ fn partitioned_restore(
     manifest: &[u8],
     segments: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> CodeIndexPublishedGenerationV1 {
-    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
-        let (digest, offset, length) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
-            SealedGenerationSegmentReadV1::Range {
-                digest,
-                offset,
-                length,
-                ..
-            } => (digest, offset, length),
-        };
-        let bytes = &segments[digest.as_str()];
-        let start = usize::try_from(offset).expect("segment offset");
-        let end = start + usize::try_from(length).expect("segment length");
-        buffer.clear();
-        buffer.extend_from_slice(&bytes[start..end]);
-        Ok(())
-    })
+    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| {
+            let (digest, offset, length) = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                    (digest, 0, size_bytes)
+                }
+                SealedGenerationSegmentReadV1::Range {
+                    digest,
+                    offset,
+                    length,
+                    ..
+                } => (digest, offset, length),
+            };
+            let bytes = &segments[digest.as_str()];
+            let start = usize::try_from(offset).expect("segment offset");
+            let end = start + usize::try_from(length).expect("segment length");
+            buffer.clear();
+            buffer.extend_from_slice(&bytes[start..end]);
+            Ok(())
+        },
+    )
     .expect("generation restores")
 }
 

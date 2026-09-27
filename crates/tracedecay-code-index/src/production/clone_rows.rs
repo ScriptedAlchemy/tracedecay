@@ -148,7 +148,7 @@ impl<'a> PersistedCloneBodiesRefV1<'a> {
             let payload = &*body.payload;
             if occurrence.project_id != authority.project_id
                 || occurrence.repository_id != authority.repository_id
-                || occurrence.worktree_id != authority.worktree_id
+                || occurrence.worktree_id.is_some()
                 || occurrence.path != authority.logical_path
                 || occurrence.source_generation != extraction.generation_id
                 || occurrence.payload_digest != payload.payload_digest
@@ -251,7 +251,7 @@ impl PersistedCloneBodiesV1 {
                     occurrence: CloneBodyOccurrenceV1 {
                         project_id: authority.project_id.clone(),
                         repository_id: authority.repository_id.clone(),
-                        worktree_id: authority.worktree_id.clone(),
+                        worktree_id: None,
                         source_generation: extraction.generation_id.clone(),
                         snapshot_digest: body
                             .snapshot_digest

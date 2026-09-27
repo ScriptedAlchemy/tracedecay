@@ -24,8 +24,9 @@ use tracedecay_code_index::{
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
         CodeIndexRepositoryParseIdentityV1, SEALED_GENERATION_FORMAT_REVISION_V1,
         SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-        SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
-        VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+        SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
+        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+        VerifiedSealedLexicalPageV1,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -3136,8 +3137,10 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     let largest_file_segment = Cell::new(0_usize);
     let largest_evidence_page = Cell::new(0_usize);
     let evidence_buffer_capacity = Cell::new(0_usize);
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |request, buffer| {
+    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| {
             let address = buffer as *const Vec<u8> as usize;
             let (digest, offset, length, reading_file) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
@@ -3174,8 +3177,9 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             }
             segment_reads.set(segment_reads.get() + 1);
             Ok(())
-        })
-        .expect("partitioned bytes decode");
+        },
+    )
+    .expect("partitioned bytes decode");
     assert_eq!(segment_reads.get(), PARTITIONED_FORMAT_SEGMENTS.len());
     let largest_file_segment = largest_file_segment.get();
     assert_eq!(
@@ -3256,7 +3260,12 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             "one flipped byte in segment {corrupted} must fail authentication"
         );
         assert!(
-            CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, flip).is_err(),
+            CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+                &manifest,
+                &SharedDecodedContentPoolV1::default(),
+                flip
+            )
+            .is_err(),
             "one flipped byte in segment {corrupted} must fail the decoder"
         );
     }
@@ -3311,11 +3320,15 @@ fn partitioned_text_metadata_exposes_commitments_without_payload_reads() {
             .expect("published generation commitments")
     );
 
-    let error = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |_, _| {
-        Err(CodeIndexProductionErrorV1::Contract(
-            "payload segment requested".to_owned(),
-        ))
-    })
+    let error = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |_, _| {
+            Err(CodeIndexProductionErrorV1::Contract(
+                "payload segment requested".to_owned(),
+            ))
+        },
+    )
     .expect_err("full decode must request payload segments");
     assert_eq!(
         error.to_string(),
@@ -3412,7 +3425,12 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
         CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest).err(),
         CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest).err(),
         CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read).err(),
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read).err(),
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            &SharedDecodedContentPoolV1::default(),
+            read,
+        )
+        .err(),
     ] {
         let error = refusal.expect("a retired manifest revision must be refused, never migrated");
         assert!(
@@ -3541,9 +3559,13 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
     CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read)
         .expect("a child encoded without reuse must be self-sufficient");
     assert_eq!(
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read)
-            .map(|restored| PartitionedSealV1::of(&restored))
-            .expect("the child decodes from its own segments"),
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            &SharedDecodedContentPoolV1::default(),
+            read
+        )
+        .map(|restored| PartitionedSealV1::of(&restored))
+        .expect("the child decodes from its own segments"),
         PartitionedSealV1::of(&child),
         "no reuse must restore the same typed generation"
     );

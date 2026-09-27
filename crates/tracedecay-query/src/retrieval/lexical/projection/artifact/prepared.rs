@@ -364,14 +364,15 @@ fn prepare_clone_body(
         })
         .transpose()?;
     // Only content is stored; the opener's route supplies project,
-    // repository, worktree, generation, and snapshot. A body from another
-    // route would be silently re-labelled, so it is refused.
+    // repository, worktree, generation, and snapshot. A generation's file
+    // pages name no worktree, so a body from another project or repository
+    // would be silently re-labelled, and is refused.
     let occurrence = &body.occurrence;
-    let owned = metadata.clone_route.as_ref().is_some_and(|route| {
-        route.project_id == occurrence.project_id
-            && route.worktree_id == occurrence.worktree_id
-            && metadata.repository_id.as_ref() == Some(&occurrence.repository_id)
-    });
+    let owned = occurrence.worktree_id.is_none()
+        && metadata.clone_route.as_ref().is_some_and(|route| {
+            route.project_id == occurrence.project_id
+                && metadata.repository_id.as_ref() == Some(&occurrence.repository_id)
+        });
     if !owned {
         return Err(CodeLexicalArtifactErrorV1::Contract(
             "clone body belongs to another route than the projection".to_owned(),

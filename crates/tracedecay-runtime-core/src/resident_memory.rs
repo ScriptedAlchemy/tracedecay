@@ -15,11 +15,12 @@ use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 mod owners;
 
 pub use owners::{
-    RESIDENT_OWNER_IDLE_WINDOW_V1, RESIDENT_OWNER_SHED_ORDER_V1, ResidentOwnerBytesV1,
-    ResidentOwnerKindV1, ResidentOwnerRegistrationFailureV1, ResidentOwnerRegistrationV1,
-    ResidentOwnerReleaseCauseV1, ResidentOwnerReleaseV1, ResidentOwnerReleasedV1,
-    ResidentOwnerReportRowV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1,
-    ResidentOwnersReportV1, ResidentOwnersV1, process_resident_owners_v1,
+    RESIDENT_OWNER_IDLE_WINDOW_V1, RESIDENT_OWNER_SHED_ORDER_V1, ResidentHoldingV1,
+    ResidentOwnerBytesV1, ResidentOwnerHolderV1, ResidentOwnerKindV1,
+    ResidentOwnerRegistrationFailureV1, ResidentOwnerRegistrationV1, ResidentOwnerReleaseCauseV1,
+    ResidentOwnerReleaseV1, ResidentOwnerReleasedV1, ResidentOwnerReportRowV1,
+    ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersReportV1,
+    ResidentOwnersV1, ResidentSharedContentV1, process_resident_owners_v1,
 };
 
 /// Conservative fallback when the host cannot report physical memory.
@@ -835,7 +836,7 @@ pub fn log_resident_owner_release_v1(released: &ResidentOwnerReleasedV1) {
         project_id = released.scope.project_id.as_str(),
         worktree_id = released.scope.worktree_id.as_str(),
         kind = released.kind.as_str(),
-        generation_id = released.generation_id.as_str(),
+        holding = released.holding.as_str(),
         bytes = released.bytes.measured(),
         cause = match released.cause {
             ResidentOwnerReleaseCauseV1::Idle => "idle",

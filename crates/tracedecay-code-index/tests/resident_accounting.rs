@@ -20,7 +20,7 @@ use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
     CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
     SealedGenerationFileWindowsV1, SealedGenerationSegmentPublicationV1,
-    SealedGenerationSegmentReadV1,
+    SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -268,9 +268,11 @@ fn read_segment(
 }
 
 fn decode(manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> CodeIndexPublishedGenerationV1 {
-    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
-        read_segment(segments, request, buffer)
-    })
+    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| read_segment(segments, request, buffer),
+    )
     .expect("decode")
 }
 

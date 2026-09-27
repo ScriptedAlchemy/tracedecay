@@ -1047,7 +1047,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             &project_root,
             sanitizer_revision.clone(),
         )?
-        .with_shutdown_signal(Arc::clone(&shutting_down));
+        .with_shutdown_signal(Arc::clone(&shutting_down))
+        .with_decoded_content(byte_pool.decoded_content.clone());
         let production_config = CodeIndexProductionConfigV1 {
             project_id: project_id.clone(),
             repository: repository_id.clone(),

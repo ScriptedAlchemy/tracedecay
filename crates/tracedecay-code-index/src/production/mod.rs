@@ -95,6 +95,8 @@ pub use lexical_page_source::{
     VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
     VerifiedSealedTextGenerationMetadataV1,
 };
+mod decoded_content;
+pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1};
 mod graph_inputs;
 pub(crate) use graph_inputs::{CodeGraphFileBatchV1, CodeGraphResolutionV1};
 mod partitioned_codec;
@@ -667,7 +669,7 @@ impl FileGenerationArtifactsV1 {
             for body in &mut artifacts.clone_bodies {
                 body.occurrence.project_id = file.authority().project_id.clone();
                 body.occurrence.repository_id = file.authority().repository_id.clone();
-                body.occurrence.worktree_id = file.authority().worktree_id.clone();
+                body.occurrence.worktree_id = None;
                 body.occurrence.snapshot_digest = target.snapshot_digest.clone();
                 body.occurrence.path = file.authority().logical_path.clone();
             }
@@ -691,14 +693,11 @@ impl FileGenerationArtifactsV1 {
     fn can_share_carried_forward(
         &self,
         config: &CodeIndexProductionConfigV1,
-        scope: &CodeIndexGenerationScopeV1,
         file: &SanitizedCodeFileV1,
         extractor_revision: &ExtractorRevision,
     ) -> bool {
         self.authority.project_id == config.project_id
             && self.authority.repository_id == config.repository
-            && self.authority.worktree_id == scope.worktree
-            && self.authority.reference == scope.reference
             && self.authority.logical_path == file.logical_path
             && self.authority.content_digest == file.content_digest
             && self.extraction.content_digest == file.content_digest
@@ -709,13 +708,12 @@ impl FileGenerationArtifactsV1 {
     fn rematerialize_carried_forward(
         &self,
         config: &CodeIndexProductionConfigV1,
-        scope: &CodeIndexGenerationScopeV1,
         generation_id: &CodeGenerationId,
         snapshot_digest: &ManifestDigest,
         file: &SanitizedCodeFileV1,
         extractor_revision: &ExtractorRevision,
     ) -> Result<Self, ChunkingFailureV1> {
-        if !self.can_share_carried_forward(config, scope, file, extractor_revision) {
+        if !self.can_share_carried_forward(config, file, extractor_revision) {
             return Err(ChunkingFailureV1::GenerationMismatch);
         }
         let mut artifacts = self
@@ -727,7 +725,7 @@ impl FileGenerationArtifactsV1 {
         for body in &mut artifacts.clone_bodies {
             body.occurrence.project_id = config.project_id.clone();
             body.occurrence.repository_id = config.repository.clone();
-            body.occurrence.worktree_id = scope.worktree.clone();
+            body.occurrence.worktree_id = None;
             body.occurrence.source_generation = generation_id.clone();
             body.occurrence.snapshot_digest = snapshot_digest.clone();
             body.occurrence.path = file.logical_path.clone();
@@ -759,6 +757,10 @@ pub struct CodeIndexPublishedGenerationV1 {
     repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     ignored_source_roster: IgnoredSourceRosterV1,
     files: Vec<Arc<FileGenerationArtifactsV1>>,
+    /// The decoded pages `files` references, shared with every generation
+    /// that sealed the same content. A generation built in this process
+    /// owns its pages outright and has none.
+    content: Option<Arc<DecodedGenerationContentV1>>,
     chunks: GenerationChunkManifestV1,
     symbols: GenerationSymbolIndexV1,
     lineage: Vec<SymbolLineageCandidateV1>,
@@ -999,6 +1001,14 @@ impl CodeIndexPublishedGenerationV1 {
 
     fn measure_decode_bytes(&self) -> usize {
         self.measure_resident_bytes()
+    }
+
+    /// The decoded pages this generation shares with every generation that
+    /// sealed the same content; `None` for a generation built in process.
+    /// Their bytes are part of [`Self::retained_bytes`].
+    #[must_use]
+    pub fn shared_content(&self) -> Option<&Arc<DecodedGenerationContentV1>> {
+        self.content.as_ref()
     }
 
     /// Build the production generation-bound affected-test authority.
@@ -1463,8 +1473,6 @@ impl CodeIndexPublishedGenerationV1 {
                     ));
                 }
                 if file.authority.repository_id != self.snapshot.repository
-                    || file.authority.worktree_id != self.snapshot.worktree
-                    || file.authority.reference != self.snapshot.reference
                     || occurrence.is_none_or(|occurrence| {
                         occurrence.logical_path != file.authority.logical_path
                             || occurrence.content_digest != file.authority.content_digest
@@ -2169,6 +2177,7 @@ where
                 repository_parse_identity: request.repository_parse_identity.clone(),
                 ignored_source_roster,
                 files: staged.files,
+                content: None,
                 chunks: staged.chunks,
                 symbols: staged.symbols,
                 lineage: staged.lineage,
@@ -2536,11 +2545,9 @@ where
             .iter()
             .map(|file| (file.file_occurrence_id.clone(), file))
             .collect::<BTreeMap<_, _>>();
-        let scope = CodeIndexGenerationScopeV1::for_snapshot(&capability.snapshot().snapshot);
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
-        let scope_ref = &scope;
         let mut extractor_by_language: HashMap<LanguageId, ExtractorRevision> = HashMap::new();
         let mut dirty_plans = Vec::new();
         let mut shared_carry_by_index = Vec::with_capacity(increment.files.len());
@@ -2573,7 +2580,6 @@ where
                                 Some(ref extractor_revision)
                                     if prior.can_share_carried_forward(
                                         config,
-                                        scope_ref,
                                         current_file,
                                         extractor_revision,
                                     ) =>
@@ -2658,7 +2664,6 @@ where
                         } else {
                             prior.rematerialize_carried_forward(
                                 config,
-                                &scope,
                                 &manifest.generation_id,
                                 &capability.snapshot().intake_digest,
                                 current_file,

@@ -17,7 +17,7 @@ use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry}
 use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, SealedGenerationFileWindowsV1,
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-    VerifiedSealedLexicalPageSourceV1,
+    SharedDecodedContentPoolV1, VerifiedSealedLexicalPageSourceV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, FileOccurrenceId, LanguageDescriptorV1, LanguageId, ManifestDigest,
@@ -130,9 +130,11 @@ impl PartitionedSealV1 {
         &self,
         manifest: &[u8],
     ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
-            self.read_segment(request, buffer)
-        })
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            manifest,
+            &SharedDecodedContentPoolV1::default(),
+            |request, buffer| self.read_segment(request, buffer),
+        )
     }
 
     fn read_segment(

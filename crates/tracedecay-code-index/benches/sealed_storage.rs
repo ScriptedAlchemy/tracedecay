@@ -43,7 +43,8 @@ use tracedecay_code_index::{
         CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
         SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+        SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
+        VerifiedSealedLexicalPageSourceV1,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -628,6 +629,7 @@ fn digest_decoded(
     let started = Instant::now();
     let generation = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &sealed.manifest,
+        &SharedDecodedContentPoolV1::default(),
         |request, buffer| {
             let (bytes, offset, length) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
