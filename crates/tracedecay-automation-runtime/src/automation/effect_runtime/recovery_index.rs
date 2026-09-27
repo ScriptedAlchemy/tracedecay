@@ -69,7 +69,7 @@ pub async fn prepare_reserved_automation_effect_recovery(
     })??;
     let recovery_root = dashboard_root.to_path_buf();
     let (reset_journals, indexed) = tokio::task::spawn_blocking(move || {
-        let reset_journals = rebuild_unsupported_index_blocking(&recovery_root)?;
+        let reset_journals = reset_refused_shapes_blocking(&recovery_root)?;
         Ok::<_, TraceDecayError>((reset_journals, indexed_recovery_blocking(&recovery_root)?))
     })
     .await
@@ -97,46 +97,66 @@ fn reset_report(reset_journals: usize) -> AutomationEffectRecoveryReport {
     }
 }
 
+/// Resets every refused persisted shape recovery can reach: a refused pending
+/// index is rebuilt from its journals, and under a current index each refused
+/// journal it does not reference is retired. Returns the number of discarded
+/// journals.
+#[hotpath::measure(label = "daemon.automation.effect.reset_refused_shapes")]
+fn reset_refused_shapes_blocking(dashboard_root: &Path) -> Result<usize> {
+    let path = index_path(dashboard_root);
+    match with_index_lock(&path, || read_index(&path)) {
+        Ok(index) => retire_unreferenced_refused_journals_blocking(dashboard_root, &index),
+        Err(error) if error.reset_required_context().is_some() => {
+            rebuild_unsupported_index_blocking(dashboard_root, &error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// No current writer produces or indexes a refused shape, so a refused journal
+/// outside the index is settled history that can neither replay nor recover.
+/// Left in place it would refuse every reuse of its run id forever. Referenced
+/// refused journals are discarded by per-entry recovery instead.
+fn retire_unreferenced_refused_journals_blocking(
+    dashboard_root: &Path,
+    index: &PendingIndex,
+) -> Result<usize> {
+    let mut retired = 0;
+    for journal_path in journal_files(dashboard_root)? {
+        let referenced = index
+            .entries
+            .iter()
+            .any(|entry| Some(entry.journal_file.as_str()) == journal_file_name(&journal_path));
+        if referenced || journal::refused_journal_shape_blocking(&journal_path)?.is_none() {
+            continue;
+        }
+        if matches!(
+            discard_if_refused_blocking(&journal_path)?,
+            journal::JournalShapeProbe::Discarded(_)
+        ) {
+            retired += 1;
+        }
+    }
+    Ok(retired)
+}
+
 /// Rebuilds a pending index whose persisted shape is refused from the journals
 /// beside it, discarding journals whose own shape is refused. Journals are read
 /// before the index lock is taken, preserving the journal -> index lock order
 /// used by reservation. Returns the number of discarded journals.
-fn rebuild_unsupported_index_blocking(dashboard_root: &Path) -> Result<usize> {
+fn rebuild_unsupported_index_blocking(
+    dashboard_root: &Path,
+    refusal: &TraceDecayError,
+) -> Result<usize> {
     let path = index_path(dashboard_root);
-    let refusal = match with_index_lock(&path, || read_index(&path)) {
-        Ok(_) => return Ok(0),
-        Err(error) if error.reset_required_context().is_some() => error,
-        Err(error) => return Err(error),
-    };
-    let root = automation_root(dashboard_root);
-    let listing = std::fs::read_dir(&root).map_err(|error| {
-        contract_error(format!(
-            "automation journal directory listing failed: {error}"
-        ))
-    })?;
     let mut entries = Vec::new();
     let mut discarded = 0;
-    for listed in listing {
-        let listed = listed.map_err(|error| {
-            contract_error(format!(
-                "automation journal directory listing failed: {error}"
-            ))
-        })?;
-        let Some(name) = listed.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if validate_journal_filename(&name).is_err() {
-            continue;
-        }
-        let journal_path = root.join(&name);
-        match journal::read_or_discard_unsupported_record_blocking(&journal_path)? {
+    for journal_path in journal_files(dashboard_root)? {
+        match discard_if_refused_blocking(&journal_path)? {
             journal::JournalShapeProbe::Current(record) if !record.is_terminal() => {
                 entries.push(entry_for(&journal_path, &record.admission().scope)?);
             }
-            journal::JournalShapeProbe::Discarded(journal_refusal) => {
-                discarded += 1;
-                log_journal_reset(&journal_path, &journal_refusal);
-            }
+            journal::JournalShapeProbe::Discarded(_) => discarded += 1,
             journal::JournalShapeProbe::Current(_) | journal::JournalShapeProbe::Missing => {}
         }
     }
@@ -162,12 +182,91 @@ fn rebuild_unsupported_index_blocking(dashboard_root: &Path) -> Result<usize> {
     Ok(discarded)
 }
 
-fn log_journal_reset(journal: &Path, refusal: &TraceDecayError) {
-    tracing::warn!(
-        event = "automation_effect_journal_reset",
-        journal = %journal.display(),
-        reason = %refusal,
-    );
+/// Discards the journal when its persisted shape is refused, logging the reset
+/// with the run id its admission names when that run id owns the filename.
+fn discard_if_refused_blocking(journal_path: &Path) -> Result<journal::JournalShapeProbe> {
+    let claimed_run_id = journal::refused_journal_shape_blocking(journal_path)?
+        .and_then(|refused| refused.claimed_run_id);
+    let probe = journal::read_or_discard_unsupported_record_blocking(journal_path)?;
+    if let journal::JournalShapeProbe::Discarded(refusal) = &probe {
+        tracing::warn!(
+            event = "automation_effect_journal_reset",
+            journal = %journal_path.display(),
+            run_id = verified_run_id(journal_path, claimed_run_id)
+                .as_ref()
+                .map(RunId::as_str),
+            reason = %refusal,
+        );
+    }
+    Ok(probe)
+}
+
+fn verified_run_id(journal_path: &Path, claimed: Option<RunId>) -> Option<RunId> {
+    claimed.filter(|run_id| {
+        automation_journal_filename(run_id)
+            .is_ok_and(|expected| Some(expected.as_str()) == journal_file_name(journal_path))
+    })
+}
+
+fn journal_file_name(journal_path: &Path) -> Option<&str> {
+    journal_path.file_name().and_then(|name| name.to_str())
+}
+
+/// Every digest-named journal in the automation directory, sorted.
+fn journal_files(dashboard_root: &Path) -> Result<Vec<PathBuf>> {
+    let root = automation_root(dashboard_root);
+    let listing = match std::fs::read_dir(&root) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(contract_error(format!(
+                "automation journal directory listing failed: {error}"
+            )));
+        }
+    };
+    let mut journals = Vec::new();
+    for listed in listing {
+        let listed = listed.map_err(|error| {
+            contract_error(format!(
+                "automation journal directory listing failed: {error}"
+            ))
+        })?;
+        if let Some(name) = listed.file_name().to_str()
+            && validate_journal_filename(name).is_ok()
+        {
+            journals.push(root.join(name));
+        }
+    }
+    journals.sort();
+    Ok(journals)
+}
+
+/// A refused effect journal that project-open recovery will retire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAutomationEffectReset {
+    pub journal: PathBuf,
+    /// Present only when the run id the admission names digests to the
+    /// journal's filename.
+    pub run_id: Option<RunId>,
+    pub reason: String,
+}
+
+/// Read-only listing of the refused journals the next recovery resets, for
+/// Doctor. It takes no journal lock and removes nothing.
+pub fn pending_automation_effect_resets_blocking(
+    dashboard_root: &Path,
+) -> Result<Vec<PendingAutomationEffectReset>> {
+    let mut resets = Vec::new();
+    for journal in journal_files(dashboard_root)? {
+        if let Some(refused) = journal::refused_journal_shape_blocking(&journal)? {
+            resets.push(PendingAutomationEffectReset {
+                run_id: verified_run_id(&journal, refused.claimed_run_id),
+                reason: refused.reason,
+                journal,
+            });
+        }
+    }
+    Ok(resets)
 }
 
 /// Opens receipt authority only for reserved memory effects; failures defer that
@@ -637,18 +736,15 @@ async fn discard_unsupported_journal(
 ) -> Result<EntryRecoveryOutcome> {
     let root = dashboard_root.to_path_buf();
     let path = journal_path.to_path_buf();
-    tokio::task::spawn_blocking(
-        move || match journal::read_or_discard_unsupported_record_blocking(&path)? {
-            journal::JournalShapeProbe::Discarded(refusal) => {
-                log_journal_reset(&path, &refusal);
-                remove_pending_blocking(&root, &path)?;
-                Ok(EntryRecoveryOutcome::ResetRequired)
-            }
-            journal::JournalShapeProbe::Missing | journal::JournalShapeProbe::Current(_) => {
-                Ok(EntryRecoveryOutcome::Deferred)
-            }
-        },
-    )
+    tokio::task::spawn_blocking(move || match discard_if_refused_blocking(&path)? {
+        journal::JournalShapeProbe::Discarded(_) => {
+            remove_pending_blocking(&root, &path)?;
+            Ok(EntryRecoveryOutcome::ResetRequired)
+        }
+        journal::JournalShapeProbe::Missing | journal::JournalShapeProbe::Current(_) => {
+            Ok(EntryRecoveryOutcome::Deferred)
+        }
+    })
     .await
     .map_err(|error| contract_error(format!("automation journal reset failed to join: {error}")))?
 }

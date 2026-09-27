@@ -3423,6 +3423,71 @@ async fn refused_memory_journal_shape_resets_per_entry_and_recovery_converges() 
     );
 }
 
+/// A settled journal leaves the pending index, so a legacy terminal journal is
+/// referenced by nothing. Recovery must still retire it, or its run id is
+/// refused forever; a current settled journal beside it stays the replay
+/// authority for its own run id.
+#[tokio::test]
+async fn unreferenced_refused_terminal_journal_is_retired_and_its_run_id_reusable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let legacy = external_admission("run.legacy-terminal", "request.legacy-terminal");
+    let legacy_journal = reserve_indexed(dashboard_root, &legacy);
+    let current = external_admission("run.current-terminal", "request.current-terminal");
+    let current_journal = reserve_indexed(dashboard_root, &current);
+    recover_without_memory_reads(dashboard_root).await;
+    assert!(
+        recovery_index::indexed_journals_blocking(dashboard_root, &scope())
+            .expect("pending index")
+            .is_empty(),
+        "settled journals leave the pending index"
+    );
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&legacy_journal).expect("journal")).expect("json");
+    journal["admission"]["recovery"]["binding"]["retirement"] = serde_json::Value::Null;
+    write_private_test_file(
+        &legacy_journal,
+        &serde_json::to_vec_pretty(&journal).expect("bytes"),
+    );
+    let refusal =
+        reserve_or_replay_with_index(&legacy_journal, legacy.clone(), || Ok(()), || Ok(()))
+            .err()
+            .expect("a legacy terminal journal refuses its run id");
+    assert!(
+        refusal.reset_required_context().is_some(),
+        "refusal must be a typed reset: {refusal}"
+    );
+
+    let report = recover_without_memory_reads(dashboard_root).await;
+    assert_eq!(
+        report,
+        recovery_index::AutomationEffectRecoveryReport {
+            inspected: 1,
+            reset_required: 1,
+            ..recovery_index::AutomationEffectRecoveryReport::default()
+        }
+    );
+    assert!(!legacy_journal.exists(), "legacy journal is retired");
+    assert!(
+        !terminal_sidecar_path(&legacy_journal)
+            .expect("sidecar")
+            .exists()
+    );
+    let ReservationResult::Replay { .. } =
+        reserve_or_replay_with_index(&current_journal, current, || Ok(()), || Ok(()))
+            .expect("current terminal journal replays")
+    else {
+        panic!("a current settled journal keeps replaying its run id")
+    };
+    let ReservationResult::Execute { claim } =
+        reserve_or_replay_with_index(&legacy_journal, legacy, || Ok(()), || Ok(()))
+            .expect("the retired run id is admitted again")
+    else {
+        panic!("a retired run id runs as a fresh reservation")
+    };
+    drop(claim);
+}
+
 #[tokio::test]
 async fn refused_pending_index_shape_rebuilds_from_journals_and_converges() {
     let temp = tempfile::tempdir().expect("tempdir");
