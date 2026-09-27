@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
-use tracedecay_code_index::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
+use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionStore, CodeGraphSymbolBindingV1,
-    build_code_graph_manifest, code_graph_projection_identity,
+    build_code_graph_manifest, code_graph_projection_identity, code_graph_record_property,
+    code_graph_symbol_record_property,
 };
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_contracts::retrieval::{
@@ -707,7 +707,7 @@ fn file_entity(file: &SanitizedCodeFileV1) -> GraphEntity {
         BTreeSet::from([GraphLabel::new("CodeFile").expect("file label")]),
         BTreeMap::from([(
             GraphPropertyName::new("file-record").expect("file property"),
-            GraphProperty::Bytes(serde_json::to_vec(file).expect("file record")),
+            code_graph_record_property(file).expect("file record"),
         )]),
     )
     .expect("file entity")
@@ -719,7 +719,7 @@ fn import_entity(import: &CodeIndexImportEvidenceV1) -> GraphEntity {
         BTreeSet::from([GraphLabel::new("CodeImport").expect("import label")]),
         BTreeMap::from([(
             GraphPropertyName::new("import-record").expect("import property"),
-            GraphProperty::Bytes(serde_json::to_vec(import).expect("import record")),
+            code_graph_record_property(import).expect("import record"),
         )]),
     )
     .expect("import entity")
@@ -760,14 +760,6 @@ fn import_entity_id(import: &CodeIndexImportEvidenceV1) -> GraphEntityId {
     .expect("import entity id")
 }
 
-#[derive(Serialize)]
-struct SymbolRecordFixture {
-    occurrence: SymbolOccurrenceId,
-    binding: Option<CodeGraphSymbolBindingV1>,
-    metadata: Option<LineageSymbolRecordV1>,
-    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
-}
-
 #[allow(clippy::too_many_arguments)]
 fn symbol_entity(
     file: &SanitizedCodeFileV1,
@@ -779,9 +771,9 @@ fn symbol_entity(
     start_byte: u64,
 ) -> GraphEntity {
     let occurrence = SymbolOccurrenceId::new(occurrence).expect("symbol");
-    let record = SymbolRecordFixture {
-        occurrence: occurrence.clone(),
-        binding: Some(CodeGraphSymbolBindingV1 {
+    let record = code_graph_symbol_record_property(
+        occurrence.clone(),
+        Some(CodeGraphSymbolBindingV1 {
             file: file.file_occurrence_id.clone(),
             logical_path: Some(file.logical_path.clone()),
             source_span: Some(SourceSpan {
@@ -792,7 +784,7 @@ fn symbol_entity(
             language_descriptor_revision: LanguageDescriptorRevision::new("language.typescript.v1")
                 .expect("language revision"),
         }),
-        metadata: Some(LineageSymbolRecordV1 {
+        Some(LineageSymbolRecordV1 {
             occurrence: occurrence.clone(),
             identity: digest::<SymbolIdentityDigest>(identity_byte),
             qualified_name: qualified_name.to_owned(),
@@ -813,15 +805,16 @@ fn symbol_entity(
             file_identity: digest::<FileIdentityDigest>('f'),
             content_digest: digest::<ContentDigest>(content_byte),
         }),
-        unresolved_calls: Vec::new(),
-    };
+        Vec::new(),
+    )
+    .expect("symbol record");
     GraphEntity::new(
         GraphEntityId::new(stable_identity("symbol", occurrence.as_str()))
             .expect("symbol entity id"),
         BTreeSet::from([GraphLabel::new("CodeSymbol").expect("symbol label")]),
         BTreeMap::from([(
             GraphPropertyName::new("symbol-record").expect("symbol property"),
-            GraphProperty::Bytes(serde_json::to_vec(&record).expect("symbol record")),
+            record,
         )]),
     )
     .expect("symbol entity")

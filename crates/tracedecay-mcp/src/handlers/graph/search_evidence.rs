@@ -3,6 +3,7 @@ use std::future::Future;
 use serde_json::Value;
 
 use crate::tools::render::Md;
+use tracedecay_contracts::retrieval::{PrimitiveUnavailableEvidenceV1, SearchExternalImportHintV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_query::code_search::CodeIndexSearchDisplayV1;
@@ -78,7 +79,7 @@ pub(super) fn bind_verified_graph_to_search(
 
 pub(super) struct SearchGraphEvidence<'a> {
     graph: std::result::Result<&'a VerifiedGraphQuery, &'a TraceDecayError>,
-    unavailable: Option<Value>,
+    unavailable: Option<PrimitiveUnavailableEvidenceV1>,
 }
 
 pub(super) fn append_verified_graph_evidence_md(md: &mut Md, value: &Value) {
@@ -104,28 +105,27 @@ impl<'a> SearchGraphEvidence<'a> {
         let unavailable = graph
             .as_ref()
             .err()
-            .map(|error| dependency_hints::unavailable_hint(error));
+            .map(|error| dependency_hints::unavailable_evidence(error));
         Self { graph, unavailable }
     }
 
-    pub(super) fn enrich_node_id(
-        &mut self,
-        result: &mut Value,
-        display: &CodeIndexSearchDisplayV1,
-    ) {
+    /// The one graph symbol a search display names, when the graph resolves
+    /// it uniquely. A graph read failure is recorded as the response's
+    /// unavailable graph evidence.
+    pub(super) fn node_id_for(&mut self, display: &CodeIndexSearchDisplayV1) -> Option<String> {
         let Ok(graph) = self.graph else {
-            return;
+            return None;
         };
         match unique_graph_node_id_for_search_display(graph, display) {
-            Ok(Some(node_id)) => result["node_id"] = Value::String(node_id),
-            Ok(None) => {}
+            Ok(node_id) => node_id,
             Err(error) => {
-                self.unavailable = Some(dependency_hints::unavailable_hint(&error));
+                self.unavailable = Some(dependency_hints::unavailable_evidence(&error));
+                None
             }
         }
     }
 
-    pub(super) fn unavailable(&self) -> Option<&Value> {
+    pub(super) fn unavailable(&self) -> Option<&PrimitiveUnavailableEvidenceV1> {
         self.unavailable.as_ref()
     }
 
@@ -136,16 +136,20 @@ impl<'a> SearchGraphEvidence<'a> {
         query: &str,
         limit: usize,
         scope_prefix: Option<&str>,
-    ) -> Option<Value> {
+    ) -> Option<SearchExternalImportHintV1> {
         match self.graph {
             Ok(graph) => {
                 match dependency_hints::external_import_hint(ctx, graph, query, limit, scope_prefix)
                 {
-                    Ok(hint) => hint,
-                    Err(error) => Some(dependency_hints::unavailable_hint(&error)),
+                    Ok(hint) => hint.map(SearchExternalImportHintV1::Candidates),
+                    Err(error) => Some(SearchExternalImportHintV1::Unavailable(
+                        dependency_hints::unavailable_evidence(&error),
+                    )),
                 }
             }
-            Err(error) => Some(dependency_hints::unavailable_hint(error)),
+            Err(error) => Some(SearchExternalImportHintV1::Unavailable(
+                dependency_hints::unavailable_evidence(error),
+            )),
         }
     }
 }

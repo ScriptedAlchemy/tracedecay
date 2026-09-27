@@ -156,7 +156,8 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::SkillList
         | ApplicationSurfaceOperation::SkillView
         | ApplicationSurfaceOperation::HermesSkillBridge
-        | ApplicationSurfaceOperation::Analytics => return None,
+        | ApplicationSurfaceOperation::Analytics
+        | ApplicationSurfaceOperation::Search => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

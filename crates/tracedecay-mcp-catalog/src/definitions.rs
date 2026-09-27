@@ -47,7 +47,6 @@ use ast_grep::ast_grep_available;
 use edit::*;
 use git::*;
 use graph::*;
-pub use graph::{SEARCH_MAX_LEXICAL_ANCHOR_BYTES, SEARCH_MAX_LEXICAL_ANCHORS};
 use lcm::*;
 use multi_root::*;
 use skills::*;
@@ -322,7 +321,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         canonical_application_request_schema(application_registry, operation)
     };
     let mut definitions = vec![
-        def_search(),
+        def_search(request_schema("search")?),
         def_grep(request_schema("grep")?),
         def_ast_grep_search(request_schema("ast_grep_search")?),
         def_retrieve(request_schema("retrieve")?),

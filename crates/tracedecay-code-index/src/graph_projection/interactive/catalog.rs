@@ -437,9 +437,9 @@ fn file_dependencies(
     }
 }
 
-/// Per-symbol semantic degree tallied from source (`CodeRelationSource.*`) and
-/// `CodeRelationTarget` relations while the rows stream past, keyed by the
-/// symbol's entity identity.
+/// Per-symbol semantic degree tallied from `CodeEdge.<kind>` rows while they
+/// stream past (outgoing at the source symbol, incoming at the target), keyed
+/// by the symbol's entity identity.
 pub(super) struct SymbolDegreeCounts<K> {
     counts: BTreeMap<K, (u64, u64)>,
 }
