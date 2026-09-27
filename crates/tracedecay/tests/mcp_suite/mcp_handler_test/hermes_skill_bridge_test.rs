@@ -388,7 +388,7 @@ async fn hermes_skill_bridge_mcp_returns_standard_install_inventory() {
     assert_eq!(omitted, populated_inventory(&isolated.home, false, false));
     assert_eq!(
         non_bool["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_hermes_skill_bridge: invalid type: string \"true\", expected a boolean"
+        "tool execution failed: config error: invalid arguments for tracedecay_hermes_skill_bridge: invalid type: integer `1`, expected a boolean"
     );
     assert_eq!(included, populated_inventory(&isolated.home, true, true));
     assert_eq!(

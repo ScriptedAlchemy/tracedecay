@@ -58,7 +58,7 @@ pub struct AutomationRunListSurfaceRequestV1 {
 /// artifact kinds, without the artifact payloads or operation bodies.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct AutomationRunSummaryV1 {
+pub struct AutomationRunListEntryV1 {
     pub run_id: String,
     pub task: AgentTaskKind,
     pub task_key: Option<String>,
@@ -76,7 +76,7 @@ pub struct AutomationRunSummaryV1 {
     pub artifact_kinds: Vec<String>,
 }
 
-impl AutomationRunSummaryV1 {
+impl AutomationRunListEntryV1 {
     pub fn of(record: &AutomationRunLedgerRecord) -> Self {
         Self {
             run_id: record.run_id.clone(),
@@ -107,7 +107,7 @@ impl AutomationRunSummaryV1 {
 pub struct AutomationRunListResultV1 {
     pub status: AutomationReadStatusV1,
     pub scope: AutomationRunScopeV1,
-    pub runs: Vec<AutomationRunSummaryV1>,
+    pub runs: Vec<AutomationRunListEntryV1>,
     pub count: usize,
     pub limit: u32,
     pub has_more: bool,

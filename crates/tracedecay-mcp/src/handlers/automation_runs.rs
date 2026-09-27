@@ -10,8 +10,8 @@ use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1}
 use tracedecay_contracts::retrieval::{
     AUTOMATION_RUN_LIST_DEFAULT_LIMIT, AUTOMATION_RUN_LIST_MAX_LIMIT, AutomationReadStatusV1,
     AutomationRunArtifactViewResultV1, AutomationRunArtifactViewSurfaceRequestV1,
-    AutomationRunListResultV1, AutomationRunListSurfaceRequestV1, AutomationRunPageCompletenessV1,
-    AutomationRunScopeV1, AutomationRunSummaryV1, AutomationRunViewResultV1,
+    AutomationRunListEntryV1, AutomationRunListResultV1, AutomationRunListSurfaceRequestV1,
+    AutomationRunPageCompletenessV1, AutomationRunScopeV1, AutomationRunViewResultV1,
     AutomationRunViewSurfaceRequestV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -65,7 +65,7 @@ pub async fn compute_run_list(
     let runs = page
         .records
         .iter()
-        .map(AutomationRunSummaryV1::of)
+        .map(AutomationRunListEntryV1::of)
         .collect::<Vec<_>>();
     Ok(graph_tool_completion(
         GraphToolResultV1::AutomationRunList(AutomationRunListResultV1 {
