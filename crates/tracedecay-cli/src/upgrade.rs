@@ -501,7 +501,8 @@ fn extract_zip(archive: impl Read + Seek, staging: &Path, members: &[ReleaseMemb
 }
 
 /// Publishes a staged release around the running executable and returns the
-/// path the new binary was installed at, when known.
+/// path the new binary was installed at, when known, plus whether codesign
+/// failed after that replacement.
 ///
 /// On Unix the running executable is resolved to its real file first: a
 /// symlinked entry point must be replaced at its target (`self_replace`
@@ -509,14 +510,14 @@ fn extract_zip(archive: impl Read + Seek, staging: &Path, members: &[ReleaseMemb
 /// `$ORIGIN` is that target's directory. The path is captured before the
 /// swap because on Linux `/proc/self/exe` reads `… (deleted)` afterwards.
 #[hotpath::measure(label = "cli.upgrade.publish_release")]
-fn publish_release(staged: &StagedRelease) -> Result<Option<PathBuf>> {
+fn publish_release(staged: &StagedRelease) -> Result<(Option<PathBuf>, bool)> {
     #[cfg(unix)]
     {
         let executable = std::env::current_exe()
             .and_then(|exe| exe.canonicalize())
             .map_err(io_err("cannot resolve the running executable"))?;
-        publish_release_at(staged, &executable)?;
-        Ok(Some(executable))
+        let codesign_failed = publish_release_at(staged, &executable)?;
+        Ok((Some(executable), codesign_failed))
     }
     #[cfg(not(unix))]
     {
@@ -528,20 +529,34 @@ fn publish_release(staged: &StagedRelease) -> Result<Option<PathBuf>> {
                  To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
             ),
         })?;
-        Ok(exe)
+        Ok((exe, false))
     }
 }
 
 /// Publishes a staged release by replacing `executable` with its entry point.
 #[cfg(unix)]
-fn publish_release_at(staged: &StagedRelease, executable: &Path) -> Result<()> {
+fn publish_release_at(staged: &StagedRelease, executable: &Path) -> Result<bool> {
     executable.parent().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine the running executable's directory".into(),
     })?;
     publish_member(&staged.executable(), executable, RELEASE_MEMBER_MODE)?;
     // The archive checksum already matched. This only replaces an ad-hoc or
     // missing signature on the installed Mach-O; a team signature stays.
-    stabilize_installed_executable(executable)
+    // The binary is already the installed one: a codesign failure must not
+    // turn into an error that drops that install.
+    Ok(codesign_failed(stabilize_installed_executable(executable)))
+}
+
+/// `true` when codesign did not complete after the binary was replaced.
+#[cfg(unix)]
+fn codesign_failed(sign: Result<()>) -> bool {
+    match sign {
+        Ok(()) => false,
+        Err(error) => {
+            eprintln!("  \x1b[33mwarning:\x1b[0m {error}");
+            true
+        }
+    }
 }
 
 /// Outcome of an upgrade attempt that completed without error.
@@ -569,6 +584,9 @@ pub enum UpgradeOutcome {
         /// if a new daemon really was installed, fails with a typed identity
         /// mismatch rather than accepting a less specific name.
         version: Option<String>,
+        /// The binary was replaced and the macOS codesign step failed.
+        /// Callers keep `version` for daemon restore and still exit non-zero.
+        codesign_failed: bool,
     },
     /// Already on the latest version. The binary was not replaced.
     AlreadyCurrent,
@@ -780,7 +798,7 @@ fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
     }
 }
 
-fn install_upgrade_version(latest: &str, is_beta: bool) -> Result<Option<PathBuf>> {
+fn install_upgrade_version(latest: &str, is_beta: bool) -> Result<(Option<PathBuf>, bool)> {
     let download = preflight_asset_check(latest, is_beta)?;
     perform_upgrade(&download)
 }
@@ -801,9 +819,9 @@ fn run_versioned_upgrade(
     };
 
     eprintln!("Upgrading v{current} → v{latest}...");
-    let binary = install_upgrade_version(latest, is_beta)?;
+    let (binary, codesign_failed) = install_upgrade_version(latest, is_beta)?;
     record_previous_version(profile);
-    Ok(finish_versioned_upgrade(latest, binary))
+    Ok(finish_versioned_upgrade(latest, binary, codesign_failed))
 }
 
 /// Completes a GitHub-release install.
@@ -813,10 +831,18 @@ fn run_versioned_upgrade(
 /// `{release}+{sha}` and the daemon advertises that same string. Readiness
 /// compares the two exactly, so recording the catalog tag refuses the binary
 /// this function just installed.
-fn finish_versioned_upgrade(catalog_version: &str, binary: Option<PathBuf>) -> UpgradeOutcome {
+fn finish_versioned_upgrade(
+    catalog_version: &str,
+    binary: Option<PathBuf>,
+    codesign_failed: bool,
+) -> UpgradeOutcome {
     let version = probed_installed_version(binary.as_deref(), "installed release");
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{catalog_version}!");
-    UpgradeOutcome::Installed { binary, version }
+    UpgradeOutcome::Installed {
+        binary,
+        version,
+        codesign_failed,
+    }
 }
 
 /// Atomically replaces `target` with the contents of `source`: the bytes are
@@ -881,14 +907,14 @@ fn record_previous_version(profile: &ProfileRoot) {
 /// Downloads, verifies, stages and publishes the complete release bundle of a
 /// direct install. Returns the path the new binary was installed at, when
 /// known.
-fn perform_upgrade(download: &ReleaseDownload) -> Result<Option<PathBuf>> {
+fn perform_upgrade(download: &ReleaseDownload) -> Result<(Option<PathBuf>, bool)> {
     let staged = download_and_stage(download, &required_members())?;
 
     eprint!("  Installing release...");
-    let installed_at = publish_release(&staged)?;
+    let installed = publish_release(&staged)?;
     eprintln!(" Done");
 
-    Ok(installed_at)
+    Ok(installed)
 }
 
 /// A `--version` line is `tracedecay <release>[+<40-hex sha>[.dirty]]`, well
@@ -1081,6 +1107,7 @@ fn run_delegated_upgrade(
     Ok(UpgradeOutcome::Installed {
         binary,
         version: installed_version,
+        codesign_failed: false,
     })
 }
 
@@ -1187,9 +1214,16 @@ fn switch_channel_for(
 
     // Channel switches do not yet run the post-update refresh chain, so the
     // installed path is unused here.
-    let _ = perform_upgrade(&download)?;
+    let (_installed_at, codesign_failed) = perform_upgrade(&download)?;
     record_previous_version(profile);
     eprintln!("\x1b[32m✔\x1b[0m Switched to {target_channel} channel: v{latest}");
+    if codesign_failed {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "switched to {target_channel} channel v{latest}, but codesign failed (see above)"
+            ),
+        });
+    }
     Ok(latest)
 }
 
@@ -1441,7 +1475,7 @@ mod tests {
             let binary = script(dir.path(), &format!("printf 'tracedecay {identity}\\n'"));
             let catalog = "0.1.0-beta.47";
 
-            let outcome = finish_versioned_upgrade(catalog, Some(binary));
+            let outcome = finish_versioned_upgrade(catalog, Some(binary), false);
 
             let UpgradeOutcome::Installed { version, .. } = outcome else {
                 panic!("a published release is an install, got {outcome:?}");
@@ -1462,7 +1496,7 @@ mod tests {
             let catalog = "0.1.0-beta.47";
             let missing = PathBuf::from("/nonexistent/tracedecay-release");
 
-            let outcome = finish_versioned_upgrade(catalog, Some(missing));
+            let outcome = finish_versioned_upgrade(catalog, Some(missing), false);
 
             let UpgradeOutcome::Installed { version, .. } = outcome else {
                 panic!("a published release is an install, got {outcome:?}");
@@ -1651,10 +1685,12 @@ mod tests {
             let UpgradeOutcome::Installed {
                 binary: installed,
                 version,
+                codesign_failed,
             } = outcome
             else {
                 panic!("expected an install, got {outcome:?}");
             };
+            assert!(!codesign_failed);
             assert_eq!(installed, Some(binary));
             assert_eq!(
                 version.as_deref(),
@@ -1678,6 +1714,7 @@ mod tests {
                     UpgradeOutcome::Installed {
                         binary: None,
                         version: None,
+                        codesign_failed: false,
                     }
                 ),
                 "{outcome:?}"
