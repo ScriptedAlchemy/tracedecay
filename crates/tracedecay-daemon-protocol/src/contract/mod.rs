@@ -1039,7 +1039,8 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::SkillList
             | ApplicationSurfaceOperation::SkillView
             | ApplicationSurfaceOperation::HermesSkillBridge
-            | ApplicationSurfaceOperation::Analytics => {
+            | ApplicationSurfaceOperation::Analytics
+            | ApplicationSurfaceOperation::Search => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate

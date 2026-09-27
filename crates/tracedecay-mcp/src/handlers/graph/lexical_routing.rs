@@ -1,72 +1,71 @@
-use crate::tools::render::Md;
-use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
-use tracedecay_contracts::retrieval::{LexicalAnchorDropReasonV1, LexicalAnchorDropV1};
+use serde_json::Value;
+use tracedecay_contracts::retrieval::{
+    ContextLexicalAnchorV1, LexicalAnchorDropReasonV1, LexicalAnchorDropV1,
+    SearchLexicalAlternativeReasonV1, SearchLexicalFieldV1, SearchLexicalRouteV1,
+    SearchResultRowV1, SearchRouteMatchV1, SearchSpellingVariantV1, SearchSurfaceRequestV1,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_query::retrieval::lexical::{
-    LexicalAliasV1, LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalFieldFilterV1,
-    LexicalProximityV1, LexicalRouteKindV1, LexicalRouteReceiptV1, LexicalRoutingV1,
+    LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1,
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalProximityV1, LexicalRouteKindV1,
+    LexicalRouteReceiptV1, LexicalRoutingV1,
 };
 
-pub(super) fn routing_from_args(args: &Value) -> Result<LexicalRoutingV1> {
-    let anchors = match args.get("lexical_anchors") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                item.as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message: format!("lexical_anchors[{index}] must be a string"),
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?,
-        Some(_) => {
-            return Err(TraceDecayError::Config {
-                message: "lexical_anchors must be an array of strings".to_owned(),
-            });
-        }
-    };
-    let prefer_symbol = match args.get("prefer_symbol") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(flag)) => *flag,
-        Some(_) => {
-            return Err(TraceDecayError::Config {
-                message: "prefer_symbol must be a boolean".to_owned(),
-            });
-        }
-    };
-    let aliases: Vec<LexicalAliasV1> = decode_array(args, "lexical_aliases")?;
-    let phrases: Vec<String> = decode_array(args, "lexical_phrases")?;
-    let proximities: Vec<LexicalProximityV1> = decode_array(args, "lexical_proximities")?;
-    let field_filters: Vec<LexicalFieldFilterV1> = decode_array(args, "lexical_field_filters")?;
-    let mut routing = routing_from_parts(anchors, prefer_symbol)?
-        .with_aliases(aliases)
-        .map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-    routing.phrases = phrases;
-    routing.proximities = proximities;
-    routing.field_filters = field_filters;
+use crate::tools::render::Md;
+
+/// The kernel routing for one typed search request. The kernel bounds and
+/// validates the anchors and aliases; a violation is a typed request error.
+pub(super) fn routing_from_request(request: &SearchSurfaceRequestV1) -> Result<LexicalRoutingV1> {
+    let aliases = request
+        .lexical_aliases
+        .iter()
+        .flatten()
+        .map(|alias| LexicalAliasV1 {
+            strict_query: alias.strict_query.clone(),
+            alternative: alias.alternative.clone(),
+        })
+        .collect();
+    let mut routing = routing_from_parts(
+        request.lexical_anchors.clone().unwrap_or_default(),
+        request.prefer_symbol.unwrap_or(false),
+    )?
+    .with_aliases(aliases)
+    .map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
+    routing.phrases = request.lexical_phrases.clone().unwrap_or_default();
+    routing.proximities = request
+        .lexical_proximities
+        .iter()
+        .flatten()
+        .map(|proximity| LexicalProximityV1 {
+            terms: proximity.terms.clone(),
+            maximum_gap: proximity.maximum_gap,
+        })
+        .collect();
+    routing.field_filters = request
+        .lexical_field_filters
+        .iter()
+        .flatten()
+        .map(|filter| LexicalFieldFilterV1 {
+            field: lexical_field(filter.field),
+            include: filter.include,
+        })
+        .collect();
     Ok(routing)
 }
 
-fn decode_array<T: DeserializeOwned>(args: &Value, field: &str) -> Result<Vec<T>> {
-    match args.get(field) {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(values)) => values
-            .iter()
-            .cloned()
-            .map(|value| {
-                serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
-                    message: format!("{field} is invalid: {error}"),
-                })
-            })
-            .collect(),
-        Some(_) => Err(TraceDecayError::Config {
-            message: format!("{field} must be an array"),
-        }),
+fn lexical_field(field: SearchLexicalFieldV1) -> LexicalFieldV1 {
+    match field {
+        SearchLexicalFieldV1::SymbolName => LexicalFieldV1::SymbolName,
+        SearchLexicalFieldV1::QualifiedName => LexicalFieldV1::QualifiedName,
+        SearchLexicalFieldV1::Path => LexicalFieldV1::Path,
+        SearchLexicalFieldV1::Signature => LexicalFieldV1::Signature,
+        SearchLexicalFieldV1::Documentation => LexicalFieldV1::Documentation,
+        SearchLexicalFieldV1::BodyText => LexicalFieldV1::BodyText,
+        SearchLexicalFieldV1::PreambleText => LexicalFieldV1::PreambleText,
+        SearchLexicalFieldV1::ExactTerm => LexicalFieldV1::ExactTerm,
+        SearchLexicalFieldV1::Subtoken => LexicalFieldV1::Subtoken,
     }
 }
 
@@ -93,58 +92,98 @@ pub(super) fn route_label(route: &LexicalRouteKindV1) -> String {
     }
 }
 
-pub(super) fn attach_route_evidence(
-    output: &mut Value,
-    results: &mut [Value],
+/// The page-level route and anchor evidence, attached only when a route
+/// beyond the strict query ran or ranked a result, and each ranked row's
+/// matching routes.
+pub(super) fn route_evidence(
+    results: &mut [SearchResultRowV1],
     receipt: &LexicalRouteReceiptV1,
-) -> Result<()> {
+) -> (
+    Option<Vec<SearchLexicalRouteV1>>,
+    Option<Vec<ContextLexicalAnchorV1>>,
+) {
     if !receipt.has_disclosure() {
-        return Ok(());
+        return (None, None);
     }
-    let mut routes = Vec::with_capacity(receipt.routes.len());
-    for route in &receipt.routes {
-        let mut value = serde_json::to_value(route)?;
-        value["label"] = json!(route_label(route));
-        routes.push(value);
-    }
-    output["lexical_routes"] = Value::Array(routes);
-    if !receipt.anchors.is_empty() {
-        output["lexical_anchors"] = serde_json::to_value(&receipt.anchors)?;
-    }
-    for result in results.iter_mut() {
-        let Some(anchor) = result
-            .get("candidate")
-            .and_then(|candidate| candidate.get("anchor_id"))
-            .and_then(Value::as_str)
-        else {
+    for row in results.iter_mut() {
+        let Some(matches) = receipt.matches_by_anchor.get(&row.candidate.anchor_id) else {
             continue;
         };
-        let Some(matches) = receipt
-            .matches_by_anchor
-            .iter()
-            .find(|(candidate_anchor, _)| candidate_anchor.as_str() == anchor)
-            .map(|(_, matches)| matches)
-        else {
-            continue;
-        };
-        result["lexical_routes"] = json!(
+        row.lexical_routes = Some(
             matches
                 .iter()
-                .map(|route_match| {
-                    let mut value = json!({
-                        "route": route_label(&route_match.route),
-                        "score_micros": route_match.score_micros,
-                        "matched_terms": route_match.matched_terms,
-                    });
-                    if !route_match.spelling_variants.is_empty() {
-                        value["spelling_variants"] = json!(route_match.spelling_variants);
-                    }
-                    value
+                .map(|route_match| SearchRouteMatchV1 {
+                    route: route_label(&route_match.route),
+                    score_micros: route_match.score_micros,
+                    matched_terms: route_match.matched_terms.clone(),
+                    spelling_variants: route_match
+                        .spelling_variants
+                        .iter()
+                        .map(|variant| SearchSpellingVariantV1 {
+                            query: variant.query.clone(),
+                            alternative: variant.alternative.clone(),
+                        })
+                        .collect(),
                 })
-                .collect::<Vec<_>>()
+                .collect(),
         );
     }
-    Ok(())
+    let routes = receipt.routes.iter().map(search_route).collect();
+    let anchors =
+        (!receipt.anchors.is_empty()).then(|| receipt.anchors.iter().map(anchor_outcome).collect());
+    (Some(routes), anchors)
+}
+
+fn search_route(route: &LexicalRouteKindV1) -> SearchLexicalRouteV1 {
+    let label = route_label(route);
+    match route {
+        LexicalRouteKindV1::Query => SearchLexicalRouteV1::Query { label },
+        LexicalRouteKindV1::Anchor { anchor } => SearchLexicalRouteV1::Anchor {
+            anchor: anchor.as_str().to_owned(),
+            label,
+        },
+        LexicalRouteKindV1::PreferredSymbol { tokens } => SearchLexicalRouteV1::PreferredSymbol {
+            tokens: tokens.clone(),
+            label,
+        },
+        LexicalRouteKindV1::IdentifierSplit {
+            strict_query,
+            terms,
+        } => SearchLexicalRouteV1::IdentifierSplit {
+            strict_query: strict_query.clone(),
+            terms: terms.clone(),
+            label,
+        },
+        LexicalRouteKindV1::Alias {
+            strict_query,
+            alternative,
+            reason: LexicalAlternativeReasonV1::ConfiguredVocabularyAlias,
+        } => SearchLexicalRouteV1::Alias {
+            strict_query: strict_query.clone(),
+            alternative: alternative.clone(),
+            reason: SearchLexicalAlternativeReasonV1::ConfiguredVocabularyAlias,
+            label,
+        },
+    }
+}
+
+/// One caller anchor's kernel receipt in its wire shape.
+pub(super) fn anchor_outcome(receipt: &LexicalAnchorReceiptV1) -> ContextLexicalAnchorV1 {
+    let anchor = receipt.anchor.as_str().to_owned();
+    match &receipt.outcome {
+        LexicalAnchorOutcomeV1::Matched {
+            matched,
+            admitted,
+            dropped,
+        } => ContextLexicalAnchorV1::Matched {
+            anchor,
+            matched: *matched,
+            admitted: *admitted,
+            dropped: dropped.clone(),
+        },
+        LexicalAnchorOutcomeV1::Unmatched => ContextLexicalAnchorV1::Unmatched { anchor },
+        LexicalAnchorOutcomeV1::NotServed => ContextLexicalAnchorV1::NotServed { anchor },
+    }
 }
 
 pub(super) fn result_route_suffix(result: &Value) -> String {
@@ -272,13 +311,20 @@ pub(super) fn append_routes_md(md: &mut Md, value: &Value) {
 mod tests {
     use std::collections::BTreeMap;
 
+    use serde_json::json;
     use tracedecay_query::retrieval::lexical::{LexicalRouteMatchV1, MAX_LEXICAL_ANCHORS_V1};
 
     use super::*;
 
+    fn routing(arguments: &Value) -> Result<LexicalRoutingV1> {
+        let request: SearchSurfaceRequestV1 =
+            crate::handlers::support::decode_primitive_request(arguments, "tracedecay_search")?;
+        routing_from_request(&request)
+    }
+
     #[test]
-    fn routing_args_decode_and_reject_typed_violations() {
-        let routing = routing_from_args(&json!({
+    fn routing_requests_decode_and_reject_typed_violations() {
+        let routing_plan = routing(&json!({
             "query": "memoization",
             "lexical_anchors": ["reserve_stock", "Foo::bar"],
             "prefer_symbol": true,
@@ -297,50 +343,50 @@ mod tests {
             }],
         }))
         .expect("valid routing");
-        assert_eq!(routing.anchors.len(), 2);
-        assert!(routing.prefer_symbol);
-        assert_eq!(routing.aliases[0].strict_query, "memoization");
-        assert_eq!(routing.aliases[0].alternative, "cache");
-        assert_eq!(routing.phrases, ["durable cache"]);
-        assert_eq!(routing.proximities[0].terms, ["durable", "owner"]);
+        assert_eq!(routing_plan.anchors.len(), 2);
+        assert!(routing_plan.prefer_symbol);
+        assert_eq!(routing_plan.aliases[0].strict_query, "memoization");
+        assert_eq!(routing_plan.aliases[0].alternative, "cache");
+        assert_eq!(routing_plan.phrases, ["durable cache"]);
+        assert_eq!(routing_plan.proximities[0].terms, ["durable", "owner"]);
         assert_eq!(
-            routing.field_filters,
-            [tracedecay_query::retrieval::lexical::LexicalFieldFilterV1 {
-                field: tracedecay_query::retrieval::lexical::LexicalFieldV1::Documentation,
+            routing_plan.field_filters,
+            [LexicalFieldFilterV1 {
+                field: LexicalFieldV1::Documentation,
                 include: true,
             }]
         );
 
-        let plain = routing_from_args(&json!({"query": "inventory"})).expect("query only");
+        let plain = routing(&json!({"query": "inventory"})).expect("query only");
         assert_eq!(plain, LexicalRoutingV1::default());
 
         let too_many: Vec<String> = (0..=MAX_LEXICAL_ANCHORS_V1)
             .map(|index| format!("anchor_{index}"))
             .collect();
-        let error = routing_from_args(&json!({"lexical_anchors": too_many}))
+        let error = routing(&json!({"query": "q", "lexical_anchors": too_many}))
             .expect_err("anchor count is bounded");
         assert!(
             error.to_string().contains("at most 8 anchors"),
             "typed bound in the message: {error}"
         );
-        let error = routing_from_args(&json!({"lexical_anchors": ["ok", ""]}))
+        let error = routing(&json!({"query": "q", "lexical_anchors": ["ok", ""]}))
             .expect_err("empty anchors are rejected");
         assert!(error.to_string().contains("anchor 1 is empty"), "{error}");
-        let error = routing_from_args(&json!({"lexical_anchors": ["two words"]}))
+        let error = routing(&json!({"query": "q", "lexical_anchors": ["two words"]}))
             .expect_err("multi-term anchors are rejected");
         assert!(error.to_string().contains("one identifier"), "{error}");
-        let error = routing_from_args(&json!({"lexical_anchors": "reserve_stock"}))
-            .expect_err("a bare string is not an anchor list");
-        assert!(error.to_string().contains("array of strings"), "{error}");
-        let error = routing_from_args(&json!({"lexical_anchors": [1]}))
-            .expect_err("anchors must be strings");
-        assert!(
-            error.to_string().contains("[0] must be a string"),
-            "{error}"
+        assert_eq!(
+            routing(&json!({"query": "q", "lexical_anchors": "reserve_stock"}))
+                .expect_err("a bare string is not an anchor list")
+                .to_string(),
+            "config error: invalid arguments for tracedecay_search: invalid type: string \"reserve_stock\", expected a sequence"
         );
-        let error = routing_from_args(&json!({"prefer_symbol": "yes"}))
-            .expect_err("prefer_symbol must be a boolean");
-        assert!(error.to_string().contains("must be a boolean"), "{error}");
+        assert_eq!(
+            routing(&json!({"query": "q", "prefer_symbol": "yes"}))
+                .expect_err("prefer_symbol must be a boolean")
+                .to_string(),
+            "config error: invalid arguments for tracedecay_search: invalid type: string \"yes\", expected a boolean"
+        );
 
         let aliases = (0..=tracedecay_query::retrieval::lexical::MAX_LEXICAL_ALIASES_V1)
             .map(|index| {
@@ -351,28 +397,48 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            routing_from_args(&json!({"lexical_aliases": aliases}))
+            routing(&json!({"query": "q", "lexical_aliases": aliases}))
                 .expect_err("aliases are bounded")
                 .to_string()
                 .contains("at most 8")
         );
     }
 
+    fn row(anchor: &str) -> SearchResultRowV1 {
+        SearchResultRowV1 {
+            candidate: serde_json::from_value(json!({
+                "anchor_id": anchor,
+                "logical_evidence_id": "evidence.reserve",
+                "occurrences": [],
+                "exact_class": "approximate",
+                "utility_micros": 0,
+                "contributions": [],
+                "freshness": [],
+                "decisions": [],
+            }))
+            .expect("fused candidate"),
+            final_ordinal: 0,
+            node_id: None,
+            display: None,
+            lexical_routes: None,
+        }
+    }
+
     #[test]
     fn route_evidence_is_attached_only_when_additional_routes_ran() {
-        let mut output = json!({"results": []});
-        let mut results = vec![json!({"candidate": {"anchor_id": "code-symbol:reserve"}})];
+        let mut results = vec![row("code-symbol:reserve")];
         let query_only = LexicalRouteReceiptV1 {
             routes: vec![LexicalRouteKindV1::Query],
             matches_by_anchor: BTreeMap::new(),
             anchors: Vec::new(),
             dropped_sites: BTreeMap::new(),
         };
-        attach_route_evidence(&mut output, &mut results, &query_only).expect("attach");
-        assert!(output.get("lexical_routes").is_none());
-        assert!(results[0].get("lexical_routes").is_none());
-        assert_eq!(result_route_suffix(&results[0]), "");
-
+        assert_eq!(route_evidence(&mut results, &query_only), (None, None));
+        assert_eq!(results[0].lexical_routes, None);
+        assert_eq!(
+            result_route_suffix(&serde_json::to_value(&results[0]).unwrap()),
+            ""
+        );
         let anchor = LexicalRoutingV1::new(vec!["reserve_stock".to_owned()], true)
             .expect("routing")
             .anchors
@@ -440,7 +506,9 @@ mod tests {
             ],
             dropped_sites: BTreeMap::new(),
         };
-        attach_route_evidence(&mut output, &mut results, &receipt).expect("attach");
+        let (routes, anchors) = route_evidence(&mut results, &receipt);
+        let output = json!({"lexical_routes": routes, "lexical_anchors": anchors});
+        let results = [serde_json::to_value(&results[0]).unwrap()];
         assert_eq!(
             output["lexical_anchors"],
             json!([

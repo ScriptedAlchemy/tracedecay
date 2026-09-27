@@ -15,6 +15,7 @@ mod primitive_surface;
 mod project_file_surface;
 mod requests;
 mod response_handle_surface;
+mod search_surface;
 mod service;
 mod source_read;
 mod symbol_graph;
@@ -222,6 +223,16 @@ pub use requests::{
 pub use response_handle_surface::{
     RetrieveHandleExpiredV1, RetrieveHandleMissingV1, RetrieveResultV1, RetrieveSurfaceRequestV1,
     RetrievedPageV1,
+};
+pub use search_surface::{
+    SEARCH_MAX_LEXICAL_ALIASES, SEARCH_MAX_LEXICAL_ANCHOR_BYTES, SEARCH_MAX_LEXICAL_ANCHORS,
+    SEARCH_MAX_LEXICAL_PHRASES, SEARCH_MAX_LEXICAL_PROXIMITIES, SEARCH_MAX_LEXICAL_PROXIMITY_GAP,
+    SEARCH_MAX_LEXICAL_PROXIMITY_TERMS, SearchCompleteV1, SearchCoverageV1,
+    SearchExternalImportCandidatesV1, SearchExternalImportHintV1, SearchExternalImportV1,
+    SearchLaneStateV1, SearchLaneStatusV1, SearchLexicalAliasV1, SearchLexicalAlternativeReasonV1,
+    SearchLexicalFieldFilterV1, SearchLexicalFieldV1, SearchLexicalProximityV1,
+    SearchLexicalRouteV1, SearchResultDisplayV1, SearchResultRowV1, SearchResultV1,
+    SearchRouteMatchV1, SearchSpellingVariantV1, SearchSurfaceRequestV1, SearchUnavailableV1,
 };
 pub use source_read::{
     MAX_SOURCE_READ_PATH_BYTES, SourceReadModeV1, SourceReadPortContext, SourceReadPortFuture,

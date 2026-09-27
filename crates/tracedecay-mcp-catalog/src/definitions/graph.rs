@@ -1,122 +1,18 @@
 //! Graph query and navigation tool definitions.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{context_description, def, def_always_load};
 use crate::ToolDefinition;
 
 // ── alwaysLoad tools (loaded into the model prompt immediately) ─────────
 
-/// Caller-facing bounds for `lexical_anchors`; they mirror the retrieval
-/// kernel's `MAX_LEXICAL_ANCHORS_V1` / `MAX_LEXICAL_ANCHOR_BYTES_V1` so the
-/// schema states the same limit the handler enforces.
-pub const SEARCH_MAX_LEXICAL_ANCHORS: usize = 8;
-pub const SEARCH_MAX_LEXICAL_ANCHOR_BYTES: usize = 128;
-const SEARCH_MAX_LEXICAL_ALIASES: usize = 8;
-const SEARCH_MAX_LEXICAL_PHRASES: usize = 4;
-const SEARCH_MAX_LEXICAL_PROXIMITIES: usize = 4;
-const SEARCH_MAX_LEXICAL_PROXIMITY_TERMS: usize = 8;
-const SEARCH_MAX_LEXICAL_PROXIMITY_GAP: u32 = 8;
-
-pub(super) fn def_search() -> ToolDefinition {
+pub(super) fn def_search(input_schema: Value) -> ToolDefinition {
     def_always_load(
         "tracedecay_search",
         "Search Symbols",
         "Exact and lexical code search over the active project's code graph: find symbols (functions, structs, traits, etc.) by name, identifier fragment, signature, path, or phrase through ranked exact and lexical routes. Every response opens with a `freshness: fresh | possibly_stale` line, so no status preflight is needed. Pass known identifiers as `lexical_anchors` (each an extra ranked route) and set `prefer_symbol` to add a symbol-name route for identifier-shaped query words.",
-        json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query string to match against symbol names"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 10)"
-                },
-                "cursor": {
-                    "type": "string",
-                    "description": "Authenticated opaque continuation returned as next_cursor. Repeat the same query and lexical options with it."
-                },
-                "lexical_anchors": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "maxItems": SEARCH_MAX_LEXICAL_ANCHORS,
-                    "description": format!(
-                        "Exact identifiers or technical terms (e.g. 'reserve_stock', 'Foo::bar', 'E0308') that the answer must be about. Each is ranked through the lexical lane as its own route: a hit carrying an anchor outranks every hit that carries none, exact hits included, every anchor with matches keeps at least its best sites through the lane cap, and `lexical_anchors` in the response reports each anchor's outcome (`matched` rows, `admitted` sites this response returns, `dropped` admitted sites it could not carry with the reason, `unmatched`, or `not_served`). Ranked retrieval, not exhaustive grep (use tracedecay_grep for that). Each result names the routes that ranked it. At most {SEARCH_MAX_LEXICAL_ANCHORS} anchors, each one whitespace-free term of at most {SEARCH_MAX_LEXICAL_ANCHOR_BYTES} bytes, no repeats."
-                    )
-                },
-                "prefer_symbol": {
-                    "type": "boolean",
-                    "description": "Add a lexical route restricted to symbol-name matches for the identifier-shaped words of the query (default: false). Query words such as class/struct/function/find/explain are ignored; 'Foo::bar' and 'Foo.bar' contribute 'bar'."
-                },
-                "lexical_aliases": {
-                    "type": "array",
-                    "maxItems": SEARCH_MAX_LEXICAL_ALIASES,
-                    "description": "Named query-time vocabulary aliases. The strict query always ranks first. Alias-only hits follow it with the strict query, alternative, and configured-vocabulary reason disclosed.",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["strict_query", "alternative"],
-                        "properties": {
-                            "strict_query": { "type": "string", "maxLength": SEARCH_MAX_LEXICAL_ANCHOR_BYTES },
-                            "alternative": { "type": "string", "maxLength": SEARCH_MAX_LEXICAL_ANCHOR_BYTES }
-                        }
-                    }
-                },
-                "lexical_phrases": {
-                    "type": "array",
-                    "maxItems": SEARCH_MAX_LEXICAL_PHRASES,
-                    "description": "Exact lexical phrases to rank through n-gram candidate pruning.",
-                    "items": { "type": "string" }
-                },
-                "lexical_proximities": {
-                    "type": "array",
-                    "maxItems": SEARCH_MAX_LEXICAL_PROXIMITIES,
-                    "description": "Ordered lexical terms that must occur within the bounded intervening-token gap.",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["terms", "maximum_gap"],
-                        "properties": {
-                            "terms": {
-                                "type": "array",
-                                "minItems": 2,
-                                "maxItems": SEARCH_MAX_LEXICAL_PROXIMITY_TERMS,
-                                "items": { "type": "string" }
-                            },
-                            "maximum_gap": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": SEARCH_MAX_LEXICAL_PROXIMITY_GAP
-                            }
-                        }
-                    }
-                },
-                "lexical_field_filters": {
-                    "type": "array",
-                    "maxItems": 9,
-                    "description": "Include or exclude lexical symbol_name, qualified_name, path, signature, documentation, body_text, preamble_text, exact_term, or subtoken fields.",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["field", "include"],
-                        "properties": {
-                            "field": {
-                                "type": "string",
-                                "enum": ["symbol_name", "qualified_name", "path", "signature", "documentation", "body_text", "preamble_text", "exact_term", "subtoken"]
-                            },
-                            "include": { "type": "boolean" }
-                        }
-                    }
-                },
-                "lazy_index_ignored_dependencies": {
-                    "type": "boolean",
-                    "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
-                }
-            },
-            "required": ["query"]
-        }),
+        input_schema,
     )
 }
 
@@ -300,47 +196,75 @@ pub(super) fn def_find_exact_symbol(input_schema: Value) -> ToolDefinition {
 
 #[cfg(test)]
 mod search_schema_tests {
-    use super::{
+    use tracedecay_contracts::retrieval::{
         SEARCH_MAX_LEXICAL_ALIASES, SEARCH_MAX_LEXICAL_ANCHORS, SEARCH_MAX_LEXICAL_PROXIMITY_GAP,
-        def_search,
     };
+
+    fn search_schema() -> serde_json::Value {
+        crate::get_maximal_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name == "tracedecay_search")
+            .expect("tracedecay_search definition")
+            .input_schema
+    }
+
+    /// The schema a `$ref` into the tool schema's `$defs` names, or `node`.
+    fn definition<'a>(
+        schema: &'a serde_json::Value,
+        node: &'a serde_json::Value,
+    ) -> &'a serde_json::Value {
+        match node["$ref"]
+            .as_str()
+            .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        {
+            Some(name) => &schema["$defs"][name],
+            None => node,
+        }
+    }
 
     #[test]
     fn search_schema_has_no_semantic_mode_and_keeps_the_cursor() {
-        let definition = def_search();
-        assert!(definition.input_schema["properties"]["semantic_mode"].is_null());
+        let schema = search_schema();
+        assert!(schema["properties"]["semantic_mode"].is_null());
         assert_eq!(
-            definition.input_schema["properties"]["cursor"]["type"],
-            "string"
+            schema["properties"]["cursor"]["type"],
+            serde_json::json!(["string", "null"])
         );
     }
 
     #[test]
     fn search_schema_declares_lexical_routing_parameters() {
-        let definition = def_search();
-        let anchors = &definition.input_schema["properties"]["lexical_anchors"];
-        assert_eq!(anchors["type"], "array");
+        let schema = search_schema();
+        let anchors = &schema["properties"]["lexical_anchors"];
+        assert_eq!(anchors["type"], serde_json::json!(["array", "null"]));
         assert_eq!(anchors["items"]["type"], "string");
         assert_eq!(
             anchors["maxItems"],
             serde_json::json!(SEARCH_MAX_LEXICAL_ANCHORS)
         );
         assert_eq!(
-            definition.input_schema["properties"]["prefer_symbol"]["type"],
-            "boolean"
+            schema["properties"]["prefer_symbol"]["type"],
+            serde_json::json!(["boolean", "null"])
         );
         assert_eq!(
-            definition.input_schema["properties"]["lexical_aliases"]["maxItems"],
+            schema["properties"]["lexical_aliases"]["maxItems"],
             serde_json::json!(SEARCH_MAX_LEXICAL_ALIASES)
         );
+        let proximity = definition(
+            &schema,
+            &schema["properties"]["lexical_proximities"]["items"],
+        );
         assert_eq!(
-            definition.input_schema["properties"]["lexical_proximities"]["items"]["properties"]["maximum_gap"]
-                ["maximum"],
+            proximity["properties"]["maximum_gap"]["maximum"],
             serde_json::json!(SEARCH_MAX_LEXICAL_PROXIMITY_GAP)
         );
+        let filter = definition(
+            &schema,
+            &schema["properties"]["lexical_field_filters"]["items"],
+        );
         assert!(
-            definition.input_schema["properties"]["lexical_field_filters"]["items"]["properties"]
-                ["field"]["enum"]
+            definition(&schema, &filter["properties"]["field"])["enum"]
                 .as_array()
                 .is_some_and(|fields| fields.contains(&serde_json::json!("documentation")))
         );

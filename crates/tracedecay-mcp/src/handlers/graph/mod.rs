@@ -1,25 +1,29 @@
 //! Portable graph-navigation handlers over one source-bound verified query.
 
+mod clones;
+mod context;
 mod context_markdown;
 mod context_support;
-mod dispatch;
+mod exact_symbol;
 mod lexical_routing;
 mod navigation;
 mod primitive_surface;
+mod rename_preview;
 mod search;
 mod search_evidence;
 mod search_freshness;
 mod verified;
 
+pub use clones::{compute_redundancy, compute_similar};
+pub use context::compute_context;
 pub(crate) use context_markdown::render_context;
-pub use dispatch::dispatch_tool;
+pub use exact_symbol::compute_find_exact_symbol;
 pub use navigation::{
     compute_by_qualified_name, compute_derives, compute_impact, compute_node, compute_signature,
 };
-pub use search::{
-    compute_context, compute_find_exact_symbol, compute_redundancy, compute_rename_preview,
-    compute_similar, handle_search,
-};
+pub use rename_preview::compute_rename_preview;
+pub use search::compute_search;
+pub(crate) use search::render_search;
 pub use verified::{
     GRAPH_RELATION_READ_LIMIT, VerifiedNeighbor, cost_to_expand_verified, graph_occurrence_id,
     graph_symbol_corrupt, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
