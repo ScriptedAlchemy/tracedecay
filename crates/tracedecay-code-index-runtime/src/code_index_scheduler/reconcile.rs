@@ -59,6 +59,7 @@ use crate::code_index::{
 
 use super::freshness_witness::{
     ReconciledSourceWitnessV1, RestoreFreshnessWitnessV1, SourceContentManifestV1,
+    SourceSweepCacheV1,
 };
 use super::git_tree_capture::{CapturedFileOutcomeV1, CapturedFileRosterV1};
 use super::publication_store::GenerationDecodeBudgetV1;
@@ -502,6 +503,8 @@ pub(crate) struct SourceFreshnessFenceV1 {
     pub(super) state: Arc<Mutex<SourceFreshnessFenceStateV1>>,
     last_reconciled_at_micros: Arc<AtomicI64>,
     source_epoch: Arc<AtomicU64>,
+    /// Held only by source sweeps, never across a scheduler pass.
+    sweep_cache: Arc<Mutex<SourceSweepCacheV1>>,
 }
 
 #[derive(Clone)]
@@ -511,6 +514,8 @@ pub(super) struct SourceFreshnessFenceStateV1 {
     /// The stat signature (negative cache) and sealed file digests (proof)
     /// the last completed reconcile established; `None` until one has.
     source_witness: Option<ReconciledSourceWitnessV1>,
+    /// The ignored-source roster that proof was established under.
+    source_roster: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     verified_against_source: bool,
     freshness_unknown: bool,
     reconciled_without_generation: bool,
@@ -524,6 +529,7 @@ impl SourceFreshnessFenceV1 {
                 git_metadata: identity::GitMetadataFingerprintV1::default(),
                 last_reconciled_at: Instant::now(),
                 source_witness: None,
+                source_roster: Vec::new(),
                 verified_against_source: false,
                 freshness_unknown: true,
                 reconciled_without_generation: false,
@@ -531,6 +537,7 @@ impl SourceFreshnessFenceV1 {
             })),
             last_reconciled_at_micros: Arc::new(AtomicI64::new(0)),
             source_epoch,
+            sweep_cache: Arc::default(),
         }
     }
 
@@ -545,12 +552,14 @@ impl SourceFreshnessFenceV1 {
         &self,
         git_metadata: identity::GitMetadataFingerprintV1,
         source_witness: Option<ReconciledSourceWitnessV1>,
+        source_roster: &[CodeIndexIgnoredSourceAdmissionV1],
         reconciled_without_generation: bool,
     ) {
         let micros = now_micros().0;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.git_metadata = git_metadata;
         state.source_witness = source_witness;
+        state.source_roster = source_roster.to_vec();
         state.freshness_unknown = false;
         state.last_reconciled_at = Instant::now();
         state.verified_against_source = true;
@@ -712,6 +721,103 @@ impl SourceFreshnessFenceV1 {
         state.freshness_unknown = false;
         self.last_reconciled_at_micros
             .store(micros, Ordering::Release);
+    }
+
+    /// Whether `freshness`'s source witness still describes the worktree:
+    /// every candidate's content digest, under the roster the proof was
+    /// established with, equals the sealed file manifest.
+    fn source_witness_matches(
+        &self,
+        freshness: &SourceFreshnessFenceStateV1,
+        git_metadata: &identity::GitMetadataFingerprintV1,
+        project_root: &Path,
+        shutting_down: &AtomicBool,
+    ) -> bool {
+        freshness.source_witness.as_ref().is_some_and(|witness| {
+            self.sweep_sources(
+                project_root,
+                &freshness.source_roster,
+                git_metadata,
+                &witness.content_manifest,
+                shutting_down,
+            )
+            .0
+        })
+    }
+
+    /// The one source sweep: every content proof, the freshness ladder's and
+    /// a reconcile's, goes through this cache, so digests one derives are
+    /// reused by the next.
+    fn sweep_sources(
+        &self,
+        project_root: &Path,
+        roster: &[CodeIndexIgnoredSourceAdmissionV1],
+        git_metadata: &identity::GitMetadataFingerprintV1,
+        manifest: &SourceContentManifestV1,
+        shutting_down: &AtomicBool,
+    ) -> (bool, freshness_witness::SourceSweepStatsV1) {
+        self.sweep_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .witness_matches(
+                project_root,
+                roster,
+                &git_metadata.stable_signature(),
+                manifest,
+                shutting_down,
+            )
+    }
+
+    /// Sweep the current witness and report what the sweep had to read.
+    #[cfg(test)]
+    pub(super) fn source_sweep_for_test(
+        &self,
+        project_root: &Path,
+        shutting_down: &AtomicBool,
+    ) -> (bool, freshness_witness::SourceSweepStatsV1) {
+        let freshness = self.snapshot();
+        let witness = freshness
+            .source_witness
+            .as_ref()
+            .expect("a reconciled fence carries a source witness");
+        self.sweep_sources(
+            project_root,
+            &freshness.source_roster,
+            &identity::GitMetadataFingerprintV1::capture(project_root),
+            &witness.content_manifest,
+            shutting_down,
+        )
+    }
+
+    /// The freshness ladder over this fence alone, so a caller verifying the
+    /// source never waits for a scheduler pass: unverified, then Git
+    /// metadata, then (unless the last proof is younger than
+    /// `trust_recent_reconcile`) the source witness. A matching witness
+    /// resets the probe clock.
+    pub(super) fn ladder_verdict(
+        &self,
+        project_root: &Path,
+        shutting_down: &AtomicBool,
+        trust_recent_reconcile: Option<Duration>,
+    ) -> FreshnessProbeVerdictV1 {
+        let freshness = self.snapshot();
+        if !freshness.verified_against_source {
+            return FreshnessProbeVerdictV1::Unverified;
+        }
+        let git_metadata = identity::GitMetadataFingerprintV1::capture(project_root);
+        if git_metadata.differs_from(&freshness.git_metadata) {
+            return FreshnessProbeVerdictV1::Moved;
+        }
+        if trust_recent_reconcile
+            .is_some_and(|threshold| freshness.last_reconciled_at.elapsed() < threshold)
+        {
+            return FreshnessProbeVerdictV1::Current;
+        }
+        if self.source_witness_matches(&freshness, &git_metadata, project_root, shutting_down) {
+            self.refresh_monotonic_clock(true);
+            return FreshnessProbeVerdictV1::Current;
+        }
+        FreshnessProbeVerdictV1::Moved
     }
 }
 
@@ -1579,7 +1685,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         else {
             return Ok(None);
         };
-        if self.retained_frontier_stat_sweep(&pointer).is_none() {
+        if !self.retained_frontier_stat_sweep(&pointer) {
             return Ok(None);
         }
         let Some(generation) = self
@@ -1641,7 +1747,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         }
         let source_manifest = SourceContentManifestV1::for_snapshot(generation.snapshot());
-        if !sweep.content_matches(&self.project_root, &source_manifest, &self.shutting_down) {
+        if !self.sources_match_manifest(&source_manifest) {
             return Ok(None);
         }
         let snapshot_content_identity = generation.snapshot().content_identity.clone();
@@ -1707,13 +1813,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         // the first branch and would keep swallowing the pass.
         let content_matches = decoded.as_ref().is_some_and(|generation| {
             self.retained_frontier_stat_sweep(&pointer)
-                .is_some_and(|sweep| {
-                    sweep.content_matches(
-                        &self.project_root,
-                        &SourceContentManifestV1::for_snapshot(generation.snapshot()),
-                        &self.shutting_down,
-                    )
-                })
+                && self.sources_match_manifest(&SourceContentManifestV1::for_snapshot(
+                    generation.snapshot(),
+                ))
         });
         if !retained_empty_seat_settles_source(decoded.is_some(), content_matches) {
             return Ok(None);
@@ -1747,24 +1849,22 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Witness + git/stat fence that does not read sealed generation bytes.
-    /// `Some` is the negative cache only, the metadata the witness recorded
-    /// has not moved, and hands back the sweep so the caller can settle
-    /// currency against the retained generation's sealed file digests.
-    fn retained_frontier_stat_sweep(
-        &self,
-        pointer: &DurablePublicationPointerV1,
-    ) -> Option<freshness_witness::WorktreeStatSweepV1> {
-        let witness = RestoreFreshnessWitnessV1::load(&self.store_root)?;
+    /// `true` is the negative cache only: the metadata the witness recorded
+    /// has not moved, and the caller still settles currency against the
+    /// retained generation's sealed file digests.
+    fn retained_frontier_stat_sweep(&self, pointer: &DurablePublicationPointerV1) -> bool {
+        let Some(witness) = RestoreFreshnessWitnessV1::load(&self.store_root) else {
+            return false;
+        };
         if witness.generation_id != pointer.generation_id {
-            return None;
+            return false;
         }
         let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
         if witness.git_metadata_signature != metadata.stable_signature() {
-            return None;
+            return false;
         }
         self.worktree_stat_sweep()
-            .ok()
-            .filter(|sweep| witness.stat_signature == sweep.signature)
+            .is_ok_and(|sweep| witness.stat_signature == sweep.signature)
     }
 
     /// Verify an unchanged retained text generation without decoding the full
@@ -2005,13 +2105,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         // generation's sealed file digests; its matching stat signature is
         // the negative cache that lets a moved tree skip the byte comparison.
         let source_manifest = SourceContentManifestV1::for_snapshot(metadata.snapshot());
-        let sealed_bytes_match = retained_is_reusable
-            && !has_hints
-            && sampled_sweep.content_matches(
-                &self.project_root,
-                &source_manifest,
-                &self.shutting_down,
-            );
+        let sealed_bytes_match =
+            retained_is_reusable && !has_hints && self.sources_match_manifest(&source_manifest);
         let quiet_witness = sealed_bytes_match
             && witness.as_ref().is_some_and(|witness| {
                 witness.git_metadata_signature == sampled_metadata.stable_signature()
@@ -2935,6 +3030,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.freshness_fence.mark_reconciled(
             metadata,
             source_witness,
+            &self.ignored_source_admissions,
             reconciled_without_generation,
         );
     }
@@ -2944,8 +3040,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         metadata: identity::GitMetadataFingerprintV1,
         source_witness: Option<ReconciledSourceWitnessV1>,
     ) {
-        self.freshness_fence
-            .mark_reconciled(metadata, source_witness, false);
+        self.freshness_fence.mark_reconciled(
+            metadata,
+            source_witness,
+            &self.ignored_source_admissions,
+            false,
+        );
     }
 
     /// Record the restore-time freshness witness for the current active
@@ -3061,17 +3161,29 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
     }
 
-    /// Whether the last reconcile's source witness still describes the
-    /// worktree: unchanged stat metadata (the negative cache) and, only then,
-    /// every candidate's content digest equal to the sealed file manifest.
-    fn source_witness_matches_worktree(&self, freshness: &SourceFreshnessFenceStateV1) -> bool {
-        freshness.source_witness.as_ref().is_some_and(|witness| {
-            witness.matches_worktree(
+    /// Whether the bytes on disk carry exactly `manifest`'s digests under this
+    /// scheduler's ignored-source roster.
+    fn sources_match_manifest(&self, manifest: &SourceContentManifestV1) -> bool {
+        self.freshness_fence
+            .sweep_sources(
                 &self.project_root,
                 &self.ignored_source_admissions,
+                &identity::GitMetadataFingerprintV1::capture(&self.project_root),
+                manifest,
                 &self.shutting_down,
             )
-        })
+            .0
+    }
+
+    /// Whether the last reconcile's source witness still describes the
+    /// worktree: every candidate's content digest equals the sealed manifest.
+    fn source_witness_matches_worktree(&self, freshness: &SourceFreshnessFenceStateV1) -> bool {
+        self.freshness_fence.source_witness_matches(
+            freshness,
+            &identity::GitMetadataFingerprintV1::capture(&self.project_root),
+            &self.project_root,
+            &self.shutting_down,
+        )
     }
 
     /// Mint the exact-source currency witness for one generation from the
@@ -3235,35 +3347,11 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// as movement here made a concurrent query escalate the targeted hint
     /// pass into an overflow rescan and relabel the arrival as its own.
     pub(super) fn freshness_probe_verdict(&mut self) -> FreshnessProbeVerdictV1 {
-        self.freshness_ladder_verdict(true)
-    }
-
-    /// The ladder behind [`Self::freshness_probe_verdict`]. Without the
-    /// bounded-staleness shortcut it always sweeps the source witness, which
-    /// is what a caller waiting for the source as it is now asks for.
-    fn freshness_ladder_verdict(
-        &mut self,
-        trust_recent_reconcile: bool,
-    ) -> FreshnessProbeVerdictV1 {
-        let freshness = self.freshness_fence.snapshot();
-        if !freshness.verified_against_source {
-            return FreshnessProbeVerdictV1::Unverified;
-        }
-        if identity::GitMetadataFingerprintV1::capture(&self.project_root)
-            .differs_from(&freshness.git_metadata)
-        {
-            return FreshnessProbeVerdictV1::Moved;
-        }
-        if trust_recent_reconcile
-            && freshness.last_reconciled_at.elapsed() < self.policy.staleness_threshold
-        {
-            return FreshnessProbeVerdictV1::Current;
-        }
-        if self.source_witness_matches_worktree(&freshness) {
-            self.freshness_fence.refresh_monotonic_clock(true);
-            return FreshnessProbeVerdictV1::Current;
-        }
-        FreshnessProbeVerdictV1::Moved
+        self.freshness_fence.ladder_verdict(
+            &self.project_root,
+            &self.shutting_down,
+            Some(self.policy.staleness_threshold),
+        )
     }
 
     /// Decide whether the cheap Git/stat ladder requires an authoritative
@@ -3309,7 +3397,9 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// [`Self::request_fresh_for_query_background`] against the source as it
     /// is now: the source witness is swept even inside the staleness window.
     pub fn request_fresh_now_background(&mut self) -> bool {
-        let verdict = self.freshness_ladder_verdict(false);
+        let verdict =
+            self.freshness_fence
+                .ladder_verdict(&self.project_root, &self.shutting_down, None);
         self.request_reconcile_for_verdict(verdict)
     }
 

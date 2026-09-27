@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::{Duration, timeout};
 use tracedecay_hooks::core_events::{DaemonHookEvent, HOOK_EVENT_METHOD, HookEventNotifyOutcomeV1};
 
@@ -66,8 +66,10 @@ async fn notify_hook_event_to_connection(
         return HookEventNotifyOutcomeV1::Malformed;
     };
     // A stateless request, not a notification: its own daemon connection has
-    // no `initialize` session for a notification to ride. The result is not
-    // awaited, so delivery stays fire-and-forget.
+    // no `initialize` session for a notification to ride. The daemon answers
+    // once it has admitted the event, the edited paths into the code-index
+    // queue included, so `Delivered` means a status read issued afterwards
+    // already sees the save.
     let mut request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(serde_json::Value::from(1)),
@@ -81,7 +83,7 @@ async fn notify_hook_event_to_connection(
     let Ok(stream) = BrokerStream::connect(connection.endpoint()).await else {
         return HookEventNotifyOutcomeV1::Unavailable;
     };
-    let (_reader, mut writer) = stream.into_owned_split();
+    let (reader, mut writer) = stream.into_owned_split();
     if write_daemon_preamble(&mut writer, &connection, &handshake)
         .await
         .is_err()
@@ -94,10 +96,29 @@ async fn notify_hook_event_to_connection(
     if writer.write_all(b"\n").await.is_err() {
         return HookEventNotifyOutcomeV1::Unavailable;
     }
-    if writer.flush().await.is_err() || writer.shutdown().await.is_err() {
+    if writer.flush().await.is_err() {
         return HookEventNotifyOutcomeV1::Unavailable;
     }
-    HookEventNotifyOutcomeV1::Delivered
+    let mut reader = BufReader::new(reader);
+    let mut response = String::new();
+    loop {
+        response.clear();
+        match reader.read_line(&mut response).await {
+            Ok(0) | Err(_) => return HookEventNotifyOutcomeV1::Unavailable,
+            Ok(_) => {}
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&response) else {
+            return HookEventNotifyOutcomeV1::Malformed;
+        };
+        if value.get("id") != request.id.as_ref() {
+            continue;
+        }
+        return if value.get("result").is_some() {
+            HookEventNotifyOutcomeV1::Delivered
+        } else {
+            HookEventNotifyOutcomeV1::Malformed
+        };
+    }
 }
 
 #[cfg(all(test, unix))]

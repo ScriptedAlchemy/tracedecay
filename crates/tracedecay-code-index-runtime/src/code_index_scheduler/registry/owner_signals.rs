@@ -1,6 +1,7 @@
 //! Change signals for one project root, and the readiness wait built on them.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, PoisonError};
 
 use std::time::Duration;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -16,7 +17,10 @@ use super::{
     CodeIndexCadenceTriggerV1, CodeIndexOwnerActivityV1, CodeIndexSchedulerRegistryV1,
     unique_mounted_for_scope,
 };
-use crate::code_index_scheduler::{CodeIndexCadenceTelemetryV1, LatestCodeTextGenerationV1};
+use crate::code_index_scheduler::reconcile::FreshnessProbeVerdictV1;
+use crate::code_index_scheduler::{
+    CodeIndexCadenceTelemetryV1, CodeIndexWorktreeSchedulerV1, LatestCodeTextGenerationV1,
+};
 
 /// Why the source could not be proven current before waiting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,9 +159,11 @@ impl CodeIndexOwnerSignalsV1 {
 
 impl CodeIndexSchedulerRegistryV1 {
     /// Sweep the source witness now and post a wake for any proven change,
-    /// so later freshness reads describe the source as of this call. An
-    /// unmounted root has nothing to sweep; its mount reconciles. Without
-    /// `sweep_source` only the publication park is checked.
+    /// so later freshness reads describe the source as of this call. The
+    /// sweep reads only the freshness fence, never the scheduler mutex, so a
+    /// pass in flight cannot delay it. An unmounted root has nothing to
+    /// sweep; its mount reconciles. Without `sweep_source` only the
+    /// publication park is checked.
     async fn request_fresh_now(
         &self,
         project_root: &Path,
@@ -166,7 +172,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(canonical) = canonical_existing_identity(project_root) else {
             return Ok(());
         };
-        let (scheduler, pending_wake, wake) = {
+        let (source_freshness, shutting_down, hints, epoch, pending_wake, wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&canonical) else {
                 return Ok(());
@@ -178,22 +184,31 @@ impl CodeIndexSchedulerRegistryV1 {
                 return Ok(());
             }
             (
-                std::sync::Arc::clone(&worktree.scheduler),
-                std::sync::Arc::clone(&worktree.pending_wake),
-                std::sync::Arc::clone(&worktree.wake),
+                worktree.source_freshness.clone(),
+                Arc::clone(&worktree.shutting_down),
+                Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.epoch),
+                Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.wake),
             )
         };
         tokio::task::spawn_blocking(move || {
-            let mut scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if scheduler.request_fresh_now_background() {
-                Self::note_wake(
-                    &pending_wake,
-                    &wake,
-                    CodeIndexCadenceTriggerV1::QueryAdmission,
-                );
+            match source_freshness.ladder_verdict(&canonical, &shutting_down, None) {
+                FreshnessProbeVerdictV1::Current => return,
+                FreshnessProbeVerdictV1::Unverified => {}
+                FreshnessProbeVerdictV1::Moved => {
+                    CodeIndexWorktreeSchedulerV1::record_background_reconcile_hint(
+                        &mut hints.lock().unwrap_or_else(PoisonError::into_inner),
+                        &epoch,
+                        true,
+                    );
+                }
             }
+            Self::note_wake(
+                &pending_wake,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
         })
         .await
         .map_err(|_| CodeIndexFreshSweepRefusedV1::SweepFailed)
@@ -232,18 +247,17 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Wait until `project_root` reaches `target`, re-reading freshness only
     /// when the registry publishes a change, for at most `budget`.
     ///
-    /// A target the current reading already satisfies is reached at once:
-    /// that reading is the scheduler's last proof, the answer a plain status
-    /// read gives, so a save no hook reported is left to the backstop sweep
-    /// rather than swept inside the caller's budget. Otherwise the wait proves
-    /// freshness against the source as it is now: the bounded
-    /// Git/stat/content probe either refreshes the verified watermark or
-    /// posts the wake for a proven change, so a reading taken after it
-    /// cannot report an edit the scheduler has not yet seen as fresh.
-    /// `graph_ready` does not depend on freshness and skips that probe. An
-    /// unmounted root is waited through: a mount that lands inside the budget
-    /// reconciles the source as of that mount. Dropping the future abandons
-    /// the wait; a wake the probe posted is ordinary demand.
+    /// `fresh` means verified against the source as of the request: the wait
+    /// first sweeps the source witness, which either refreshes the verified
+    /// watermark or posts the wake for a proven change, so a reading taken
+    /// after it cannot report an edit no hook announced as fresh. The sweep
+    /// stats files against digests earlier sweeps proved and reads bytes
+    /// only where a stat moved, without the scheduler mutex. `ready` and
+    /// `graph_ready` accept a reading that already satisfies them, the answer
+    /// a plain status read gives; a pending `ready` still sweeps first.
+    /// An unmounted root is waited through: a mount that lands inside the
+    /// budget reconciles the source as of that mount. Dropping the future
+    /// abandons the wait; a wake the sweep posted is ordinary demand.
     pub async fn wait_for_readiness(
         &self,
         project_root: &Path,
@@ -251,16 +265,19 @@ impl CodeIndexSchedulerRegistryV1 {
         budget: Duration,
     ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         let deadline = tokio::time::Instant::now() + budget;
-        if self
-            .dashboard_freshness_read(project_root)
-            .await?
-            .is_some_and(|freshness| freshness.readiness(target) == CodeIndexReadinessV1::Reached)
+        if target != CodeIndexReadinessTargetV1::Fresh
+            && self
+                .dashboard_freshness_read(project_root)
+                .await?
+                .is_some_and(|freshness| {
+                    freshness.readiness(target) == CodeIndexReadinessV1::Reached
+                })
         {
             return Ok(CodeIndexReadinessWaitReadV1::Reached);
         }
         let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
-        // The probe can take the scheduler mutex; the caller's budget bounds
-        // it, and an unproven source cannot be reported as reached.
+        // The caller's budget bounds the sweep, and an unproven source cannot
+        // be reported as reached.
         let sweep_source = target != CodeIndexReadinessTargetV1::GraphReady;
         match tokio::time::timeout_at(deadline, self.request_fresh_now(project_root, sweep_source))
             .await
