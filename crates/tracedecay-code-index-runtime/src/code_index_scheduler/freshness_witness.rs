@@ -33,6 +33,7 @@ use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     ContentDigest, LanguageId, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
 };
+use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
 use super::{CodeIndexSchedulerErrorV1, classification, ignored_dependencies, privacy};
 use crate::code_index::chunks::content_digest;
@@ -221,6 +222,9 @@ impl CandidateContentV1 {
 /// cannot yet tell the file's current state from its next one.
 const RACY_STAT_WINDOW: Duration = Duration::from_secs(2);
 
+/// At most this many digests are re-derived on the sweeping thread.
+const INLINE_DIGEST_LIMIT: usize = 16;
+
 /// One inode's stat identity. On Unix the change time is the kernel's own
 /// record of every content or metadata write and cannot be set back
 /// (`touch -d`, `cp --preserve`, `rsync -a` all advance it), so an equal
@@ -283,6 +287,31 @@ impl StatKeyV1 {
     }
 }
 
+/// Apply a stat-sized `probe` to every item on a few scoped threads, in order.
+/// Stats never queue on the indexing pool, so a sweep is not delayed by the
+/// builds that pool is running.
+fn stat_concurrently<T: Sync, R: Send>(items: &[T], probe: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let chunk = items
+        .len()
+        .div_ceil(GIT_STATUS_MODIFICATION_CHECK_THREADS)
+        .max(1);
+    std::thread::scope(|scope| {
+        let probe = &probe;
+        let workers = items
+            .chunks(chunk)
+            .map(|slice| scope.spawn(move || slice.iter().map(probe).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
 /// The key of whatever is at `path` now, `None` when nothing is.
 fn sample(path: &Path) -> std::io::Result<Option<StatKeyV1>> {
     match std::fs::symlink_metadata(path) {
@@ -308,12 +337,11 @@ impl CachedCandidateRosterV1 {
     fn holds(&self, git_metadata_signature: &str, admitted_paths: &[String]) -> bool {
         self.git_metadata_signature == git_metadata_signature
             && self.admitted_paths == admitted_paths
-            && parallelism::install(|| {
-                self.evidence
-                    .par_iter()
-                    .all(|(path, key)| sample(path).is_ok_and(|now| now == *key))
+            && stat_concurrently(&self.evidence, |(path, key)| {
+                sample(path).is_ok_and(|now| now == *key)
             })
-            .unwrap_or(false)
+            .into_iter()
+            .all(|holds| holds)
     }
 }
 
@@ -505,33 +533,31 @@ impl SourceSweepCacheV1 {
                 candidates
             }
         };
-        let Ok(present) = parallelism::install(|| {
-            candidates
-                .par_iter()
-                .filter(|candidate| {
-                    candidate.explicitly_admitted
-                        || !is_generated_path_segment(&candidate.logical_path)
-                })
-                .filter_map(|candidate| {
-                    let absolute = project_root.join(&candidate.logical_path);
-                    let metadata = std::fs::symlink_metadata(&absolute).ok()?;
-                    // A link's own key says nothing about its target's bytes.
-                    let key = if metadata.file_type().is_symlink() {
-                        if !std::fs::metadata(&absolute).is_ok_and(|target| target.is_file()) {
-                            return None;
-                        }
-                        None
-                    } else if metadata.is_file() {
-                        Some(StatKeyV1::of(&metadata))
-                    } else {
-                        return None;
-                    };
-                    Some((candidate, key))
-                })
-                .collect::<Vec<_>>()
-        }) else {
-            return (false, stats);
-        };
+        let eligible = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.explicitly_admitted || !is_generated_path_segment(&candidate.logical_path)
+            })
+            .collect::<Vec<_>>();
+        let present = stat_concurrently(&eligible, |candidate| {
+            let absolute = project_root.join(&candidate.logical_path);
+            let metadata = std::fs::symlink_metadata(&absolute).ok()?;
+            // A link's own key says nothing about its target's bytes.
+            let key = if metadata.file_type().is_symlink() {
+                if !std::fs::metadata(&absolute).is_ok_and(|target| target.is_file()) {
+                    return None;
+                }
+                None
+            } else if metadata.is_file() {
+                Some(StatKeyV1::of(&metadata))
+            } else {
+                return None;
+            };
+            Some((*candidate, key))
+        })
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
         stats.candidates = present.len();
         hotpath::gauge!("daemon.code_index.freshness.source_sweep.candidates")
             .set(present.len() as u64);
@@ -561,29 +587,38 @@ impl SourceSweepCacheV1 {
         stats.hashed = unvouched.len();
         hotpath::gauge!("daemon.code_index.freshness.source_sweep.hashed")
             .set(unvouched.len() as u64);
-        let Ok(derived) = parallelism::install(|| {
+        let derive = |candidate: &StatCandidateV1| {
+            if shutting_down.load(Ordering::Acquire) {
+                CandidateContentV1::Unreadable
+            } else {
+                CandidateContentV1::derive(project_root, candidate)
+            }
+        };
+        // The few files an edit touches are read on this thread; only a bulk
+        // re-derivation (a cold cache) takes the indexing pool and its CPU
+        // permits.
+        let derived = if unvouched.len() <= INLINE_DIGEST_LIMIT {
             unvouched
-                .par_iter()
-                .map(|(candidate, key)| {
-                    parallelism::with_background_cpu_permit(|| {
-                        if shutting_down.load(Ordering::Acquire) {
-                            return (*candidate, *key, CandidateContentV1::Unreadable);
-                        }
-                        (
-                            *candidate,
-                            *key,
-                            CandidateContentV1::derive(project_root, candidate),
-                        )
-                    })
-                })
+                .iter()
+                .map(|(candidate, _)| derive(candidate))
                 .collect::<Vec<_>>()
-        }) else {
-            return (false, stats);
+        } else {
+            let Ok(derived) = parallelism::install(|| {
+                unvouched
+                    .par_iter()
+                    .map(|(candidate, _)| {
+                        parallelism::with_background_cpu_permit(|| derive(candidate))
+                    })
+                    .collect::<Vec<_>>()
+            }) else {
+                return (false, stats);
+            };
+            derived
         };
         if shutting_down.load(Ordering::Acquire) {
             return (false, stats);
         }
-        for (candidate, key, content) in derived {
+        for ((candidate, key), content) in unvouched.into_iter().zip(derived) {
             if !content.matches(manifest.files.get(&candidate.logical_path)) {
                 disputed.push(candidate);
             }
