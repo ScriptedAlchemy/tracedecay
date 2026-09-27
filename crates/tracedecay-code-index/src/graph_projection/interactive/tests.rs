@@ -779,6 +779,152 @@ fn degree_ranking_serves_catalog_degrees_over_the_whole_generation() {
     );
 }
 
+/// `sym.center` has seven neighbors across four edge kinds; `sym.leaf.*`
+/// only raise the degrees of `n::alpha` (3) and `n::Shape` (4).
+fn neighbor_manifest() -> GraphGenerationManifest {
+    let projection =
+        code_graph_projection_identity(GraphNamespace::new("code-graph").expect("namespace"))
+            .expect("projection identity");
+    let named = [
+        ("sym.center", "hub::center", "function"),
+        ("sym.n.alpha", "n::alpha", "function"),
+        ("sym.n.beta", "n::beta", "function"),
+        ("sym.n.zeta", "n::zeta", "function"),
+        ("sym.n.both", "n::both", "function"),
+        ("sym.n.trait", "n::Trait", "trait"),
+        ("sym.n.shape", "n::Shape", "struct"),
+        ("sym.n.module", "n::module", "module"),
+        ("sym.leaf.1", "leaf::one", "function"),
+        ("sym.leaf.2", "leaf::two", "function"),
+        ("sym.leaf.3", "leaf::three", "function"),
+    ];
+    let files = vec![file("file.f1", "src/hub.rs")];
+    let chunks = named
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (occurrence, _, _))| Arc::new(chunk(occurrence, "file.f1", ordinal as u32)))
+        .collect::<Vec<_>>();
+    let symbols = GenerationSymbolIndexV1::new(
+        generation(),
+        named
+            .iter()
+            .enumerate()
+            .map(|(index, (occurrence, qualified_name, kind))| {
+                let mut metadata = symbol_metadata(occurrence, qualified_name, kind, '1');
+                metadata.identity = id(&format!("sha256:{index:064x}"));
+                Arc::new(metadata)
+            })
+            .collect(),
+    )
+    .expect("neighbor fixture symbols");
+    let edges = [
+        ("sym.n.zeta", "sym.center", RelationEdgeKindV1::Calls),
+        ("sym.center", "sym.n.alpha", RelationEdgeKindV1::Calls),
+        ("sym.center", "sym.n.beta", RelationEdgeKindV1::Calls),
+        ("sym.center", "sym.n.both", RelationEdgeKindV1::Uses),
+        ("sym.n.both", "sym.center", RelationEdgeKindV1::Calls),
+        ("sym.center", "sym.n.trait", RelationEdgeKindV1::Implements),
+        ("sym.center", "sym.n.shape", RelationEdgeKindV1::TypeOf),
+        ("sym.n.module", "sym.center", RelationEdgeKindV1::Contains),
+        ("sym.n.alpha", "sym.leaf.1", RelationEdgeKindV1::Calls),
+        ("sym.n.alpha", "sym.leaf.2", RelationEdgeKindV1::Calls),
+        ("sym.n.shape", "sym.leaf.1", RelationEdgeKindV1::Uses),
+        ("sym.n.shape", "sym.leaf.2", RelationEdgeKindV1::Uses),
+        ("sym.n.shape", "sym.leaf.3", RelationEdgeKindV1::Uses),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, (from, to, kind))| edge(from, to, *kind, 2 * index as u64))
+    .collect::<Vec<_>>();
+    build_code_graph_manifest_inputs_checked(
+        projection,
+        &generation(),
+        &edges,
+        &chunks,
+        Some(ProductionCodeGraphInputs {
+            files: &files,
+            symbols: &symbols,
+            imports: &[],
+            unresolved_calls: &[],
+        }),
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
+            .expect("projector revision"),
+        &|| Ok(()),
+    )
+    .expect("neighbor fixture manifest")
+}
+
+fn neighbor_kind_rank(kind: RelationEdgeKindV1) -> u8 {
+    match kind {
+        RelationEdgeKindV1::Calls => 0,
+        RelationEdgeKindV1::Implements => 1,
+        RelationEdgeKindV1::TypeOf => 2,
+        RelationEdgeKindV1::Uses => 3,
+        RelationEdgeKindV1::Contains => 4,
+        RelationEdgeKindV1::Extends
+        | RelationEdgeKindV1::Annotates
+        | RelationEdgeKindV1::Returns
+        | RelationEdgeKindV1::Receives => 5,
+    }
+}
+
+/// Neighbors rank by their best edge kind to a seed, then total degree
+/// descending, then qualified name, whatever order the store returns them
+/// in; the cut keeps that prefix and reports the total.
+#[test]
+fn ranked_neighbors_order_by_kind_then_degree_then_name_before_the_cut() {
+    let reader = reader(&store_for(neighbor_manifest()));
+    let seeds = [id::<SymbolOccurrenceId>("sym.center")];
+    let names = |ranked: &super::CodeGraphRankedNeighborsV1| {
+        ranked
+            .neighbors
+            .iter()
+            .map(|summary| {
+                summary
+                    .metadata
+                    .as_ref()
+                    .map(|metadata| metadata.qualified_name.clone())
+                    .expect("production summary carries its name")
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let whole = reader
+        .ranked_neighbors(&seeds, neighbor_kind_rank, 64, 16, request())
+        .expect("whole neighborhood");
+    assert_eq!(
+        names(&whole),
+        [
+            "n::alpha",
+            "n::both",
+            "n::beta",
+            "n::zeta",
+            "n::Trait",
+            "n::Shape",
+            "n::module",
+        ]
+    );
+    assert_eq!((whole.total, whole.walk_truncated), (7, false));
+
+    let cut = reader
+        .ranked_neighbors(&seeds, neighbor_kind_rank, 64, 5, request())
+        .expect("cut neighborhood");
+    assert_eq!(
+        names(&cut),
+        ["n::alpha", "n::both", "n::beta", "n::zeta", "n::Trait"]
+    );
+    assert_eq!((cut.total, cut.walk_truncated), (7, false));
+
+    let walked = reader
+        .ranked_neighbors(&seeds, neighbor_kind_rank, 2, 16, request())
+        .expect("row-limited walk");
+    assert!(
+        walked.walk_truncated,
+        "a direction stopped at its row limit"
+    );
+    assert!(walked.total < 7);
+}
+
 #[test]
 fn degree_ranking_refuses_zero_sized_requests() {
     let reader = reader(&store_for(production_manifest()));

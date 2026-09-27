@@ -22,8 +22,8 @@ use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextExtensionPointV1, ContextLexicalAnchorV1, ContextPlanV1,
-    ContextResultV1, ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1,
-    PrimitiveSymbolLocationV1,
+    ContextRelatedOmissionV1, ContextResultV1, ContextRetrievalPlanV1, ContextSearchMatchV1,
+    ContextStageV1, PrimitiveSymbolLocationV1,
 };
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
@@ -48,6 +48,7 @@ pub(crate) fn render_context(
         &result.task,
         &result.symbols,
         &result.related_symbols,
+        result.related_omission.as_ref(),
         &result.code,
     ));
     if result.symbols.is_empty() {
@@ -97,6 +98,7 @@ fn context_markdown(
     task: &str,
     symbols: &[PrimitiveSymbolLocationV1],
     related: &[PrimitiveSymbolLocationV1],
+    related_omission: Option<&ContextRelatedOmissionV1>,
     code: &[ContextCodeBlockV1],
 ) -> String {
     let mut output = format!("# Context for {task}\n\n{CONTEXT_CODE_HEADING}\n");
@@ -125,6 +127,18 @@ fn context_markdown(
             output,
             "- **{}** ({}), {}:{}",
             symbol.name, symbol.kind, symbol.file, symbol.start_line,
+        );
+    }
+    if let Some(omission) = related_omission {
+        let at_least = if omission.total_is_lower_bound {
+            "at least "
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            output,
+            "- {} more omitted of {at_least}{} ranked related symbols",
+            omission.omitted, omission.total,
         );
     }
     output.push('\n');

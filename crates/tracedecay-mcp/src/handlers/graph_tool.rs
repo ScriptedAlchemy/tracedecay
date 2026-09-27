@@ -423,6 +423,7 @@ mod tests {
                 unavailable_fields: Vec::new(),
             }],
             related_symbols: Vec::new(),
+            related_omission: None,
             code: Vec::new(),
             coverage: PrimitiveSearchCoverageV1 {
                 exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),

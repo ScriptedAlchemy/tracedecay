@@ -9,18 +9,18 @@ use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextResultV1,
-    ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1,
-    FindExactSymbolMatchV1, FindExactSymbolResultV1, FindExactSymbolSurfaceRequestV1,
-    LexicalAnchorDropReasonV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
-    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
-    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
-    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
-    SimilarSurfaceRequestV1, SimilarTargetV1,
+    ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextRelatedOmissionV1,
+    ContextResultV1, ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1,
+    ContextSurfaceRequestV1, FindExactSymbolMatchV1, FindExactSymbolResultV1,
+    FindExactSymbolSurfaceRequestV1, LexicalAnchorDropReasonV1, RedundancyScopeV1,
+    RedundancySurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1,
+    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
+    RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
+    SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarTargetV1,
 };
 use tracedecay_contracts::{ApplicationProblemDetailV1, InvocationAnalyticsV1};
-use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{ExactClass, RelationEdgeKindV1};
 use tracedecay_query::retrieval::lexical::LexicalAnchorOutcomeV1;
 #[cfg(test)]
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
@@ -536,22 +536,36 @@ fn render_search_md(value: &Value) -> String {
     md.render()
 }
 
-/// Related-symbol assembly is a page, not a complete fan-out. The callers
-/// tool uses a 50k refuse budget; context used to keep that budget, hydrate
-/// every edge, then discard all but `max_nodes`. That walk is CPU-bound and
-/// shows no warm benefit. Cap examination at a small multiple of the kept
-/// page. The page admits every edge kind: the same neighborhood a complete
-/// walk returns, cut to a prefix in store order.
-fn context_related_relation_budget(max_nodes: usize) -> usize {
-    max_nodes.saturating_mul(4).clamp(16, 64)
+/// Edge rows each direction of the related-symbol walk reads across all
+/// selected symbols. The walk takes each neighbor from its edge row and
+/// ranks it from the catalog without reading a symbol entity, so it covers
+/// a hub's neighborhood before the `max_nodes` cut; past this many rows the
+/// omission reports its total as a lower bound.
+const CONTEXT_RELATED_WALK_ROWS: usize = 4_096;
+
+/// Related symbols rank by the best edge kind joining them to a selected
+/// symbol, lower first: behavior (calls), then the type hierarchy
+/// (implements, extends), then signatures (`type_of`, returns, receives),
+/// then looser references (uses, annotates), then containment.
+fn context_related_kind_rank(kind: RelationEdgeKindV1) -> u8 {
+    match kind {
+        RelationEdgeKindV1::Calls => 0,
+        RelationEdgeKindV1::Implements => 1,
+        RelationEdgeKindV1::Extends => 2,
+        RelationEdgeKindV1::TypeOf => 3,
+        RelationEdgeKindV1::Returns => 4,
+        RelationEdgeKindV1::Receives => 5,
+        RelationEdgeKindV1::Uses => 6,
+        RelationEdgeKindV1::Annotates => 7,
+        RelationEdgeKindV1::Contains => 8,
+    }
 }
 
 #[derive(Default)]
 struct ContextGraphProjection {
     selected: Vec<CodeGraphSymbolSummaryV1>,
     related: Vec<CodeGraphSymbolSummaryV1>,
-    /// A relation walk or the `max_nodes` cap stopped the related symbols.
-    related_truncated: bool,
+    related_omission: Option<ContextRelatedOmissionV1>,
     code_blocks: Vec<ContextCodeBlockV1>,
     touched_files: Vec<String>,
 }
@@ -663,28 +677,23 @@ fn context_graph_projection(
         .iter()
         .map(|symbol| symbol.occurrence.clone())
         .collect::<Vec<_>>();
-    let mut related = Vec::new();
-    let mut related_truncated = false;
-    if !seeds.is_empty() {
-        let related_budget = context_related_relation_budget(max_nodes);
-        for batches in [
-            graph.callers_truncated(&seeds, &[], related_budget)?,
-            graph.callees_truncated(&seeds, &[], related_budget)?,
-        ] {
-            related_truncated |= batches.iter().map(Vec::len).sum::<usize>() >= related_budget;
-            for edge in batches.into_iter().flatten() {
-                if !seeds.contains(&edge.neighbor.occurrence)
-                    && !related.iter().any(|existing: &CodeGraphSymbolSummaryV1| {
-                        existing.occurrence == edge.neighbor.occurrence
-                    })
-                {
-                    related.push(edge.neighbor);
-                }
-            }
-        }
-    }
-    related_truncated |= related.len() > max_nodes;
-    related.truncate(max_nodes);
+    let (related, related_omission) = if seeds.is_empty() {
+        (Vec::new(), None)
+    } else {
+        let ranked = graph.ranked_neighbors(
+            &seeds,
+            context_related_kind_rank,
+            CONTEXT_RELATED_WALK_ROWS,
+            max_nodes,
+        )?;
+        let omitted = ranked.total.saturating_sub(ranked.neighbors.len());
+        let omission = (omitted > 0 || ranked.walk_truncated).then_some(ContextRelatedOmissionV1 {
+            total: ranked.total,
+            omitted,
+            total_is_lower_bound: ranked.walk_truncated,
+        });
+        (ranked.neighbors, omission)
+    };
 
     let mut all_symbols = selected.clone();
     all_symbols.extend(related.iter().cloned());
@@ -727,7 +736,7 @@ fn context_graph_projection(
     Ok(ContextGraphProjection {
         selected,
         related,
-        related_truncated,
+        related_omission,
         code_blocks,
         touched_files,
     })
@@ -913,7 +922,7 @@ where
             ContextStageV1::ran(
                 max_nodes,
                 projection.related.len(),
-                projection.related_truncated,
+                projection.related_omission.is_some(),
             )
         },
         code: if !include_code {
@@ -982,6 +991,7 @@ where
         lexical_anchors,
         symbols,
         related_symbols,
+        related_omission: projection.related_omission,
         code: projection.code_blocks,
         coverage,
         memory_matches,
@@ -2015,17 +2025,6 @@ mod tests {
             "why": null
         }))
         .expect("canonical context memory hit")
-    }
-
-    #[test]
-    fn context_related_relation_budget_is_a_page_not_a_complete_walk() {
-        assert_eq!(context_related_relation_budget(1), 16);
-        assert_eq!(context_related_relation_budget(20), 64);
-        assert_eq!(context_related_relation_budget(200), 64);
-        assert!(
-            context_related_relation_budget(20) < 50_000,
-            "context must not reuse the callers complete-walk budget"
-        );
     }
 
     /// A warm response must render exactly as it did before coverage existed:
