@@ -734,18 +734,38 @@ impl SourceFreshnessFenceV1 {
         shutting_down: &AtomicBool,
     ) -> bool {
         freshness.source_witness.as_ref().is_some_and(|witness| {
-            self.sweep_cache
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .witness_matches(
-                    project_root,
-                    &freshness.source_roster,
-                    &git_metadata.stable_signature(),
-                    &witness.content_manifest,
-                    shutting_down,
-                )
-                .0
+            self.sweep_sources(
+                project_root,
+                &freshness.source_roster,
+                git_metadata,
+                &witness.content_manifest,
+                shutting_down,
+            )
+            .0
         })
+    }
+
+    /// The one source sweep: every content proof, the freshness ladder's and
+    /// a reconcile's, goes through this cache, so digests one derives are
+    /// reused by the next.
+    fn sweep_sources(
+        &self,
+        project_root: &Path,
+        roster: &[CodeIndexIgnoredSourceAdmissionV1],
+        git_metadata: &identity::GitMetadataFingerprintV1,
+        manifest: &SourceContentManifestV1,
+        shutting_down: &AtomicBool,
+    ) -> (bool, freshness_witness::SourceSweepStatsV1) {
+        self.sweep_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .witness_matches(
+                project_root,
+                roster,
+                &git_metadata.stable_signature(),
+                manifest,
+                shutting_down,
+            )
     }
 
     /// Sweep the current witness and report what the sweep had to read.
@@ -760,16 +780,13 @@ impl SourceFreshnessFenceV1 {
             .source_witness
             .as_ref()
             .expect("a reconciled fence carries a source witness");
-        self.sweep_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .witness_matches(
-                project_root,
-                &freshness.source_roster,
-                &identity::GitMetadataFingerprintV1::capture(project_root).stable_signature(),
-                &witness.content_manifest,
-                shutting_down,
-            )
+        self.sweep_sources(
+            project_root,
+            &freshness.source_roster,
+            &identity::GitMetadataFingerprintV1::capture(project_root),
+            &witness.content_manifest,
+            shutting_down,
+        )
     }
 
     /// The freshness ladder over this fence alone, so a caller verifying the
@@ -1668,7 +1685,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         else {
             return Ok(None);
         };
-        if self.retained_frontier_stat_sweep(&pointer).is_none() {
+        if !self.retained_frontier_stat_sweep(&pointer) {
             return Ok(None);
         }
         let Some(generation) = self
@@ -1730,7 +1747,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         }
         let source_manifest = SourceContentManifestV1::for_snapshot(generation.snapshot());
-        if !sweep.content_matches(&self.project_root, &source_manifest, &self.shutting_down) {
+        if !self.sources_match_manifest(&source_manifest) {
             return Ok(None);
         }
         let snapshot_content_identity = generation.snapshot().content_identity.clone();
@@ -1796,13 +1813,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         // the first branch and would keep swallowing the pass.
         let content_matches = decoded.as_ref().is_some_and(|generation| {
             self.retained_frontier_stat_sweep(&pointer)
-                .is_some_and(|sweep| {
-                    sweep.content_matches(
-                        &self.project_root,
-                        &SourceContentManifestV1::for_snapshot(generation.snapshot()),
-                        &self.shutting_down,
-                    )
-                })
+                && self.sources_match_manifest(&SourceContentManifestV1::for_snapshot(
+                    generation.snapshot(),
+                ))
         });
         if !retained_empty_seat_settles_source(decoded.is_some(), content_matches) {
             return Ok(None);
@@ -1836,24 +1849,22 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Witness + git/stat fence that does not read sealed generation bytes.
-    /// `Some` is the negative cache only, the metadata the witness recorded
-    /// has not moved, and hands back the sweep so the caller can settle
-    /// currency against the retained generation's sealed file digests.
-    fn retained_frontier_stat_sweep(
-        &self,
-        pointer: &DurablePublicationPointerV1,
-    ) -> Option<freshness_witness::WorktreeStatSweepV1> {
-        let witness = RestoreFreshnessWitnessV1::load(&self.store_root)?;
+    /// `true` is the negative cache only: the metadata the witness recorded
+    /// has not moved, and the caller still settles currency against the
+    /// retained generation's sealed file digests.
+    fn retained_frontier_stat_sweep(&self, pointer: &DurablePublicationPointerV1) -> bool {
+        let Some(witness) = RestoreFreshnessWitnessV1::load(&self.store_root) else {
+            return false;
+        };
         if witness.generation_id != pointer.generation_id {
-            return None;
+            return false;
         }
         let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
         if witness.git_metadata_signature != metadata.stable_signature() {
-            return None;
+            return false;
         }
         self.worktree_stat_sweep()
-            .ok()
-            .filter(|sweep| witness.stat_signature == sweep.signature)
+            .is_ok_and(|sweep| witness.stat_signature == sweep.signature)
     }
 
     /// Verify an unchanged retained text generation without decoding the full
@@ -2094,13 +2105,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         // generation's sealed file digests; its matching stat signature is
         // the negative cache that lets a moved tree skip the byte comparison.
         let source_manifest = SourceContentManifestV1::for_snapshot(metadata.snapshot());
-        let sealed_bytes_match = retained_is_reusable
-            && !has_hints
-            && sampled_sweep.content_matches(
-                &self.project_root,
-                &source_manifest,
-                &self.shutting_down,
-            );
+        let sealed_bytes_match =
+            retained_is_reusable && !has_hints && self.sources_match_manifest(&source_manifest);
         let quiet_witness = sealed_bytes_match
             && witness.as_ref().is_some_and(|witness| {
                 witness.git_metadata_signature == sampled_metadata.stable_signature()
@@ -3153,6 +3159,20 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.request_background_reconcile();
             Ok(false)
         }
+    }
+
+    /// Whether the bytes on disk carry exactly `manifest`'s digests under this
+    /// scheduler's ignored-source roster.
+    fn sources_match_manifest(&self, manifest: &SourceContentManifestV1) -> bool {
+        self.freshness_fence
+            .sweep_sources(
+                &self.project_root,
+                &self.ignored_source_admissions,
+                &identity::GitMetadataFingerprintV1::capture(&self.project_root),
+                manifest,
+                &self.shutting_down,
+            )
+            .0
     }
 
     /// Whether the last reconcile's source witness still describes the

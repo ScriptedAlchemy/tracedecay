@@ -51,11 +51,9 @@ struct StatCandidateV1 {
 }
 
 /// One stat sweep over every ordinary or explicitly admitted source
-/// candidate: the cheap signature plus the candidate roster it hashed, so the
-/// content proof compares exactly the files the signature covered.
+/// candidate: a negative cache only, settled by [`SourceSweepCacheV1`].
 pub struct WorktreeStatSweepV1 {
     pub signature: String,
-    candidates: Vec<StatCandidateV1>,
 }
 
 /// A cheap stat-level sweep over every ordinary or explicitly admitted source
@@ -74,7 +72,6 @@ pub fn worktree_stat_sweep(
     hotpath::gauge!("daemon.code_index.freshness.stat_signature.candidates")
         .set(candidate_roster.len() as u64);
     let mut buf = Vec::new();
-    let mut candidates = Vec::new();
     for candidate in candidate_roster {
         let Ok(metadata) = std::fs::metadata(project_root.join(&candidate.logical_path)) else {
             continue;
@@ -92,11 +89,9 @@ pub fn worktree_stat_sweep(
         buf.extend_from_slice(&metadata.len().to_le_bytes());
         buf.extend_from_slice(&mtime_nanos.to_le_bytes());
         buf.push(0xff);
-        candidates.push(candidate);
     }
     Ok(WorktreeStatSweepV1 {
         signature: encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&buf)),
-        candidates,
     })
 }
 
@@ -162,63 +157,6 @@ impl SourceContentManifestV1 {
     }
 }
 
-impl WorktreeStatSweepV1 {
-    /// Whether the bytes on disk still carry exactly the content identities
-    /// the generation sealed: every present manifest file is still a
-    /// candidate, and every candidate's re-derived canonical digest equals
-    /// its manifest entry (or the privacy boundary withholds it and the
-    /// manifest agrees). Read + sanitize + digest is per-file pure work over
-    /// independent paths, so it fans out across the indexing pool exactly as
-    /// capture does.
-    #[hotpath::measure(label = "daemon.code_index.freshness.content_verify")]
-    pub fn content_matches(
-        &self,
-        project_root: &Path,
-        manifest: &SourceContentManifestV1,
-        shutting_down: &AtomicBool,
-    ) -> bool {
-        let candidates = self
-            .candidates
-            .iter()
-            .filter(|candidate| {
-                candidate.explicitly_admitted || !is_generated_path_segment(&candidate.logical_path)
-            })
-            .collect::<Vec<_>>();
-        hotpath::gauge!("daemon.code_index.freshness.content_verify.candidates")
-            .set(candidates.len() as u64);
-        let candidate_paths = candidates
-            .iter()
-            .map(|candidate| candidate.logical_path.as_str())
-            .collect::<BTreeSet<_>>();
-        if !manifest
-            .files
-            .keys()
-            .all(|logical_path| candidate_paths.contains(logical_path.as_str()))
-        {
-            return false;
-        }
-        let Ok(disputed) = parallelism::install(|| {
-            candidates
-                .par_iter()
-                .copied()
-                .filter(|candidate| {
-                    parallelism::with_background_cpu_permit(|| {
-                        shutting_down.load(Ordering::Acquire)
-                            || !candidate_matches_manifest(project_root, candidate, manifest)
-                    })
-                })
-                .collect::<Vec<_>>()
-        }) else {
-            return false;
-        };
-        if shutting_down.load(Ordering::Acquire) {
-            return false;
-        }
-        disputed.is_empty()
-            || tracked_files_match_after_clean_filters(project_root, &disputed, manifest)
-    }
-}
-
 fn read_candidate(
     project_root: &Path,
     candidate: &StatCandidateV1,
@@ -276,15 +214,6 @@ impl CandidateContentV1 {
             _ => false,
         }
     }
-}
-
-fn candidate_matches_manifest(
-    project_root: &Path,
-    candidate: &StatCandidateV1,
-    manifest: &SourceContentManifestV1,
-) -> bool {
-    CandidateContentV1::derive(project_root, candidate)
-        .matches(manifest.files.get(&candidate.logical_path))
 }
 
 /// Timestamps this close to the moment of a stat can still be shared by a
@@ -524,8 +453,10 @@ pub struct SourceSweepCacheV1 {
 
 impl SourceSweepCacheV1 {
     /// Whether the bytes on disk still carry exactly the manifest's content
-    /// identities, with the same verdict [`WorktreeStatSweepV1::content_matches`]
-    /// gives over a fresh sweep under the same roster.
+    /// identities: every present manifest file is still a candidate, and
+    /// every candidate's canonical digest equals its manifest entry (or the
+    /// privacy boundary withholds it and the manifest agrees). Digests no
+    /// settled key vouches for are re-derived across the indexing pool.
     #[hotpath::measure(label = "daemon.code_index.freshness.source_sweep")]
     pub fn witness_matches(
         &mut self,
