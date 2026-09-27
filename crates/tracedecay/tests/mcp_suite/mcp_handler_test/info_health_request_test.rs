@@ -1,5 +1,5 @@
-//! The project-info, registry, and runtime reads, and the admin sync the CLI
-//! requests, decode their arguments against a typed request over the
+//! The project-info, registry, and runtime reads, and the admin sync and admin
+//! CLI actions the CLI requests, decode their arguments against a typed request over the
 //! production MCP `tools/call` path: an argument outside the request contract
 //! is refused instead of being silently ignored, and a valid call answers the
 //! typed result through its owner.
@@ -345,6 +345,111 @@ async fn admin_sync_answers_the_scheduler_admission_and_refuses_arguments() {
             "tracedecay_admin_sync",
             "unknown field `project_root`, there are no fields"
         )
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+/// `tracedecay_admin_cli` is the owner's profile maintenance the CLI's
+/// registry, storage, cost, and session commands request by name. Each action
+/// answers its established body through the owner, and an argument outside
+/// the named action is refused instead of being silently ignored.
+#[tokio::test]
+async fn admin_cli_actions_answer_through_the_owner_and_refuse_arguments_outside_the_action() {
+    let fixture = production_composition_fixture().await;
+    let root = canonical_existing_identity(&fixture.project_root)
+        .expect("canonical project root")
+        .display()
+        .to_string();
+    let project_id = fixture
+        .harness
+        .project_id(&fixture.project_root)
+        .await
+        .expect("registered project id");
+
+    assert_eq!(
+        call_json(
+            &fixture,
+            "tracedecay_admin_cli",
+            json!({"action": "registry_empty"})
+        )
+        .await,
+        json!({"empty": false})
+    );
+    let first = call_json(
+        &fixture,
+        "tracedecay_admin_cli",
+        json!({"action": "registry_update", "tokens": 42}),
+    )
+    .await;
+    assert_eq!(first["current"], 42, "{first}");
+    assert_eq!(
+        call_json(
+            &fixture,
+            "tracedecay_admin_cli",
+            json!({"action": "registry_update", "tokens": 7}),
+        )
+        .await,
+        json!({"previous": 42, "current": 7})
+    );
+    assert_eq!(
+        call_json(
+            &fixture,
+            "tracedecay_admin_cli",
+            json!({"action": "registry_project_tokens", "project_args": [root]}),
+        )
+        .await,
+        json!({"projects": [{"project": root, "tokens": 7}]})
+    );
+    let context = call_json(
+        &fixture,
+        "tracedecay_admin_cli",
+        json!({"action": "registry_context"}),
+    )
+    .await;
+    assert_eq!(
+        (
+            &context["status"],
+            &context["project"]["project_id"],
+            &context["project"]["canonical_root"],
+        ),
+        (&json!("ok"), &json!(project_id), &json!(root)),
+        "{context}"
+    );
+
+    assert_eq!(
+        refusal(
+            &fixture,
+            "tracedecay_admin_cli",
+            json!({"action": "registry_empty", "project_root": "/elsewhere"})
+        )
+        .await,
+        invalid(
+            "tracedecay_admin_cli",
+            "unknown field `project_root`, there are no fields"
+        )
+    );
+    assert_eq!(
+        refusal(
+            &fixture,
+            "tracedecay_admin_cli",
+            json!({"action": "registry_update", "tokens": 1, "project_arg": "/elsewhere"})
+        )
+        .await,
+        invalid(
+            "tracedecay_admin_cli",
+            "unknown field `project_arg`, expected `tokens`"
+        )
+    );
+    // The refused write left the recorded total untouched.
+    assert_eq!(
+        call_json(
+            &fixture,
+            "tracedecay_admin_cli",
+            json!({"action": "registry_project_tokens", "project_args": [root]}),
+        )
+        .await,
+        json!({"projects": [{"project": root, "tokens": 7}]})
     );
 
     fixture.harness.shutdown().await;

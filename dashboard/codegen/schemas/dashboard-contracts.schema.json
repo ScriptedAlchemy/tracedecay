@@ -11231,6 +11231,11 @@
           "const": "schedules_work",
           "description": "Queues work on a daemon-owned scheduler; the call answers with the\nscheduler's admission, not the finished work.",
           "type": "string"
+        },
+        {
+          "const": "maintains_profile_state",
+          "description": "Reads and rewrites the daemon profile's own state: its project\nregistry, accounting ledgers, and session stores, including registry\ncollection and transcript import.",
+          "type": "string"
         }
       ]
     },
