@@ -619,6 +619,13 @@ pub enum CodeIndexReadinessWaitOutcomeV1 {
     },
 }
 
+/// Reason code of a refusal reporting a `timed_out` wait outcome; retrying
+/// the wait may reach the target.
+pub const CODE_INDEX_READINESS_WAIT_TIMED_OUT: &str = "code_index_readiness_wait_timed_out";
+
+/// Reason code of a refusal reporting an `unavailable` wait outcome.
+pub const CODE_INDEX_READINESS_WAIT_UNAVAILABLE: &str = "code_index_readiness_wait_unavailable";
+
 /// Whether one freshness reading satisfies a readiness target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodeIndexReadinessV1 {

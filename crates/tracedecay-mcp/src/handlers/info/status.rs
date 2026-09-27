@@ -583,17 +583,25 @@ pub async fn handle_status(
     if let Some(prefix) = scope_prefix {
         output["scope_prefix"] = json!(prefix);
     }
-    if let Some(wait) = wait {
-        output["wait"] = serde_json::to_value(wait)?;
+    let wait = wait.map(serde_json::to_value).transpose()?;
+    if let Some(wait) = &wait {
+        output["wait"] = wait.clone();
     }
 
-    Ok(rendered_tool_result(
+    let mut result = rendered_tool_result(
         Some(&ctx.store_layout().response_handle_root),
         &args,
         &output,
         vec![],
         || render_status_md(&output),
-    ))
+    );
+    // Structured content beside the rendered body in every format, like a
+    // typed `problem`, so a caller such as `tracedecay tool` can type its
+    // exit status on the outcome.
+    if let (Some(wait), Some(object)) = (wait, result.value.as_object_mut()) {
+        object.insert("structuredContent".to_owned(), json!({ "wait": wait }));
+    }
+    Ok(result)
 }
 
 /// Project one freshness reading into the operator-facing status label and
@@ -780,6 +788,17 @@ fn render_status_md(value: &Value) -> String {
                             ));
                         }
                     }
+                }
+                Value::Object(o) if k == "wait" => {
+                    let outcome = o.get("outcome").and_then(Value::as_str).unwrap_or_default();
+                    match o
+                        .get("last_state")
+                        .or_else(|| o.get("reason"))
+                        .and_then(Value::as_str)
+                    {
+                        Some(detail) => md.field(k, &format!("{outcome} ({detail})")),
+                        None => md.field(k, outcome),
+                    };
                 }
                 Value::Object(o) => {
                     if let Some(status) = o.get("status").and_then(Value::as_str) {

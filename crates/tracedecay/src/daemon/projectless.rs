@@ -380,10 +380,17 @@ async fn projectless_tools_call_response_with_connection(
 }
 
 fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResponse {
-    JsonRpcResponse::error(
+    tool_error_response(
         id,
-        ErrorCode::InternalError,
-        format!("{tool_name} requires an initialized code project"),
+        tool_name,
+        &TraceDecayError::project_route(
+            PROJECT_REQUIRED_REASON_CODE,
+            false,
+            format!(
+                "{tool_name} requires an initialized code project; run it inside an \
+                 initialized project or pass --project <path>"
+            ),
+        ),
     )
 }
 

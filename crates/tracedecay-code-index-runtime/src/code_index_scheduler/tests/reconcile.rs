@@ -6563,6 +6563,64 @@ async fn readiness_wait_reaches_ready_exactly_when_the_held_graph_publishes() {
     registry.shutdown().await;
 }
 
+/// A settled worktree already satisfies `fresh`, so a short wait reaches it
+/// even while another holder owns the scheduler lock the source sweep would
+/// need; the busy-read ladder still reports the served generation current.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn readiness_wait_reaches_a_target_the_current_reading_already_holds() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn source() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let fresh = tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh;
+    assert!(matches!(
+        registry
+            .wait_for_readiness(fixture.path(), fresh, SERVING_SEAT_FAILURE_CEILING)
+            .await
+            .expect("freshness read"),
+        tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+    ));
+
+    let handle = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal scheduler lock held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("scheduler lock acquired");
+
+    let held = registry
+        .wait_for_readiness(fixture.path(), fresh, Duration::from_millis(200))
+        .await
+        .expect("freshness read");
+    release_tx.send(()).expect("release scheduler lock");
+    lock_thread.join().expect("lock thread joins");
+    assert!(
+        matches!(
+            held,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+        ),
+        "a current worktree must not time out behind the source sweep: {held:?}"
+    );
+    registry.shutdown().await;
+}
+
 /// A pass can start and settle entirely between two reads of the running
 /// level. The owner-activity counts only grow, so a reader that looks after
 /// the pass still sees it, and the worker phase says the pass and its tail

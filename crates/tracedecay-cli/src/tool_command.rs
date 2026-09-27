@@ -49,6 +49,10 @@ use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 
 use tracedecay::daemon::call_default_tool_awaiting_project_open;
+use tracedecay_contracts::code_index_freshness::{
+    CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+    CodeIndexReadinessWaitOutcomeV1,
+};
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{CancellationSignal, Deadline, RetainedSurfaceOperation};
 use tracedecay_daemon_protocol::{
@@ -1086,6 +1090,7 @@ async fn dispatch_compatibility_tool(
     // abort had already printed "outcome may be unknown", untruthful, since
     // the outcome was in flight. Never discard an envelope that was received.
     let response_bound = tracedecay::daemon::daemon_tool_response_bound(deadline)?;
+    let json_output = raw_json || tool_args.get("format").and_then(Value::as_str) == Some("json");
     let result_value = match timeout_at(
         response_bound,
         dispatch.call(profile, tool_name, tool_args, deadline),
@@ -1093,7 +1098,13 @@ async fn dispatch_compatibility_tool(
     .await
     {
         Ok(Ok(value)) => value,
-        Ok(Err(error)) => return Err(map_tool_deadline_error(tool_name, error)),
+        Ok(Err(error)) => {
+            let error = map_tool_deadline_error(tool_name, error);
+            if json_output {
+                print_project_route_problem(tool_name, &error)?;
+            }
+            return Err(error);
+        }
         Err(_) => return Err(tool_timeout_error(tool_name)),
     };
     reject_tool_result_truncation(&result_value, tool_name)?;
@@ -1104,6 +1115,19 @@ async fn dispatch_compatibility_tool(
     // exit 0, that made every script and CI gate shelling out to
     // `tracedecay tool` silently blind to a failing tool.
     tool_result_process_outcome(&result_value, tool_name)
+}
+
+/// A JSON request answered by a typed daemon refusal still gets a JSON
+/// document on stdout: `{"problem": …}`, the same problem the MCP error
+/// carries. The error itself goes to stderr and sets the exit status.
+fn print_project_route_problem(tool_name: &str, error: &TraceDecayError) -> Result<()> {
+    let Some(problem) = tracedecay_mcp::tool_errors::project_route_problem(tool_name, error) else {
+        return Ok(());
+    };
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{}", serde_json::json!({ "problem": problem }))?;
+    stdout.flush()?;
+    Ok(())
 }
 
 /// The process outcome for a completed MCP tool result: `Ok` (exit 0) for a
@@ -1123,6 +1147,33 @@ async fn dispatch_compatibility_tool(
 /// the status, which mirrors what the typed application-surface path already
 /// does in [`print_cli_application_surface`].
 fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<()> {
+    if let Some(wait) = result_value.pointer("/structuredContent/wait") {
+        let wait: CodeIndexReadinessWaitOutcomeV1 = serde_json::from_value(wait.clone())?;
+        let refusal = match wait {
+            CodeIndexReadinessWaitOutcomeV1::Reached => None,
+            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => {
+                Some(TraceDecayError::project_route(
+                    CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+                    true,
+                    format!(
+                        "{tool_name} wait_for timed out before the index reached the requested \
+                         state; last state: {last_state}"
+                    ),
+                ))
+            }
+            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
+                Some(TraceDecayError::project_route(
+                    CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+                    false,
+                    format!("{tool_name} wait_for cannot reach the requested state: {reason}"),
+                ))
+            }
+        };
+        if let Some(refusal) = refusal {
+            std::io::stdout().flush()?;
+            return Err(refusal);
+        }
+    }
     if result_value.get("isError").and_then(Value::as_bool) != Some(true) {
         return Ok(());
     }

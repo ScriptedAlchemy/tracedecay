@@ -77,13 +77,14 @@ async fn version_skewed_client_cannot_crash_the_daemon() {
     .await
     .expect("skewed projectless tools/call timed out")
     .expect_err("a project tool on a projectless connection must be refused");
-    let refusal = refusal.to_string();
-    assert!(
-        refusal.contains("daemon tool call failed"),
-        "skewed client must receive a daemon-authored response, not a transport failure: {refusal}"
-    );
-    assert!(
-        refusal.contains("requires an initialized code project"),
+    assert_eq!(
+        refusal.project_route_context(),
+        Some((
+            "project_required",
+            false,
+            "tracedecay_search requires an initialized code project; run it inside an \
+             initialized project or pass --project <path>"
+        )),
         "skewed client must receive the typed projectless refusal: {refusal}"
     );
 

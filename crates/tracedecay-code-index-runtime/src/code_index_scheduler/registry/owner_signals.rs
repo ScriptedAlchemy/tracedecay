@@ -197,9 +197,13 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Wait until `project_root` reaches `target`, re-reading freshness only
     /// when the registry publishes a change, for at most `budget`.
     ///
-    /// The wait first proves freshness against the source as it is now: the
-    /// bounded Git/stat/content probe either refreshes the verified watermark
-    /// or posts the wake for a proven change, so a reading taken after it
+    /// A target the current reading already satisfies is reached at once:
+    /// that reading is the scheduler's last proof, the answer a plain status
+    /// read gives, so a save no hook reported is left to the backstop sweep
+    /// rather than swept inside the caller's budget. Otherwise the wait proves
+    /// freshness against the source as it is now: the bounded
+    /// Git/stat/content probe either refreshes the verified watermark or
+    /// posts the wake for a proven change, so a reading taken after it
     /// cannot report an edit the scheduler has not yet seen as fresh.
     /// `graph_ready` does not depend on freshness and skips that probe. An
     /// unmounted root is waited through: a mount that lands inside the budget
@@ -212,6 +216,13 @@ impl CodeIndexSchedulerRegistryV1 {
         budget: Duration,
     ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         let deadline = tokio::time::Instant::now() + budget;
+        if self
+            .dashboard_freshness_read(project_root)
+            .await?
+            .is_some_and(|freshness| freshness.readiness(target) == CodeIndexReadinessV1::Reached)
+        {
+            return Ok(CodeIndexReadinessWaitReadV1::Reached);
+        }
         let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
         // The probe can take the scheduler mutex; the caller's budget bounds
         // it, and an unproven source cannot be reported as reached.
