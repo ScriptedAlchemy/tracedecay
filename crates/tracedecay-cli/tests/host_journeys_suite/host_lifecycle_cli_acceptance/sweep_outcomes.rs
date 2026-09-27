@@ -222,6 +222,93 @@ fn post_update_reports_a_tracked_host_without_its_cli_as_pending_beside_kimi() {
     assert!(!stderr.contains("reinstall failed for"), "{stderr}");
 }
 
+/// The daemon serving the isolated profile while it is held: Doctor reads its
+/// canonical report from the sole daemon owner and counts its absence as an
+/// issue.
+#[cfg(unix)]
+struct ProfileDaemon(std::process::Child);
+
+#[cfg(unix)]
+impl ProfileDaemon {
+    fn start(cli: &IsolatedCli) -> Self {
+        let mut command = cli.command(&["daemon", "run"]);
+        command
+            .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let daemon = Self(command.spawn().unwrap());
+        let socket = cli.profile.join("daemon.sock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the profile daemon never listened at {}",
+                socket.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        daemon
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProfileDaemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Doctor classifies the same operator steps `update-plugin` does: Kimi's
+/// pending `/plugins install` and a tracked host without its CLI exit 75,
+/// and the run converges to 0 once the operator acts on both.
+#[cfg(unix)]
+#[test]
+fn doctor_waits_on_the_operator_for_the_steps_update_plugin_reports() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    track_kiro(&cli);
+    let _ = cli.run(&["install", "--agent", "kimi"]);
+    let _daemon = ProfileDaemon::start(&cli);
+    let staged = cli
+        .home
+        .path()
+        .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
+
+    let doctor = cli.run_without_host_clis(&["doctor"]);
+    let doctor_stderr = stderr(&doctor);
+    assert_eq!(
+        doctor.status.code(),
+        Some(PENDING_OPERATOR_ACTION_EXIT),
+        "{doctor_stderr}"
+    );
+    assert!(
+        doctor_stderr.contains(
+            "kiro: pending operator action: install the kiro CLI, or run `tracedecay \
+             uninstall --agent kiro` to stop tracking it"
+        ),
+        "{doctor_stderr}"
+    );
+    assert!(
+        doctor_stderr.contains(&format!(
+            "pending operator action: open Kimi Code and run `/plugins install {}`",
+            staged.display()
+        )),
+        "{doctor_stderr}"
+    );
+
+    complete_kimi_plugins_install(&cli, &staged);
+    let untrack = cli.run_without_host_clis(&["uninstall", "--agent", "kiro"]);
+    assert_eq!(untrack.status.code(), Some(0), "{}", stderr(&untrack));
+    let converged = cli.run_without_host_clis(&["doctor"]);
+    let converged_stderr = stderr(&converged);
+    assert_eq!(converged.status.code(), Some(0), "{converged_stderr}");
+    assert!(
+        !converged_stderr.contains("pending operator action"),
+        "{converged_stderr}"
+    );
+}
+
 #[test]
 fn update_plugin_exits_nonzero_when_an_attempted_host_fails() {
     let cli = IsolatedCli::new();

@@ -589,7 +589,9 @@ fn uninstall_prompt_rules(agents_md: &Path) -> Result<()> {
 /// Check the Kimi Code CLI native plugin: registered in `installed.json` and
 /// its host-managed bundle matches the staged source. Like the other
 /// plugin-based hosts, an absent plugin warns (not every machine runs Kimi
-/// Code CLI); a broken one fails.
+/// Code CLI); a broken one fails. A staged bundle Kimi has not installed, or
+/// a managed copy older than the staged one, waits on the operator's
+/// `/plugins install`, the same pending step lifecycle commands report.
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Path) {
     let installed_path = kimi_installed_json_path(kimi_code_home);
     if !installed_json_has_tracedecay(kimi_code_home) {
@@ -597,7 +599,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Pa
             .join(KIMI_PLUGIN_MANIFEST_RELATIVE)
             .is_file()
         {
-            dc.warn(&pending_plugins_install_notice(home));
+            dc.pending(&pending_plugins_install_notice(home));
             return;
         }
         dc.warn(&format!(
@@ -613,7 +615,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Pa
 
     match kimi_managed_bundle_matches_staged(home, kimi_code_home) {
         Ok(true) => dc.pass("Kimi Code CLI managed plugin matches its staged source"),
-        Ok(false) => dc.fail(&format!(
+        Ok(false) => dc.pending(&format!(
             "Kimi Code CLI managed plugin is stale; {}",
             pending_plugins_install_notice(home)
         )),
