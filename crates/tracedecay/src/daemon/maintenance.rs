@@ -841,8 +841,8 @@ impl MaintenanceCoordinator {
     }
 }
 
-/// Samples this process's current resident set size, republishes it as a
-/// Hotpath gauge, and feeds it to the resident-memory admission authority.
+/// Samples this process's resident set, republishes it as Hotpath gauges, and
+/// feeds its unreclaimable bytes to the resident-memory admission authority.
 ///
 /// A 20G RSS overrun past the admission limit was visible only to `ps` during
 /// a 2026-08 incident; the dedicated sampler closes that gap on a short
@@ -850,19 +850,19 @@ impl MaintenanceCoordinator {
 /// [`process_resident_memory_pressure_v1`](tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1)
 /// closes the loop: admission stops trusting its reservation model once the
 /// measurement says the process is over budget. The post-reclaim observation
-/// returned by the pressure cell is the authority for the gauge and logs.
+/// returned by the pressure cell is the authority for the unreclaimable gauge
+/// and logs.
 #[cfg(target_os = "linux")]
 fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {
     use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1;
 
-    let Some(bytes) = tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
-    else {
+    let pressure = tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1();
+    let Some((sample, state)) = pressure.sample_and_publish() else {
         return;
     };
-    let pressure = tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1();
-    let state = pressure.publish_observed_resident_bytes(bytes);
+    hotpath::gauge!("daemon.process.resident_bytes").set(sample.resident_bytes);
     if let Some(observed_bytes) = state.observed_bytes() {
-        hotpath::gauge!("daemon.process.resident_bytes").set(observed_bytes);
+        hotpath::gauge!("daemon.process.unreclaimable_resident_bytes").set(observed_bytes);
     }
     let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
     let transition = {

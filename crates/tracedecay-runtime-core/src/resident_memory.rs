@@ -291,33 +291,66 @@ pub fn resident_memory_watermark_bytes_v1(limit_bytes: NonZeroU64, permille: u64
     u64::try_from(scaled).unwrap_or(u64::MAX)
 }
 
-/// Sample this process's resident set size directly from the kernel.
+/// One kernel reading of this process's resident set, split by whether the
+/// kernel can take the pages back without swapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessResidentSampleV1 {
+    /// Every resident page (`VmRSS`), clean file-backed mappings included.
+    pub resident_bytes: u64,
+    /// Anonymous and shared-memory pages (`RssAnon + RssShmem`). Clean mapped
+    /// file pages (the sealed container, graph stores) are dropped by the
+    /// kernel on demand before the cgroup kill line, so admission counts only
+    /// these.
+    pub unreclaimable_bytes: u64,
+}
+
+fn status_kib_field_bytes(status: &str, field: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(field)?.strip_prefix(':'))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1_024)
+}
+
+fn process_resident_sample_from_status_v1(status: &str) -> Option<ProcessResidentSampleV1> {
+    let anon = status_kib_field_bytes(status, "RssAnon")?;
+    let shmem = status_kib_field_bytes(status, "RssShmem")?;
+    Some(ProcessResidentSampleV1 {
+        resident_bytes: status_kib_field_bytes(status, "VmRSS")?,
+        unreclaimable_bytes: anon.checked_add(shmem)?,
+    })
+}
+
+/// Sample this process's resident set directly from the kernel.
 ///
-/// The one `/proc/self/status` `VmRSS` parser in the workspace: the daemon's
-/// dedicated resident-memory sampler publishes its samples into
-/// [`process_resident_memory_pressure_v1`], and load-scoped watchdogs (the
-/// semantic session pool's cold-load resident bound) sample it directly.
-/// Returns `None` where the kernel surface is unavailable (non-Linux hosts),
-/// which callers must treat as unobserved, never as zero.
+/// The one `/proc/self/status` parser in the workspace: the daemon's
+/// dedicated resident-memory sampler and every admission re-measure read it
+/// through [`ResidentMemoryPressureV1::sample_and_publish`]. Returns `None`
+/// where the kernel surface is unavailable (non-Linux hosts), which callers
+/// must treat as unobserved, never as zero.
 #[must_use]
-pub fn sampled_process_resident_bytes_v1() -> Option<u64> {
+pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
     #[cfg(target_os = "linux")]
     {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        let kib = status
-            .lines()
-            .find_map(|line| line.strip_prefix("VmRSS:"))?
-            .split_whitespace()
-            .next()?
-            .parse::<u64>()
-            .ok()?;
-        kib.checked_mul(1_024)
+        process_resident_sample_from_status_v1(&std::fs::read_to_string("/proc/self/status").ok()?)
     }
     #[cfg(not(target_os = "linux"))]
     {
         None
     }
 }
+
+/// The bytes admission trusts: [`ProcessResidentSampleV1::unreclaimable_bytes`].
+#[must_use]
+pub fn sampled_process_resident_bytes_v1() -> Option<u64> {
+    sampled_process_resident_v1().map(|sample| sample.unreclaimable_bytes)
+}
+
+/// Where a pressure cell reads the process's resident set.
+pub type ProcessResidentSamplerV1 = dyn Fn() -> Option<ProcessResidentSampleV1> + Send + Sync;
 
 /// Share of the last ten seconds, in percent, that some task in this process's
 /// cgroup stalled on memory, at or above which the daemon sheds retained state
@@ -427,10 +460,10 @@ pub struct ResidentMemoryPressureRegistrationFailureV1;
 
 /// The measured side of the memory accounting loop.
 ///
-/// One dedicated reader samples real RSS (`/proc/self/status` `VmRSS` on
-/// Linux), publishes the `daemon.process.resident_bytes` gauge, and feeds this
-/// cell. Admission reads the same canonical observation; there is no second
-/// parser or publisher.
+/// One dedicated reader samples the process (`/proc/self/status` on Linux),
+/// publishes the `daemon.process.resident_bytes` gauge, and feeds this cell
+/// the unreclaimable bytes. Admission re-measures through the same sampler;
+/// there is no second parser or publisher.
 pub struct ResidentMemoryPressureV1 {
     limit_bytes: NonZeroU64,
     high_watermark_bytes: u64,
@@ -439,6 +472,7 @@ pub struct ResidentMemoryPressureV1 {
     observed: AtomicBool,
     over_budget: AtomicBool,
     state: ProfiledMutex<ResidentMemoryPressureReclaimerStateV1>,
+    sampler: Arc<ProcessResidentSamplerV1>,
 }
 
 impl fmt::Debug for ResidentMemoryPressureV1 {
@@ -456,14 +490,24 @@ impl fmt::Debug for ResidentMemoryPressureV1 {
 impl ResidentMemoryPressureV1 {
     #[must_use]
     pub fn new(limit_bytes: NonZeroU64) -> Self {
-        Self::with_reclaim_line(limit_bytes, None)
+        Self::with_reclaim_line(limit_bytes, None, Arc::new(sampled_process_resident_v1))
+    }
+
+    /// A cell that reads the process through `sampler` instead of the kernel.
+    #[must_use]
+    pub fn with_sampler(limit_bytes: NonZeroU64, sampler: Arc<ProcessResidentSamplerV1>) -> Self {
+        Self::with_reclaim_line(limit_bytes, None, sampler)
     }
 
     /// `reclaim_watermark_bytes` is a cgroup `memory.high` that sits strictly
     /// below `limit_bytes`. It replaces the percentage high watermark so the
     /// operator's band down to `memory.max` is not discounted again. Absent,
     /// zero, or not strictly below the ceiling, the percentage watermarks stand.
-    fn with_reclaim_line(limit_bytes: NonZeroU64, reclaim_watermark_bytes: Option<u64>) -> Self {
+    fn with_reclaim_line(
+        limit_bytes: NonZeroU64,
+        reclaim_watermark_bytes: Option<u64>,
+        sampler: Arc<ProcessResidentSamplerV1>,
+    ) -> Self {
         let percentage_high = resident_memory_watermark_bytes_v1(
             limit_bytes,
             RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
@@ -497,7 +541,29 @@ impl ResidentMemoryPressureV1 {
                 Mutex::new(ResidentMemoryPressureReclaimerStateV1::default()),
                 label = "runtime_core.resident.pressure"
             ),
+            sampler,
         }
+    }
+
+    /// Read the process and publish its unreclaimable bytes as the admission
+    /// observation. `None` when the process cannot be read, which leaves the
+    /// last observation standing.
+    pub fn sample_and_publish(
+        &self,
+    ) -> Option<(ProcessResidentSampleV1, ResidentMemoryPressureStateV1)> {
+        let sample = (self.sampler)()?;
+        Some((
+            sample,
+            self.publish_observed_resident_bytes(sample.unreclaimable_bytes),
+        ))
+    }
+
+    /// [`Self::sample_and_publish`] reduced to the admission bytes: the
+    /// post-reclaim observation, or zero when the process cannot be read.
+    pub fn measure_admission_bytes(&self) -> u64 {
+        self.sample_and_publish().map_or(0, |(sample, state)| {
+            state.observed_bytes().unwrap_or(sample.unreclaimable_bytes)
+        })
     }
 
     #[must_use]
@@ -685,6 +751,7 @@ pub fn process_resident_memory_pressure_v1() -> &'static Arc<ResidentMemoryPress
         Arc::new(ResidentMemoryPressureV1::with_reclaim_line(
             authority.limit_bytes,
             authority.reclaim_watermark_bytes,
+            Arc::new(sampled_process_resident_v1),
         ))
     })
 }

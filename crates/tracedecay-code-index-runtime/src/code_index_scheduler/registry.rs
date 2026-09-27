@@ -1217,19 +1217,19 @@ fn dashboard_generation_is_ready(
 
 /// Whether the generation status advertises is the one search will serve.
 ///
-/// Status identity is taken from the text owner, but a publication installs
-/// the replacement text owner before the serving swap (`registry/mount.rs`),
-/// and a graph-on search answers from the decoded seat. Until the seat catches
-/// up, search serves the predecessor and the split is not terminal. A graph-off
-/// mount serves the text owner directly and deliberately never seats the
-/// decoded generation, so there is no seat to compare.
+/// Status identity is taken from the text owner. A graph-on search answers
+/// from a decoded seat when one is held; while the seat still names the
+/// predecessor, search serves it and the split is not terminal. With no seat,
+/// search serves the text owner itself (exact, lexical, and the graph its
+/// mapped store serves), which is the advertised generation. A graph-off
+/// mount never seats the decoded generation, so there is no seat to compare.
 pub(super) fn serving_seat_matches_advertised_generation(
     graph_activation_enabled: bool,
     serving_generation_id: Option<&str>,
     advertised_text_generation_id: Option<&str>,
 ) -> bool {
-    match advertised_text_generation_id {
-        Some(advertised) if graph_activation_enabled => serving_generation_id == Some(advertised),
+    match (advertised_text_generation_id, serving_generation_id) {
+        (Some(advertised), Some(seated)) if graph_activation_enabled => seated == advertised,
         _ => true,
     }
 }
@@ -1238,7 +1238,6 @@ pub(super) fn serving_seat_matches_advertised_generation(
 /// status advertises.
 pub(super) fn dashboard_terminal_status(
     latest: Option<&LatestCompleteCodeIndexV1>,
-    released_seat: Option<&str>,
     text: Option<&LatestCodeTextGenerationV1>,
     text_ready: bool,
     graph_activation_enabled: bool,
@@ -1251,9 +1250,7 @@ pub(super) fn dashboard_terminal_status(
         code_graph_serving,
     ) && serving_seat_matches_advertised_generation(
         graph_activation_enabled,
-        latest
-            .map(|latest| latest.generation().manifest().generation_id.as_str())
-            .or(released_seat),
+        latest.map(|latest| latest.generation().manifest().generation_id.as_str()),
         text.map(|text| text.metadata().manifest().generation_id.as_str()),
     )
 }
@@ -3537,13 +3534,12 @@ impl CodeIndexSchedulerRegistryV1 {
         if mounted_root != project_root {
             return None;
         }
+        // Feedback identity reads only the sealed manifest's snapshot, so an
+        // undecoded generation's text owner answers as well as a decoded one.
         if let Some(generation) = self
             .latest_complete_ready_decoded_for_root_scope(&project_root, scope)
             .await
         {
-            return Some(generation.text_generation_handle());
-        }
-        if let Some(generation) = self.latest_complete_ready_for_scope(scope).await {
             return Some(generation.text_generation_handle());
         }
         self.latest_text_serving_freshness_for_scope(scope)

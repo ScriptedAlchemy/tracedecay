@@ -62,10 +62,10 @@ use super::projection_rows::{
     PersistedProjectionRequestV1, chunk_roster,
 };
 use super::sealed_codec::{
-    FileScopeIdentityV1, PersistedFileGenerationArtifactsRefV2, PersistedFileGenerationArtifactsV1,
-    PersistedFileGenerationArtifactsV2, SEALED_GENERATION_FORMAT_REVISION_V1,
-    StreamingPersistedPublishedGenerationV1, assemble_published_generation, restore_file_pages,
-    superseded_sealed_generation_revision,
+    DecodePeakProbeV1, FileScopeIdentityV1, PersistedFileGenerationArtifactsRefV2,
+    PersistedFileGenerationArtifactsV1, PersistedFileGenerationArtifactsV2,
+    SEALED_GENERATION_FORMAT_REVISION_V1, StreamingPersistedPublishedGenerationV1,
+    assemble_published_generation, restore_file_pages, superseded_sealed_generation_revision,
 };
 use super::*;
 
@@ -2138,6 +2138,7 @@ impl CodeIndexPublishedGenerationV1 {
             &mut Vec<u8>,
         ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
+        let mut probe = DecodePeakProbeV1::start();
         let generation = hotpath::measure_block!(
             "code_index.restore.manifest",
             parse_partitioned_manifest(bytes)
@@ -2151,10 +2152,12 @@ impl CodeIndexPublishedGenerationV1 {
                 decode_file_pages(&generation, &scope, &mut read_segment)?,
             )),
         };
+        probe.sample();
         let evidence = hotpath::measure_block!(
             "code_index.restore.generation_evidence",
             decode_generation_evidence(&generation.generation_evidence, read_segment)
         )?;
+        probe.sample();
         let files = &content.files;
         let (lineage, projection_request, projection_receipt) =
             hotpath::measure_block!("code_index.restore.evidence_expand", {
@@ -2172,19 +2175,23 @@ impl CodeIndexPublishedGenerationV1 {
                     .expand(&generation.manifest.generation_id, &symbols)?;
                 Ok::<_, CodeIndexProductionErrorV1>((lineage, request, receipt))
             })?;
-        assemble_published_generation(StreamingPersistedPublishedGenerationV1 {
-            manifest: generation.manifest,
-            snapshot: generation.snapshot,
-            repository_parse_identity: generation.repository_parse_identity,
-            ignored_source_admissions: generation.ignored_source_admissions,
-            ignored_source_admissions_digest: generation.ignored_source_admissions_digest,
-            content,
-            lineage,
-            coverage: generation.coverage,
-            capability: generation.capability,
-            projection_request,
-            projection_receipt,
-        })
+        probe.sample();
+        assemble_published_generation(
+            StreamingPersistedPublishedGenerationV1 {
+                manifest: generation.manifest,
+                snapshot: generation.snapshot,
+                repository_parse_identity: generation.repository_parse_identity,
+                ignored_source_admissions: generation.ignored_source_admissions,
+                ignored_source_admissions_digest: generation.ignored_source_admissions_digest,
+                content,
+                lineage,
+                coverage: generation.coverage,
+                capability: generation.capability,
+                projection_request,
+                projection_receipt,
+            },
+            probe,
+        )
     }
 
     /// Authenticate only the tiny partitioned manifest and return the metadata

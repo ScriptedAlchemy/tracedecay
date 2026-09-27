@@ -758,6 +758,7 @@ mod tests {
         let pressure = Arc::new(ResidentMemoryPressureV1::with_reclaim_line(
             std::num::NonZeroU64::new(10_000).unwrap(),
             Some(6_000),
+            Arc::new(|| None),
         ));
         let owners = Arc::new(ResidentOwnersV1::new(Duration::from_mins(5)));
         let _reclaimer =

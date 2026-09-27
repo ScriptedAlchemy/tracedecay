@@ -617,18 +617,17 @@ pub(super) async fn register_project_open_production_owners(
     let mut mounted_providers = Vec::new();
     let mut lsp_session_factory = None;
     let diagnostic_broker = server.diagnostics_lsp();
-    // Bounds the orchestration wait around the scheduler's generation decode;
-    // the decode itself is instrumented inside the code-index subsystem.
+    // The census is the sealed manifest's file list; it never decodes.
     let indexed_generation = hotpath::future!(
         invocation
             .code_index_schedulers
-            .latest_complete_ready_decoded_for_root_scope(project_root, &scope),
+            .latest_feedback_generation_for_scope(project_root, &scope),
         label = "daemon.project.open.owners.lsp_census"
     )
     .await;
     if let Some(generation) = indexed_generation {
         let mut indexed_files = generation
-            .generation()
+            .metadata()
             .snapshot()
             .files
             .iter()

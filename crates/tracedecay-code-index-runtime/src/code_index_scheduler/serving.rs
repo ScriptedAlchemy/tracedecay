@@ -46,7 +46,7 @@ use tracedecay_private_fs::{open_private_file, validate_private_directory};
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
     ResidentMemoryReservationV1, ResidentOwnersV1, log_resident_owner_release_v1,
-    release_process_allocator_memory_v1, sampled_process_resident_bytes_v1,
+    release_process_allocator_memory_v1,
 };
 
 use crate::{
@@ -1189,13 +1189,7 @@ impl DaemonCodeTextArtifactStoreV1 {
         minimum: NonZeroU64,
     ) -> Result<(u64, u64, u64, u64), RetrievalPortError> {
         let snapshot = self.resident_memory.snapshot();
-        let observed_bytes = sampled_process_resident_bytes_v1().map_or(0, |observed| {
-            self.resident_memory
-                .pressure()
-                .publish_observed_resident_bytes(observed)
-                .observed_bytes()
-                .unwrap_or(observed)
-        });
+        let observed_bytes = self.resident_memory.pressure().measure_admission_bytes();
         let unmodeled_live_bytes = observed_bytes.saturating_sub(snapshot.used_bytes);
         let admission_watermark = self
             .resident_memory
@@ -1250,17 +1244,17 @@ impl DaemonCodeTextArtifactStoreV1 {
                     let released = self
                         .resident_owners
                         .shed(minimum.get(), std::time::Instant::now());
-                    if released.is_empty() {
-                        return Err(RetrievalPortError::ResidentMemoryRefused(detail));
-                    }
                     for release in &released {
                         log_resident_owner_release_v1(release);
                     }
+                    // Freed pages sit in the pool workers' allocator heaps
+                    // whether or not an owner was shed.
                     let trim = release_process_allocator_memory_v1();
                     tracing::info!(
                         event = "code_text_artifact_build_shed_retained_state",
                         released_owners = released.len(),
                         trimmed_bytes = trim.released_bytes(),
+                        refused = %detail,
                         "text-artifact build shed retained state before re-measuring headroom"
                     );
                     self.text_artifact_admission(preferred, minimum)

@@ -2,14 +2,14 @@ use std::fs;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 use tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1;
 use tracedecay_domain::{ProjectId, configuration::CodeIndexWorkerSelectionV1};
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryPressureV1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ProcessResidentSampleV1,
+    ResidentMemoryComponentIdV1, ResidentMemoryPressureV1,
 };
 
 use crate::code_index::production::CodeIndexPublicationStoreErrorV1;
@@ -548,5 +548,84 @@ fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
             .map(|bytes| bytes.len() as u64)
             .sum::<u64>(),
         "the decode's charge is released once it completes"
+    );
+}
+
+/// Admission counts only what the kernel cannot take back without swapping.
+/// Here clean file pages (the mapped sealed container) fill the resident set
+/// to one byte under the admission watermark while anonymous memory leaves
+/// room, so the decode runs. Once the unreclaimable bytes themselves fill the
+/// headroom, the same decode is refused and nothing is decoded.
+#[test]
+fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-decode-unreclaimable").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let limit = NonZeroU64::new(16 * GIB).expect("limit");
+    let view = Arc::new(Mutex::new(ProcessResidentSampleV1 {
+        resident_bytes: GIB,
+        unreclaimable_bytes: GIB,
+    }));
+    let sampled = Arc::clone(&view);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || Some(*sampled.lock().expect("view"))),
+    ));
+    let high_watermark = pressure.high_watermark_bytes();
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+    assert!(matches!(
+        scheduler.reconcile_now().expect("publish generation"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    scheduler
+        .publication
+        .release_decoded_active_after_seal()
+        .expect("release the sealed decode");
+    let decodes_before = scheduler.sealed_decode_count();
+
+    *view.lock().expect("view") = ProcessResidentSampleV1 {
+        resident_bytes: high_watermark - 1,
+        unreclaimable_bytes: 2 * GIB,
+    };
+    let decoded = scheduler
+        .latest_complete()
+        .expect("clean file pages do not refuse a decode that fits in anonymous headroom");
+    assert_eq!(scheduler.sealed_decode_count(), decodes_before + 1);
+    assert_eq!(
+        decoded
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs::retained_generation"]
+    );
+    drop(decoded);
+    scheduler
+        .publication
+        .release_decoded_active_after_seal()
+        .expect("release the decode again");
+
+    *view.lock().expect("view") = ProcessResidentSampleV1 {
+        resident_bytes: high_watermark - 1,
+        unreclaimable_bytes: high_watermark - 1,
+    };
+    assert!(matches!(
+        scheduler.publication.load_active_shared(),
+        Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_))
+    ));
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        decodes_before + 1,
+        "a decode refused on unreclaimable bytes decodes nothing"
     );
 }

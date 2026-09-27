@@ -280,7 +280,6 @@ impl CodeIndexSchedulerRegistryV1 {
             pending_wake,
             source_freshness,
             graph_activation_enabled,
-            residency,
         ) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&canonical_root) else {
@@ -299,7 +298,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.pending_wake),
                 worktree.source_freshness.clone(),
                 worktree.graph_activation.policy().is_enabled(),
-                Arc::clone(&worktree.residency),
             )
         };
         tokio::task::spawn_blocking(move || {
@@ -352,10 +350,6 @@ impl CodeIndexSchedulerRegistryV1 {
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    let released_seat = latest
-                        .is_none()
-                        .then(|| residency.released_seat())
-                        .flatten();
                     let text = text_generation
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -391,7 +385,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     });
                     let ready = dashboard_terminal_status(
                         latest.as_ref(),
-                        released_seat.as_ref().map(CodeGenerationId::as_str),
                         text.as_ref(),
                         text_ready,
                         graph_activation_enabled,
@@ -448,10 +441,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            let released_seat = latest
-                .is_none()
-                .then(|| residency.released_seat())
-                .flatten();
             let text = text_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -479,7 +468,6 @@ impl CodeIndexSchedulerRegistryV1 {
             });
             let ready = dashboard_terminal_status(
                 latest.as_ref(),
-                released_seat.as_ref().map(CodeGenerationId::as_str),
                 text.as_ref(),
                 text_ready,
                 graph_activation_enabled,
