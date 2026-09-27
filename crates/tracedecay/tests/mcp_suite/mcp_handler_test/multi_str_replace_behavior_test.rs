@@ -261,8 +261,8 @@ async fn preview_apply_and_replay_replace_each_original_span() {
     );
     assert_eq!(read_file(&dir, "src/main.rs"), applied);
 
-    let conflict = protocol_error(
-        &fixture,
+    let conflict = tools_call(
+        &server(&fixture),
         json!({
             "path": "src/main.rs",
             "replacements": [["old-a", "other-a"], ["old-b", "other-b"]],
@@ -271,20 +271,24 @@ async fn preview_apply_and_replay_replace_each_original_span() {
         }),
     )
     .await;
-    assert_eq!(conflict["code"], -32603, "{conflict}");
+    assert!(conflict["error"].is_null(), "{conflict}");
+    assert_eq!(conflict["result"]["isError"], true, "{conflict}");
+    let problem = &conflict["result"]["structuredContent"]["problem"];
     assert_eq!(
-        conflict["message"],
-        "tool project route failed: reason_code=source_edit.idempotency_conflict retryable=true: source edit idempotency key conflicts with a prior input",
-        "{conflict}"
-    );
-    assert_eq!(
-        conflict["data"],
-        json!({
-            "tool": TOOL,
-            "reason_code": "source_edit.idempotency_conflict",
-            "retryable": true,
-            "detail": "source edit idempotency key conflicts with a prior input"
-        }),
+        (
+            &problem["kind"],
+            &problem["code"],
+            &problem["retry"],
+            &problem["legal_actions"],
+            &problem["message"],
+        ),
+        (
+            &json!("conflict"),
+            &json!("source_edit.idempotency_conflict"),
+            &json!("after_revalidate"),
+            &json!(["refresh"]),
+            &json!("source edit idempotency key conflicts with a prior input"),
+        ),
         "{conflict}"
     );
     assert_eq!(read_file(&dir, "src/main.rs"), applied);

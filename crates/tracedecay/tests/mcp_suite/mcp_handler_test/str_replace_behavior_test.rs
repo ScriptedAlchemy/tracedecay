@@ -10,7 +10,7 @@
 
 use crate::support::{
     ProductionSourceEditFixture, TestTempDir, extract_first_json_content,
-    init_production_source_edit_project, test_temp_dir,
+    handle_real_server_tool_call, init_production_source_edit_project, test_temp_dir,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -706,6 +706,77 @@ async fn str_replace_refuses_project_selectors() {
     assert_eq!(
         error.data.as_ref().and_then(|data| data["tool"].as_str()),
         Some("tracedecay_str_replace")
+    );
+    assert_eq!(fs::read(&file).unwrap(), initial);
+}
+
+/// Another process holds the store's writer lock past the admission deadline:
+/// the preview is refused as retryable capacity, and the host reads the lock's
+/// typed detail beside the text, not a flattened project-route error.
+#[tokio::test]
+async fn str_replace_behind_a_held_writer_lock_reports_the_lock_deadline_detail() {
+    let initial = b"fn price() -> u32 { 12 }\n";
+    let (fixture, _dir, file) = open_file(PRICE_FILE, initial).await;
+    let lock_root = fixture
+        .harness
+        .project_data_root(&fixture.project_root)
+        .await
+        .expect("project data root")
+        .join("source-edit-transactions-v1");
+    fs::create_dir_all(&lock_root).unwrap();
+    let writer = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_root.join("source-edit.lock"))
+        .unwrap();
+    writer.lock().expect("hold the source-edit writer lock");
+
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    let result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_str_replace",
+        json!({"path": PRICE_FILE, "old_str": "12", "new_str": "40", "dry_run": true}),
+    )
+    .await;
+    writer.unlock().expect("release the writer lock");
+
+    assert_eq!(result["isError"], true, "{result}");
+    let problem = &result["structuredContent"]["problem"];
+    assert_eq!(
+        (
+            &problem["kind"],
+            &problem["code"],
+            &problem["retry"],
+            &problem["legal_actions"],
+            &problem["message"],
+            &problem["detail"],
+        ),
+        (
+            &json!("saturated"),
+            &json!("application.lock-deadline"),
+            &json!("after_delay"),
+            &json!(["retry"]),
+            &json!(
+                "The source-edit writer lock stayed busy past its 30000ms admission deadline; \
+                 retry the operation."
+            ),
+            &json!({
+                "kind": "lock_deadline",
+                "resource": "source-edit writer lock",
+                "deadline_ms": 30_000,
+            }),
+        ),
+        "{result}"
+    );
+    assert_eq!(
+        extract_first_json_content(&result)["problem"],
+        *problem,
+        "the text the host reads carries the same record"
     );
     assert_eq!(fs::read(&file).unwrap(), initial);
 }

@@ -1460,6 +1460,59 @@
             "remedy"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "No compiler runs automatically for the diagnostics scope: no tsconfig\nowns `file`, or, for a workspace read (`file` null), none exists under\nthe project root. `searched` lists the owner search's candidates,\nnearest first; it is empty for a workspace read or a file outside the\nproject root.",
+          "properties": {
+            "file": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "diagnostics_unsupported",
+              "type": "string"
+            },
+            "searched": {
+              "items": {
+                "$ref": "#/$defs/DiagnosticsSearchedTsconfigV1"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "file",
+            "searched"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The TypeScript `producer` has not published diagnostics for the\ncurrent code generation yet. `generation` is the last generation it\npublished, null when it has published none.",
+          "properties": {
+            "generation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "diagnostics_pending",
+              "type": "string"
+            },
+            "producer": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "producer",
+            "generation"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -10640,6 +10693,25 @@
         "state",
         "href",
         "source_generation"
+      ],
+      "type": "object"
+    },
+    "DiagnosticsSearchedTsconfigV1": {
+      "additionalProperties": false,
+      "description": "One tsconfig location the diagnostics owner search checked.",
+      "properties": {
+        "path": {
+          "description": "Relative to the project root, forward-slash separated.",
+          "type": "string"
+        },
+        "present": {
+          "description": "The config exists, but neither it nor its references include the\nfile.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "present"
       ],
       "type": "object"
     },

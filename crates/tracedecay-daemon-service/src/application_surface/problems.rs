@@ -91,6 +91,7 @@ pub(super) fn http_adapter_problem(
             },
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::ContactAdministrator],
+            detail: None,
         },
         // Genuinely transient: the owning daemon transport is not answering.
         ApplicationSurfaceAdapterError::DaemonUnavailable => {

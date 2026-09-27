@@ -309,26 +309,9 @@ async fn source_edit_rollback_restores_move_preimages_and_replays_the_receipt() 
         ),
     )
     .await;
-    assert_eq!(mismatched["jsonrpc"], "2.0");
-    assert_eq!(mismatched["id"], 1);
-    assert!(mismatched.get("result").is_none_or(Value::is_null));
-    assert_eq!(mismatched["error"]["code"], -32602);
-    assert_eq!(
-        mismatched["error"]["message"],
-        "tool project route failed: reason_code=source_edit.execution_failed retryable=false: config error: source edit rollback identity does not match the completed original effect"
-    );
-    assert_eq!(
-        mismatched["error"]["data"]["tool"],
-        "tracedecay_source_edit_rollback"
-    );
-    assert_eq!(
-        mismatched["error"]["data"]["reason_code"],
-        "source_edit.execution_failed"
-    );
-    assert_eq!(mismatched["error"]["data"]["retryable"], json!(false));
-    assert_eq!(
-        mismatched["error"]["data"]["detail"],
-        "config error: source edit rollback identity does not match the completed original effect"
+    assert_rollback_execution_failed(
+        &mismatched,
+        "config error: source edit rollback identity does not match the completed original effect",
     );
     assert_original_sources(&moved.project);
 }
@@ -475,24 +458,39 @@ async fn source_edit_rollback_refuses_an_edit_without_retained_preimages() {
         }),
     )
     .await;
-    assert_eq!(refused["jsonrpc"], "2.0");
-    assert_eq!(refused["id"], 1);
-    assert!(refused.get("result").is_none_or(Value::is_null));
-    assert_eq!(refused["error"]["code"], -32602);
-    assert_eq!(
-        refused["error"]["message"],
-        "tool project route failed: reason_code=source_edit.execution_failed retryable=false: config error: source edit effect has no retained rollback material"
-    );
-    assert_eq!(
-        refused["error"]["data"]["tool"],
-        "tracedecay_source_edit_rollback"
-    );
-    assert_eq!(
-        refused["error"]["data"]["detail"],
-        "config error: source edit effect has no retained rollback material"
+    assert_rollback_execution_failed(
+        &refused,
+        "config error: source edit effect has no retained rollback material",
     );
     assert_eq!(
         read_project_file(&project, "src/main.rs"),
         "fn new_name() {}\n"
+    );
+}
+
+/// A rollback the daemon refused reaches the host as a tool result carrying
+/// the daemon's problem record, not a flattened project-route error.
+fn assert_rollback_execution_failed(response: &Value, message: &str) {
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 1);
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(response["result"]["isError"], json!(true), "{response}");
+    let problem = &response["result"]["structuredContent"]["problem"];
+    assert_eq!(
+        (
+            &problem["kind"],
+            &problem["code"],
+            &problem["retryable"],
+            &problem["legal_actions"],
+            &problem["message"],
+        ),
+        (
+            &json!("execution_failed"),
+            &json!("source_edit.execution_failed"),
+            &json!(false),
+            &json!(["contact_administrator"]),
+            &json!(message),
+        ),
+        "{response}"
     );
 }
