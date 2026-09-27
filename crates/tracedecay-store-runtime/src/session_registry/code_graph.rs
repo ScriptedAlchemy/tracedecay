@@ -47,6 +47,7 @@ use seals::{
     prove_stable_sealed_source, revalidate_stable_sealed_source,
     sealed_digest_from_generation_file, stage_project_graph_replay_unlink,
 };
+use tracedecay_runtime_core::resident_memory::release_process_allocator_memory_v1;
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
@@ -561,21 +562,6 @@ impl CodeGraphShardPublicationLocksV1 {
     }
 }
 
-/// Returns the arenas a finished publication emptied back to the operating
-/// system.
-///
-/// A corpus-sized publish frees hundreds of megabytes as it unwinds, but
-/// glibc keeps freed pages in the per-thread arena that allocated them, and
-/// each publishing worktree scope publishes on its own thread. Measured on
-/// the 600-file harness at four scopes, arena retention alone accounted for
-/// 0.24 GB of the 0.60 GB that each additional scope added to peak RSS,
-/// memory that was already dead, held only because nothing asked for it back.
-/// Asking here, at the permit boundary, is what turns "freed" into "not
-/// resident" for the next scope's build.
-///
-/// Best effort by construction: a build with a non-glibc allocator (the
-/// daemon's optional jemalloc and mimalloc lanes purge on their own) simply
-/// does nothing, and a failed trim only means the pages stay where they were.
 /// Reports what one staging-release attempt decided, at info.
 ///
 /// Retention was previously invisible: only a hard error was logged, so a
@@ -676,21 +662,6 @@ fn retire_superseded_replays(
             error = ?error,
             "superseded graph replay retirement will be retried by the next pass"
         ),
-    }
-}
-
-fn release_publish_transient_memory() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        // SAFETY: `malloc_trim` takes no pointers and no ownership; it only
-        // asks the allocator to return unused top-of-arena pages. It is safe
-        // to call at any time from any thread.
-        let released = unsafe { libc::malloc_trim(0) };
-        tracing::debug!(
-            event = "graph_publish_arena_trim",
-            released = released == 1,
-            "returned publication arenas to the operating system"
-        );
     }
 }
 
@@ -1446,7 +1417,7 @@ impl RetainedCodeGraphRuntimeV1 {
         match staging_release {
             Some(projection) => self.release_sealed_staging_rows(build, projection),
             None => {
-                release_publish_transient_memory();
+                let _ = release_process_allocator_memory_v1();
                 drop(build);
             }
         }
@@ -1784,7 +1755,7 @@ impl RetainedCodeGraphRuntimeV1 {
                     "sealed generation staging release will be retried by maintenance"
                 );
             }
-            release_publish_transient_memory();
+            let _ = release_process_allocator_memory_v1();
         };
         // Publication also runs on plain measurement threads. Enter the
         // runtime captured at mount so those calls use the same task owner.
@@ -1802,7 +1773,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 event = "graph_staging_release_failed",
                 "staging release admission closed; maintenance will retry the release"
             );
-            release_publish_transient_memory();
+            let _ = release_process_allocator_memory_v1();
         }
     }
 
