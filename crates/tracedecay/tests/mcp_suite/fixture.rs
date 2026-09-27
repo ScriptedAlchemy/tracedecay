@@ -10,13 +10,14 @@
 //! to the production daemon composition and is never pre-seeded here.
 //!
 //! The graph DB only stores project-root-relative paths, so a copied store is
-//! location-independent; the two files that embed absolute paths
-//! (`config.json` `root_dir` and `store_manifest.json`) are rewritten after
-//! copying.
+//! location-independent. The profile shard's `store_manifest.json` is the file
+//! that still embeds absolute paths (`project_id`, `project_root`,
+//! `data_root`); it is rewritten after copying. Configuration lives in the
+//! store, not a `config.json` (#2134).
 //!
-//! Every entry point falls back to the real `TraceDecay::init` path when the
-//! template cannot be built or the seeded store cannot be opened, so tests
-//! never depend on the template for correctness.
+//! Seeding is the only bootstrap. A template that cannot be built or a copy
+//! that cannot be opened is a typed error; tests do not silently pay a second
+//! full init.
 
 use std::fs;
 use std::io;
@@ -125,8 +126,7 @@ fn test_helper() { assert!(!helper().is_empty()); }
 
 /// Drop-in replacement for `TraceDecay::init_with_options(project, options)`
 /// in tests: seeds an initialized (schema-complete, empty) store from the
-/// on-disk template into the options' profile and opens it. Falls back to the
-/// real init when seeding is not possible.
+/// on-disk template into the options' profile and opens it.
 pub async fn init_project_from_template_with_options(
     project_root: &Path,
     options: TraceDecayOpenOptions,
@@ -139,13 +139,19 @@ async fn init_project_from_template_root(
     project_root: &Path,
     options: TraceDecayOpenOptions,
 ) -> TdResult<TraceDecay> {
-    if let (Some(template), Some(targets)) = (template, SeedTargets::from_options(&options))
-        && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
-        && let Ok(cg) = Box::pin(TraceDecay::open_with_options(project_root, options.clone())).await
-    {
-        return Ok(cg);
+    let template =
+        template.ok_or_else(|| config_error("mcp suite store template is unavailable"))?;
+    let targets = SeedTargets::from_options(&options)
+        .ok_or_else(|| config_error("mcp suite store template seed requires a profile root"))?;
+    seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets)
+        .map_err(|error| config_error(format!("mcp suite store template seed failed: {error}")))?;
+    Box::pin(TraceDecay::open_with_options(project_root, options)).await
+}
+
+fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
+        message: message.into(),
     }
-    Box::pin(TraceDecay::init_with_options(project_root, options)).await
 }
 
 struct SeedTargets {
@@ -169,7 +175,7 @@ impl SeedTargets {
 
 /// Copies one template flavor's store into place for `project_root`:
 /// data dir under the target profile root, global DB (only if absent), and
-/// rewrites the absolute paths embedded in config + manifest.
+/// rewrites the absolute paths embedded in `store_manifest.json`.
 fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::Result<()> {
     fs::create_dir_all(project_root)?;
     let src_home = flavor.join("home/.tracedecay");
@@ -191,9 +197,6 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
     PrivateStoreIo::create_dir_all(&data_dest)?;
     copy_tree(&src_data, &data_dest)?;
 
-    rewrite_json(&data_dest.join("config.json"), |config| {
-        config["root_dir"] = Value::String(project_root.to_string_lossy().into_owned());
-    })?;
     rewrite_json(&data_dest.join("store_manifest.json"), |manifest| {
         manifest["project_id"] = Value::String(project_id.clone());
         manifest["project_root"] = Value::String(project_root.to_string_lossy().into_owned());
@@ -269,9 +272,7 @@ async fn ensure_template(tmp_root: &Path, versions: StoreSchemaVersions) -> Opti
             Err(_) => Some(build),
         },
         Err(err) => {
-            eprintln!(
-                "[mcp_suite::fixture] template build failed, falling back to real init: {err}"
-            );
+            eprintln!("[mcp_suite::fixture] template build failed: {err}");
             let _ = fs::remove_dir_all(&build);
             None
         }
@@ -559,4 +560,105 @@ async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
         .unwrap();
     assert_eq!(recorded, 6);
     cg.close();
+}
+
+/// The copied store is the template, bound to the requested project. A fresh
+/// init would not carry the template marker, and it would not be how this
+/// bootstrap reports success.
+#[tokio::test]
+async fn template_seed_opens_the_copied_store_for_the_requested_project() {
+    let scratch = tempfile::TempDir::new().unwrap();
+    let tmp_root = scratch.path().canonicalize().unwrap();
+    let template = ensure_template(&tmp_root, StoreSchemaVersions::CURRENT)
+        .await
+        .expect("template builds from a real init");
+    let template_store = sole_subdir(
+        &template
+            .join(EMPTY_FLAVOR)
+            .join("home/.tracedecay/projects"),
+    )
+    .unwrap();
+    let template_manifest: Value = serde_json::from_str(
+        &fs::read_to_string(template_store.join("store_manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let template_project_root = template_manifest["project_root"]
+        .as_str()
+        .expect("template manifest records a project root")
+        .to_owned();
+    fs::write(
+        template_store.join("template-seed-marker"),
+        b"seeded-not-initialized",
+    )
+    .unwrap();
+
+    let project = tmp_root.join("requested-project");
+    fs::create_dir_all(&project).unwrap();
+    let profile_root = tmp_root.join("profile/.tracedecay");
+    let cg = init_project_from_template_root(
+        Some(&template),
+        &project,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    .expect("seeded store opens");
+
+    let data_root = cg.store_layout().data_root.clone();
+    assert_eq!(
+        fs::read(data_root.join("template-seed-marker")).unwrap(),
+        b"seeded-not-initialized"
+    );
+    assert!(data_root.join("store_manifest.json").is_file());
+    assert!(!data_root.join("config.json").exists());
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(data_root.join("store_manifest.json")).unwrap())
+            .unwrap();
+    assert_ne!(
+        manifest["project_root"].as_str(),
+        Some(template_project_root.as_str())
+    );
+    assert_eq!(
+        manifest["project_root"].as_str(),
+        Some(project.to_str().unwrap())
+    );
+    assert_eq!(cg.project_root(), project.as_path());
+    cg.close();
+}
+
+/// An occupied destination used to fall through to a full init and hide a
+/// broken seed. Seeding now fails closed with the seed error.
+#[tokio::test]
+async fn template_seed_does_not_fall_back_when_the_destination_exists() {
+    let scratch = tempfile::TempDir::new().unwrap();
+    let tmp_root = scratch.path().canonicalize().unwrap();
+    let template = ensure_template(&tmp_root, StoreSchemaVersions::CURRENT)
+        .await
+        .expect("template builds from a real init");
+    let project = tmp_root.join("requested-project");
+    fs::create_dir_all(&project).unwrap();
+    let profile_root = tmp_root.join("profile/.tracedecay");
+    let project_id = default_profile_project_id(&project);
+    fs::create_dir_all(profile_root.join("projects").join(&project_id)).unwrap();
+
+    let error = match init_project_from_template_root(
+        Some(&template),
+        &project,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("an existing store must not be papered over with a full init"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "config error: mcp suite store template seed failed: store data dir already exists"
+    );
 }
