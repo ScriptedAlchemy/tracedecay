@@ -1165,12 +1165,12 @@ fn affected_tests_outcome(
         }
         RetrievalPortOutcome::Cancelled(_) => DirectAffectedTestsOutcome::Cancelled,
         RetrievalPortOutcome::TimedOut(_) => DirectAffectedTestsOutcome::TimedOut,
-        RetrievalPortOutcome::Failed(_) | RetrievalPortOutcome::Unavailable(_) => {
-            DirectAffectedTestsOutcome::Evidence {
-                tests: Vec::new(),
-                state: FeedbackImpactStateV1::Unavailable,
-            }
-        }
+        RetrievalPortOutcome::Failed(_)
+        | RetrievalPortOutcome::Unavailable(_)
+        | RetrievalPortOutcome::Refused(..) => DirectAffectedTestsOutcome::Evidence {
+            tests: Vec::new(),
+            state: FeedbackImpactStateV1::Unavailable,
+        },
     }
 }
 

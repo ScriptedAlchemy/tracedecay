@@ -16,10 +16,10 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, CodeRelationRequest,
-    CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRequest, OmissionReason,
-    OpaqueCursor, PageRequest, PhraseSearchRequest, QualifiedNameRequest, ResolvedScope,
-    ResultProjection, RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome,
-    RetrievalRequestMeta, SourceMetadataRequest, callable_code_operation,
+    CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRequest, OpaqueCursor,
+    PageRequest, PhraseSearchRequest, QualifiedNameRequest, ResolvedScope, ResultProjection,
+    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
+    SourceMetadataRequest, callable_code_operation,
     retrieval::{
         CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
         CodeImplementationsRequest, CodeNavigationRequest, CodeTimelineRequest,
@@ -5629,7 +5629,7 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
     let original_generation = first_page.generation.clone();
 
     // The envelope prefix names the cursor wire revision and is bumped whenever
-    // that contract changes (it is `ccq2.` today). Take it from the cursor the
+    // that contract changes (it is `ccq3.` today). Take it from the cursor the
     // production path just minted rather than pinning a literal here: this test
     // is about expiry tampering, not about which revision is current.
     let (prefix, encoded) = cursor
@@ -5664,12 +5664,14 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
             &tampered_request,
         )
         .await;
-    let RetrievalPortOutcome::Failed(tampered_evidence) = tampered_outcome else {
-        panic!("tampered cursor must be rejected as a failed request");
+    let RetrievalPortOutcome::Refused(_, refusal) = tampered_outcome else {
+        panic!("tampered cursor must be refused as an invalid request");
     };
     assert_eq!(
-        tampered_evidence.omissions[0].reason,
-        OmissionReason::Failed,
+        refusal
+            .diagnostic()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        Some("callable_code.cursor_invalid"),
         "MAC verification must precede expiry and other binding diagnostics"
     );
 

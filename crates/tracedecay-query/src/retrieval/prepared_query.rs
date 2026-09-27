@@ -19,9 +19,10 @@ use tracedecay_domain::{
 use super::fusion::{PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1, QueryDigestAuthenticationError};
 use super::{QueryAuthorityErrorV1, QueryAuthorityV1};
 
-const PREPARED_QUERY_CURSOR_PREFIX_V2: &str = "ccq2.";
-const PREPARED_QUERY_CURSOR_REVISION_V2: u16 = 2;
+const PREPARED_QUERY_CURSOR_PREFIX_V3: &str = "ccq3.";
+const PREPARED_QUERY_CURSOR_REVISION_V3: u16 = 3;
 const PREPARED_QUERY_CURSOR_TTL_MICROS_V1: i64 = 15 * 60 * 1_000_000;
+const PARAMETER_FINGERPRINT_HEX_LEN: usize = 8;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum PreparedQueryErrorV1 {
@@ -33,8 +34,79 @@ pub enum PreparedQueryErrorV1 {
     /// Issued for another scope (project, repository, worktree, or ref).
     #[error("prepared query cursor was issued for another scope")]
     Foreign,
+    /// Authentic, but presented with a request parameter that differs from
+    /// the request that minted it.
+    #[error("prepared query cursor was issued with a different `{parameter}`")]
+    ParameterChanged { parameter: &'static str },
     #[error("prepared query authority is unavailable")]
     Unavailable,
+}
+
+/// The named request parameters a prepared-query cursor is minted for.
+///
+/// `digest` covers every parameter and alone decides whether a cursor
+/// matches. The cursor also carries a short fingerprint per parameter so a
+/// mismatch can name the parameter that changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedQueryBindingV1 {
+    digest: ManifestDigest,
+    parameters: Vec<(&'static str, String)>,
+}
+
+impl PreparedQueryBindingV1 {
+    /// `parameters` pairs each caller-visible parameter name with the digest
+    /// of its value, in an order fixed by the operation.
+    pub fn new(
+        parameters: Vec<(&'static str, ManifestDigest)>,
+    ) -> Result<Self, PreparedQueryErrorV1> {
+        let digest =
+            canonical_sha256(&parameters).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
+        let parameters = parameters
+            .into_iter()
+            .map(|(name, digest)| (name, parameter_fingerprint(&digest)))
+            .collect();
+        Ok(Self { digest, parameters })
+    }
+
+    fn fingerprints(&self) -> Vec<String> {
+        self.parameters
+            .iter()
+            .map(|(_, fingerprint)| fingerprint.clone())
+            .collect()
+    }
+
+    /// Why a cursor minted with `digest` and `fingerprints` does not match
+    /// this binding, or `None` when it does.
+    fn mismatch(
+        &self,
+        digest: &ManifestDigest,
+        fingerprints: &[String],
+    ) -> Option<PreparedQueryErrorV1> {
+        if &self.digest == digest {
+            return None;
+        }
+        if fingerprints.len() != self.parameters.len() {
+            return Some(PreparedQueryErrorV1::Invalid);
+        }
+        Some(
+            self.parameters
+                .iter()
+                .zip(fingerprints)
+                .find(|((_, presented), minted)| presented != *minted)
+                .map_or(PreparedQueryErrorV1::Invalid, |((parameter, _), _)| {
+                    PreparedQueryErrorV1::ParameterChanged { parameter }
+                }),
+        )
+    }
+}
+
+fn parameter_fingerprint(digest: &ManifestDigest) -> String {
+    digest
+        .as_str()
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(PARAMETER_FINGERPRINT_HEX_LEN)
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +114,7 @@ pub struct PreparedQueryBindingsV1 {
     operation: String,
     scope_digest: ManifestDigest,
     generation: CodeGenerationId,
-    query_binding_digest: ManifestDigest,
+    query_binding: PreparedQueryBindingV1,
 }
 
 impl PreparedQueryBindingsV1 {
@@ -50,7 +122,7 @@ impl PreparedQueryBindingsV1 {
         operation: impl Into<String>,
         scope_digest: ManifestDigest,
         generation: CodeGenerationId,
-        query_binding_digest: ManifestDigest,
+        query_binding: PreparedQueryBindingV1,
     ) -> Result<Self, PreparedQueryErrorV1> {
         let operation = operation.into();
         if operation.is_empty() {
@@ -62,14 +134,11 @@ impl PreparedQueryBindingsV1 {
         generation
             .validate()
             .map_err(|_| PreparedQueryErrorV1::Invalid)?;
-        query_binding_digest
-            .validate()
-            .map_err(|_| PreparedQueryErrorV1::Invalid)?;
         Ok(Self {
             operation,
             scope_digest,
             generation,
-            query_binding_digest,
+            query_binding,
         })
     }
 }
@@ -87,7 +156,7 @@ pub struct PreparedQueryRoutingBindingsV1 {
     pub principal: PrincipalId,
     pub root: SingleRootScopeV1,
     pub temporal_mode: TemporalModeV1,
-    pub query_binding_digest: ManifestDigest,
+    pub query_binding: PreparedQueryBindingV1,
     pub page_size: u32,
     pub authorization_revision: AuthorizationRevision,
 }
@@ -108,12 +177,36 @@ struct PreparedQueryCursorPayloadV1 {
     scope_digest: ManifestDigest,
     generation: CodeGenerationId,
     query_binding_digest: ManifestDigest,
+    parameter_fingerprints: Vec<String>,
     candidate_set_digest: ManifestDigest,
     authentication_key_id: RetrievalCursorKeyId,
     next_offset: u32,
     page_size: u32,
     expires_at: UtcMicros,
     request_binding: PreparedQueryRequestBindingV1,
+}
+
+impl PreparedQueryCursorPayloadV1 {
+    /// Why this cursor cannot page `operation` over `query_binding` at
+    /// `page_size`, or `None` when it can.
+    fn request_mismatch(
+        &self,
+        operation: &str,
+        query_binding: &PreparedQueryBindingV1,
+        page_size: u32,
+    ) -> Option<PreparedQueryErrorV1> {
+        if self.operation != operation {
+            return Some(PreparedQueryErrorV1::Invalid);
+        }
+        if let Some(mismatch) =
+            query_binding.mismatch(&self.query_binding_digest, &self.parameter_fingerprints)
+        {
+            return Some(mismatch);
+        }
+        (self.page_size != page_size).then_some(PreparedQueryErrorV1::ParameterChanged {
+            parameter: "meta.page_size",
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -237,11 +330,12 @@ impl PreparedQueryV1 {
                 {
                     return Err(PreparedQueryErrorV1::Stale);
                 }
-                if cursor.payload.operation != bindings.operation
-                    || cursor.payload.query_binding_digest != bindings.query_binding_digest
-                    || cursor.payload.page_size != page_size
-                {
-                    return Err(PreparedQueryErrorV1::Invalid);
+                if let Some(mismatch) = cursor.payload.request_mismatch(
+                    &bindings.operation,
+                    &bindings.query_binding,
+                    page_size,
+                ) {
+                    return Err(mismatch);
                 }
                 usize::try_from(cursor.payload.next_offset)
                     .map_err(|_| PreparedQueryErrorV1::Invalid)?
@@ -263,11 +357,12 @@ impl PreparedQueryV1 {
                 ),
             };
             let payload = PreparedQueryCursorPayloadV1 {
-                revision: PREPARED_QUERY_CURSOR_REVISION_V2,
+                revision: PREPARED_QUERY_CURSOR_REVISION_V3,
                 operation: bindings.operation.clone(),
                 scope_digest: bindings.scope_digest.clone(),
                 generation: bindings.generation.clone(),
-                query_binding_digest: bindings.query_binding_digest.clone(),
+                query_binding_digest: bindings.query_binding.digest.clone(),
+                parameter_fingerprints: bindings.query_binding.fingerprints(),
                 candidate_set_digest,
                 authentication_key_id: self.authority.active_query_key_id(),
                 next_offset: u32::try_from(end).map_err(|_| PreparedQueryErrorV1::Unavailable)?,
@@ -329,11 +424,12 @@ pub fn authenticate_prepared_query_cursor_for_routing(
         )
         .map_err(map_verification_error)?;
     require_unexpired(&cursor, now)?;
-    if cursor.payload.operation != bindings.operation
-        || cursor.payload.query_binding_digest != bindings.query_binding_digest
-        || cursor.payload.page_size != bindings.page_size
-    {
-        return Err(PreparedQueryErrorV1::Invalid);
+    if let Some(mismatch) = cursor.payload.request_mismatch(
+        &bindings.operation,
+        &bindings.query_binding,
+        bindings.page_size,
+    ) {
+        return Err(mismatch);
     }
     Ok(PreparedQueryCursorRoutingV1 {
         generation: cursor.payload.generation,
@@ -355,7 +451,9 @@ where
     let routing =
         authenticate_prepared_query_cursor_for_routing(authority, bindings, encoded, now)?;
     if expected_generation.is_some_and(|expected| expected != &routing.generation) {
-        return Err(PreparedQueryErrorV1::Invalid);
+        return Err(PreparedQueryErrorV1::ParameterChanged {
+            parameter: "scope.generation",
+        });
     }
     Ok(effect(routing.generation))
 }
@@ -478,7 +576,7 @@ fn encode_cursor(
     })
     .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
     Ok(format!(
-        "{PREPARED_QUERY_CURSOR_PREFIX_V2}{}",
+        "{PREPARED_QUERY_CURSOR_PREFIX_V3}{}",
         hex::encode(bytes)
     ))
 }
@@ -487,7 +585,7 @@ fn decode_cursor(
     encoded: &str,
 ) -> Result<AuthenticatedPreparedQueryCursorV1, PreparedQueryErrorV1> {
     let encoded = encoded
-        .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V2)
+        .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V3)
         .ok_or(PreparedQueryErrorV1::Invalid)?;
     let bytes = hex::decode(encoded).map_err(|_| PreparedQueryErrorV1::Invalid)?;
     if hex::encode(&bytes) != encoded {
@@ -496,7 +594,7 @@ fn decode_cursor(
     let cursor: AuthenticatedPreparedQueryCursorV1 =
         serde_json::from_slice(&bytes).map_err(|_| PreparedQueryErrorV1::Invalid)?;
     if serde_json::to_vec(&cursor).map_err(|_| PreparedQueryErrorV1::Invalid)? != bytes
-        || cursor.payload.revision != PREPARED_QUERY_CURSOR_REVISION_V2
+        || cursor.payload.revision != PREPARED_QUERY_CURSOR_REVISION_V3
     {
         return Err(PreparedQueryErrorV1::Invalid);
     }
@@ -564,11 +662,12 @@ mod tests {
     fn cursor(next_offset: u32, expires_at: UtcMicros) -> String {
         encode_cursor(
             PreparedQueryCursorPayloadV1 {
-                revision: PREPARED_QUERY_CURSOR_REVISION_V2,
+                revision: PREPARED_QUERY_CURSOR_REVISION_V3,
                 operation: "code_exact_occurrence".to_owned(),
                 scope_digest: digest("scope"),
                 generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
                 query_binding_digest: digest("query"),
+                parameter_fingerprints: Vec::new(),
                 candidate_set_digest: digest("candidates"),
                 authentication_key_id: RetrievalCursorKeyId::new("cursor-key.callable-page")
                     .expect("cursor key"),
@@ -602,9 +701,9 @@ mod tests {
         assert_eq!(decode_cursor(&tampered), Err(PreparedQueryErrorV1::Invalid));
 
         let uppercase = format!(
-            "{PREPARED_QUERY_CURSOR_PREFIX_V2}{}",
+            "{PREPARED_QUERY_CURSOR_PREFIX_V3}{}",
             encoded
-                .trim_start_matches(PREPARED_QUERY_CURSOR_PREFIX_V2)
+                .trim_start_matches(PREPARED_QUERY_CURSOR_PREFIX_V3)
                 .to_ascii_uppercase()
         );
         assert_eq!(
@@ -621,7 +720,7 @@ mod tests {
         assert_eq!(first, second);
         let first_bytes = hex::decode(
             first
-                .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V2)
+                .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V3)
                 .expect("prepared cursor prefix"),
         )
         .expect("prepared cursor bytes");
@@ -637,11 +736,12 @@ mod tests {
         // The authentication payload is domain-separated for prepared cursors and
         // must never embed query sanitizer/normalization revision strings.
         let payload = PreparedQueryCursorPayloadV1 {
-            revision: PREPARED_QUERY_CURSOR_REVISION_V2,
+            revision: PREPARED_QUERY_CURSOR_REVISION_V3,
             operation: "code_exact_occurrence".to_owned(),
             scope_digest: digest("scope"),
             generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
             query_binding_digest: digest("query"),
+            parameter_fingerprints: Vec::new(),
             candidate_set_digest: digest("candidates"),
             authentication_key_id: RetrievalCursorKeyId::new("cursor-key.callable-page")
                 .expect("cursor key"),

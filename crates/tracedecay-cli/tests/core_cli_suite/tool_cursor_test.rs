@@ -178,6 +178,68 @@ fn callees_cursors_page_to_the_end_across_tool_processes() {
 }
 
 #[test]
+fn a_cursor_presented_with_changed_parameters_is_refused_naming_the_parameter() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    committed_git_project(&project, &hub_source());
+    initialize_tracedecay_cli_project(&home, &project);
+    let hub = hub_node_id(&home, &project);
+
+    // Page one omits `meta`, so it pages the default evidence projection.
+    let (ok, first) = tool(
+        &home,
+        &project,
+        "tracedecay_callees",
+        &json!({"node_id": hub, "maximum_depth": 1}),
+    );
+    assert!(ok, "{first}");
+    let cursor = next_cursor(&first).expect("first page continues");
+
+    let changed = run_tool(
+        &home,
+        &project,
+        "tracedecay_callees",
+        &json!({
+            "node_id": hub,
+            "maximum_depth": 1,
+            "meta": {"projection": "summary", "order": "source_position", "cursor": cursor},
+        }),
+    );
+    let refusal = body_of("tracedecay_callees", &changed);
+    assert!(!changed.success, "{refusal}");
+    assert_eq!(refusal["problem"]["kind"], "invalid_request", "{refusal}");
+    assert_eq!(
+        refusal["problem"]["code"], "callable_code.cursor_parameter_changed",
+        "{refusal}"
+    );
+    assert_eq!(
+        refusal["problem"]["message"],
+        "The cursor was issued for a request with a different `meta.projection`. Repeat the \
+         request with the parameters that returned the cursor, or restart without it.",
+        "{refusal}"
+    );
+    assert_eq!(
+        refusal["problem"]["legal_actions"],
+        json!(["correct_request", "restart_without_cursor"]),
+        "{refusal}"
+    );
+
+    // The same cursor with the parameters that minted it still pages.
+    let (ok, second) = tool(
+        &home,
+        &project,
+        "tracedecay_callees",
+        &json!({"node_id": hub, "maximum_depth": 1, "meta": {
+            "projection": "evidence", "order": "source_position", "cursor": cursor,
+        }}),
+    );
+    assert!(ok, "{second}");
+    assert_eq!(page_names(&second).len(), 10, "{second}");
+}
+
+#[test]
 fn a_cursor_presented_where_it_cannot_be_served_is_typed() {
     let home = TempDir::new().unwrap();
     let other_home = TempDir::new().unwrap();

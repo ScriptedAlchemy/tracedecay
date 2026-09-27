@@ -395,6 +395,9 @@ fn validate_code_query_outcome<T>(
     requested_generation: &CodeGenerationId,
     requested_page_size: u32,
 ) -> Result<(), ApplicationProblem> {
+    if let RetrievalPortOutcome::Refused(_, problem) = outcome {
+        return Err(problem.as_ref().clone());
+    }
     let evidence = outcome.evidence();
     let unpinned = requested_generation.as_str() == UNPINNED_LATEST_GENERATION_SENTINEL;
     if evidence.temporal.requested_mode != TemporalModeV1::Current {

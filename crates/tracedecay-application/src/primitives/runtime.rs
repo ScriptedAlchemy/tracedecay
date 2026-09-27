@@ -1205,14 +1205,14 @@ fn retrieval_outcome<T: Serialize>(
     outcome: RetrievalPortOutcome<T>,
     started_at: UtcMicros,
 ) -> Result<ApplicationResult<Value>, ApplicationContractError> {
-    let (termination, mut evidence) = match outcome {
-        RetrievalPortOutcome::Completed(evidence) => (OperationTermination::Completed, evidence),
-        RetrievalPortOutcome::Partial(evidence) => (OperationTermination::Partial, evidence),
-        RetrievalPortOutcome::Cancelled(evidence) => (OperationTermination::Cancelled, evidence),
-        RetrievalPortOutcome::TimedOut(evidence) => (OperationTermination::TimedOut, evidence),
-        RetrievalPortOutcome::Failed(evidence) => (OperationTermination::Failed, evidence),
-        RetrievalPortOutcome::Unavailable(evidence) => {
-            (OperationTermination::Unavailable, evidence)
+    let (termination, mut evidence) = match outcome.into_termination() {
+        Ok(published) => published,
+        Err(problem) => {
+            return Ok(Err(ApplicationProblemEnvelope::new(
+                operation.result_contract().clone(),
+                context.request_id().clone(),
+                problem,
+            )?));
         }
     };
     if evidence.cancellation.is_none()
