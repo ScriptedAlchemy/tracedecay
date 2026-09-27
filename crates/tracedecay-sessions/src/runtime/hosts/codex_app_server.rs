@@ -458,7 +458,14 @@ fn spawn_codex_app_server(command: &mut Command, codex_bin: &str) -> Result<Chil
                 child
             };
             match spawn_result {
-                Ok(child) => return Ok(child),
+                Ok(child) => {
+                    tracing::debug!(
+                        pid = child.id(),
+                        codex_bin,
+                        "codex app-server process started"
+                    );
+                    return Ok(child);
+                }
                 Err(err)
                     if err.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline =>
                 {

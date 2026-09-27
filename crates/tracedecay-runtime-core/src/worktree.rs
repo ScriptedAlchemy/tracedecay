@@ -41,7 +41,7 @@ pub struct WorktreeIndexMismatch {
 /// checkout and each linked worktree report their own distinct directory,
 /// which is exactly the distinction this module relies on.
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
-    crate::git_repository::repository_topology(dir)
+    crate::git_repository::settled_repository_topology(dir)
         .ok()?
         .worktree_root
         .clone()
@@ -52,7 +52,9 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    git_common_dir_outcome(dir).ok().flatten()
+    crate::git_repository::settled_repository_topology(dir)
+        .ok()
+        .map(|topology| topology.common_dir.clone())
 }
 
 /// [`git_common_dir`] that keeps a blocked discovery distinct from "not a
@@ -143,7 +145,7 @@ pub fn primary_checkout_root(
 /// inside a monorepo is its own project), is outside git, or has a repository
 /// shape whose primary checkout cannot be derived safely.
 pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
-    let topology = crate::git_repository::repository_topology(dir).ok()?;
+    let topology = crate::git_repository::settled_repository_topology(dir).ok()?;
     let worktree_root = topology.worktree_root.as_deref()?;
     // Only a worktree ROOT inherits repository identity. Without this check a
     // subdirectory indexed as its own project would be absorbed into the
@@ -156,7 +158,7 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
 
 /// Returns whether `dir` resolves to a linked worktree root.
 pub fn is_linked_worktree(dir: &Path) -> bool {
-    let Ok(topology) = crate::git_repository::repository_topology(dir) else {
+    let Ok(topology) = crate::git_repository::settled_repository_topology(dir) else {
         return false;
     };
     topology.worktree_root.as_deref().is_some_and(|root| {
@@ -178,7 +180,7 @@ pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
     if !is_detached_linked_worktree(dir) {
         return None;
     }
-    let topology = crate::git_repository::repository_topology(dir).ok()?;
+    let topology = crate::git_repository::settled_repository_topology(dir).ok()?;
     let git_dir = topology.git_dir.as_path();
     let common_dir = topology.common_dir.as_path();
     let identity = git_dir.strip_prefix(common_dir).unwrap_or(git_dir);
@@ -554,6 +556,32 @@ mod tests {
             None,
             "non-`.git` common dirs must not redirect registration"
         );
+    }
+
+    /// A caller that finds another thread mid-walk on the same checkout must
+    /// still get the repository answer, not "not a repository": a linked
+    /// worktree otherwise mints a path-derived identity of its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_walk_in_flight_on_another_thread_does_not_hide_the_repository() {
+        let temporary = tempdir().unwrap();
+        let primary = temporary.path().join("primary");
+        fs::create_dir_all(&primary).unwrap();
+        run_git(&primary, &["init", "-b", "main", "--quiet"]);
+        let primary = primary.canonicalize().unwrap();
+        let common_dir = primary.join(".git");
+
+        let mut block = crate::git_repository::block_repository_discovery_for_test(&primary);
+        let parked = std::thread::spawn({
+            let primary = primary.clone();
+            move || git_common_dir(&primary)
+        });
+        block.wait_entered().await;
+
+        assert_eq!(git_common_dir(&primary), Some(common_dir.clone()));
+        assert_eq!(git_worktree_root(&primary), Some(primary.clone()));
+        block.release();
+        assert_eq!(parked.join().unwrap(), Some(common_dir));
+        crate::git_repository::reset_repository_discovery_for_test(&primary);
     }
 
     #[test]

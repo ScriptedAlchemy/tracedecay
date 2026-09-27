@@ -34,8 +34,8 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 use model::{RetentionConfig, SyncConfig, TelemetryConfig};
 
@@ -68,8 +68,42 @@ pub struct RuntimeTraceDecayConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfigurationTarget {
+    /// Data directory of the profile that owns this project's configuration
+    /// store. One checkout registered in two profiles has one `project_id`,
+    /// so only the pair names a store.
+    pub profile_root: PathBuf,
     pub project_id: ProjectId,
     pub project_root: PathBuf,
+}
+
+/// The owning profile and project of a registered project store. The store
+/// lives in its profile's shard for the project, so its path names the owner.
+pub fn registered_configuration_owner(
+    database: &RegisteredGlobalDb,
+) -> Result<(PathBuf, ProjectId)> {
+    let project_id = database
+        .binding()
+        .shard_id
+        .scope
+        .project_id()
+        .ok_or_else(|| config_error("registered database is not a project store"))?;
+    database
+        .db_path()
+        .parent()
+        .and_then(|store_root| {
+            tracedecay_runtime_core::storage::profile_root_of_sharded_data_root(
+                store_root,
+                project_id.as_str(),
+            )
+        })
+        .map(|profile_root| (profile_root.to_path_buf(), project_id.clone()))
+        .ok_or_else(|| {
+            config_error(format!(
+                "registered database '{}' is not a profile shard of project '{}'",
+                database.db_path().display(),
+                project_id.as_str()
+            ))
+        })
 }
 
 /// One validated binding of a configuration revision to the runtime settings
@@ -163,12 +197,14 @@ impl OpenedRuntimeConfiguration {
 pub trait PinnedRuntimeConfigurationCachePort: Send + Sync {
     fn publish(&self, configuration: PinnedRuntimeConfiguration) -> Result<()>;
 
-    fn cached_for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration>;
-
-    /// The pin published for an already-authoritative registered project,
-    /// for daemon work (session shards, background convergence) that has a
-    /// project identity but no route root.
-    fn cached_for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration>;
+    /// The pin `profile_root` published for an already-authoritative
+    /// registered project, for daemon work (session shards, background
+    /// convergence) that has a project identity but no route root.
+    fn cached_for_project(
+        &self,
+        profile_root: &Path,
+        project_id: &ProjectId,
+    ) -> Result<PinnedRuntimeConfiguration>;
 }
 
 static PINNED_RUNTIME_CONFIGURATION_CACHE: OnceLock<Arc<dyn PinnedRuntimeConfigurationCachePort>> =
@@ -196,20 +232,15 @@ pub fn publish_pinned_runtime_configuration(
     pinned_runtime_configuration_cache()?.publish(configuration)
 }
 
-pub fn cached_pinned_runtime_configuration(
-    project_root: &Path,
-) -> Result<PinnedRuntimeConfiguration> {
-    pinned_runtime_configuration_cache()?.cached_for_root(project_root)
-}
-
-/// The summarizer executables the daemon published for one registered
-/// project. A missing cache or pin is a typed configuration error, not an
-/// unconfigured provider: the caller decides whether that means "pending".
-pub fn lcm_summarizer_executables_for_project(
-    project_id: &ProjectId,
+/// The summarizer executables the daemon published for the project store
+/// `database` is. A missing cache or pin is a typed configuration error, not
+/// an unconfigured provider: the caller decides whether that means "pending".
+pub fn lcm_summarizer_executables_for_database(
+    database: &RegisteredGlobalDb,
 ) -> Result<LcmSummarizerExecutablesV1> {
+    let (profile_root, project_id) = registered_configuration_owner(database)?;
     Ok(pinned_runtime_configuration_cache()?
-        .cached_for_project(project_id)?
+        .cached_for_project(&profile_root, &project_id)?
         .config()
         .lcm_summarizers
         .clone())
@@ -381,6 +412,7 @@ mod tests {
 
     fn target() -> RuntimeConfigurationTarget {
         RuntimeConfigurationTarget {
+            profile_root: PathBuf::from("/profile"),
             project_id: ProjectId::new("project.pinned-runtime".to_owned()).unwrap(),
             project_root: PathBuf::from("/project"),
         }

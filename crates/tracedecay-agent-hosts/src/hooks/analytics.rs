@@ -146,7 +146,7 @@ impl HookTimingSpan {
         // never finished. Only an authority that explicitly says timings are
         // off suppresses the completion row.
         let enabled = root
-            .and_then(|root| (runtime.timing_gate)(root))
+            .and_then(|root| (runtime.timing_gate)(&runtime.profile, root))
             .unwrap_or(true);
         Self {
             profile_root: runtime.profile.data_dir().to_path_buf(),

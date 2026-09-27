@@ -1,7 +1,7 @@
 //! Dashboard endpoints for project and user settings.
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -334,7 +334,8 @@ pub async fn patch_project_settings(
                 "message": "idempotency_key must be one non-empty canonical caller-stable value"
             }]))
         })?;
-    let current = crate::config::cached_runtime_configuration(&state.project_root)
+    let current = state
+        .cached_runtime_configuration()
         .map_err(|_| configuration_authority_unavailable_error())?;
     let project_id = state
         .project_id
@@ -388,11 +389,7 @@ pub async fn patch_project_settings(
         {
             Ok(outcome) => Some(outcome),
             Err(DashboardConfigurationApplyError::ApplicationProblem(problem)) => {
-                return Err(project_apply_error(
-                    &state.project_root,
-                    &expected_revision,
-                    problem,
-                ));
+                return Err(project_apply_error(&state, &expected_revision, problem));
             }
             Err(error) => return Err(configuration_apply_error(error)),
         }
@@ -596,7 +593,8 @@ async fn settings_envelope(
     pr_autotrack: PrAutoTrackPayloadV1,
 ) -> std::result::Result<DashboardEnvelopeV1<SettingsPayloadV1>, DashboardConfigurationRouteErrorV1>
 {
-    let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
+    let project_configuration = state
+        .cached_runtime_configuration()
         .map_err(|_| configuration_authority_unavailable_error())?;
     let user = state
         .user_settings
@@ -846,12 +844,12 @@ fn project_preview_error(
 /// idempotency conflict against the current revision included, keeps the
 /// daemon's own problem envelope rather than being relabeled by a guess.
 fn project_apply_error(
-    project_root: &Path,
+    state: &DashboardState,
     expected_revision: &ConfigurationRevisionId,
     problem: ApplicationProblemEnvelope,
 ) -> DashboardConfigurationRouteErrorV1 {
     if problem.problem.kind() == ApplicationProblemKind::Conflict
-        && let Ok(current) = crate::config::cached_runtime_configuration(project_root)
+        && let Ok(current) = state.cached_runtime_configuration()
         && current.revision_id() != expected_revision
     {
         return configuration_revision_conflict_error(

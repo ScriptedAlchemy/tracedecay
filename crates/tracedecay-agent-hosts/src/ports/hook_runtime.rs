@@ -67,11 +67,12 @@ pub type HookEventNotifier = for<'a> fn(
     DaemonHookEvent,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
-/// Reads the daemon-published telemetry timing decision without store I/O.
+/// Reads the telemetry timing decision a profile's daemon published, without
+/// store I/O.
 ///
 /// The `Option` is the answer, not the wiring: `None` means the daemon has
 /// published no authoritative override for this checkout.
-pub type HookTimingGate = fn(&Path) -> Option<bool>;
+pub type HookTimingGate = fn(&ProfileRoot, &Path) -> Option<bool>;
 
 /// Reports whether one checkout has an initialized canonical store in a
 /// profile.
@@ -151,7 +152,7 @@ mod test_runtime {
         Box::pin(async {})
     }
 
-    fn timings(_: &Path) -> Option<bool> {
+    fn timings(_: &ProfileRoot, _: &Path) -> Option<bool> {
         None
     }
 

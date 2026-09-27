@@ -759,6 +759,24 @@ impl DashboardTestProjectGraphsV1 {
 }
 
 impl DashboardState {
+    /// The configuration this dashboard's project store published. The store
+    /// is its owning profile's shard, which names whose pin to read.
+    pub(crate) fn cached_runtime_configuration(
+        &self,
+    ) -> Result<crate::config::PinnedRuntimeConfiguration> {
+        let profile_root = self
+            .project_id
+            .as_deref()
+            .and_then(|project_id| {
+                tracedecay_runtime_core::storage::profile_root_of_sharded_data_root(
+                    &self.store_root,
+                    project_id,
+                )
+            })
+            .ok_or_else(|| config_error("dashboard project store is not a profile shard"))?;
+        crate::config::cached_runtime_configuration(profile_root, &self.project_root)
+    }
+
     pub fn reconcile_automation_scheduler(&self) {
         if let Some(reconcile) = &self.automation_scheduler_reconciler {
             let reconcile = Arc::clone(reconcile);

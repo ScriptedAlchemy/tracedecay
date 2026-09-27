@@ -925,6 +925,7 @@ pub(crate) mod tests {
         .snapshot;
         let pinned = PinnedRuntimeConfiguration::new(
             RuntimeConfigurationTarget {
+                profile_root: temp.path().join("profile"),
                 project_id,
                 project_root: temp.path().to_path_buf(),
             },

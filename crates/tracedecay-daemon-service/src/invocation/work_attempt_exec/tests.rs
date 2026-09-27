@@ -748,6 +748,7 @@ fn resolver_over(
     .unwrap();
     let configuration = PinnedRuntimeConfiguration::new(
         RuntimeConfigurationTarget {
+            profile_root: root.join("profile"),
             project_id,
             project_root: root.to_path_buf(),
         },
