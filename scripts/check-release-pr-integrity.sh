@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Validates a release PR: only release metadata changed, and Cargo.lock matches
+# the bumped manifests. Before merging a release PR by hand, run it with the PR
+# head checked out: scripts/check-release-pr-integrity.sh origin/master HEAD
 set -euo pipefail
 
 usage() {
@@ -70,3 +73,45 @@ if ((${#unexpected[@]})); then
   echo "release PR integrity: explicitly approved extra paths:" >&2
   printf '  %s\n' "${unexpected[@]}" >&2
 fi
+
+# Release-please rewrites the release branch on every master push, dropping
+# the lockfile commit, and every `--locked` build fails once a lagging lock
+# merges. Compare each local package's manifest version with its lock entry.
+python3 - <<'PY'
+import glob
+import sys
+import tomllib
+from pathlib import Path
+
+
+def load(path):
+    return tomllib.loads(Path(path).read_text())
+
+
+root = load("Cargo.toml")
+workspace = root.get("workspace", {})
+workspace_version = workspace.get("package", {}).get("version")
+packages = [root["package"]] if "package" in root else []
+for pattern in workspace.get("members", []):
+    for member in sorted(glob.glob(pattern)):
+        packages.append(load(Path(member, "Cargo.toml"))["package"])
+
+locked = {
+    entry["name"]: entry["version"]
+    for entry in load("Cargo.lock").get("package", [])
+    if "source" not in entry
+}
+stale = []
+for package in packages:
+    version = package.get("version", "0.0.0")
+    if version == {"workspace": True}:
+        version = workspace_version
+    if locked.get(package["name"]) != version:
+        stale.append(f"{package['name']}: Cargo.toml {version}, Cargo.lock {locked.get(package['name'], 'missing')}")
+
+if stale:
+    print("release PR integrity: Cargo.lock disagrees with the manifest versions:", file=sys.stderr)
+    print("\n".join(f"  {line}" for line in stale), file=sys.stderr)
+    print("Refresh Cargo.lock; on a release branch run scripts/update-release-pr-lockfile.sh.", file=sys.stderr)
+    sys.exit(1)
+PY
