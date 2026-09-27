@@ -223,6 +223,12 @@ async fn exact_semantic_symbol_diff(
                 (partial.base_generation, partial.head_generation),
                 Some(partial.next_cursor),
             ),
+            CodeIndexBranchDiffOutcomeV1::CursorRefused(mismatch) => {
+                return Err(SemanticSymbolDiffUnavailable {
+                    reason: mismatch.code(),
+                    retryable: false,
+                });
+            }
             CodeIndexBranchDiffOutcomeV1::Unavailable(unavailable) => {
                 let retryable = matches!(
                     unavailable.reason,

@@ -13,7 +13,7 @@ use tracedecay_contracts::{
     ApplicationProblem, EvidenceDomain, OmissionReason, RetrievalPortOutcome,
 };
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
-use tracedecay_domain::{CursorBindingV1, ProjectId};
+use tracedecay_domain::{CursorBindingMismatchV1, CursorBindingV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::queries::GraphQueryManager;
 use tracedecay_graph_query::{
@@ -336,6 +336,21 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
     ) -> ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult> {
         Box::pin(hotpath::future!(
             async move {
+                // The lookup answers in one page and never issues a
+                // continuation, so any presented cursor is another operation's.
+                if request.page.cursor.is_some() {
+                    return RetrievalPortOutcome::Refused(
+                        omitted_evidence(
+                            EvidenceDomain::Symbol,
+                            now_observed(),
+                            OmissionReason::Unsupported,
+                            0,
+                        ),
+                        Box::new(ApplicationProblem::cursor_refused(
+                            &CursorBindingMismatchV1::Foreign,
+                        )),
+                    );
+                }
                 let cancellation = request_graph_cancellation(context.request);
                 let reader = match open_code_graph(
                     self.code_graph.as_ref(),

@@ -25,7 +25,7 @@ pub const CURSOR_PARAMETER_CHANGED_CODE: &str = "cursor.parameter_changed";
 pub const CURSOR_INVALID_CODE: &str = "cursor.invalid";
 
 /// Why a presented cursor cannot page the request it was presented with.
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CursorBindingMismatchV1 {
     /// Malformed, or issued by another operation.
     #[error("the cursor was not issued by this operation")]
