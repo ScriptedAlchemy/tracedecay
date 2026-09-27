@@ -370,6 +370,7 @@ impl PowerShellExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);

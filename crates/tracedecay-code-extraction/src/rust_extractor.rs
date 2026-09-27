@@ -17,7 +17,7 @@ use crate::extraction_artifact::{
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, SourceSpan,
-    UnresolvedRef, Visibility, generate_node_id,
+    UnmodeledImportShapeV1, UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Rust source files using tree-sitter.
@@ -28,13 +28,27 @@ struct ShadowedCallNames {
     names: Vec<String>,
 }
 
-/// The names one block's `use` declarations bind, with the path each names.
-struct BlockUseScope {
+/// The names one block's or inline module's `use` declarations bind.
+struct UseScope {
     start: Point,
     end: Point,
-    /// `None` binds the name to an item this file may itself define.
+    /// Named bindings with the path each names; `None` binds the name to an
+    /// item this file may itself define.
     paths: BTreeMap<String, Option<String>>,
+    /// Project modules outside this file that the scope glob-imports.
+    globs: Vec<String>,
+    shape: UnmodeledImportShapeV1,
 }
+
+/// Call heads a glob import cannot supply in practice: path roots, the
+/// prelude's constructors and containers, and primitive types.
+// ponytail: a fixed list, not name resolution; a project module that exports
+// one of these names through a glob keeps the name unqualified.
+const GLOB_EXEMPT_CALL_HEADS: &[&str] = &[
+    "crate", "self", "super", "Self", "std", "core", "alloc", "Some", "None", "Ok", "Err", "Box",
+    "Vec", "String", "Option", "Result", "Default", "drop", "bool", "char", "str", "u8", "u16",
+    "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64",
+];
 
 /// Receiver bindings whose type the function body states outright: typed
 /// parameters, typed `let`s, `let`s initialised by a struct literal
@@ -623,6 +637,7 @@ impl RustExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -741,6 +756,7 @@ impl RustExtractor {
                 line: start_line,
                 column: start_column,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
         }
 
@@ -833,6 +849,7 @@ impl RustExtractor {
                 line: start_line,
                 column: start_column,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
         }
         if top_level_argument.is_some() {
@@ -854,6 +871,7 @@ impl RustExtractor {
                         line: import.start_line,
                         column: import.start_column,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
                     });
                 }
             }
@@ -1358,6 +1376,7 @@ impl RustExtractor {
                 line: start_line,
                 column: start_column,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
         }
         let Some(body) = find_direct_child_by_kind(node, "token_tree") else {
@@ -1865,6 +1884,7 @@ impl RustExtractor {
                                 line: position.row as u32,
                                 column: position.column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                             // The simple name of a dotted call is not itself a call.
                             // `items.push()` must not bind a same-file `fn push`.
@@ -1881,6 +1901,7 @@ impl RustExtractor {
                                     line: position.row as u32,
                                     column: position.column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
                             }
                         }
@@ -1901,6 +1922,7 @@ impl RustExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id, receivers);
                     }
@@ -2343,19 +2365,50 @@ impl RustExtractor {
     }
 
     /// A `use` inside a block binds its names for that whole block, nested
-    /// blocks included, and shadows a module-scope import of the same name.
-    /// Import rows are file-scoped, so a call through a block `use` is
+    /// blocks included, and shadows a module-scope import of the same name;
+    /// a `use` in an inline `mod` body binds for every item of that module.
+    /// Import rows are file-scoped, so a call through such a `use` is
     /// rewritten to the declared path here; the qualified resolver then binds
     /// it exactly like a `crate::`/`super::`/extern path. A path that may
     /// stay inside this file keeps its bare name, which binds same-file
     /// items; the cross-file resolver never binds into the referencing file.
+    ///
+    /// A glob names every public item of a module this file cannot see, and
+    /// Rust resolves it ahead of outer-scope names. A call it could supply
+    /// is rewritten into the one project module the scope glob-imports and
+    /// marked with the glob's shape, so the seal keeps it as a disclosed gap
+    /// if that module does not define the name.
     fn qualify_block_scoped_uses(
         state: &mut ExtractionState<'_>,
         function: TsNode<'_>,
         fn_node_id: &str,
     ) {
+        let depth = Self::ancestors(function)
+            .filter(|node| node.kind() == "mod_item")
+            .count();
         let mut scopes = Vec::new();
-        Self::collect_block_use_scopes(state, function, function, &mut scopes);
+        if let Some(module_body) = Self::ancestors(function)
+            .find(|node| node.kind() == "mod_item")
+            .and_then(|module| module.child_by_field_name("body"))
+        {
+            Self::push_use_scope(
+                state,
+                function,
+                module_body,
+                depth,
+                UnmodeledImportShapeV1::InlineModuleGlob,
+                &mut scopes,
+            );
+        }
+        let mut macro_sites = Vec::new();
+        Self::collect_block_use_scopes(
+            state,
+            function,
+            function,
+            depth,
+            &mut scopes,
+            &mut macro_sites,
+        );
         if scopes.is_empty() {
             return;
         }
@@ -2372,27 +2425,67 @@ impl RustExtractor {
                 row: reference.line as usize,
                 column: reference.column as usize,
             };
-            // Pre-order: an inner block follows the block that contains it.
-            let declared = scopes
+            let glob_candidate = reference.reference_kind == EdgeKind::Calls
+                && !macro_sites.contains(&site)
+                && !GLOB_EXEMPT_CALL_HEADS.contains(&head)
+                && !state.root_modules.contains_key(head);
+            // Pre-order: the module scope comes first and an inner block
+            // follows the block that contains it.
+            for scope in scopes
                 .iter()
                 .rev()
                 .filter(|scope| scope.start <= site && site < scope.end)
-                .find_map(|scope| scope.paths.get(head));
-            if let Some(Some(path)) = declared {
-                reference.reference_name =
-                    format!("{path}{}", &reference.reference_name[head.len()..]);
+            {
+                if let Some(declared) = scope.paths.get(head) {
+                    if let Some(path) = declared {
+                        reference.reference_name =
+                            format!("{path}{}", &reference.reference_name[head.len()..]);
+                    }
+                    break;
+                }
+                if glob_candidate && !scope.globs.is_empty() {
+                    if let [module] = scope.globs.as_slice() {
+                        reference.reference_name =
+                            format!("{module}::{}", reference.reference_name);
+                    }
+                    reference.unmodeled_import = Some(scope.shape);
+                    break;
+                }
             }
         }
     }
 
-    /// Whether a block `use` path names an item outside this file: `self::`
-    /// (and `crate::` from a crate root) only when it continues through a
-    /// root `mod name;` file module, and `super::` only from a file module.
-    fn block_use_path_leaves_file(
-        state: &ExtractionState<'_>,
-        function: TsNode<'_>,
-        path: &str,
-    ) -> bool {
+    /// Rewrites a `use` path written `depth` inline modules below the file's
+    /// own module to the path the file's module would write, or `None` when
+    /// it names an item inside those inline modules.
+    fn file_level_use_path(path: &str, depth: usize) -> Option<String> {
+        if depth == 0 {
+            return Some(path.to_owned());
+        }
+        let segments = path.split("::").collect::<Vec<_>>();
+        let supers = segments
+            .iter()
+            .take_while(|segment| **segment == "super")
+            .count();
+        match segments.first() {
+            Some(&"self") => None,
+            Some(&"super") if supers < depth || supers == segments.len() => None,
+            Some(&"super") => {
+                let rest = segments[supers..].join("::");
+                Some(if supers == depth {
+                    format!("self::{rest}")
+                } else {
+                    format!("{}{rest}", "super::".repeat(supers - depth))
+                })
+            }
+            _ => Some(path.to_owned()),
+        }
+    }
+
+    /// Whether a file-level `use` path names an item outside this file:
+    /// `self::` (and `crate::` from a crate root) only when it continues
+    /// through a root `mod name;` file module; `super::` always does.
+    fn use_path_leaves_file(state: &ExtractionState<'_>, function: TsNode<'_>, path: &str) -> bool {
         let crate_root = state.file_path == "lib.rs"
             || state.file_path == "main.rs"
             || state.file_path.ends_with("/lib.rs")
@@ -2401,9 +2494,6 @@ impl RustExtractor {
         let file_relative = match segments.next() {
             Some("self") => true,
             Some("crate") => crate_root,
-            Some("super") => {
-                return !Self::ancestors(function).any(|node| node.kind() == "mod_item");
-            }
             _ => false,
         };
         if !file_relative {
@@ -2429,48 +2519,89 @@ impl RustExtractor {
         std::iter::successors(node.parent(), TsNode::parent)
     }
 
+    /// Records the `use` declarations directly inside `container` (a block
+    /// or an inline module body) as one scope.
+    fn push_use_scope(
+        state: &mut ExtractionState<'_>,
+        function: TsNode<'_>,
+        container: TsNode<'_>,
+        depth: usize,
+        shape: UnmodeledImportShapeV1,
+        scopes: &mut Vec<UseScope>,
+    ) {
+        let mut paths = BTreeMap::new();
+        let mut globs = Vec::new();
+        let mut cursor = container.walk();
+        for child in container.named_children(&mut cursor) {
+            if child.kind() != "use_declaration" {
+                continue;
+            }
+            let Some(argument) = child.child_by_field_name("argument") else {
+                continue;
+            };
+            let first = state.imports.len();
+            Self::extract_use_bindings(state, argument, None, false, None);
+            let bindings = state.imports.drain(first..).collect::<Vec<_>>();
+            for import in bindings {
+                if import.is_glob {
+                    let Some(module) = Self::file_level_use_path(&import.module_specifier, depth)
+                    else {
+                        continue;
+                    };
+                    let project =
+                        matches!(module.split("::").next(), Some("crate" | "self" | "super"));
+                    if project && Self::use_path_leaves_file(state, function, &module) {
+                        globs.push(module);
+                    }
+                } else if let (Some(local), Some(imported)) =
+                    (import.local_name, import.imported_name)
+                {
+                    let path = Self::file_level_use_path(
+                        &format!("{}::{imported}", import.module_specifier),
+                        depth,
+                    )
+                    .filter(|path| Self::use_path_leaves_file(state, function, path));
+                    paths.insert(local, path);
+                }
+            }
+        }
+        if !paths.is_empty() || !globs.is_empty() {
+            scopes.push(UseScope {
+                start: container.start_position(),
+                end: container.end_position(),
+                paths,
+                globs,
+                shape,
+            });
+        }
+    }
+
     fn collect_block_use_scopes(
         state: &mut ExtractionState<'_>,
         node: TsNode<'_>,
         function: TsNode<'_>,
-        scopes: &mut Vec<BlockUseScope>,
+        depth: usize,
+        scopes: &mut Vec<UseScope>,
+        macro_sites: &mut Vec<Point>,
     ) {
         if node != function && node.kind() == "function_item" {
             return;
         }
-        if node.kind() == "block" {
-            let mut paths = BTreeMap::new();
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if child.kind() != "use_declaration" {
-                    continue;
-                }
-                let Some(argument) = child.child_by_field_name("argument") else {
-                    continue;
-                };
-                let first = state.imports.len();
-                Self::extract_use_bindings(state, argument, None, false, None);
-                let bindings = state.imports.drain(first..).collect::<Vec<_>>();
-                for import in bindings {
-                    if let (Some(local), Some(imported)) = (import.local_name, import.imported_name)
-                    {
-                        let path = format!("{}::{imported}", import.module_specifier);
-                        let leaves_file = Self::block_use_path_leaves_file(state, function, &path);
-                        paths.insert(local, leaves_file.then_some(path));
-                    }
-                }
-            }
-            if !paths.is_empty() {
-                scopes.push(BlockUseScope {
-                    start: node.start_position(),
-                    end: node.end_position(),
-                    paths,
-                });
-            }
+        match node.kind() {
+            "block" => Self::push_use_scope(
+                state,
+                function,
+                node,
+                depth,
+                UnmodeledImportShapeV1::BlockGlob,
+                scopes,
+            ),
+            "macro_invocation" => macro_sites.push(node.start_position()),
+            _ => {}
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            Self::collect_block_use_scopes(state, child, function, scopes);
+            Self::collect_block_use_scopes(state, child, function, depth, scopes, macro_sites);
         }
     }
 
@@ -2564,6 +2695,7 @@ impl RustExtractor {
                         line: cur.start_position().row as u32,
                         column: cur.start_position().column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
                     });
                     Self::extract_calls_in_token_tree(state, children[i + 1], fn_node_id);
                     i += 2; // skip the token_tree we just handled
@@ -2624,6 +2756,7 @@ impl RustExtractor {
                             line,
                             column: attr_node.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                     }
                 }
@@ -2689,6 +2822,7 @@ impl RustExtractor {
                 line: n.start_position().row as u32,
                 column: n.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
             return;
         }
@@ -2700,6 +2834,7 @@ impl RustExtractor {
                 line: n.start_position().row as u32,
                 column: n.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
         }
         if cursor.goto_first_child() {
@@ -2793,6 +2928,7 @@ impl RustExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
 
         state.edges.push(Edge {

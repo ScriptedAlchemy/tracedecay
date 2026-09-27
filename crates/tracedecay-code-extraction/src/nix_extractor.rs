@@ -463,6 +463,7 @@ impl NixExtractor {
                                     line: start_line,
                                     column: start_column,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
                             }
                             if !attr_cursor.goto_next_sibling() {
@@ -784,6 +785,7 @@ impl NixExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
 
@@ -894,6 +896,7 @@ impl NixExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
     }
 

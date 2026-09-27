@@ -825,6 +825,7 @@ impl PhpExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
     }
 
@@ -1033,6 +1034,7 @@ impl PhpExtractor {
                     line,
                     column,
                     file_path: state.file_path.clone(),
+                    unmodeled_import: None,
                 });
             }
         }
@@ -1056,6 +1058,7 @@ impl PhpExtractor {
                             line,
                             column,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -1161,6 +1164,7 @@ impl PhpExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1179,6 +1183,7 @@ impl PhpExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1196,6 +1201,7 @@ impl PhpExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1303,6 +1309,7 @@ impl PhpExtractor {
                                     line: start_line,
                                     column: start_column,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
 
                                 state.edges.push(Edge {

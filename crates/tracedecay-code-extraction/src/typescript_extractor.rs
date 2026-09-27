@@ -882,6 +882,7 @@ impl TypeScriptExtractor {
                             line: parent.start_position().row as u32,
                             column: parent.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -1326,6 +1327,7 @@ impl TypeScriptExtractor {
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
                             }
                         }
@@ -1343,6 +1345,7 @@ impl TypeScriptExtractor {
                                             line: iface.start_position().row as u32,
                                             column: iface.start_position().column as u32,
                                             file_path: state.file_path.clone(),
+                                            unmodeled_import: None,
                                         });
                                     }
                                     if !inner.goto_next_sibling() {
@@ -1391,6 +1394,7 @@ impl TypeScriptExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1560,6 +1564,7 @@ impl TypeScriptExtractor {
                         line: child.start_position().row as u32,
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
                     });
                 }
             } else {

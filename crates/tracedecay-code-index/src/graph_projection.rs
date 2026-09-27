@@ -45,7 +45,7 @@ pub use self::interactive::{
     CodeGraphReadCostMeter, CodeGraphRelationKeyV1, CodeGraphRelationKeysV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
     CodeGraphSymbolPredicate, CodeGraphSymbolRefV1, CodeGraphSymbolSearchPageV1,
-    CodeGraphSymbolSummaryV1,
+    CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
 };
 use self::schema::{
     SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, record_property,

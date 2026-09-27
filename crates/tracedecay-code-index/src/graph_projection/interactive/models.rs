@@ -1,12 +1,12 @@
 //! Public interactive graph results and the generation-pinned lookup catalog.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Serialize, Serializer};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, FileOccurrenceId, RelationEdgeKindV1, SanitizedCodeFileV1,
-    SymbolOccurrenceId,
+    SymbolOccurrenceId, UnmodeledImportShapeV1,
 };
 use tracedecay_graph_db::GraphEntityId;
 
@@ -187,6 +187,21 @@ pub struct CodeGraphImpactBatchV1 {
 pub struct CodeGraphPathSearchV1 {
     pub path: Option<Vec<CanonicalRelationEdgeV1>>,
     pub complete: bool,
+}
+
+/// Unresolved call sites that can name a queried callee, by kind of gap.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnresolvedCallerGapsV1 {
+    /// A receiver or import call whose exact target the seal could not bind.
+    pub exact_target_unavailable: bool,
+    /// Calls under `use` shapes the extractor could not model.
+    pub unmodeled_imports: BTreeSet<UnmodeledImportShapeV1>,
+}
+
+impl UnresolvedCallerGapsV1 {
+    pub fn is_empty(&self) -> bool {
+        !self.exact_target_unavailable && self.unmodeled_imports.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -387,15 +402,12 @@ impl InteractiveCatalog {
 
     pub(super) fn insert(&mut self, occurrence: SymbolOccurrenceId, record: CatalogSymbol) {
         for reference in &record.unresolved_calls {
-            if let Some(member) = reference.reference_name.rsplit('.').next() {
-                let method = member.split("::").next().unwrap_or(member);
-                let sources = self
-                    .unresolved_call_sources
-                    .entry(method.to_owned())
-                    .or_default();
-                if sources.last() != Some(&occurrence) {
-                    sources.push(occurrence.clone());
-                }
+            let sources = self
+                .unresolved_call_sources
+                .entry(unresolved_callee_name(&reference.reference_name).to_owned())
+                .or_default();
+            if sources.last() != Some(&occurrence) {
+                sources.push(occurrence.clone());
             }
         }
         if let Some(metadata) = &record.metadata {
@@ -453,4 +465,13 @@ fn derived_simple_name(qualified_name: &str) -> String {
     let tail = qualified_name.rsplit("::").next().unwrap_or(qualified_name);
     let tail = tail.rsplit('.').next().unwrap_or(tail);
     tail.to_lowercase()
+}
+
+/// The callee name an unresolved call could bind: the member of a dotted
+/// receiver call (without turbofish), otherwise the last path segment.
+pub(super) fn unresolved_callee_name(reference_name: &str) -> &str {
+    match reference_name.rsplit_once('.') {
+        Some((_, member)) => member.split("::").next().unwrap_or(member),
+        None => reference_name.rsplit("::").next().unwrap_or(reference_name),
+    }
 }

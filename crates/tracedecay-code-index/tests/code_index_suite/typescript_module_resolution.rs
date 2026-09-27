@@ -176,7 +176,7 @@ fn callers_with_authority(
     callers
 }
 
-fn reader(generation: &CodeIndexPublishedGenerationV1) -> CodeGraphInteractiveReader {
+pub(crate) fn reader(generation: &CodeIndexPublishedGenerationV1) -> CodeGraphInteractiveReader {
     let manifest = PartitionedSealV1::of(generation).graph_manifest(
         code_graph_projection_identity(
             GraphNamespace::new("code-graph-ts-monorepo").expect("graph namespace"),

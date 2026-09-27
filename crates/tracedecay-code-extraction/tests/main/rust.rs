@@ -1500,3 +1500,113 @@ cfg_rt! { pub fn plain() {} }
         .collect::<Vec<_>>();
     assert_eq!(calls, vec![("handler", 0)]);
 }
+
+/// Calls through a `use` the extractor sees only inside one scope, with the
+/// name each call carries to the resolver and the unmodeled-import shape it
+/// is marked with.
+fn scoped_calls(source: &str, function: &str) -> Vec<(String, Option<UnmodeledImportShapeV1>)> {
+    let result = RustExtractor.extract_artifact("src/lib.rs", source).result;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let caller = result
+        .nodes
+        .iter()
+        .find(|node| node.name == function && node.kind == NodeKind::Function)
+        .unwrap_or_else(|| panic!("function {function}"));
+    result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Calls && reference.from_node_id == caller.id
+        })
+        .map(|reference| (reference.reference_name.clone(), reference.unmodeled_import))
+        .collect()
+}
+
+/// A `use` in an inline `mod` body binds for that module's functions, with
+/// `self::`/`super::` read against the inline module, not the file.
+#[test]
+fn inline_module_uses_qualify_calls_against_the_inline_module() {
+    let source = "\
+mod m;
+fn local() {}
+mod inner {
+    use crate::m::h;
+    use super::m::k;
+    use super::local;
+    use self::deeper::d;
+    mod deeper { pub fn d() {} }
+    pub fn inline_caller() { h(); k(); local(); d(); }
+}
+pub fn outer() { h(); }
+";
+    assert_eq!(
+        scoped_calls(source, "inline_caller"),
+        vec![
+            ("crate::m::h".to_owned(), None),
+            ("self::m::k".to_owned(), None),
+            ("local".to_owned(), None),
+            ("d".to_owned(), None),
+        ]
+    );
+    assert_eq!(scoped_calls(source, "outer"), vec![("h".to_owned(), None)]);
+}
+
+/// A glob `use` in a block or inline module qualifies the calls it could
+/// supply into its one project module and marks them with its shape; a
+/// named `use` still wins, and an external glob or a prelude name is left
+/// alone.
+#[test]
+fn glob_uses_qualify_and_mark_the_calls_they_could_supply() {
+    let source = "\
+mod m;
+mod n;
+pub fn glob_caller() {
+    use crate::m::*;
+    use crate::n::named;
+    g();
+    named();
+    Some(1);
+    println!(\"{}\", 1);
+}
+pub fn two_globs() {
+    use crate::m::*;
+    use crate::n::*;
+    g();
+}
+pub fn external_glob() {
+    use std::collections::*;
+    g();
+}
+mod inner {
+    use crate::m::*;
+    pub fn inline_caller() { g(); }
+}
+";
+    assert_eq!(
+        scoped_calls(source, "glob_caller"),
+        vec![
+            (
+                "crate::m::g".to_owned(),
+                Some(UnmodeledImportShapeV1::BlockGlob)
+            ),
+            ("crate::n::named".to_owned(), None),
+            ("Some".to_owned(), None),
+            ("println".to_owned(), None),
+        ]
+    );
+    assert_eq!(
+        scoped_calls(source, "two_globs"),
+        vec![("g".to_owned(), Some(UnmodeledImportShapeV1::BlockGlob))]
+    );
+    assert_eq!(
+        scoped_calls(source, "external_glob"),
+        vec![("g".to_owned(), None)]
+    );
+    assert_eq!(
+        scoped_calls(source, "inline_caller"),
+        vec![(
+            "crate::m::g".to_owned(),
+            Some(UnmodeledImportShapeV1::InlineModuleGlob)
+        )]
+    );
+}
