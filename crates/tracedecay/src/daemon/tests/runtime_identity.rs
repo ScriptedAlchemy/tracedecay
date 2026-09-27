@@ -382,8 +382,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         .await;
     assert!(matches!(
         primary_automation,
-        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Started
-            | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
+        tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
+            | tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified
     ));
     let linked_automation = engine
         .reconcile_automation_scheduler_locked(
@@ -394,8 +394,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         .await;
     assert!(matches!(
         linked_automation,
-        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
-            | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Exiting
+        tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified
+            | tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Exiting
     ));
     assert_eq!(
         engine
@@ -447,8 +447,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
                 primary_handshake.clone(),
             )
             .await,
-        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
-            | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Exiting
+        tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified
+            | tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Exiting
     ));
     // Every whole-worktree demand the daemon raised for the linked route on
     // its own, both full servers' startup catch-up and the `workspaceOpen`

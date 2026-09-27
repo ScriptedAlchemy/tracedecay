@@ -69,6 +69,7 @@ mod workflow_cli;
 mod workflow_command;
 
 use cli::*;
+use tracedecay_contracts::retrieval::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use tracedecay_daemon_service::logging::StderrTracingDefault;
 use tracedecay_runtime_core::config::ProfileRoot;
 
@@ -1861,49 +1862,28 @@ async fn dispatch_configuration_command(
     match command {
         Commands::CurrentCounter { path } => {
             let project_path = tracedecay_configuration::resolve_path(path);
-            let result = hotpath::future!(
-                commands::daemon_tool_json(
-                    profile,
-                    Some(&project_path),
-                    "tracedecay_admin_project",
-                    serde_json::json!({ "action": "counter_get" }),
-                ),
+            let value = hotpath::future!(
+                commands::local_counter(profile, &project_path),
                 label = "cli.counter.current"
             )
             .await?;
-            let value = result
-                .get("counter")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon counter response omitted counter".to_string(),
-                })?;
             println!("{value}");
         }
         Commands::ResetCounter { path } => {
             let project_path = tracedecay_configuration::resolve_path(path);
-            let result = commands::daemon_tool_json(
-                profile,
-                Some(&project_path),
-                "tracedecay_admin_project",
-                serde_json::json!({ "action": "counter_get" }),
-            )
-            .await?;
-            let prev = result
-                .get("counter")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon counter response omitted counter".to_string(),
-                })?;
-            hotpath::future!(
-                commands::daemon_tool_json(
+            let prev = commands::local_counter(profile, &project_path).await?;
+            let reset = hotpath::future!(
+                commands::admin_project(
                     profile,
-                    Some(&project_path),
-                    "tracedecay_admin_project",
-                    serde_json::json!({ "action": "counter_reset" }),
+                    &project_path,
+                    AdminProjectSurfaceRequestV1::CounterReset {},
                 ),
                 label = "cli.counter.reset"
             )
             .await?;
+            if !matches!(reset, AdminProjectResultV1::CounterReset(_)) {
+                return Err(commands::unexpected_admin_project_result());
+            }
             eprintln!("Local counter reset (was {prev})");
         }
         Commands::DisableUploadCounter => {

@@ -227,7 +227,8 @@ pub(super) async fn hermes_receipt(
     broker: &SharedHostAdmissionBroker,
 ) -> Result<HermesReceiptStatusV1> {
     let event: tracedecay_hooks::core_events::DaemonHookEvent =
-        serde_json::from_value(event_value.clone())?;
+        serde_json::from_value(event_value.clone())
+            .map_err(|error| config_error(format!("invalid Hermes receipt event: {error}")))?;
     if event.receipt.is_none() {
         return Err(config_error("Hermes event omitted receipt"));
     }

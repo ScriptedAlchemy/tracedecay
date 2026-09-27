@@ -34,11 +34,8 @@ pub use workflow::workflow_operation_for_tool;
 
 /// Tools the daemon serves itself; they carry no application-catalog
 /// contract and never enter the advertised dispatch catalog.
-pub const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
-    "tracedecay_admin_branch_add",
-    "tracedecay_admin_cli",
-    "tracedecay_admin_project",
-];
+pub const INTERNAL_DAEMON_TOOL_NAMES: &[&str] =
+    &["tracedecay_admin_branch_add", "tracedecay_admin_cli"];
 
 /// Which dispatch family owns a tool once the surface predicates decline it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -298,6 +295,7 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::ProjectSearch
         | ApplicationSurfaceOperation::ProjectContext
         | ApplicationSurfaceOperation::AdminSync
+        | ApplicationSurfaceOperation::AdminProject
         | ApplicationSurfaceOperation::HookRuntime
         | HealthRead
         | HealthDelta
@@ -349,7 +347,7 @@ macro_rules! binding_groups {
 #[rustfmt::skip]
 const BINDING_GROUPS: &[BindingGroup] = binding_groups![
     [Some(McpToolDispatchGroup::Admin), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_admin_cli", "tracedecay_admin_project"],
+        "tracedecay_admin_cli"],
     [Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_admin_branch_add"],
     [Some(McpToolDispatchGroup::MultiRoot), RegisteredProjectAccess::ActiveProjectOnly,

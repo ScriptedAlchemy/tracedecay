@@ -142,6 +142,11 @@ pub enum EffectClass {
     /// Queues work on a daemon-owned scheduler; the call answers with the
     /// scheduler's admission, not the finished work.
     SchedulesWork,
+    /// Maintains bookkeeping the daemon keeps for the project or profile it
+    /// serves: resets a usage counter, records registry token accounting, or
+    /// reconciles automation schedulers with the saved configuration. Each
+    /// write settles within the call and answers its new state.
+    MaintainsOwnerState,
     /// Records a host's session evidence (transcripts, hook admissions,
     /// receipts) in daemon-owned session stores.
     RecordsHostEvidence,
@@ -160,6 +165,7 @@ impl EffectClass {
             Self::SpawnsProcess
                 | Self::BindsServer
                 | Self::SchedulesWork
+                | Self::MaintainsOwnerState
                 | Self::RecordsHostEvidence
         )
     }

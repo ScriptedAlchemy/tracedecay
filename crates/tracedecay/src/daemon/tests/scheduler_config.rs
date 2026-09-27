@@ -455,11 +455,11 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     assert!(matches!(
         (first, second),
         (
-            tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Started,
-            tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
+            tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started,
+            tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified
         ) | (
-            tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified,
-            tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Started
+            tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified,
+            tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
         )
     ));
 }
@@ -568,7 +568,8 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
         "name": "tracedecay_admin_project",
         "arguments": {
             "action": "automation_reconcile",
-            "scope": "profile"
+            "scope": "profile",
+            "format": "json"
         }
     });
     let response = super::super::projectless_tools_call_response(
@@ -622,6 +623,28 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
             .load(std::sync::atomic::Ordering::Relaxed),
         opens_before,
         "profile reconcile must not open uncached projects"
+    );
+    // The profile owner answers only the requests that select the profile;
+    // a project action on a projectless connection names the project it
+    // needs.
+    let project_action = super::super::projectless_tools_call_response(
+        json!(74),
+        Some(&json!({
+            "name": "tracedecay_admin_project",
+            "arguments": {"action": "counter_get"}
+        })),
+        &client_identity,
+        &engine.store_administration,
+    )
+    .await;
+    assert_eq!(
+        project_action.error.map(|error| error.message),
+        Some(
+            "tool project route failed: reason_code=project_required retryable=false: \
+             tracedecay_admin_project requires an initialized code project; run it inside an \
+             initialized project or pass --project <path>"
+                .to_owned()
+        )
     );
     wait_for_automation_scheduler_state(
         &engine,
@@ -741,7 +764,8 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
             "name": "tracedecay_admin_project",
             "arguments": {
                 "action": "automation_reconcile",
-                "scope": "project"
+                "scope": "project",
+                "format": "json"
             }
         }
     }))
@@ -796,7 +820,7 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     use tracedecay_automation_runtime::automation::scheduler::{
         AutomationSchedulerControl, save_scheduler_control,
     };
-    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+    use tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome;
 
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().canonicalize().expect("canonical temp dir");

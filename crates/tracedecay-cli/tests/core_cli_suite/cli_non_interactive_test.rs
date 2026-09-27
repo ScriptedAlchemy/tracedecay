@@ -2445,6 +2445,19 @@ async fn automation_facts_list_reports_terminal_receipt_collection() {
     assert_eq!(payload["count"], 0);
     assert_eq!(payload["receipts"], serde_json::json!([]));
     assert!(payload["next_after_apply_id"].is_null());
+
+    // A state outside the receipt contract is refused, not normalized.
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["automation", "facts", "list", "--state", " applied "]);
+    let output = run_with_timeout(command, cli_timeout());
+    assert!(!output.status.success(), "a padded state must be refused");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("invalid automatic fact state ` applied `; expected applied or quarantined"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// The daemon compiles the manual branch-activation journey only on Unix

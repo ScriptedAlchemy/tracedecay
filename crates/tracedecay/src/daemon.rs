@@ -353,7 +353,7 @@ mod store_maintenance;
 pub use production_harness::ProductionProjectCompositionHarnessV1;
 #[cfg(all(unix, feature = "test-transport"))]
 pub use production_harness::capture_exact_git_snapshot_for_test;
-mod profile_registry;
+mod profile_owner;
 mod profile_retained;
 mod projectless;
 mod remote_deletion;

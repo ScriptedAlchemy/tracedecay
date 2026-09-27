@@ -83,10 +83,12 @@ async fn initialize_codex_daemon_automation_project(
         profile,
         project_path,
         |handshake| async move {
-            tracedecay::daemon::call_default_tool(
-                &handshake,
-                "tracedecay_admin_project",
-                serde_json::json!({"action": "counter_get"}),
+            let deadline =
+                tokio::time::Instant::now() + crate::tool_command::tool_command_deadline()?;
+            crate::commands::admin_project_until(
+                handshake,
+                tracedecay_contracts::retrieval::AdminProjectSurfaceRequestV1::CounterGet {},
+                deadline,
             )
             .await
             .map(|_| ())

@@ -116,7 +116,7 @@ async fn rejected_token_reads_typed_refusal_and_daemon_keeps_serving() {
             &socket,
             &healthy,
             "tracedecay_admin_project",
-            json!({ "action": "automation_reconcile", "scope": "profile" }),
+            json!({ "action": "automation_reconcile", "scope": "profile", "format": "json" }),
         ),
     )
     .await

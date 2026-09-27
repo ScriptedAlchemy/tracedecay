@@ -14,6 +14,9 @@ use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
 use tracedecay_contracts::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
+use tracedecay_contracts::retrieval::{
+    AdminProjectResultV1, AdminProjectStatusAccountingV1, AdminProjectSurfaceRequestV1,
+};
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
@@ -456,25 +459,25 @@ async fn handle_status_command_within(
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
-    let accounting = daemon_tool_json_within(
-        profile,
+    // The shorter deadline rides inside the call so the owner can settle a
+    // typed terminal; the command deadline is only the response backstop.
+    let accounting = await_daemon_tool_result(
         deadline,
-        server_deadline,
-        &project_path,
         "tracedecay_admin_project",
-        serde_json::json!({ "action": "status_accounting" }),
+        commands::admin_project_until(
+            commands::client_handshake(profile, Some(&project_path))?,
+            AdminProjectSurfaceRequestV1::StatusAccounting {},
+            server_deadline,
+        ),
     )
     .await?;
-    reject_truncation_envelope(&accounting, "tracedecay_admin_project")?;
-    let tokens_saved = accounting
-        .get("tokens_saved")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: "daemon status accounting omitted token count".to_string(),
-        })?;
-    let global_tokens_saved = accounting
-        .get("global_tokens_saved")
-        .and_then(Value::as_u64);
+    let AdminProjectResultV1::StatusAccounting(AdminProjectStatusAccountingV1 {
+        tokens_saved,
+        global_tokens_saved,
+    }) = accounting
+    else {
+        return Err(commands::unexpected_admin_project_result());
+    };
     let upload_enabled = timeout_at(
         deadline,
         commands::canonical_upload_enabled(profile, &project_path),

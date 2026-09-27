@@ -952,6 +952,7 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::ProjectSearch
         | ApplicationSurfaceOperation::ProjectContext
         | ApplicationSurfaceOperation::AdminSync
+        | ApplicationSurfaceOperation::AdminProject
         | ApplicationSurfaceOperation::HookRuntime => match value {
             Value::Object(arguments) => Ok(ApplicationSurfaceRequest::GraphTool(arguments)),
             _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(

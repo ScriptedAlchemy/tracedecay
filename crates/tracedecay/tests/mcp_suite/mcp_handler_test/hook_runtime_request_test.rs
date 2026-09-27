@@ -1,7 +1,8 @@
 //! `tracedecay_hook_runtime` over the production MCP `tools/call` path, the
-//! way agent-host hooks call it: the project's owner answers each action's
-//! typed result, and a request outside what hosts send is refused through the
-//! owner's problem record instead of being ignored.
+//! way agent-host hooks call it: the project's owner, or the profile owner for
+//! a hook with no project route, answers each action's typed result, and a
+//! request outside what hosts send is refused through the owner's problem
+//! record instead of being ignored.
 
 #![cfg(feature = "test-transport")]
 
@@ -109,13 +110,26 @@ async fn hook_runtime_answers_typed_results_and_refuses_what_no_host_sends() {
             "invalid arguments for tracedecay_hook_runtime: unknown variant `codex_stop`, expected one of `reset_counter`, `hook_v2_admit`, `hook_v2_delivery_receipt`, `hook_v2_feedback_notice_delivery`, `opencode_lsp_updated`, `ingest_transcript`, `codex_compact`, `claude_compact`, `cursor_compact`, `user_review`, `hermes_receipt`, `hook_v2_profile_admit`"
         )
     );
+
+    // A hook with no project route selects the profile; the daemon's profile
+    // owner answers it even on a project connection.
+    assert_eq!(
+        refusal(
+            &fixture,
+            json!({"action": "user_review", "provider": "codex", "session_id": null})
+        )
+        .await,
+        invalid(
+            "projectless Hermes review is unavailable: automation requires a pinned project configuration"
+        )
+    );
     assert_eq!(
         refusal(
             &fixture,
             json!({"action": "ingest_transcript", "provider": "codex", "user_scope": true})
         )
         .await,
-        invalid("user transcript ingest requires projectless daemon routing")
+        invalid("missing required parameter `session_id`")
     );
     assert_eq!(
         refusal(
@@ -123,7 +137,7 @@ async fn hook_runtime_answers_typed_results_and_refuses_what_no_host_sends() {
             json!({"action": "hermes_receipt", "event": {"agent": "hermes"}})
         )
         .await,
-        invalid("hook action `hermes_receipt` requires projectless daemon routing")
+        invalid("invalid Hermes receipt event: missing field `event`")
     );
 
     fixture.harness.shutdown().await;

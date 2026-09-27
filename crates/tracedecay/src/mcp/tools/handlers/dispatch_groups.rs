@@ -13,8 +13,8 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
 };
 use tracedecay_contracts::retrieval::{
-    ActiveProjectSurfaceRequestV1, AdminSyncSurfaceRequestV1, RemoteStatusSurfaceRequestV1,
-    RuntimeSurfaceRequestV1, StatusSurfaceRequestV1,
+    ActiveProjectSurfaceRequestV1, AdminProjectSurfaceRequestV1, AdminSyncSurfaceRequestV1,
+    RemoteStatusSurfaceRequestV1, RuntimeSurfaceRequestV1, StatusSurfaceRequestV1,
 };
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
 use tracedecay_mcp::handlers::health as portable_health;
@@ -109,8 +109,7 @@ async fn admitted_graph_query_for_operation(
     Ok(query)
 }
 
-/// Dispatch administrative tools (`tracedecay_admin_cli`,
-/// `tracedecay_admin_project`).
+/// Dispatch administrative tools (`tracedecay_admin_cli`).
 #[hotpath::measure(future = true, label = "mcp.dispatch.admin")]
 pub(super) async fn dispatch_admin_tools(
     tool_name: &str,
@@ -143,27 +142,6 @@ fn dispatch_admin_tools_inner<'a>(
                     options.application_request_id.clone(),
                     options.application_deadline.clone(),
                     options.application_cancellation.clone(),
-                )
-                .await
-            }
-            "tracedecay_admin_project" => {
-                let deadline = options.application_deadline.clone().ok_or_else(|| {
-                    TraceDecayError::Config {
-                        message: "admin project request deadline is unavailable".to_owned(),
-                    }
-                })?;
-                let cancellation = options.application_cancellation.clone().ok_or_else(|| {
-                    TraceDecayError::Config {
-                        message: "admin project cancellation authority is unavailable".to_owned(),
-                    }
-                })?;
-                admin_project::handle_admin_project(
-                    cg,
-                    args,
-                    options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
-                    options.automation_scheduler_reconciler,
-                    deadline,
-                    cancellation,
                 )
                 .await
             }
@@ -709,7 +687,9 @@ fn admitted_tool_context<'a>(
 
 /// Runs one side-effecting owner operation under the owner's admitted
 /// authorities. The dashboard composes the daemon-owned readers and writers
-/// this owner carries; the test run admits the verified graph to select tests.
+/// this owner carries; the test run admits the verified graph to select tests;
+/// admin project maintains the project's counter, registry accounting, and
+/// automation scheduler.
 async fn compute_owner_side_effect(
     cg: &TraceDecay,
     operation: ApplicationSurfaceOperation,
@@ -732,6 +712,31 @@ async fn compute_owner_side_effect(
             GraphToolResultV1::AdminSync(
                 info::admin_sync(cg, options.code_index_reconcile_sink.as_ref()).await?,
             )
+        }
+        ApplicationSurfaceOperation::AdminProject => {
+            let request: AdminProjectSurfaceRequestV1 =
+                decode_primitive_request(&args, operation.mcp_tool_name())?;
+            let (Some(deadline), Some(cancellation)) = (
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            ) else {
+                return Err(TraceDecayError::project_route(
+                    "application_surface_controls_unavailable",
+                    true,
+                    "tracedecay_admin_project requires the caller's deadline and cancellation",
+                ));
+            };
+            GraphToolResultV1::AdminProject(Box::new(
+                admin_project::compute_admin_project(
+                    cg,
+                    request,
+                    options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
+                    options.automation_scheduler_reconciler.clone(),
+                    deadline,
+                    cancellation,
+                )
+                .await?,
+            ))
         }
         ApplicationSurfaceOperation::HookRuntime => GraphToolResultV1::HookRuntime(
             hook_runtime::compute_hook_runtime(

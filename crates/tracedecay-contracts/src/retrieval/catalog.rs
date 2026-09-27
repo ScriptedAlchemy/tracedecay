@@ -1,3 +1,4 @@
+use crate::retrieval::admin_project_surface::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use crate::retrieval::hook_runtime_surface::{HookRuntimeResultV1, HookRuntimeSurfaceRequestV1};
 use crate::retrieval::owner_effect_surface::{
     AdminSyncResultV1, AdminSyncSurfaceRequestV1, DashboardResultV1, DashboardSurfaceRequestV1,
@@ -280,6 +281,7 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("project_search"),
     graph_report_spec("project_context"),
     owner_side_effect_spec(ApplicationSurfaceOperation::AdminSync),
+    owner_side_effect_spec(ApplicationSurfaceOperation::AdminProject),
     owner_side_effect_spec(ApplicationSurfaceOperation::HookRuntime),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
@@ -389,6 +391,7 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "project_search"
         | "project_context"
         | "admin_sync"
+        | "admin_project"
         | "hook_runtime" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
@@ -638,6 +641,9 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "admin_sync" => {
             "Queue the operator's code-index reconcile of the served project and report the scheduler's admission."
+        }
+        "admin_project" => {
+            "Maintain the served project's daemon bookkeeping: its usage counter, registry token accounting, gitignore status, bench report, automatic-fact receipts, and automation scheduler reconcile."
         }
         "hook_runtime" => {
             "Record one agent-host hook's session evidence (a transcript, a hook admission, or a receipt) in the daemon-owned session stores."
@@ -1201,6 +1207,11 @@ fn primitive_executable_schemas(
         ProjectContextResultV1
     );
     add!("admin_sync", AdminSyncSurfaceRequestV1, AdminSyncResultV1);
+    add!(
+        "admin_project",
+        AdminProjectSurfaceRequestV1,
+        AdminProjectResultV1
+    );
     add!(
         "hook_runtime",
         HookRuntimeSurfaceRequestV1,

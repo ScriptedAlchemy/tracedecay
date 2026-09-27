@@ -542,6 +542,7 @@ fn route_effect(effect: EffectClass) -> Result<CapabilityEffectClassV1, Applicat
         | EffectClass::SpawnsProcess
         | EffectClass::BindsServer
         | EffectClass::SchedulesWork
+        | EffectClass::MaintainsOwnerState
         | EffectClass::RecordsHostEvidence => Err(ApplicationContractError::Inconsistent {
             field: "capability routing effect class",
         }),

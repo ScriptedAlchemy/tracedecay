@@ -109,7 +109,7 @@ async fn version_skewed_client_cannot_crash_the_daemon() {
             &socket,
             &healthy,
             "tracedecay_admin_project",
-            json!({ "action": "automation_reconcile", "scope": "profile" }),
+            json!({ "action": "automation_reconcile", "scope": "profile", "format": "json" }),
         ),
     )
     .await

@@ -362,7 +362,7 @@ async fn automation_retirement_reserves_only_after_scheduler_lock_admission() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
-    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+    use tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome;
 
     let engine = DaemonEngine::default();
     let key = ProjectServerKey {

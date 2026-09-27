@@ -12,20 +12,20 @@ use crate::retrieval::{
     ProjectRegistryListingResultV1, RuntimeResultV1, StatusResultV1,
 };
 use crate::retrieval::{
-    AdminSyncResultV1, AffectedResultV1, AnalyticsResultV1, AstGrepSearchResultV1,
-    AutomationRunArtifactViewResultV1, AutomationRunListResultV1, AutomationRunViewResultV1,
-    BranchDiffResultV1, BranchListResultV1, BranchSearchResultV1, ByQualifiedNameResultV1,
-    ChangelogResultV1, CircularResultV1, CommitContextResultV1, ComplexityReportV1, ConfigResultV1,
-    ConstructorsResultV1, ContextResultV1, CouplingResultV1, DashboardResultV1, DeadCodeResultV1,
-    DependencyDepthResultV1, DerivesResultV1, DiagnoseResultV1, DiffContextResultV1,
-    DistributionResultV1, DocCoverageResultV1, DsmResultV1, FieldSitesResultV1, FilesResultV1,
-    FindExactSymbolResultV1, GiniResultV1, GodClassResultV1, GrepSearchResultV1, HealthResultV1,
-    HermesSkillBridgeResultV1, HotspotsResultV1, ImpactResultV1, InheritanceDepthResultV1,
-    LargestResultV1, NodeResultV1, PortOrderResultV1, PortStatusResultV1, PrContextResultV1,
-    RankResultV1, RecursionResultV1, RedundancyResultV1, RenamePreviewPrimitiveOutcomeV1,
-    RetrieveResultV1, RunAffectedTestsResultV1, SearchResultV1, SignatureResultV1, SimilarResultV1,
-    SkillListResultV1, SkillViewResultV1, TestMapResultV1, TestRiskResultV1, TodosResultV1,
-    UnmountedFilesResultV1, UnsafePatternsResultV1,
+    AdminProjectResultV1, AdminSyncResultV1, AffectedResultV1, AnalyticsResultV1,
+    AstGrepSearchResultV1, AutomationRunArtifactViewResultV1, AutomationRunListResultV1,
+    AutomationRunViewResultV1, BranchDiffResultV1, BranchListResultV1, BranchSearchResultV1,
+    ByQualifiedNameResultV1, ChangelogResultV1, CircularResultV1, CommitContextResultV1,
+    ComplexityReportV1, ConfigResultV1, ConstructorsResultV1, ContextResultV1, CouplingResultV1,
+    DashboardResultV1, DeadCodeResultV1, DependencyDepthResultV1, DerivesResultV1,
+    DiagnoseResultV1, DiffContextResultV1, DistributionResultV1, DocCoverageResultV1, DsmResultV1,
+    FieldSitesResultV1, FilesResultV1, FindExactSymbolResultV1, GiniResultV1, GodClassResultV1,
+    GrepSearchResultV1, HealthResultV1, HermesSkillBridgeResultV1, HotspotsResultV1,
+    ImpactResultV1, InheritanceDepthResultV1, LargestResultV1, NodeResultV1, PortOrderResultV1,
+    PortStatusResultV1, PrContextResultV1, RankResultV1, RecursionResultV1, RedundancyResultV1,
+    RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, RunAffectedTestsResultV1, SearchResultV1,
+    SignatureResultV1, SimilarResultV1, SkillListResultV1, SkillViewResultV1, TestMapResultV1,
+    TestRiskResultV1, TodosResultV1, UnmountedFilesResultV1, UnsafePatternsResultV1,
 };
 
 /// One graph read's typed result, tagged by its operation.
@@ -99,6 +99,7 @@ pub enum GraphToolResultV1 {
     ProjectSearch(ProjectRegistryListingResultV1),
     ProjectContext(ProjectContextResultV1),
     AdminSync(AdminSyncResultV1),
+    AdminProject(Box<AdminProjectResultV1>),
     HookRuntime(HookRuntimeResultV1),
 }
 
@@ -179,6 +180,7 @@ impl GraphToolResultV1 {
             Operation::ProjectSearch => Self::ProjectSearch(serde_json::from_value(value)?),
             Operation::ProjectContext => Self::ProjectContext(serde_json::from_value(value)?),
             Operation::AdminSync => Self::AdminSync(serde_json::from_value(value)?),
+            Operation::AdminProject => Self::AdminProject(serde_json::from_value(value)?),
             Operation::HookRuntime => Self::HookRuntime(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
@@ -258,6 +260,7 @@ impl GraphToolResultV1 {
             Self::ProjectList(result) | Self::ProjectSearch(result) => serde_json::to_value(result),
             Self::ProjectContext(result) => serde_json::to_value(result),
             Self::AdminSync(result) => serde_json::to_value(result),
+            Self::AdminProject(result) => serde_json::to_value(result),
             Self::HookRuntime(result) => serde_json::to_value(result),
         }
     }

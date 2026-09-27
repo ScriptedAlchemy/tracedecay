@@ -6,8 +6,8 @@ use tracedecay_sessions::runtime::hosts::claude_observation::ClaudeObservationIn
 /// actually reported.
 ///
 /// Every hook-runtime failure raised from this module goes through here, so
-/// `tracedecay_mcp::structured_hook_error_data` can serialize the reported
-/// status instead of inferring one from the reason code.
+/// the owner's refusal carries the authority's own reason code and retry
+/// verdict instead of inferring them from prose.
 pub fn hook_admission_error(
     status: HostAdmissionStatus,
     reason_code: impl Into<String>,

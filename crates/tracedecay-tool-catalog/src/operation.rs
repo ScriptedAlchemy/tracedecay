@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 macro_rules! application_surface_operations {
     (
@@ -219,6 +220,7 @@ application_surface_operations! {
     ProjectSearch => "project_search";
     ProjectContext => "project_context";
     AdminSync => "admin_sync";
+    AdminProject => "admin_project";
     HookRuntime => "hook_runtime";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
@@ -354,6 +356,7 @@ impl ApplicationSurfaceOperation {
         Self::RemoteStatus,
         Self::Runtime,
         Self::AdminSync,
+        Self::AdminProject,
         Self::HookRuntime,
     ];
 
@@ -366,7 +369,8 @@ impl ApplicationSurfaceOperation {
     /// Owner-served operations that first-party CLI commands and host hooks
     /// call by name. They are never advertised in `tools/list` or mounted on
     /// HTTP, so an agent cannot discover or select them.
-    pub const INTERNAL_OPERATIONS: &[Self] = &[Self::AdminSync, Self::HookRuntime];
+    pub const INTERNAL_OPERATIONS: &[Self] =
+        &[Self::AdminSync, Self::AdminProject, Self::HookRuntime];
 
     pub fn is_graph_tool(self) -> bool {
         Self::GRAPH_TOOL_OPERATIONS.contains(&self)
@@ -378,6 +382,30 @@ impl ApplicationSurfaceOperation {
 
     pub fn is_profile_registry_read(self) -> bool {
         Self::PROFILE_REGISTRY_OPERATIONS.contains(&self)
+    }
+
+    /// Whether the daemon's profile owner, not a project's owner, answers
+    /// this call. A registry read always names no project; an operation
+    /// that is otherwise project-scoped reaches the profile owner only for
+    /// the requests that select the profile.
+    pub fn is_profile_owner_request(self, arguments: &serde_json::Map<String, Value>) -> bool {
+        let argument = |key: &str| arguments.get(key).and_then(Value::as_str);
+        match self {
+            Self::ProjectList | Self::ProjectSearch | Self::ProjectContext => true,
+            Self::AdminProject => {
+                argument("action") == Some("automation_reconcile")
+                    && argument("scope") == Some("profile")
+            }
+            // A hook with no project route lands in the profile's stores.
+            Self::HookRuntime => match argument("action") {
+                Some("user_review" | "hermes_receipt" | "hook_v2_profile_admit") => true,
+                Some("ingest_transcript" | "claude_compact") => {
+                    arguments.get("user_scope").and_then(Value::as_bool) == Some(true)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 }
 
@@ -404,6 +432,67 @@ mod tests {
             ApplicationSurfaceOperation::from_catalog_name("not_an_operation"),
             None
         );
+    }
+
+    #[test]
+    fn only_profile_selecting_requests_reach_the_profile_owner() {
+        let owner = |operation: ApplicationSurfaceOperation, arguments: serde_json::Value| {
+            operation.is_profile_owner_request(arguments.as_object().expect("object arguments"))
+        };
+        let profile_reconcile =
+            serde_json::json!({"action": "automation_reconcile", "scope": "profile"});
+        assert!(owner(
+            ApplicationSurfaceOperation::ProjectList,
+            serde_json::json!({})
+        ));
+        assert!(owner(
+            ApplicationSurfaceOperation::AdminProject,
+            profile_reconcile.clone()
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminProject,
+            serde_json::json!({"action": "automation_reconcile", "scope": "project"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminProject,
+            serde_json::json!({"action": "counter_get"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminSync,
+            profile_reconcile
+        ));
+        for (arguments, profile) in [
+            (
+                serde_json::json!({"action": "hermes_receipt", "event": {}}),
+                true,
+            ),
+            (serde_json::json!({"action": "hook_v2_profile_admit"}), true),
+            (serde_json::json!({"action": "user_review"}), true),
+            (
+                serde_json::json!({"action": "ingest_transcript", "user_scope": true}),
+                true,
+            ),
+            (
+                serde_json::json!({"action": "ingest_transcript", "user_scope": false}),
+                false,
+            ),
+            (
+                serde_json::json!({"action": "claude_compact", "user_scope": true}),
+                true,
+            ),
+            (
+                serde_json::json!({"action": "claude_compact", "user_scope": "true"}),
+                false,
+            ),
+            (serde_json::json!({"action": "reset_counter"}), false),
+            (serde_json::json!({"action": "hook_v2_admit"}), false),
+        ] {
+            assert_eq!(
+                owner(ApplicationSurfaceOperation::HookRuntime, arguments.clone()),
+                profile,
+                "{arguments}"
+            );
+        }
     }
 
     #[test]
