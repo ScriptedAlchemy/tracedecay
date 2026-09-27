@@ -12,10 +12,15 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
 };
+use tracedecay_contracts::retrieval::{
+    ActiveProjectSurfaceRequestV1, RemoteStatusSurfaceRequestV1, RuntimeSurfaceRequestV1,
+    StatusSurfaceRequestV1,
+};
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
+use tracedecay_mcp::handlers::health as portable_health;
 use tracedecay_mcp::handlers::info as portable_info;
 use tracedecay_mcp::handlers::{
-    VerifiedGraphOpenFuture, unknown_tool_error, verified_read_operation,
+    VerifiedGraphOpenFuture, decode_primitive_request, unknown_tool_error, verified_read_operation,
 };
 use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
 use tracedecay_mcp::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
@@ -28,9 +33,6 @@ use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use super::ToolCallRegistryOptions;
 use super::{application_surface, dashboard, dispatch_controls, info};
 use tracedecay_mcp::handlers::{admin_cli, admin_project, edit, hook_runtime, workflow};
-
-mod health_dispatch;
-pub(super) use health_dispatch::dispatch_health_tools;
 
 fn graph_read_unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::ProjectRoute {
@@ -107,93 +109,19 @@ async fn admitted_graph_query_for_operation(
     Ok(query)
 }
 
-/// Dispatch project-info, registry, and file-inspection tools
-/// (`tracedecay_status`, `tracedecay_project_list`, ...).
-#[allow(clippy::too_many_arguments)]
+/// Dispatch the daemon-only `tracedecay_admin_sync`.
 #[hotpath::measure(future = true, label = "mcp.dispatch.info")]
 pub(super) async fn dispatch_info_tools(
     tool_name: &str,
     cg: &TraceDecay,
-    args: Value,
-    server_stats: Option<Value>,
-    scope_prefix: Option<&str>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    dispatch_info_tools_inner(tool_name, cg, args, server_stats, scope_prefix, options).await
-}
-
-fn dispatch_info_tools_inner<'a>(
-    tool_name: &'a str,
-    cg: &'a TraceDecay,
-    args: Value,
-    server_stats: Option<Value>,
-    scope_prefix: Option<&'a str>,
-    options: ToolCallRegistryOptions<'a>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    // Erase the deeply nested match-arm futures before they reach the
-    // measured wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        // Registry, status, and remote-status reads bind daemon authorities
-        // only the root holds (registry port, status snapshots, remote
-        // status reader, reconcile sink); the graph-backed file inspections
-        // dispatch through the portable table.
-        match tool_name {
-            "tracedecay_remote_status" => portable_info::handle_remote_status(
-                &cg.store_layout().response_handle_root,
-                &args,
-                options.remote_operational_status.as_ref(),
-            ),
-            "tracedecay_status" => {
-                // Wait before admitting snapshots, so the payload describes
-                // the worktree the wait ended on.
-                let wait = match portable_info::status_readiness_wait(&args)? {
-                    Some(request) => {
-                        Some(status_readiness_wait(&options, cg.project_root(), request).await?)
-                    }
-                    None => None,
-                };
-                let project = admitted_project_authorities(cg, &options)?;
-                let snapshots = admitted_status_snapshots(&options).await;
-                let ctx = admitted_tool_context_for(&options, &project, &snapshots)?;
-                portable_info::handle_status(&ctx, args, server_stats, scope_prefix, wait).await
-            }
-            "tracedecay_active_project" => {
-                let project = admitted_project_authorities(cg, &options)?;
-                let snapshots = AdmittedRequestSnapshotsV1::default();
-                let ctx = admitted_tool_context_for(&options, &project, &snapshots)?;
-                portable_info::handle_active_project(&ctx, &args, server_stats, scope_prefix).await
-            }
-            "tracedecay_project_list" => {
-                portable_info::handle_project_list(
-                    Some(cg.project_root()),
-                    args,
-                    options.project_registry_reads,
-                )
-                .await
-            }
-            "tracedecay_project_search" => {
-                portable_info::handle_project_search(
-                    Some(cg.project_root()),
-                    args,
-                    options.project_registry_reads,
-                )
-                .await
-            }
-            "tracedecay_project_context" => {
-                portable_info::handle_project_context(
-                    Some(cg.project_root()),
-                    Some(&cg.store_layout().response_handle_root),
-                    args,
-                    options.project_registry_reads,
-                )
-                .await
-            }
-            "tracedecay_admin_sync" => {
-                info::handle_admin_sync(cg, options.code_index_reconcile_sink.as_ref()).await
-            }
-            _ => Err(unknown_tool_error(tool_name)),
+    match tool_name {
+        "tracedecay_admin_sync" => {
+            info::handle_admin_sync(cg, options.code_index_reconcile_sink.as_ref()).await
         }
-    })
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch administrative tools (`tracedecay_hook_runtime`,
@@ -294,7 +222,7 @@ fn dispatch_application_surface_tools_inner<'a>(
         };
         let retained = RetainedSurfaceOperation::from_application(operation).is_some();
         let source_edit = tracedecay_daemon_protocol::is_source_edit_operation(operation);
-        let graph_tool = operation.is_graph_tool();
+        let graph_tool = operation.is_graph_tool() || operation.is_profile_registry_read();
         // An already-elapsed carried deadline is refused before these tools
         // dispatch, exactly as their retained handlers always refused it.
         if (retained || source_edit || graph_tool)
@@ -435,6 +363,29 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                 Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
             };
         }
+        if matches!(
+            operation,
+            ApplicationSurfaceOperation::Status
+                | ApplicationSurfaceOperation::ActiveProject
+                | ApplicationSurfaceOperation::RemoteStatus
+                | ApplicationSurfaceOperation::Runtime
+        ) {
+            let computed = compute_project_info(cg, operation, &args, scope_prefix, &options);
+            return match tokio::time::timeout(budget, computed).await {
+                Ok(result) => {
+                    result.map(
+                        |result| tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
+                            result,
+                            touched_files: Vec::new(),
+                            code_graph: None,
+                            analytics: None,
+                            cost: None,
+                        },
+                    )
+                }
+                Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+            };
+        }
         let project = admitted_project_authorities(cg, &options)?;
         let snapshots = AdmittedRequestSnapshotsV1::default();
         let freshness = graph_freshness_reader(tool_name, &options);
@@ -468,6 +419,75 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
         completion.code_graph = options.served_code_graph.served();
         Ok(completion)
     })
+}
+
+/// The project-info and runtime reads the owner answers from the daemon
+/// authorities it holds: the census and readiness waiter (status), the
+/// Remote Brain reader (remote status), and the doctor report and global
+/// registry (runtime).
+async fn compute_project_info(
+    cg: &TraceDecay,
+    operation: ApplicationSurfaceOperation,
+    args: &Value,
+    scope_prefix: Option<&str>,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<GraphToolResultV1> {
+    let tool_name = operation.mcp_tool_name();
+    match operation {
+        ApplicationSurfaceOperation::Status => {
+            let request: StatusSurfaceRequestV1 = decode_primitive_request(args, tool_name)?;
+            // Wait before admitting snapshots, so the payload describes the
+            // worktree the wait ended on.
+            let wait = match request.wait_for {
+                Some(wait_for) => {
+                    Some(status_readiness_wait(options, cg.project_root(), wait_for).await?)
+                }
+                None => None,
+            };
+            let project = admitted_project_authorities(cg, options)?;
+            let snapshots = admitted_status_snapshots(options).await;
+            let ctx = admitted_tool_context_for(options, &project, &snapshots)?;
+            portable_info::compute_status(
+                &ctx,
+                &request,
+                options.server_stats.clone(),
+                scope_prefix,
+                wait,
+            )
+            .await
+            .map(GraphToolResultV1::Status)
+        }
+        ApplicationSurfaceOperation::ActiveProject => {
+            let ActiveProjectSurfaceRequestV1 {} = decode_primitive_request(args, tool_name)?;
+            let project = admitted_project_authorities(cg, options)?;
+            let snapshots = AdmittedRequestSnapshotsV1::default();
+            let ctx = admitted_tool_context_for(options, &project, &snapshots)?;
+            Ok(GraphToolResultV1::ActiveProject(
+                portable_info::compute_active_project(&ctx, scope_prefix).await,
+            ))
+        }
+        ApplicationSurfaceOperation::RemoteStatus => {
+            let RemoteStatusSurfaceRequestV1 {} = decode_primitive_request(args, tool_name)?;
+            Ok(GraphToolResultV1::RemoteStatus(
+                portable_info::read_remote_status(options.remote_operational_status.as_ref()),
+            ))
+        }
+        ApplicationSurfaceOperation::Runtime => {
+            let request: RuntimeSurfaceRequestV1 = decode_primitive_request(args, tool_name)?;
+            let project = admitted_project_authorities(cg, options)?;
+            let snapshots = admitted_runtime_snapshots(options, request.doctor_report).await;
+            let ctx = admitted_tool_context(options, &project, &snapshots, None)?;
+            portable_health::compute_runtime(
+                &ctx,
+                &request,
+                options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
+                tracedecay_project::version::build_version()?,
+            )
+            .await
+            .map(|runtime| GraphToolResultV1::Runtime(Box::new(runtime)))
+        }
+        operation => Err(unknown_tool_error(operation.mcp_tool_name())),
+    }
 }
 
 /// Builds the request-scoped admitted project snapshot from the live

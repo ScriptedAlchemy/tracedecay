@@ -365,18 +365,11 @@ async fn project_list_reports_a_broken_registry_as_a_tool_error() {
 
     let response = tools_call(&server, json!({"format": "json"})).await;
     assert_eq!(
-        response,
+        crate::support::tool_refusal(&response),
         json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "error": {
-                "code": -32603,
-                "message": "tool execution failed: database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
-                "data": {
-                    "tool": "tracedecay_project_list",
-                    "cli_fallback": "This tool is also available from the shell: `tracedecay tool project_list ...` (`tracedecay tool project_list --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-                }
-            }
+            "kind": "unavailable",
+            "code": "graph_tool.failed",
+            "message": "database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
         })
     );
 }

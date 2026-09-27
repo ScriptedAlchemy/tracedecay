@@ -137,7 +137,6 @@ impl McpServer {
                 tool_name,
                 routed.arguments,
                 routed.selected_project.as_ref(),
-                None,
                 application_invocation_executor,
                 application_invocation_target,
                 Some(
@@ -209,11 +208,6 @@ impl McpServer {
                 publish_activity,
             )
             .await;
-        let server_stats = if tool_name == "tracedecay_status" {
-            Some(dispatch_server.server_stats_json().await)
-        } else {
-            None
-        };
         let ApplicationSurfaceDispatch {
             invocation_executor: application_invocation_executor,
             ..
@@ -226,7 +220,6 @@ impl McpServer {
                 tool_name,
                 routed.arguments,
                 routed.selected_project.as_ref(),
-                server_stats,
                 application_invocation_executor,
                 application_invocation_target,
                 application_request_id,
@@ -255,7 +248,6 @@ impl McpServer {
         tool_name: &str,
         handler_arguments: Value,
         resolved_project_route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
-        server_stats: Option<Value>,
         application_invocation_executor: Option<
             &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
         >,
@@ -287,11 +279,9 @@ impl McpServer {
             cg,
             tool_name,
             handler_arguments,
-            server_stats,
-            self.scope_prefix(),
             ToolCallRegistryOptions {
                 global_db: self.registry_db.as_ref(),
-                project_registry_reads: self.project_registry_reads.as_deref(),
+                server_stats: None,
                 accounting_db: self.accounting_db.as_deref(),
                 registered_project_session_db: self.project_session_db.clone(),
                 registered_profile_session_db: self.profile_session_db.clone(),

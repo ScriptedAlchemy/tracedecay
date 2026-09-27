@@ -18,17 +18,21 @@ use tracedecay_lsp::LspSessionRegistry;
 use super::project_open_owners::project_open_retained_grant;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
-use tracedecay_contracts::now_micros;
+use tracedecay_contracts::{ResolvedScope, now_micros};
 use tracedecay_daemon_service::{
     DaemonInvocationService, DaemonRetainedRuntimeRegistrar, daemon_owned_project_source_access_at,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 #[derive(Clone)]
 struct RetainedOwnerTestExecutor {
     service: DaemonInvocationService,
     lsp_registry: Arc<Mutex<LspSessionRegistry>>,
     project_root: PathBuf,
+    /// The profile registry the daemon composition root answers registry
+    /// reads from, with the profile session scope they report under.
+    profile_registry: Option<(ResolvedScope, RegisteredGlobalDbLeaseV1)>,
 }
 
 impl tracedecay_contracts::ApplicationInvocationExecutor for RetainedOwnerTestExecutor {
@@ -83,6 +87,33 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
                     },
                 );
             }
+            if let tracedecay_daemon_protocol::DaemonInvocationPayload::ProfileGraphTool {
+                surface_operation,
+                arguments,
+                deadline,
+                cancellation: context,
+                ..
+            } = request.payload
+            {
+                let authority = async {
+                    self.profile_registry
+                        .clone()
+                        .ok_or_else(|| TraceDecayError::Config {
+                            message: "the test server mounts no profile registry".to_owned(),
+                        })
+                };
+                return Ok(super::profile_registry::answer_profile_registry_read(
+                    authority,
+                    Some(&self.project_root),
+                    request.request_id,
+                    surface_operation,
+                    arguments,
+                    deadline,
+                    context,
+                    None,
+                )
+                .await);
+            }
             Ok(self
                 .service
                 .invoke_with_cancellation(
@@ -116,11 +147,19 @@ pub(crate) struct ProjectRetainedOwnerTransport {
     pub(crate) executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 }
 
-/// Builds the in-process retained transport for `project_root`.
+/// Builds the in-process retained transport for `context`'s project, with the
+/// profile registry its registry reads answer from.
 pub(crate) fn project_retained_owner_transport(
-    project_root: &std::path::Path,
+    context: &crate::mcp::server::McpServerConstructionContext,
 ) -> Result<ProjectRetainedOwnerTransport> {
-    let project_root = project_root.canonicalize()?;
+    let project_root = context.cg.project_root().canonicalize()?;
+    let profile_registry = match (context.profile_identity.as_deref(), &context.registry_db) {
+        (Some(identity), Some(registry)) => Some((
+            super::profile_retained::profile_session_scope(identity)?,
+            registry.clone(),
+        )),
+        _ => None,
+    };
     let resident_memory = Arc::new(
         tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
@@ -133,6 +172,7 @@ pub(crate) fn project_retained_owner_transport(
         service: service.clone(),
         lsp_registry: Arc::new(Mutex::new(LspSessionRegistry::default())),
         project_root,
+        profile_registry,
     };
     Ok(ProjectRetainedOwnerTransport {
         service,
@@ -212,7 +252,7 @@ pub(crate) async fn register_project_retained_owner_for_test(
 pub(crate) async fn mcp_server_with_project_retained_owner_for_test(
     context: crate::mcp::server::McpServerConstructionContext,
 ) -> Result<Arc<crate::mcp::McpServer>> {
-    let transport = project_retained_owner_transport(context.cg.project_root())?;
+    let transport = project_retained_owner_transport(&context)?;
     let context = context.with_application_invocation_executor(Arc::clone(&transport.executor));
     let server = crate::mcp::McpServer::new_with_context(context).await;
     register_project_retained_owner_for_test(&transport.service, server.as_ref()).await?;

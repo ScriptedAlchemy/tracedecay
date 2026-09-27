@@ -213,14 +213,17 @@ async fn execute_profile_retained(
 }
 
 /// The invocation executor of a connection that opened no project. It serves
-/// only the profile's retained stores; every other daemon payload names a
-/// project this connection does not have.
+/// only the profile's own retained stores and project registry; every other
+/// daemon payload names a project this connection does not have.
+/// `active_project_root` is the handshake's project, which marks that project
+/// active in registry reads without opening it.
 #[derive(Clone)]
-pub(super) struct ProfileRetainedExecutor {
+pub(super) struct ProfileExecutor {
     pub(super) store_administration: StoreAdministration,
+    pub(super) active_project_root: Option<std::path::PathBuf>,
 }
 
-impl tracedecay_contracts::ApplicationInvocationExecutor for ProfileRetainedExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for ProfileExecutor {
     fn invoke(
         &self,
         invocation: tracedecay_contracts::ApplicationInvocation,
@@ -243,7 +246,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for ProfileRetainedExec
     }
 }
 
-impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ProfileRetainedExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ProfileExecutor {
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
@@ -258,27 +261,47 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ProfileRetainedExe
         >,
     > {
         Box::pin(async move {
-            let tracedecay_daemon_protocol::DaemonInvocationPayload::ProfileRetainedApplication {
-                request: retained_request,
-                deadline,
-                cancellation: context,
-                ..
-            } = request.payload
-            else {
-                return Ok(DaemonInvocationResponse::problem(
-                    request.request_id,
-                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                ));
-            };
             let token = CancellationToken::new();
-            let invocation = invoke_profile_retained(
-                &self.store_administration,
-                request.request_id,
-                retained_request,
-                deadline,
-                context,
-                Some(token.clone()),
-            );
+            let invocation = match request.payload {
+                tracedecay_daemon_protocol::DaemonInvocationPayload::ProfileRetainedApplication {
+                    request: retained_request,
+                    deadline,
+                    cancellation: context,
+                    ..
+                } => Box::pin(invoke_profile_retained(
+                    &self.store_administration,
+                    request.request_id,
+                    retained_request,
+                    deadline,
+                    context,
+                    Some(token.clone()),
+                ))
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = DaemonInvocationResponse> + Send + '_>,
+                    >,
+                tracedecay_daemon_protocol::DaemonInvocationPayload::ProfileGraphTool {
+                    surface_operation,
+                    arguments,
+                    deadline,
+                    cancellation: context,
+                    ..
+                } => Box::pin(super::profile_registry::invoke_profile_registry_read(
+                    &self.store_administration,
+                    self.active_project_root.as_deref(),
+                    request.request_id,
+                    surface_operation,
+                    arguments,
+                    deadline,
+                    context,
+                    Some(token.clone()),
+                )),
+                _ => {
+                    return Ok(DaemonInvocationResponse::problem(
+                        request.request_id,
+                        DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    ));
+                }
+            };
             tokio::pin!(invocation);
             Ok(tokio::select! {
                 response = &mut invocation => response,
@@ -296,9 +319,22 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ProfileRetainedExe
         _observed_at: tracedecay_domain::UtcMicros,
         _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
-        // Retained operations publish no feedback observations.
+        // Profile operations publish no feedback observations.
         Box::pin(async { Ok(()) })
     }
+}
+
+/// The profile session scope every profile-targeted terminal reports under.
+pub(crate) fn profile_session_scope(
+    profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
+) -> Result<tracedecay_contracts::ResolvedScope> {
+    let (connection, _) = profile_retained_connection_for(profile_identity)?;
+    connection
+        .session_identity()
+        .session_request_scope()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("profile session scope is invalid: {error}"),
+        })
 }
 
 /// The profile's retained connection authority and session retrieval root,
@@ -309,7 +345,15 @@ fn profile_retained_connection(
     ProfileRetainedConnectionAuthorityV1,
     DaemonSessionRetrievalRoot,
 )> {
-    let profile_identity = store_administration.profile_identity()?;
+    profile_retained_connection_for(store_administration.profile_identity()?)
+}
+
+fn profile_retained_connection_for(
+    profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
+) -> Result<(
+    ProfileRetainedConnectionAuthorityV1,
+    DaemonSessionRetrievalRoot,
+)> {
     let shard = StoreShardIdV1::profile_sessions(
         profile_identity.brain_id().clone(),
         profile_identity.profile_id().clone(),

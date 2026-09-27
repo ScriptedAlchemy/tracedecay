@@ -373,7 +373,12 @@ pub(super) async fn execute_portable_daemon_invocation(
     let lsp_project_open_attempts = project_open_attempts.clone();
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
-    let mut project_path = None;
+    // A profile registry read marks the handshake's project active without
+    // opening it.
+    let mut project_path = match &request.payload {
+        DaemonInvocationPayload::ProfileGraphTool { .. } => handshake.project_path.clone(),
+        _ => None,
+    };
     if request.requires_project() {
         let project_server = hotpath::measure_block!(
             "daemon.invocation.project_open",
@@ -738,7 +743,12 @@ pub(super) async fn execute_daemon_invocation(
     };
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
-    let mut project_path = None;
+    // A profile registry read marks the handshake's project active without
+    // opening it.
+    let mut project_path = match &request.payload {
+        DaemonInvocationPayload::ProfileGraphTool { .. } => handshake.project_path.clone(),
+        _ => None,
+    };
     if request.requires_project() {
         let project_server = hotpath::measure_block!(
             "daemon.invocation.project_open",

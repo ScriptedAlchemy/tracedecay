@@ -125,7 +125,9 @@ pub const PROFILE_RESET_COMMAND: &str = "tracedecay wipe --all --yes";
 /// instead of refusing to serve: every read against it returns the typed
 /// refusal, stores that admit keep serving, and `remedy` is the exact command
 /// the operator runs to reset it.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct StoreResetRequiredV1 {
     pub store: String,
     pub authority: String,

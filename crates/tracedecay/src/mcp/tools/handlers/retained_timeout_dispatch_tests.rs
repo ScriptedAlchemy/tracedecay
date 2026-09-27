@@ -400,8 +400,6 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
             "min_confidence_millionths": 810_000,
             "format": "json",
         }),
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_request_id: Some(request_id.clone()),
@@ -459,8 +457,6 @@ async fn fact_store_curate_expired_deadline_does_not_mutate() {
         &cg,
         "tracedecay_fact_store_curate",
         json!({"fact_review_limit": 5, "min_confidence_millionths": 700_000}),
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_request_id: Some(
@@ -691,8 +687,6 @@ async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
         &cg,
         "tracedecay_fact_store_curate",
         json!({"fact_review_limit": 8, "min_confidence_millionths": 730_000}),
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_request_id: Some(request_id),
@@ -738,8 +732,6 @@ async fn fact_store_curate_pre_commit_cancellation_does_not_mutate() {
         &cg,
         "tracedecay_fact_store_curate",
         json!({"fact_review_limit": 5, "min_confidence_millionths": 700_000}),
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_request_id: Some(
@@ -866,8 +858,6 @@ async fn a_stale_refresh_frontier_reaches_mcp_as_typed_detail() {
                 },
                 "format": format,
             }),
-            None,
-            None,
             ToolCallRegistryOptions {
                 application_invocation_executor: Some(&executor),
                 application_request_id: Some(

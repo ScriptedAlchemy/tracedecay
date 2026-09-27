@@ -244,7 +244,7 @@ async fn call(
         obj.entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
-    let result = crate::support::handle_tool_call(cg, tool, args, None, None)
+    let result = crate::support::handle_tool_call(cg, tool, args, None)
         .await
         .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
     extract_json(&result)
@@ -272,7 +272,7 @@ async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
         json!({"run_id": RUN_ID}),
         json!({"branch": "main"}),
     ] {
-        let error = crate::support::handle_tool_call(&cg, "tracedecay_workflows", args, None, None)
+        let error = crate::support::handle_tool_call(&cg, "tracedecay_workflows", args, None)
             .await
             .expect_err("a missing workflow index must be a retained problem")
             .to_string();
@@ -596,7 +596,7 @@ fn unbuilt_index_problem() -> Value {
 }
 
 async fn refuse(cg: &TraceDecay, args: Value) -> String {
-    crate::support::handle_tool_call(cg, "tracedecay_workflows", args, None, None)
+    crate::support::handle_tool_call(cg, "tracedecay_workflows", args, None)
         .await
         .expect_err("tracedecay_workflows should refuse this request")
         .to_string()

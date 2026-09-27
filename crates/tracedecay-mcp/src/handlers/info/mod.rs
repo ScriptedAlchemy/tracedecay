@@ -18,11 +18,12 @@ pub use files::compute_files;
 pub(crate) use files::render_files_md;
 pub use port_order::compute_port_order;
 pub use port_status::compute_port_status;
-pub use registry::{handle_project_context, handle_project_list, handle_project_search};
-pub use remote_status::handle_remote_status;
+pub use registry::compute_registry_read;
+pub(crate) use registry::render_registry_listing_md;
+pub use remote_status::read_remote_status;
+pub(crate) use status::render_status_md;
 pub use status::{
-    graph_statistics_value, handle_active_project, handle_status, readiness_wait_outcome,
-    status_readiness_wait,
+    compute_active_project, compute_status, graph_statistics_value, readiness_wait_outcome,
 };
 pub use todos::compute_todos;
 

@@ -7,7 +7,6 @@ use serde_json::json;
 
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
-use tracedecay_daemon_service::DaemonProjectRegistryReadService;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::server::{LiveTranscriptRefreshJoin, join_required_live_transcript_refresh};
 use tracedecay_mcp::tools::catalog_discovery::{
@@ -355,7 +354,7 @@ async fn projectless_tools_call_response_with_connection(
                     id,
                     tool_name,
                     arguments,
-                    connection.active_project_root.as_deref(),
+                    connection,
                     store_administration,
                 ))
             }
@@ -372,6 +371,7 @@ async fn projectless_tools_call_response_with_connection(
                     tool_name,
                     operation,
                     arguments,
+                    connection,
                     store_administration,
                 ))
             }
@@ -394,62 +394,56 @@ fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResp
     )
 }
 
-/// Registry reads are profile-scoped: they answer from the authenticated
-/// profile's project registry, the same authority `tracedecay projects`
-/// reads, so a connection without a mounted project still gets the real
-/// listing (possibly empty). Only the handshake's project, if any, is marked
-/// active. A registry that cannot be opened is a typed tool error, never an
-/// empty listing.
+/// Registry reads go to the daemon's profile owner, the one path every
+/// connection's registry read takes. Only the handshake's project, if any, is
+/// marked active.
 async fn projectless_registry_response(
     id: serde_json::Value,
     tool_name: &str,
     arguments: serde_json::Value,
-    active_project_root: Option<&Path>,
+    connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
 ) -> tracedecay_mcp::JsonRpcResponse {
-    let registry =
-        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
-            Ok(registry) => registry,
-            Err(error) => return tool_error_response(id, tool_name, &error),
-        };
-    let registry_reads = DaemonProjectRegistryReadService::new(registry);
-    let result = match tool_name {
-        "tracedecay_project_list" => {
-            tracedecay_mcp::handlers::info::handle_project_list(
-                active_project_root,
-                arguments,
-                Some(&registry_reads),
-            )
-            .await
+    let Some(operation) =
+        tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .filter(|operation| operation.is_profile_registry_read())
+    else {
+        return requires_project_error(id, tool_name);
+    };
+    let executor = profile_executor(connection, store_administration);
+    let result = match boxed_projectless_phase(crate::mcp::tools::execute_graph_tool_surface(
+        tracedecay_tool_catalog::BindingSurface::Mcp,
+        operation,
+        arguments.clone(),
+        Some(&executor),
+        None,
+        None,
+        None,
+    ))
+    .await
+    {
+        Ok(Ok(completion)) => {
+            tracedecay_mcp::handlers::graph_tool::render_graph_tool(None, &arguments, completion)
         }
-        "tracedecay_project_search" => {
-            tracedecay_mcp::handlers::info::handle_project_search(
-                active_project_root,
-                arguments,
-                Some(&registry_reads),
-            )
-            .await
-        }
-        "tracedecay_project_context" => {
-            tracedecay_mcp::handlers::info::handle_project_context(
-                active_project_root,
-                None,
-                arguments,
-                Some(&registry_reads),
-            )
-            .await
-        }
-        _ => {
-            return JsonRpcResponse::error(
-                id,
-                ErrorCode::MethodNotFound,
-                format!("unknown projectless registry tool: {tool_name}"),
-            );
-        }
+        Ok(Err(refusal)) => refusal.render(None, &arguments),
+        Err(error) => Err(error),
     };
     match result {
-        Ok(result) => JsonRpcResponse::success(id, result.value),
+        Ok(mut result) => {
+            tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+            JsonRpcResponse::success(id, result.value)
+        }
         Err(error) => tool_error_response(id, tool_name, &error),
+    }
+}
+
+fn profile_executor(
+    connection: &ProjectlessConnectionStateV1,
+    store_administration: &StoreAdministration,
+) -> super::profile_retained::ProfileExecutor {
+    super::profile_retained::ProfileExecutor {
+        store_administration: store_administration.clone(),
+        active_project_root: connection.active_project_root.clone(),
     }
 }
 
@@ -653,6 +647,7 @@ async fn projectless_profile_retained_response(
     tool_name: &str,
     operation: tracedecay_contracts::RetainedSurfaceOperation,
     arguments: serde_json::Value,
+    connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
 ) -> tracedecay_mcp::JsonRpcResponse {
     match crate::mcp::tools::retained_tool_target(operation, &arguments) {
@@ -671,9 +666,7 @@ async fn projectless_profile_retained_response(
     else {
         return requires_project_error(id, tool_name);
     };
-    let executor = super::profile_retained::ProfileRetainedExecutor {
-        store_administration: store_administration.clone(),
-    };
+    let executor = profile_executor(connection, store_administration);
     let result = boxed_projectless_phase(crate::mcp::tools::run_retained_surface_tool(
         None,
         tracedecay_tool_catalog::BindingSurface::Mcp,

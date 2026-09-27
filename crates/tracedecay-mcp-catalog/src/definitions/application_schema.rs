@@ -7,8 +7,6 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value, json};
 use tracedecay_tool_catalog::{ExecutableBindingRegistryV1, OperationId};
 
-use super::required_object_schema;
-
 type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 
 pub(super) fn canonical_application_request_schema(
@@ -30,15 +28,6 @@ fn invalid_terminal_application_discovery() -> crate::McpCatalogError {
         reason: "must expose the canonical executable request schema",
     }
     .into()
-}
-
-pub(super) fn closed_object_schema(
-    properties: serde_json::Value,
-    required: &[&str],
-) -> serde_json::Value {
-    let mut schema = required_object_schema(properties, required);
-    schema["additionalProperties"] = json!(false);
-    schema
 }
 
 /// Project a canonical executable request schema into the MCP `inputSchema`

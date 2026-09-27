@@ -2,57 +2,16 @@
 //!
 //! The runtime itself, registered databases, session registry, and the
 //! project-graph opens through it, lives in `tracedecay-project`; this
-//! module adds the pieces that need the root's MCP server: tool calls through the registry-aware dispatcher and direct
-//! server construction contexts.
+//! module adds the direct MCP server construction context that needs the
+//! root's MCP server.
 
-#[cfg(any(test, feature = "test-transport"))]
 use std::sync::Arc;
 
-use tracedecay_domain::errors::Result;
-#[cfg(any(test, feature = "test-transport"))]
-use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_sessions::admission::HostAdmissionScope;
 
-use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
-
-use tracedecay_mcp::handlers::mcp_session_authorities;
 use tracedecay_project::project::TraceDecay;
-
-/// Calls one MCP tool through the registry-aware dispatcher with this
-/// runtime's registered databases as the tool's authorities.
-#[doc(hidden)]
-pub async fn call_mcp_tool_for_test(
-    runtime: &HostAdmissionTestRuntimeV1,
-    cg: &TraceDecay,
-    tool_name: &str,
-    arguments: serde_json::Value,
-    server_stats: Option<serde_json::Value>,
-    scope_prefix: Option<&str>,
-) -> Result<tracedecay_mcp::ToolResult> {
-    let profile_database = runtime.profile_database_lease();
-    let project_registry_reads =
-        tracedecay_daemon_service::DaemonProjectRegistryReadService::new(profile_database.clone());
-    crate::mcp::tools::handle_tool_call_with_registry_options(
-        cg,
-        tool_name,
-        arguments,
-        server_stats,
-        scope_prefix,
-        crate::mcp::tools::ToolCallRegistryOptions {
-            global_db: Some(profile_database),
-            project_registry_reads: Some(&project_registry_reads),
-            accounting_db: Some(profile_database.as_ref()),
-            registered_project_session_db: runtime
-                .registered_database_arc(HostAdmissionScope::Project),
-            registered_savings_db: Some(profile_database.clone()),
-            profile: Some(&test_runtime_profile(runtime)),
-            session_authorities: mcp_session_authorities(runtime),
-            ..Default::default()
-        }
-        .admit_opened_project(cg)?,
-    )
-    .await
-}
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 /// The owner a test runtime serves: its profile, with the profile's parent as
 /// the home its host transcripts live under.
@@ -69,7 +28,6 @@ fn test_runtime_profile(
 
 /// A direct MCP server construction context bound to this runtime's
 /// registered databases, profile identity, and background CPU authority.
-#[cfg(any(test, feature = "test-transport"))]
 pub(crate) fn mcp_server_context_for_test(
     runtime: Arc<HostAdmissionTestRuntimeV1>,
     cg: TraceDecay,

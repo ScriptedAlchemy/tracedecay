@@ -23,7 +23,6 @@ trait AnalysisToolHost {
         &self,
         tool_name: &str,
         arguments: Value,
-        server_stats: Option<Value>,
         scope_prefix: Option<&str>,
     ) -> TraceDecayResult<ToolResult>;
 
@@ -64,7 +63,6 @@ impl AnalysisToolHost for ProductionCompositionFixture {
         &self,
         tool_name: &str,
         arguments: Value,
-        _server_stats: Option<Value>,
         _scope_prefix: Option<&str>,
     ) -> TraceDecayResult<ToolResult> {
         call_production_tool(&self.harness, &self.project_root, tool_name, arguments).await
@@ -80,7 +78,6 @@ impl AnalysisToolHost for MountedProductionProject {
         &self,
         tool_name: &str,
         arguments: Value,
-        _server_stats: Option<Value>,
         _scope_prefix: Option<&str>,
     ) -> TraceDecayResult<ToolResult> {
         call_production_tool(&self.harness, &self.project_root, tool_name, arguments).await
@@ -96,11 +93,9 @@ impl AnalysisToolHost for TestTraceDecay {
         &self,
         tool_name: &str,
         arguments: Value,
-        server_stats: Option<Value>,
         scope_prefix: Option<&str>,
     ) -> TraceDecayResult<ToolResult> {
-        crate::support::handle_tool_call(self, tool_name, arguments, server_stats, scope_prefix)
-            .await
+        crate::support::handle_tool_call(self, tool_name, arguments, scope_prefix).await
     }
 
     async fn close_analysis_host(self) {
@@ -112,10 +107,9 @@ async fn handle_tool_call(
     host: &impl AnalysisToolHost,
     tool_name: &str,
     arguments: Value,
-    server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> TraceDecayResult<ToolResult> {
-    host.call_analysis_tool(tool_name, arguments, server_stats, scope_prefix)
+    host.call_analysis_tool(tool_name, arguments, scope_prefix)
         .await
 }
 
@@ -332,7 +326,6 @@ pub fn recovered() -> BuildOptions {
         "tracedecay_constructors",
         json!({"struct": "BuildOptions"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -393,7 +386,6 @@ pub mod second {
         &graph,
         "tracedecay_constructors",
         json!({"struct": "Options"}),
-        None,
         None,
     )
     .await
@@ -461,7 +453,6 @@ export default defineConfig({
         "tracedecay_unmounted_files",
         json!({"ecosystem": "typescript"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -511,15 +502,31 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
             .await
             .unwrap(),
     );
+    // The serving server opens on `main`; the checkout moves under it.
+    let server = Box::pin(
+        tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
+            TraceDecay::open_with_options(project, graph_open_options(&cg))
+                .await
+                .unwrap(),
+            None,
+            open_active_project_scoped_runtime(&cg).await,
+        ),
+    )
+    .await
+    .unwrap();
     git_run(project, &["checkout", "-b", "feature"]);
 
     // Branch drift diagnostics moved off `tracedecay_branch_list` (now the
     // paginated branch-ref snapshot read) to the active-project context's
     // `branch` block.
-    let result = handle_tool_call(&cg, "tracedecay_active_project", json!({}), None, None)
-        .await
-        .unwrap();
-    let report: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_active_project",
+        json!({"format": "json"}),
+    )
+    .await;
+    server.shutdown().await;
+    let report: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
     let branch = &report["branch"];
     assert_eq!(branch["current_branch"], json!("feature"));
     assert_eq!(branch["open_active_branch"], json!("main"));
@@ -547,7 +554,7 @@ async fn test_dead_code() {
     let cg = production_composition_fixture().await;
     let _populated = find_node_id(&cg, "format_greeting").await;
 
-    let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None)
         .await
         .unwrap();
     let payload = extract_json(&result.value);
@@ -577,7 +584,6 @@ async fn test_diff_context() {
         &cg,
         "tracedecay_diff_context",
         json!({"files": ["src/utils.rs"]}),
-        None,
         None,
     )
     .await
@@ -632,7 +638,7 @@ async fn test_circular() {
     let cg = production_composition_fixture().await;
     let _populated = find_node_id(&cg, "helper").await;
 
-    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None)
         .await
         .unwrap();
     let payload = extract_json(&result.value);
@@ -658,7 +664,6 @@ async fn test_rename_preview() {
         &cg,
         "tracedecay_rename_preview",
         json!({"node_id": node_id}),
-        None,
         None,
     )
     .await
@@ -712,7 +717,7 @@ async fn test_recursion() {
     let cg = production_composition_fixture().await;
     let _populated = find_node_id(&cg, "format_greeting").await;
 
-    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None)
         .await
         .unwrap();
     let payload = extract_json(&result.value);
@@ -741,7 +746,6 @@ async fn test_changelog_no_git() {
         "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -767,7 +771,6 @@ async fn pr_context_no_git_returns_structured_git_error() {
         "tracedecay_pr_context",
         json!({"base_ref": "HEAD~1", "head_ref": "HEAD"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -786,7 +789,6 @@ async fn test_port_status() {
         &cg,
         "tracedecay_port_status",
         json!({"source_dir": "src", "target_dir": "tests"}),
-        None,
         None,
     )
     .await
@@ -874,7 +876,6 @@ async fn port_status_does_not_match_methods_of_different_parents() {
             "kinds": ["method"],
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -933,7 +934,6 @@ async fn port_status_matches_methods_with_same_parent_type() {
             "kinds": ["method"],
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -955,7 +955,6 @@ async fn test_port_order() {
         &cg,
         "tracedecay_port_order",
         json!({"source_dir": "src"}),
-        None,
         None,
     )
     .await
@@ -1035,7 +1034,6 @@ async fn port_order_sorts_a_tied_level_before_applying_the_limit() {
         "tracedecay_port_order",
         json!({"source_dir": "src", "kinds": ["function"], "limit": 2}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -1058,7 +1056,6 @@ async fn test_rename_preview_not_found() {
         &cg,
         "tracedecay_rename_preview",
         json!({"node_id": "nonexistent_id_12345"}),
-        None,
         None,
     )
     .await
@@ -1097,7 +1094,6 @@ async fn commit_context_clean_worktree_returns_json() {
         &cg,
         "tracedecay_commit_context",
         json!({"format": "json"}),
-        None,
         None,
     )
     .await
@@ -1151,7 +1147,6 @@ async fn commit_context_staged_source_and_test_reports_symbols() {
         &host,
         "tracedecay_commit_context",
         json!({"format": "json"}),
-        None,
         None,
     )
     .await
@@ -1213,7 +1208,6 @@ async fn commit_context_config_and_docs_report_chore() {
         &host,
         "tracedecay_commit_context",
         json!({"format": "json"}),
-        None,
         None,
     )
     .await
@@ -1277,7 +1271,6 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
         "tracedecay_commit_context",
         json!({"format": "json", "staged_only": true}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -1285,7 +1278,6 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
         &host,
         "tracedecay_commit_context",
         json!({"format": "json", "staged_only": false}),
-        None,
         None,
     )
     .await
@@ -1354,7 +1346,6 @@ async fn commit_context_unborn_head_is_git_status_error() {
         &host,
         "tracedecay_commit_context",
         json!({"format": "json"}),
-        None,
         None,
     )
     .await
@@ -1435,7 +1426,6 @@ async fn test_changelog_with_real_git() {
         "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -1470,15 +1460,9 @@ async fn test_changelog_with_real_git() {
 #[tokio::test]
 async fn test_health_detailed_includes_raw_signals() {
     let cg = production_composition_fixture().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_health",
-        json!({ "details": true }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = handle_tool_call(&cg, "tracedecay_health", json!({ "details": true }), None)
+        .await
+        .unwrap();
     let text = extract_text(&result.value);
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     let dims = parsed.get("dimensions").expect("dimensions should exist");
@@ -1539,7 +1523,7 @@ fn write_dsm_coupling_sources(project: &Path) {
 }
 
 async fn call_dsm(host: &ProductionCompositionFixture, args: Value) -> String {
-    let result = handle_tool_call(host, "tracedecay_dsm", args, None, None)
+    let result = handle_tool_call(host, "tracedecay_dsm", args, None)
         .await
         .unwrap_or_else(|error| panic!("tracedecay_dsm failed over production MCP: {error}"));
     extract_text(&result.value).to_owned()
@@ -1694,7 +1678,6 @@ async fn test_dsm_reports_authored_file_dependencies() {
         "tracedecay_dsm",
         json!({ "format": "json", "shape": "layers" }),
         None,
-        None,
     )
     .await;
     assert_refusal_problem(
@@ -1790,15 +1773,9 @@ _No dependency clusters found._
 #[tokio::test]
 async fn test_test_risk() {
     let cg = production_composition_fixture().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_test_risk",
-        json!({ "limit": 10 }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = handle_tool_call(&cg, "tracedecay_test_risk", json!({ "limit": 10 }), None)
+        .await
+        .unwrap();
     let text = extract_text(&result.value);
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     let summary = parsed.get("summary").expect("summary should exist");
@@ -1835,7 +1812,6 @@ async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
         &cg,
         "tracedecay_test_risk",
         json!({ "limit": 10, "include_tested": true }),
-        None,
         None,
     )
     .await
@@ -1916,7 +1892,6 @@ async fn test_test_risk_scopes_workspace_source_before_following_external_test_c
             "include_tested": true
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -1941,7 +1916,6 @@ async fn test_test_risk_attributes_ts_describe_it_tests() {
         &cg,
         "tracedecay_test_risk",
         json!({ "limit": 10, "include_tested": true }),
-        None,
         None,
     )
     .await
@@ -1982,7 +1956,6 @@ async fn test_test_map_lists_ts_it_title_as_covering_test() {
         "tracedecay_test_map",
         json!({ "file": "src/math.ts" }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2011,7 +1984,6 @@ async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() 
         &cg,
         "tracedecay_test_risk",
         json!({ "limit": 10, "include_tested": true }),
-        None,
         None,
     )
     .await
@@ -2077,7 +2049,7 @@ fn helper() {
     let cg = init_test_project(project).await;
     wait_for_current_graph(&cg).await;
 
-    let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2125,15 +2097,9 @@ fn main() {
     .unwrap();
     let cg = init_test_project(project).await;
 
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_todos",
-        json!({"kinds": ["FIXME"]}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = handle_tool_call(&cg, "tracedecay_todos", json!({"kinds": ["FIXME"]}), None)
+        .await
+        .unwrap();
     let text = extract_text(&result.value);
     let output: Value = serde_json::from_str(text).unwrap();
     assert_eq!(output["match_count"].as_u64().unwrap(), 1);
@@ -2169,7 +2135,6 @@ pub fn second() { dep::shared(); }
         "tracedecay_diff_context",
         json!({"files": ["src/lib.rs"], "depth": 3}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2202,7 +2167,7 @@ async fn recursion_keeps_direct_recursion() {
     )
     .unwrap();
     let cg = init_test_project(project).await;
-    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None)
         .await
         .unwrap();
     let output = extract_json(&result.value);
@@ -2236,7 +2201,7 @@ async fn recursion_filters_self_edge_artifacts() {
     )
     .unwrap();
     let cg = init_test_project(project).await;
-    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None)
         .await
         .unwrap();
     let output = extract_json(&result.value);
@@ -2274,7 +2239,7 @@ pub fn c() { a(); }
     )
     .unwrap();
     let cg = init_test_project(project).await;
-    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None)
         .await
         .unwrap();
     let output = extract_json(&result.value);
@@ -2329,7 +2294,6 @@ async fn changelog_filters_directory_paths() {
         "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2371,7 +2335,7 @@ pub fn caller() { called(); }
     .unwrap();
     let cg = init_test_project(project).await;
 
-    let default_result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
+    let default_result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None)
         .await
         .unwrap();
     let default_text = extract_text(&default_result.value);
@@ -2386,7 +2350,6 @@ pub fn caller() { called(); }
         &cg,
         "tracedecay_dead_code",
         json!({"include_public": true}),
-        None,
         None,
     )
     .await
@@ -2436,7 +2399,6 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
         &cg,
         "tracedecay_diagnose",
         json!({"cargo_output": cargo_output, "include_callers": true}),
-        None,
         None,
     )
     .await
@@ -2496,7 +2458,6 @@ pub fn helper() {}
         &cg,
         "tracedecay_callees",
         json!({"node_id": caller_id, "maximum_depth": 1, "resolve_trait_dispatch": false}),
-        None,
         None,
     )
     .await
@@ -2559,7 +2520,6 @@ impl Default for B { fn default() -> Self { B } }
         "tracedecay_rank",
         json!({"edge_kind": "implements", "direction": "incoming", "limit": 100}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2613,7 +2573,7 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
     )
     .unwrap();
     let cg = init_test_project(project).await;
-    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2668,7 +2628,6 @@ pub fn leaf() {}
         &cg,
         "tracedecay_port_order",
         json!({"source_dir": "src"}),
-        None,
         None,
     )
     .await
@@ -2730,7 +2689,6 @@ pub fn h() { a(); }
         &cg,
         "tracedecay_port_order",
         json!({"source_dir": "src"}),
-        None,
         None,
     )
     .await
@@ -2809,7 +2767,6 @@ impl Triplet {
         "tracedecay_port_order",
         json!({"source_dir": "src"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2841,7 +2798,7 @@ pub trait Leaf: Middle {}
     )
     .unwrap();
     let cg = init_test_project(project).await;
-    let result = handle_tool_call(&cg, "tracedecay_inheritance_depth", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_inheritance_depth", json!({}), None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2915,7 +2872,7 @@ async fn analysis_symbol_locations_are_one_based() {
             3,
         ),
     ] {
-        let result = handle_tool_call(&graph, tool, arguments, None, None)
+        let result = handle_tool_call(&graph, tool, arguments, None)
             .await
             .unwrap();
         let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
@@ -2932,15 +2889,9 @@ async fn analysis_symbol_locations_are_one_based() {
         ("tracedecay_complexity", "ranking", "evaluate", 19),
         ("tracedecay_god_class", "ranking", "AuditEngine", 1),
     ] {
-        let result = handle_tool_call(
-            &graph,
-            tool,
-            json!({"limit": 100, "format": "json"}),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        let result = handle_tool_call(&graph, tool, json!({"limit": 100, "format": "json"}), None)
+            .await
+            .unwrap();
         let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
         let item = output[collection]
             .as_array()
@@ -2955,7 +2906,6 @@ async fn analysis_symbol_locations_are_one_based() {
         &graph,
         "tracedecay_recursion",
         json!({"limit": 100, "format": "json"}),
-        None,
         None,
     )
     .await
@@ -3103,7 +3053,6 @@ function helper() { return unrelated; }
         "tracedecay_type_hierarchy",
         json!({"node_id": parent_id, "format": "json"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -3117,7 +3066,6 @@ function helper() { return unrelated; }
         &cg,
         "tracedecay_inheritance_depth",
         json!({"path": "src", "limit": 10}),
-        None,
         None,
     )
     .await
@@ -3149,7 +3097,6 @@ function helper() { return unrelated; }
             "tracedecay_type_hierarchy",
             json!({"node_id": parent_id, "format": "json"}),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -3164,7 +3111,6 @@ function helper() { return unrelated; }
         &cg,
         "tracedecay_find_exact_symbol",
         json!({"name": "Base", "limit": 20}),
-        None,
         None,
     )
     .await
@@ -3187,7 +3133,6 @@ function helper() { return unrelated; }
             &cg,
             "tracedecay_type_hierarchy",
             json!({"node_id": namespace_id(namespace), "format": "json"}),
-            None,
             None,
         )
         .await
@@ -3250,7 +3195,6 @@ async fn circular_emits_disjoint_sccs_under_load() {
         "tracedecay_circular",
         json!({"member_limit": 200}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -3301,7 +3245,6 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
         "tracedecay_diff_context",
         json!({"files": ["src/lib.rs", "src/lib.rs", "src/lib.rs"], "depth": 1}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -3348,7 +3291,6 @@ async fn changelog_filters_deleted_directory_entries() {
         &cg,
         "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
-        None,
         None,
     )
     .await
@@ -3410,7 +3352,6 @@ async fn pr_context_collapses_cargo_toml_keys() {
         "tracedecay_pr_context",
         json!({"base_ref": "base", "head_ref": "HEAD"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -3465,7 +3406,7 @@ fn git_with_pinned_dates(dir: &Path, args: &[&str], date: Option<&str>) {
 }
 
 async fn pr_context_json(host: &impl AnalysisToolHost, arguments: Value) -> Value {
-    let result = handle_tool_call(host, "tracedecay_pr_context", arguments, None, None)
+    let result = handle_tool_call(host, "tracedecay_pr_context", arguments, None)
         .await
         .unwrap_or_else(|error| {
             panic!("tracedecay_pr_context should return a tool result: {error}")
@@ -3685,7 +3626,6 @@ async fn pr_context_reports_the_pinned_feature_summary() {
         "tracedecay_pr_context",
         json!({"format": "json", "base_ref": "master", "head_ref": "feature", "cursor": 1}),
         None,
-        None,
     )
     .await;
     assert_refusal_problem(
@@ -3796,7 +3736,7 @@ fn dead_helper_with_attr() {}
     .unwrap();
     let cg = init_test_project(project).await;
 
-    let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -3829,7 +3769,6 @@ async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
         "tracedecay_unsafe_patterns",
         json!({"format": "markdown"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -3853,7 +3792,6 @@ async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
         &cg,
         "tracedecay_unsafe_patterns",
         json!({"format": "json"}),
-        None,
         None,
     )
     .await
@@ -3920,7 +3858,6 @@ pub fn write_both(target: &mut Target, other: &mut Other) {
         &host,
         "tracedecay_field_sites",
         json!({"field": "Target::value", "limit": 20, "format": "json"}),
-        None,
         None,
     )
     .await
@@ -3995,7 +3932,6 @@ pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 
                 "tracedecay_field_sites",
                 json!({"field": "Target::value", "format": "json"}),
                 None,
-                None,
             )
             .await,
         );
@@ -4033,7 +3969,6 @@ async fn field_sites_ignores_field_text_in_real_rust_literals() {
         &host,
         "tracedecay_field_sites",
         json!({"field": "MmapReader::mmap", "limit": 100, "format": "json"}),
-        None,
         None,
     )
     .await
@@ -4127,7 +4062,7 @@ pub fn bump(counter: &mut Counter, gauge: &mut Gauge) -> u32 {
 "#;
 
 async fn call_field_sites(host: &impl AnalysisToolHost, arguments: Value) -> Value {
-    let result = handle_tool_call(host, "tracedecay_field_sites", arguments, None, None)
+    let result = handle_tool_call(host, "tracedecay_field_sites", arguments, None)
         .await
         .expect("production MCP field-sites call");
     extract_json(&result.value)
@@ -4221,7 +4156,6 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
             "tracedecay_field_sites",
             json!({"format": "json"}),
             None,
-            None,
         )
         .await,
     );
@@ -4240,7 +4174,6 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
             &host,
             "tracedecay_field_sites",
             json!({"field": "Counter::n", "format": "json"}),
-            None,
             None,
         )
         .await,
@@ -4336,7 +4269,6 @@ pub fn closure_then_sibling(counter: &Counter) -> u32 {
             "tracedecay_field_sites",
             json!({"field": "Counter::n", "format": "json"}),
             None,
-            None,
         )
         .await,
     );
@@ -4363,7 +4295,6 @@ async fn wait_for_current_graph(host: &impl AnalysisToolHost) {
                     "include_session_ingest": false,
                     "include_staleness": false,
                 }),
-                None,
                 None,
             )
             .await
@@ -4402,7 +4333,6 @@ async fn find_node_id(host: &impl AnalysisToolHost, name: &str) -> String {
         host,
         "tracedecay_find_exact_symbol",
         json!({"name": name, "limit": 20}),
-        None,
         None,
     )
     .await
@@ -4492,7 +4422,6 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         "tracedecay_diff_context",
         json!({"files": ["src/tier_c.rs"], "depth": 1, "format": "json"}),
         None,
-        None,
     )
     .await
     .expect("depth-1 diff_context");
@@ -4528,7 +4457,6 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         "tracedecay_diff_context",
         json!({"files": ["src/tier_c.rs"], "depth": 2, "format": "json"}),
         None,
-        None,
     )
     .await
     .expect("depth-2 diff_context");
@@ -4552,7 +4480,6 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
             "depth": 1,
             "format": "json"
         }),
-        None,
         None,
     )
     .await
@@ -4580,7 +4507,6 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         "tracedecay_diff_context",
         json!({"files": ["src/not_in_repo.rs"], "format": "json"}),
         None,
-        None,
     )
     .await
     .expect("unpublished-path diff_context");
@@ -4600,7 +4526,6 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         &host,
         "tracedecay_diff_context",
         json!({"files": [], "format": "json"}),
-        None,
         None,
     )
     .await
@@ -4622,7 +4547,6 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         "tracedecay_diff_context",
         json!({"format": "json"}),
         None,
-        None,
     )
     .await;
     assert_refusal_problem(
@@ -4637,7 +4561,6 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         "tracedecay_diff_context",
         json!({"files": "src/tier_c.rs", "format": "json"}),
         None,
-        None,
     )
     .await;
     assert_refusal_problem(
@@ -4651,7 +4574,6 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         &host,
         "tracedecay_diff_context",
         json!(["src/tier_c.rs"]),
-        None,
         None,
     )
     .await;
@@ -4668,7 +4590,6 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         &host,
         "tracedecay_diff_context",
         json!({"files": ["src/tier_c.rs"], "depth": 0, "format": "json"}),
-        None,
         None,
     )
     .await;
@@ -4733,7 +4654,7 @@ pub fn branched(n: i32) -> i32 {\n    \
 }
 
 async fn gini_json(host: &impl AnalysisToolHost, args: Value) -> Value {
-    let result = handle_tool_call(host, "tracedecay_gini", args, None, None)
+    let result = handle_tool_call(host, "tracedecay_gini", args, None)
         .await
         .expect("tracedecay_gini over production MCP");
     extract_json(&result.value)
@@ -5012,7 +4933,7 @@ fn write_fanout_project(project: &Path) -> usize {
 }
 
 async fn call_hotspots(host: &MountedProductionProject, arguments: Value) -> Value {
-    let result = handle_tool_call(host, "tracedecay_hotspots", arguments, None, None)
+    let result = handle_tool_call(host, "tracedecay_hotspots", arguments, None)
         .await
         .unwrap_or_else(|error| panic!("tracedecay_hotspots failed over production MCP: {error}"));
     result.value
@@ -5499,7 +5420,7 @@ fn assert_reported_cycles_close(payload: &Value) {
 }
 
 async fn call_recursion(graph: &impl AnalysisToolHost, arguments: Value) -> Value {
-    let result = handle_tool_call(graph, "tracedecay_recursion", arguments, None, None)
+    let result = handle_tool_call(graph, "tracedecay_recursion", arguments, None)
         .await
         .unwrap_or_else(|error| panic!("tracedecay_recursion failed: {error}"));
     extract_json(&result.value)
@@ -5557,7 +5478,6 @@ async fn recursion_reports_literal_cycles_and_refuses_non_positive_limit() {
             &graph,
             "tracedecay_recursion",
             json!({"format": "json", "limit": 0}),
-            None,
             None,
         )
         .await,

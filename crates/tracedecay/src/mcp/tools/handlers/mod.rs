@@ -52,6 +52,8 @@ mod dispatch_groups;
 )]
 mod dispatch_test_support;
 #[cfg(test)]
+pub(crate) use dispatch_test_support::dispatch_on_graph_authority;
+#[cfg(test)]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -89,6 +91,15 @@ pub(crate) mod retained_catalog;
     clippy::uninlined_format_args
 )]
 mod retained_timeout_dispatch_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod runtime_behavior_dispatch_tests;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -165,12 +176,10 @@ use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use super::LegacyToolCompatibilityOwner;
 use dispatch_groups::{
-    dispatch_admin_tools, dispatch_application_surface_tools, dispatch_health_tools,
-    dispatch_info_tools,
+    dispatch_admin_tools, dispatch_application_surface_tools, dispatch_info_tools,
 };
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
-use tracedecay_contracts::ProjectRegistryReadPort;
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -188,11 +197,6 @@ use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
 use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::storage::registered_project_id;
 
-/// Dispatches a tool call to the appropriate handler.
-///
-/// Returns the tool result and touched file paths, or an error if the tool
-/// name is unknown or the handler fails. The optional `server_stats` value
-/// is included in `tracedecay_status` responses when provided.
 fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
     if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
         return Ok(());
@@ -218,19 +222,15 @@ fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn handle_tool_call(
-    cg: &TraceDecay,
-    tool_name: &str,
-    args: Value,
-    server_stats: Option<Value>,
-    scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
+/// Dispatches a tool call to the appropriate handler.
+///
+/// Returns the tool result and touched file paths, or an error if the tool
+/// name is unknown or the handler fails.
+pub async fn handle_tool_call(cg: &TraceDecay, tool_name: &str, args: Value) -> Result<ToolResult> {
     Box::pin(handle_tool_call_with_registry_options(
         cg,
         tool_name,
         args,
-        server_stats,
-        scope_prefix,
         ToolCallRegistryOptions::default().admit_opened_project(cg)?,
     ))
     .await
@@ -283,9 +283,9 @@ impl ServedCodeGraphSlot {
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
     pub(crate) global_db: Option<&'a RegisteredGlobalDbLeaseV1>,
-    /// Daemon-owned project-registry reads. `None` is the typed
-    /// missing-registry state, not an empty registry.
-    pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
+    /// The serving MCP server's request counters, which the graph-tool owner
+    /// reports in `tracedecay_status`.
+    pub(crate) server_stats: Option<Value>,
     pub(crate) accounting_db: Option<&'a tracedecay_global_db::RegisteredGlobalDb>,
     pub(crate) registered_project_session_db:
         Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
@@ -384,7 +384,7 @@ impl Default for ToolCallRegistryOptions<'_> {
     fn default() -> Self {
         Self {
             global_db: None,
-            project_registry_reads: None,
+            server_stats: None,
             accounting_db: None,
             registered_project_session_db: None,
             registered_profile_session_db: None,
@@ -461,8 +461,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,
     args: Value,
-    server_stats: Option<Value>,
-    scope_prefix: Option<&'a str>,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
     #[cfg(feature = "hotpath")]
@@ -609,21 +607,10 @@ pub fn handle_tool_call_with_registry_options<'a>(
         let dispatched = async {
             match dispatch_group {
                 Some(McpToolDispatchGroup::Info) => {
-                    boxed_send(dispatch_info_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        server_stats,
-                        scope_prefix,
-                        options,
-                    ))
-                    .await
+                    boxed_send(dispatch_info_tools(tool_name, cg, options)).await
                 }
                 Some(McpToolDispatchGroup::Admin) => {
                     boxed_send(dispatch_admin_tools(tool_name, cg, args, options)).await
-                }
-                Some(McpToolDispatchGroup::Health) => {
-                    boxed_send(dispatch_health_tools(tool_name, cg, args, options)).await
                 }
                 // Typed daemon surface tools already returned above, and the daemon
                 // serves the internal branch-add tool before MCP dispatch; reaching

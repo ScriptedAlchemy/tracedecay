@@ -394,6 +394,18 @@ pub async fn invoke_application_surface<E: DaemonInvocationExecutor + ?Sized>(
                 cancellation.context(),
             )
         }
+        (InvocationTarget::Profile, ApplicationSurfaceRequest::GraphTool(arguments))
+            if operation.is_profile_registry_read() =>
+        {
+            DaemonInvocationRequest::profile_graph_tool(
+                request_id.as_str(),
+                operation,
+                arguments,
+                now_micros(),
+                deadline.clone(),
+                cancellation.context(),
+            )
+        }
         (InvocationTarget::Profile, _) => return Err(InvocationError::InvalidRequest),
         (target, request) => daemon_invocation_request(
             &request_id,
@@ -908,6 +920,13 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::Search
         | ApplicationSurfaceOperation::RunAffectedTests
         | ApplicationSurfaceOperation::Dashboard
+        | ApplicationSurfaceOperation::Status
+        | ApplicationSurfaceOperation::ActiveProject
+        | ApplicationSurfaceOperation::RemoteStatus
+        | ApplicationSurfaceOperation::Runtime
+        | ApplicationSurfaceOperation::ProjectList
+        | ApplicationSurfaceOperation::ProjectSearch
+        | ApplicationSurfaceOperation::ProjectContext
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

@@ -327,10 +327,9 @@ pub use profile_identity::ProfileIdentityReadPort;
 pub use project_registry::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryEntry, ProjectRegistryListingCommand,
-    ProjectRegistryListingFuture, ProjectRegistryListingOutcome, ProjectRegistryListingScope,
-    ProjectRegistryListingView, ProjectRegistryReadPort, ProjectRegistrySelector,
-    ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup, PublicCodeProject,
-    list_registered_projects, read_registered_project_context, render_project_registry_view,
+    ProjectRegistryListingFuture, ProjectRegistryListingScope, ProjectRegistryListingView,
+    ProjectRegistryReadPort, ProjectRegistrySelector, ProjectRegistrySummary, ProjectRegistryView,
+    ProjectRepoGroup, PublicCodeProject, render_project_registry_view,
 };
 pub use remote::status::RemoteOperationalStatusReaderV1;
 pub use result::{

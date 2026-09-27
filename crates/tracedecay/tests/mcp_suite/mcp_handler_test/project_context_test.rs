@@ -279,37 +279,6 @@ async fn project_context_returns_the_project_the_caller_named() {
 }
 
 #[tokio::test]
-async fn project_context_reports_an_unmounted_registry_as_unavailable() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let server = tracedecay::mcp::McpServer::new(
-        tracedecay_project::project::TraceDecay::open_with_options(
-            cg.project_root(),
-            crate::support::graph_open_options(&cg),
-        )
-        .await
-        .expect("open served project"),
-        None,
-    )
-    .await;
-
-    let payload = call_project_context(
-        &server,
-        json!({"project_selector": {"project_id": "proj_alpha"}}),
-    )
-    .await;
-
-    assert_eq!(
-        payload,
-        json!({
-            "status": "unavailable",
-            "message": "project registry is not present for this profile",
-            "projects": [],
-        }),
-        "a server with no registry port must not answer not_found"
-    );
-}
-
-#[tokio::test]
 async fn project_context_reports_a_broken_registry_read_as_a_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
@@ -361,19 +330,14 @@ async fn project_context_reports_a_broken_registry_read_as_a_tool_error() {
     )
     .await;
 
-    assert_eq!(response["error"]["code"], -32603, "{response}");
+    // A broken alias table refuses; it never becomes a successful context.
     assert_eq!(
-        response["error"]["data"]["tool"], "tracedecay_project_context",
-        "{response}"
-    );
-    assert_eq!(
-        response["error"]["message"],
-        "tool execution failed: database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
-        "{response}"
-    );
-    assert!(
-        response.get("result").is_none() || response["result"].is_null(),
-        "a broken alias table must not become a successful context: {response}"
+        crate::support::tool_refusal(&response),
+        json!({
+            "kind": "unavailable",
+            "code": "graph_tool.failed",
+            "message": "database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
+        })
     );
 }
 

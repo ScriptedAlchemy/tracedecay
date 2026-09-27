@@ -6,6 +6,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::InvocationAnalyticsV1;
+use crate::remote::status::RemoteOperationalStatusReadV1;
+use crate::retrieval::{
+    ActiveProjectResultV1, ProjectContextResultV1, ProjectRegistryListingResultV1, RuntimeResultV1,
+    StatusResultV1,
+};
 use crate::retrieval::{
     AffectedResultV1, AnalyticsResultV1, AstGrepSearchResultV1, AutomationRunArtifactViewResultV1,
     AutomationRunListResultV1, AutomationRunViewResultV1, BranchDiffResultV1, BranchListResultV1,
@@ -86,6 +91,13 @@ pub enum GraphToolResultV1 {
     Search(Box<SearchResultV1>),
     RunAffectedTests(RunAffectedTestsResultV1),
     Dashboard(DashboardResultV1),
+    Status(StatusResultV1),
+    ActiveProject(ActiveProjectResultV1),
+    RemoteStatus(RemoteOperationalStatusReadV1),
+    Runtime(Box<RuntimeResultV1>),
+    ProjectList(ProjectRegistryListingResultV1),
+    ProjectSearch(ProjectRegistryListingResultV1),
+    ProjectContext(ProjectContextResultV1),
 }
 
 impl GraphToolResultV1 {
@@ -157,6 +169,13 @@ impl GraphToolResultV1 {
             Operation::Search => Self::Search(serde_json::from_value(value)?),
             Operation::RunAffectedTests => Self::RunAffectedTests(serde_json::from_value(value)?),
             Operation::Dashboard => Self::Dashboard(serde_json::from_value(value)?),
+            Operation::Status => Self::Status(serde_json::from_value(value)?),
+            Operation::ActiveProject => Self::ActiveProject(serde_json::from_value(value)?),
+            Operation::RemoteStatus => Self::RemoteStatus(serde_json::from_value(value)?),
+            Operation::Runtime => Self::Runtime(serde_json::from_value(value)?),
+            Operation::ProjectList => Self::ProjectList(serde_json::from_value(value)?),
+            Operation::ProjectSearch => Self::ProjectSearch(serde_json::from_value(value)?),
+            Operation::ProjectContext => Self::ProjectContext(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -228,6 +247,12 @@ impl GraphToolResultV1 {
             Self::Search(result) => serde_json::to_value(result),
             Self::RunAffectedTests(result) => serde_json::to_value(result),
             Self::Dashboard(result) => serde_json::to_value(result),
+            Self::Status(result) => serde_json::to_value(result),
+            Self::ActiveProject(result) => serde_json::to_value(result),
+            Self::RemoteStatus(result) => serde_json::to_value(result),
+            Self::Runtime(result) => serde_json::to_value(result),
+            Self::ProjectList(result) | Self::ProjectSearch(result) => serde_json::to_value(result),
+            Self::ProjectContext(result) => serde_json::to_value(result),
         }
     }
 }

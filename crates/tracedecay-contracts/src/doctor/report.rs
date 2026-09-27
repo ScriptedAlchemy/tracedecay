@@ -281,7 +281,7 @@ impl DoctorReportEntryV1 {
 /// finding with complete coverage does not weaken report completeness, and only
 /// genuinely complete coverage with every finding healthy makes the whole report
 /// assert health.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DoctorReportV1 {
     entries: Vec<DoctorReportEntryV1>,
     coverage: DoctorReportCoverageV1,

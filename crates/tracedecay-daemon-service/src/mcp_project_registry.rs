@@ -3,8 +3,7 @@
 //! [`ProjectRegistryReadPort`] implementation.
 //!
 //! This module owns the registry database handle so MCP handlers do not. A
-//! mounted-but-empty registry answers with an empty listing, an absent
-//! registry never reaches here (the boundary reports that state), and an
+//! mounted-but-empty registry answers with an empty listing, and an
 //! unreadable registry still fails.
 
 use serde_json::Value;
@@ -13,8 +12,8 @@ use std::path::Path;
 use tracedecay_contracts::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
-    ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
-    ProjectRegistryReadPort, ProjectRegistrySelector,
+    ProjectRegistryListingScope, ProjectRegistryListingView, ProjectRegistryReadPort,
+    ProjectRegistrySelector,
 };
 use tracedecay_dashboard_api::project_registry::{
     align_public_checkout_branches, build_project_registry_view, public_code_project_for_checkout,
@@ -90,7 +89,7 @@ impl DaemonProjectRegistryReadService {
     async fn execute_list(
         &self,
         command: ProjectRegistryListingCommand,
-    ) -> Result<ProjectRegistryListingOutcome> {
+    ) -> Result<ProjectRegistryListingView> {
         let ProjectRegistryListingCommand {
             active_project_root,
             scope,
@@ -104,10 +103,8 @@ impl DaemonProjectRegistryReadService {
                 self.registry.try_search_code_projects(query, page).await?
             }
         };
-        Ok(ProjectRegistryListingOutcome::Listing(
-            self.listing(active_project_root.as_deref(), projects, limit)
-                .await?,
-        ))
+        self.listing(active_project_root.as_deref(), projects, limit)
+            .await
     }
 
     #[hotpath::skip]

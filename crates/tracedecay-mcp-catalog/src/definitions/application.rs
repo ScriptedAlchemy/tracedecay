@@ -3,7 +3,7 @@ use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, CatalogContributionV1, CatalogValidationError, OperationId,
 };
 
-use super::application_schema::{bound_tagged_union, closed_object_schema};
+use super::application_schema::bound_tagged_union;
 use super::def;
 use crate::{McpCatalogError, ToolDefinition};
 
@@ -85,6 +85,13 @@ const HANDWRITTEN_DEFINITION_OPERATIONS: &[ApplicationSurfaceOperation] = &[
     ApplicationSurfaceOperation::Search,
     ApplicationSurfaceOperation::RunAffectedTests,
     ApplicationSurfaceOperation::Dashboard,
+    ApplicationSurfaceOperation::Status,
+    ApplicationSurfaceOperation::ActiveProject,
+    ApplicationSurfaceOperation::RemoteStatus,
+    ApplicationSurfaceOperation::Runtime,
+    ApplicationSurfaceOperation::ProjectList,
+    ApplicationSurfaceOperation::ProjectSearch,
+    ApplicationSurfaceOperation::ProjectContext,
     ApplicationSurfaceOperation::StrReplace,
     ApplicationSurfaceOperation::MultiStrReplace,
     ApplicationSurfaceOperation::InsertAt,
@@ -283,12 +290,12 @@ fn invalid_application_definition(field: &'static str, reason: &'static str) -> 
     CatalogValidationError::InvalidValue { field, reason }.into()
 }
 
-pub(super) fn def_remote_status_read() -> ToolDefinition {
+pub(super) fn def_remote_status_read(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_remote_status",
         "Read Remote Brain status",
         "Read the Remote Brain operational plane: listener, enrollment, spool, replay coverage, and failover/recovery state.",
-        closed_object_schema(json!({}), &[]),
+        input_schema,
     )
 }
 

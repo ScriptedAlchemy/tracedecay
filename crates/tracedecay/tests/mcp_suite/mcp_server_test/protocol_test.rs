@@ -370,7 +370,8 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
 
 #[tokio::test]
 async fn test_tools_call_timings_enabled_by_default() {
-    let (server, _dir) = setup_server().await;
+    let fixture = setup_accounted_server().await;
+    let server = Arc::clone(&fixture.server);
     let responses = run_server_with_messages(
         server,
         vec![jsonrpc_request(
@@ -397,7 +398,8 @@ async fn test_tools_call_timings_enabled_by_default() {
 
 #[tokio::test]
 async fn test_tools_call_timings_can_be_disabled() {
-    let (server, dir) = setup_server().await;
+    let fixture = setup_accounted_server().await;
+    let server = Arc::clone(&fixture.server);
     server.set_timings_enabled(false);
     let responses = run_server_with_messages(
         server,
@@ -417,7 +419,7 @@ async fn test_tools_call_timings_can_be_disabled() {
     assert_eq!(payload["project_admitted"], true, "{payload}");
     assert_eq!(
         payload["project_root"],
-        json!(canonical_existing_identity(dir.path()).unwrap()),
+        json!(canonical_existing_identity(&fixture.project_root).unwrap()),
         "{payload}"
     );
     assert!(
@@ -717,7 +719,8 @@ async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
 
 #[tokio::test]
 async fn test_tools_call_status() {
-    let (server, _dir) = setup_server().await;
+    let fixture = setup_accounted_server().await;
+    let server = Arc::clone(&fixture.server);
     let responses = run_server_with_messages(
         server,
         vec![jsonrpc_request(
@@ -1152,7 +1155,8 @@ async fn test_server_stats_include_response_handle_metrics() {
 }
 #[tokio::test]
 async fn test_server_stats_after_run() {
-    let (server, _dir) = setup_server().await;
+    let fixture = setup_accounted_server().await;
+    let server = Arc::clone(&fixture.server);
     let server_handle = server.clone();
     // Send several requests then a tracedecay_status to check stats are embedded.
     let responses = run_server_with_messages(
@@ -1207,7 +1211,8 @@ async fn test_server_stats_after_run() {
 
 #[tokio::test]
 async fn test_error_tracking() {
-    let (server, _dir) = setup_server().await;
+    let fixture = setup_accounted_server().await;
+    let server = Arc::clone(&fixture.server);
     let stats_view = Arc::clone(&server);
     let responses = run_server_with_messages(
         server,

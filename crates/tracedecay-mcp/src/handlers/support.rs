@@ -117,20 +117,37 @@ pub fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
 /// thread keys are host route identity: the server routes the call by them
 /// before dispatch, so they never belong to the request body.
 pub fn decode_primitive_request<T: DeserializeOwned>(args: &Value, tool_name: &str) -> Result<T> {
+    decode_request_without(args, tool_name, &["project_selector"])
+}
+
+/// [`decode_primitive_request`] for a request whose own contract names a
+/// registered project through `project_selector`, so routing never consumed
+/// it.
+pub fn decode_selector_request<T: DeserializeOwned>(args: &Value, tool_name: &str) -> Result<T> {
+    decode_request_without(args, tool_name, &[])
+}
+
+fn decode_request_without<T: DeserializeOwned>(
+    args: &Value,
+    tool_name: &str,
+    routed_keys: &[&str],
+) -> Result<T> {
     require_object_args(args, tool_name)?;
     let mut request = args.clone();
     if let Some(object) = request.as_object_mut() {
         for key in [
             "format",
             "__mcp_request_id",
-            "project_selector",
             "_meta",
             "session_id",
             "sessionId",
             "thread_id",
             "threadId",
-        ] {
-            object.remove(key);
+        ]
+        .iter()
+        .chain(routed_keys)
+        {
+            object.remove(*key);
         }
     }
     serde_json::from_value(request).map_err(|error| TraceDecayError::Config {

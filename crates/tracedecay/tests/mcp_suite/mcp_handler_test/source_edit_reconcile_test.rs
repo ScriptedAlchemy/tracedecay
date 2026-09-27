@@ -91,14 +91,8 @@ async fn call_reconcile(
     fixture: &ProductionSourceEditFixture,
     args: Value,
 ) -> Result<ToolResult, TraceDecayError> {
-    handle_production_source_edit_tool_call(
-        fixture,
-        "tracedecay_source_edit_reconcile",
-        args,
-        None,
-        None,
-    )
-    .await
+    handle_production_source_edit_tool_call(fixture, "tracedecay_source_edit_reconcile", args, None)
+        .await
 }
 
 fn reconcile_args(
@@ -134,7 +128,6 @@ async fn admitted_expected_state(fixture: &ProductionSourceEditFixture) -> Strin
             "new_str": NEW,
             "dry_run": true
         }),
-        None,
         None,
     )
     .await
@@ -212,7 +205,6 @@ async fn retain_unpublished_effect(
             "idempotency_key": original_key,
             "expected_state": expected_state,
         }),
-        None,
         None,
     )
     .await
@@ -435,7 +427,6 @@ async fn unpublished_effect_confirms_rolled_back_and_releases_the_file() {
                 "expected_state": expected_state,
             }),
             None,
-            None,
         )
         .await
         .expect("original edit retry"),
@@ -464,7 +455,6 @@ async fn unpublished_effect_confirms_rolled_back_and_releases_the_file() {
                 "idempotency_key": "mcp.source-edit-reconcile.rolled-back.follow-up",
                 "expected_state": expected_state,
             }),
-            None,
             None,
         )
         .await
@@ -596,7 +586,6 @@ async fn mismatched_inspection_keeps_bytes_and_confirm_committed_keeps_the_posti
                 "idempotency_key": original_key,
                 "expected_state": expected_state,
             }),
-            None,
             None,
         )
         .await

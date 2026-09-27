@@ -7,11 +7,20 @@ use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessCoverageV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
-    CodeIndexReadinessWaitV1, CodeIndexStalenessStateV1,
+    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+};
+use tracedecay_contracts::doctor::ResidentMemoryHolderReadV1;
+use tracedecay_contracts::retrieval::{
+    ActiveProjectBranchV1, ActiveProjectResolutionSourceV1, ActiveProjectResultV1,
+    ActiveProjectStorageV1, ProjectStatusV1, StatusAdmissionV1, StatusBranchMismatchV1,
+    StatusCodeIndexFreshnessV1, StatusGitStalenessV1, StatusMemoryOwnerV1, StatusMemoryPressureV1,
+    StatusMemoryV1, StatusResultV1, StatusRetrievalServingV1, StatusSchemaConvergenceStateV1,
+    StatusSchemaConvergenceV1, StatusServingConditionV1, StatusServingFreshnessV1,
+    StatusSurfaceRequestV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{ManifestDigest, ProjectId};
+use tracedecay_domain::ProjectId;
+use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::resident_memory::{
     RESIDENT_OWNER_SHED_ORDER_V1, ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
@@ -21,25 +30,11 @@ use tracedecay_runtime_core::resident_memory::{
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
 
+use crate::McpToolContext;
 use crate::tools::render::Md;
-use crate::{McpToolContext, ToolResult, generic_tool_result, rendered_tool_result};
 
 fn display_path(path: &Path) -> String {
     path.display().to_string()
-}
-
-/// The `wait_for` argument, when present.
-pub fn status_readiness_wait(args: &Value) -> Result<Option<CodeIndexReadinessWaitV1>> {
-    match args.get("wait_for") {
-        None | Some(Value::Null) => Ok(None),
-        Some(wait_for) => serde_json::from_value(wait_for.clone())
-            .map(Some)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "tracedecay_status wait_for must be {{\"state\": \"fresh\"|\"ready\"|\"graph_ready\", \"timeout_ms\": <u64>}}: {error}"
-                ),
-            }),
-    }
 }
 
 /// Project what a readiness wait observed onto the caller-facing outcome.
@@ -56,7 +51,7 @@ pub fn readiness_wait_outcome(
                 last_state: last
                     .as_ref()
                     .map_or("not_mounted", |freshness| {
-                        code_index_freshness_projection(freshness).0
+                        code_index_freshness_projection(freshness).0.as_str()
                     })
                     .to_owned(),
             }
@@ -67,16 +62,12 @@ pub fn readiness_wait_outcome(
     }
 }
 
-fn status_arg_flag(args: &Value, key: &str, default: bool) -> bool {
-    args.get(key).and_then(Value::as_bool).unwrap_or(default)
-}
-
-fn schema_convergence_status(findings: &[SchemaConvergenceFindingV1]) -> Value {
+fn schema_convergence_status(findings: &[SchemaConvergenceFindingV1]) -> StatusSchemaConvergenceV1 {
     let status = if findings
         .iter()
         .any(|finding| finding.state == SchemaConvergenceStateV1::Degraded)
     {
-        "degraded"
+        StatusSchemaConvergenceStateV1::Degraded
     } else if findings.iter().any(|finding| {
         matches!(
             finding.state,
@@ -84,11 +75,14 @@ fn schema_convergence_status(findings: &[SchemaConvergenceFindingV1]) -> Value {
                 | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
         )
     }) {
-        "in_progress"
+        StatusSchemaConvergenceStateV1::InProgress
     } else {
-        "completed"
+        StatusSchemaConvergenceStateV1::Completed
     };
-    json!({ "status": status, "findings": findings })
+    StatusSchemaConvergenceV1 {
+        status,
+        findings: findings.to_vec(),
+    }
 }
 
 /// Whether exact-scope code retrieval can serve at all, derived from the same
@@ -99,61 +93,14 @@ fn schema_convergence_status(findings: &[SchemaConvergenceFindingV1]) -> Value {
 /// every retrieval lane truthfully refused `generation_rebuilding`. Status
 /// must report the same serving truth the lanes enforce: the branch claim is
 /// gated on a sealed complete generation existing, and the typed
-/// `retrieval_serving` field carries the lane-level answer either way.
-enum CodeIndexRetrievalServingV1 {
-    /// A sealed complete generation exists for the exact worktree. The ages
-    /// distinguish a routine rebuild window from a wedged route: a seat
-    /// sealed days ago whose last reconcile observation is equally old is a
-    /// daemon serving stale answers with nothing progressing, and "serving"
-    /// alone must not mask that.
-    Serving {
-        freshness: &'static str,
-        condition: Option<&'static str>,
-        seated_generation_age_seconds: Option<i64>,
-        last_reconcile_age_seconds: Option<i64>,
-    },
-    /// The daemon census answered and nothing is servable yet.
-    NotServing { reason: &'static str },
-    /// No census authority is attached (non-daemon server); status cannot
-    /// claim or deny lane-serving truth.
-    AuthorityUnattached,
-}
-
-impl CodeIndexRetrievalServingV1 {
-    fn attach(&self, output: &mut Value) -> bool {
-        match self {
-            Self::Serving {
-                freshness,
-                condition,
-                seated_generation_age_seconds,
-                last_reconcile_age_seconds,
-            } => {
-                let mut serving = json!({
-                    "status": "serving",
-                    "freshness": freshness,
-                });
-                if let Some(condition) = condition {
-                    serving["condition"] = json!(condition);
-                }
-                if let Some(age) = seated_generation_age_seconds {
-                    serving["seated_generation_age_seconds"] = json!(age);
-                }
-                if let Some(age) = last_reconcile_age_seconds {
-                    serving["last_reconcile_age_seconds"] = json!(age);
-                }
-                output["retrieval_serving"] = serving;
-                true
-            }
-            Self::NotServing { reason } => {
-                output["retrieval_serving"] = json!({
-                    "status": "unavailable",
-                    "reason": reason,
-                });
-                false
-            }
-            Self::AuthorityUnattached => true,
-        }
-    }
+/// `retrieval_serving` field carries the lane-level answer either way. No
+/// census authority attached (a non-daemon server) leaves it absent: status
+/// can then neither claim nor deny lane-serving truth.
+fn branch_servable(retrieval_serving: Option<&StatusRetrievalServingV1>) -> bool {
+    !matches!(
+        retrieval_serving,
+        Some(StatusRetrievalServingV1::Unavailable { .. })
+    )
 }
 
 /// Whole seconds elapsed since a recorded microsecond timestamp, clamped at
@@ -194,75 +141,65 @@ fn ready_serving_source(
 }
 
 fn attach_compact_branch_summary(
-    open_active_branch: Option<&str>,
-    serving_branch: Option<&str>,
-    output: &mut Value,
-    retrieval_serving: &CodeIndexRetrievalServingV1,
+    open_active_branch: Option<String>,
+    serving_branch: Option<String>,
+    status: &mut ProjectStatusV1,
 ) {
     // Both status shapes consume the serving identity reconciled with the
     // ready generation source below.
     // Do not alias open/active into current/live: those are distinct under drift.
-    if let Some(active) = open_active_branch {
-        output["active_branch"] = json!(active);
-    }
-    let branch_servable = retrieval_serving.attach(output);
-    if branch_servable && let Some(serving) = serving_branch {
-        output["serving_branch"] = json!(serving);
+    status.active_branch = open_active_branch;
+    if branch_servable(status.retrieval_serving.as_ref()) {
+        status.serving_branch = serving_branch;
     }
 }
 
 fn attach_full_branch_status(
     branch_diagnostics: &BranchDiagnostics,
-    output: &mut Value,
-    retrieval_serving: &CodeIndexRetrievalServingV1,
-) {
-    output["branch_diagnostics"] = json!(&branch_diagnostics);
-    if let Some(open_branch) = branch_diagnostics.open_active_branch.as_deref() {
-        output["active_branch"] = json!(open_branch);
+    status: &mut ProjectStatusV1,
+) -> Result<()> {
+    status.branch_diagnostics = Some(serde_json::to_value(branch_diagnostics)?);
+    status
+        .active_branch
+        .clone_from(&branch_diagnostics.open_active_branch);
+    status
+        .current_branch
+        .clone_from(&branch_diagnostics.current_branch);
+    status
+        .live_branch
+        .clone_from(&branch_diagnostics.current_branch);
+    if branch_servable(status.retrieval_serving.as_ref()) {
+        status
+            .serving_branch
+            .clone_from(&branch_diagnostics.serving_branch);
     }
-    if let Some(current_branch) = branch_diagnostics.current_branch.as_deref() {
-        output["current_branch"] = json!(current_branch);
-        output["live_branch"] = json!(current_branch);
-    }
-    let branch_servable = retrieval_serving.attach(output);
-    if branch_servable && let Some(serving_branch) = branch_diagnostics.serving_branch.as_deref() {
-        output["serving_branch"] = json!(serving_branch);
-    }
-    if let Some(parent) = branch_diagnostics
+    status.parent_branch = branch_diagnostics
         .branches
         .iter()
         .find(|entry| entry.is_serving)
-        .and_then(|entry| entry.parent.as_deref())
-    {
-        output["parent_branch"] = json!(parent);
-    }
-    output["branch_drifted"] = json!(branch_diagnostics.branch_drifted);
-    output["branch_resolution"] = json!(branch_diagnostics.branch_resolution.clone());
-    output["tracked_branch_count"] = json!(branch_diagnostics.tracked_branch_count);
+        .and_then(|entry| entry.parent.clone());
+    status.branch_drifted = Some(branch_diagnostics.branch_drifted);
+    status.branch_resolution = Some(branch_diagnostics.branch_resolution.clone());
+    status.tracked_branch_count = Some(branch_diagnostics.tracked_branch_count);
     if branch_diagnostics.branch_drifted {
-        output["branch_mismatch"] = json!({
-            "git_branch": branch_diagnostics.current_branch,
-            "indexed_branch": branch_diagnostics.open_active_branch,
-            "serving_branch": branch_diagnostics.serving_branch,
+        status.branch_mismatch = Some(StatusBranchMismatchV1 {
+            git_branch: branch_diagnostics.current_branch.clone(),
+            indexed_branch: branch_diagnostics.open_active_branch.clone(),
+            serving_branch: branch_diagnostics.serving_branch.clone(),
         });
     }
     if !branch_diagnostics.warnings.is_empty() {
-        output["branch_warnings"] = json!(branch_diagnostics.warnings);
+        status.branch_warnings = Some(branch_diagnostics.warnings.clone());
     }
+    Ok(())
 }
 
-/// Serialize the generation census exactly as the CLI decoder reads it back.
-///
-/// [`tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
-/// authority for the `graph_statistics` field: this route serializes it and
-/// `tracedecay status` deserializes the same Rust type, so the two sides
-/// cannot drift.
 /// The daemon's resident memory as one project sees it: process RSS against
 /// the admission ceiling and pressure line, the daemon-wide retained totals,
 /// and this project's retained owners with their bytes, idle time, and
 /// whether pressure may shed them. Other projects' owners belong to the
 /// daemon-wide Doctor inventory, never to a project read.
-fn project_memory_value(project_id: &ProjectId) -> Value {
+fn project_memory_value(project_id: &ProjectId) -> StatusMemoryV1 {
     memory_value(
         process_resident_memory_pressure_v1(),
         process_resident_owners_v1(),
@@ -278,56 +215,64 @@ fn memory_value(
     psi_some_avg10: Option<f64>,
     now: std::time::Instant,
     project_id: &ProjectId,
-) -> Value {
-    let (state, resident_bytes) = match pressure.state() {
-        ResidentMemoryPressureStateV1::Unobserved => ("unobserved", None),
+) -> StatusMemoryV1 {
+    let (status, resident_bytes) = match pressure.state() {
+        ResidentMemoryPressureStateV1::Unobserved => (StatusMemoryPressureV1::Unobserved, None),
         ResidentMemoryPressureStateV1::Nominal { observed_bytes, .. } => {
-            ("nominal", Some(observed_bytes))
+            (StatusMemoryPressureV1::Nominal, Some(observed_bytes))
         }
         ResidentMemoryPressureStateV1::OverBudget { observed_bytes, .. } => {
-            ("over_budget", Some(observed_bytes))
+            (StatusMemoryPressureV1::OverBudget, Some(observed_bytes))
         }
     };
     let report = owners.report(now);
-    let rows = report
+    let owners = report
         .owners
         .iter()
         .filter(|row| row.project_id == *project_id)
-        .map(|row| {
-            json!({
-                "project_id": row.project_id.as_str(),
-                "kind": row.kind.as_str(),
-                "holders": row
-                    .holders
-                    .iter()
-                    .map(|holder| json!({
-                        "worktree_id": holder.worktree_id.as_str(),
-                        "holding": holder.holding.as_str(),
-                    }))
-                    .collect::<Vec<_>>(),
-                "content_digest": row.content_digest.as_ref().map(ManifestDigest::as_str),
-                "bytes": row.bytes.measured(),
-                "measured": row.bytes.measured().is_some(),
-                "idle_seconds": row.idle_for.as_secs(),
-                "protected": row.protected,
-            })
+        .map(|row| StatusMemoryOwnerV1 {
+            project_id: row.project_id.as_str().to_owned(),
+            kind: row.kind.as_str().to_owned(),
+            holders: row
+                .holders
+                .iter()
+                .map(|holder| ResidentMemoryHolderReadV1 {
+                    worktree_id: holder.worktree_id.as_str().to_owned(),
+                    holding: holder.holding.as_str().to_owned(),
+                })
+                .collect(),
+            content_digest: row
+                .content_digest
+                .as_ref()
+                .map(|digest| digest.as_str().to_owned()),
+            bytes: row.bytes.measured(),
+            measured: row.bytes.measured().is_some(),
+            idle_seconds: row.idle_for.as_secs(),
+            protected: row.protected,
         })
-        .collect::<Vec<_>>();
-    json!({
-        "status": state,
-        "resident_bytes": resident_bytes,
-        "limit_bytes": pressure.limit_bytes(),
-        "high_watermark_bytes": pressure.high_watermark_bytes(),
-        "low_watermark_bytes": pressure.low_watermark_bytes(),
-        "psi_some_avg10": psi_some_avg10,
-        "idle_window_seconds": report.idle_window.as_secs(),
-        "shed_order": RESIDENT_OWNER_SHED_ORDER_V1.map(ResidentOwnerKindV1::as_str),
-        "retained_bytes": report.measured_bytes,
-        "unmeasured_owners": report.unmeasured_owners,
-        "owners": rows,
-    })
+        .collect();
+    StatusMemoryV1 {
+        status,
+        resident_bytes,
+        limit_bytes: pressure.limit_bytes(),
+        high_watermark_bytes: pressure.high_watermark_bytes(),
+        low_watermark_bytes: pressure.low_watermark_bytes(),
+        psi_some_avg10,
+        idle_window_seconds: report.idle_window.as_secs(),
+        shed_order: RESIDENT_OWNER_SHED_ORDER_V1
+            .map(|kind: ResidentOwnerKindV1| kind.as_str().to_owned())
+            .to_vec(),
+        retained_bytes: report.measured_bytes,
+        unmeasured_owners: report.unmeasured_owners,
+        owners,
+    }
 }
 
+/// Serialize the generation census exactly as the CLI decoder reads it back.
+///
+/// [`GenerationCensusSnapshot`] is the single wire authority for the
+/// `graph_statistics` field: this route serializes it and `tracedecay status`
+/// deserializes the same Rust type, so the two sides cannot drift.
 pub fn graph_statistics_value(census: Option<&GenerationCensusSnapshot>) -> Result<Value> {
     let census = census.cloned().unwrap_or(
         GenerationCensusSnapshot::Unavailable {
@@ -338,179 +283,197 @@ pub fn graph_statistics_value(census: Option<&GenerationCensusSnapshot>) -> Resu
     Ok(serde_json::to_value(&census)?)
 }
 
+/// The code-index freshness section and the lane-level serving truth it
+/// implies. The lanes serve exactly when a sealed complete generation exists
+/// for the worktree; until the first seal every retrieval lane refuses
+/// `generation_rebuilding`.
+fn code_index_freshness_status(
+    freshness_payload: Option<
+        &tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1,
+    >,
+) -> (
+    StatusCodeIndexFreshnessV1,
+    Option<String>,
+    Option<StatusRetrievalServingV1>,
+) {
+    let Some(payload) = freshness_payload else {
+        return (
+            StatusCodeIndexFreshnessV1::Unavailable {
+                reason: "code_index_scheduler_authority_not_attached".to_owned(),
+            },
+            None,
+            None,
+        );
+    };
+    let Some(freshness) = payload.worktrees.first() else {
+        return (
+            StatusCodeIndexFreshnessV1::Unavailable {
+                reason: "code_index_scheduler_not_mounted".to_owned(),
+            },
+            None,
+            Some(StatusRetrievalServingV1::Unavailable {
+                reason: "code_index_scheduler_not_mounted".to_owned(),
+            }),
+        );
+    };
+    let (label, warning) = code_index_freshness_projection(freshness);
+    let retrieval_serving = if freshness.latest_generation_id.is_some() {
+        let (serving_freshness, condition) = match freshness.staleness_state {
+            Some(CodeIndexStalenessStateV1::Fresh) => (StatusServingFreshnessV1::Current, None),
+            Some(CodeIndexStalenessStateV1::Restoring) => (
+                StatusServingFreshnessV1::Restoring,
+                Some(StatusServingConditionV1::ArtifactRestore),
+            ),
+            Some(CodeIndexStalenessStateV1::Verifying) => (
+                StatusServingFreshnessV1::LastCompleteStale,
+                Some(StatusServingConditionV1::SourceVerification),
+            ),
+            Some(_) if freshness.rebuild_in_flight => (
+                StatusServingFreshnessV1::LastCompleteStale,
+                Some(StatusServingConditionV1::Rebuilding),
+            ),
+            Some(_) => (
+                StatusServingFreshnessV1::LastCompleteStale,
+                Some(StatusServingConditionV1::Stalled),
+            ),
+            None => (StatusServingFreshnessV1::Unknown, None),
+        };
+        StatusRetrievalServingV1::Serving {
+            freshness: serving_freshness,
+            condition,
+            seated_generation_age_seconds: age_seconds(freshness.sealed_at_micros),
+            last_reconcile_age_seconds: age_seconds(freshness.last_reconcile_micros),
+        }
+    } else {
+        let reason = if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
+            "generation_restoring"
+        } else {
+            "generation_rebuilding"
+        };
+        StatusRetrievalServingV1::Unavailable {
+            reason: reason.to_owned(),
+        }
+    };
+    (
+        label.with_worktree(freshness.clone()),
+        warning,
+        Some(retrieval_serving),
+    )
+}
+
+/// Computes `tracedecay_status`. `server_stats` is the serving MCP server's
+/// request counters; `wait` is the readiness wait the owner held the read
+/// for, when the request asked for one.
 #[hotpath::measure(label = "mcp.info.status.total")]
-pub async fn handle_status(
+pub async fn compute_status(
     ctx: &McpToolContext<'_>,
-    args: Value,
+    request: &StatusSurfaceRequestV1,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
     wait: Option<CodeIndexReadinessWaitOutcomeV1>,
-) -> Result<ToolResult> {
-    if status_arg_flag(&args, "admission_only", false) {
-        let mut output = json!({
-            "project_admitted": true,
-            "project_root": ctx.project_root(),
-        });
-        if let Some(ss) = server_stats {
-            output["server"] = ss;
-        }
-        if let Some(prefix) = scope_prefix {
-            output["scope_prefix"] = json!(prefix);
-        }
-        return Ok(generic_tool_result(
-            Some(&ctx.store_layout().response_handle_root),
-            &args,
-            &output,
-            vec![],
-        ));
+) -> Result<StatusResultV1> {
+    if request.admission_only {
+        return Ok(StatusResultV1::Admission(StatusAdmissionV1 {
+            project_admitted: true,
+            project_root: display_path(ctx.project_root()),
+            server: server_stats,
+            scope_prefix: scope_prefix.map(str::to_owned),
+        }));
     }
 
     // Compact by default. The CLI already skips these sections because they
     // commonly push status over the response-frame budget, and the truncated
     // body is not something the caller should reassemble into context. Opt in
     // when the full diagnostic section is the thing being asked for.
-    let include_branch_diagnostics = status_arg_flag(&args, "include_branch_diagnostics", false);
-    let include_storage_health = status_arg_flag(&args, "include_storage_health", false);
-    let include_session_ingest = status_arg_flag(&args, "include_session_ingest", false);
-    let include_staleness = status_arg_flag(&args, "include_staleness", false);
-
-    let graph_statistics = graph_statistics_value(ctx.generation_census())?;
-    let mut output = json!({
-        "project_root": ctx.project_root(),
-        "graph_statistics": graph_statistics,
-        "memory": project_memory_value(&ctx.admitted_scope().project_id),
-    });
-    output["schema_convergence"] = schema_convergence_status(
-        &ctx.store_runtime()
-            .registered_schema_convergence_observations(),
-    );
-    output["reset_required_stores"] = json!(ctx.store_runtime().reset_required_stores());
     let freshness_payload = hotpath::future!(
         ctx.freshness(),
         label = "mcp.info.status.code_index_freshness"
     )
     .await;
-    let (code_index_freshness, retrieval_serving) = match freshness_payload.as_ref() {
-        Some(payload) => match payload.worktrees.first() {
-            Some(freshness) => {
-                let (status, warning) = code_index_freshness_projection(freshness);
-                if let Some(warning) = warning {
-                    output["code_index_freshness_warning"] = json!(warning);
-                }
-                // The lanes serve exactly when a sealed complete generation
-                // exists for the worktree; until the first seal every
-                // retrieval lane refuses `generation_rebuilding`.
-                let retrieval_serving = if freshness.latest_generation_id.is_some() {
-                    let (serving_freshness, condition) = match freshness.staleness_state {
-                        Some(CodeIndexStalenessStateV1::Fresh) => ("current", None),
-                        Some(CodeIndexStalenessStateV1::Restoring) => {
-                            ("restoring", Some("artifact_restore"))
-                        }
-                        Some(CodeIndexStalenessStateV1::Verifying) => {
-                            ("last_complete_stale", Some("source_verification"))
-                        }
-                        Some(_) if freshness.rebuild_in_flight => {
-                            ("last_complete_stale", Some("rebuilding"))
-                        }
-                        Some(_) => ("last_complete_stale", Some("stalled")),
-                        None => ("unknown", None),
-                    };
-                    CodeIndexRetrievalServingV1::Serving {
-                        freshness: serving_freshness,
-                        condition,
-                        seated_generation_age_seconds: age_seconds(freshness.sealed_at_micros),
-                        last_reconcile_age_seconds: age_seconds(freshness.last_reconcile_micros),
-                    }
-                } else {
-                    CodeIndexRetrievalServingV1::NotServing {
-                        reason: if freshness.staleness_state
-                            == Some(CodeIndexStalenessStateV1::Restoring)
-                        {
-                            "generation_restoring"
-                        } else {
-                            "generation_rebuilding"
-                        },
-                    }
-                };
-                (
-                    json!({
-                        "status": status,
-                        "worktree": freshness,
-                    }),
-                    retrieval_serving,
-                )
-            }
-            None => (
-                json!({
-                    "status": "unavailable",
-                    "reason": "code_index_scheduler_not_mounted",
-                }),
-                CodeIndexRetrievalServingV1::NotServing {
-                    reason: "code_index_scheduler_not_mounted",
-                },
-            ),
-        },
-        None => (
-            json!({
-                "status": "unavailable",
-                "reason": "code_index_scheduler_authority_not_attached",
-            }),
-            CodeIndexRetrievalServingV1::AuthorityUnattached,
-        ),
-    };
-    let ready_serving_source = ready_serving_source(freshness_payload.as_ref());
-    let (source_reference, source_revision, source_is_current) = (
-        ready_serving_source.map(|source| source.reference),
-        ready_serving_source.and_then(|source| source.revision),
-        ready_serving_source.is_some_and(|source| source.current_source_verified),
-    );
-    output["code_index_freshness"] = code_index_freshness;
-    output["github_source"] = match github_source_status_v1(ctx.project_root()) {
+    let (code_index_freshness, code_index_freshness_warning, retrieval_serving) =
+        code_index_freshness_status(freshness_payload.as_ref());
+    let github_source = match github_source_status_v1(ctx.project_root()) {
         Some(source) => serde_json::to_value(&source)?,
         None => json!({
             "state": "absent",
             "reason": "the checkout has no GitHub origin, or its advisory owner has not mounted in this daemon",
         }),
     };
-    if include_storage_health {
+    let storage_health = if request.include_storage_health {
         let mut storage_health = serde_json::to_value(
             hotpath::future!(
                 crate::handlers::health::collect_database_snapshot(ctx, false, None),
                 label = "mcp.info.status.storage_health"
             )
             .await?,
-        )
-        .unwrap_or_else(|_| json!({}));
+        )?;
         if server_stats.is_some() {
             storage_health["daemon_owner_pid"] = json!(std::process::id());
             storage_health["daemon_generation"] =
                 json!(tracedecay_runtime_core::runtime_identity::process_run_id());
         }
-        output["storage_health"] = storage_health;
-    }
-    if let Some(ss) = server_stats {
-        output["server"] = ss;
-    }
+        Some(storage_health)
+    } else {
+        None
+    };
+    let mut status = ProjectStatusV1 {
+        project_root: display_path(ctx.project_root()),
+        graph_statistics: graph_statistics_value(ctx.generation_census())?,
+        memory: project_memory_value(&ctx.admitted_scope().project_id),
+        schema_convergence: schema_convergence_status(
+            &ctx.store_runtime()
+                .registered_schema_convergence_observations(),
+        ),
+        reset_required_stores: ctx.store_runtime().reset_required_stores(),
+        code_index_freshness,
+        code_index_freshness_warning,
+        retrieval_serving,
+        github_source,
+        storage_health,
+        server: server_stats,
+        branch_diagnostics: None,
+        active_branch: None,
+        current_branch: None,
+        live_branch: None,
+        serving_branch: None,
+        parent_branch: None,
+        branch_drifted: None,
+        branch_resolution: None,
+        tracked_branch_count: None,
+        branch_mismatch: None,
+        branch_warnings: None,
+        session_ingest: None,
+        session_history_catch_up: None,
+        git_staleness: request.include_staleness.then(|| StatusGitStalenessV1 {
+            status: "unavailable".to_owned(),
+            reason: "sealed_generation_git_watermark_not_published".to_owned(),
+            message: "the verified code generation does not publish a Git commit watermark"
+                .to_owned(),
+        }),
+        scope_prefix: scope_prefix.map(str::to_owned),
+        wait,
+    };
 
-    if include_branch_diagnostics {
+    let ready_serving_source = ready_serving_source(freshness_payload.as_ref());
+    let (source_reference, source_revision, source_is_current) = (
+        ready_serving_source.map(|source| source.reference),
+        ready_serving_source.and_then(|source| source.revision),
+        ready_serving_source.is_some_and(|source| source.current_source_verified),
+    );
+    if request.include_branch_diagnostics {
         let branch_diagnostics = ctx.branch_diagnostics_for_serving_source(
             source_reference,
             source_revision,
             source_is_current,
         );
-        attach_full_branch_status(&branch_diagnostics, &mut output, &retrieval_serving);
+        attach_full_branch_status(&branch_diagnostics, &mut status)?;
     } else {
         let (open_active_branch, serving_branch) = ctx.serving_branch_identity_for_serving_source(
             source_reference,
             source_revision,
             source_is_current,
         );
-        attach_compact_branch_summary(
-            open_active_branch.as_deref(),
-            serving_branch.as_deref(),
-            &mut output,
-            &retrieval_serving,
-        );
+        attach_compact_branch_summary(open_active_branch, serving_branch, &mut status);
     }
 
     // Session-transcript ingest health (recall trust): last ingest time and
@@ -518,17 +481,17 @@ pub async fn handle_status(
     // authority. Match tracedecay_runtime: consult the lease directly rather
     // than gating on the layout path existing on disk (fixtures and some
     // retained mounts hold an open authority before the path is observed).
-    if include_session_ingest {
+    if request.include_session_ingest {
         match ctx.authorized_project_session_db() {
             None => {
                 // Attached means admitted; absent is the typed
                 // unavailable/denied state. Fail closed instead of
                 // opening a second connection here.
-                output["session_ingest"] = json!({
+                status.session_ingest = Some(json!({
                     "status": "unavailable",
                     "reason": "session_store_denied",
                     "message": "this request is not authorized to read the admitted project session store",
-                });
+                }));
             }
             Some((lease, _)) => {
                 let db = lease.as_ref();
@@ -539,69 +502,65 @@ pub async fn handle_status(
                 .await
                 {
                     Ok(ingest) => {
-                        output["session_ingest"] =
-                            serde_json::to_value(&ingest).unwrap_or_else(|error| {
-                                json!({
-                                    "status": "unavailable",
-                                    "reason": "session_ingest_serialization_failed",
-                                    "message": error.to_string(),
-                                })
-                            });
+                        status.session_ingest = Some(serde_json::to_value(&ingest)?);
                         // `session_ingest` stays cursor-scoped so it keeps matching the
                         // doctor-owned signal. Historical catch-up is measured across
                         // providers and remains explicitly partial while the retained
                         // daemon authority drains its bounded backlog.
-                        if let Some(catch_up) = hotpath::future!(
-                            historical_session_catch_up(db),
-                            label = "mcp.info.status.session_history"
-                        )
-                        .await
-                        {
-                            output["session_history_catch_up"] = catch_up;
-                        }
+                        status.session_history_catch_up = Some(
+                            hotpath::future!(
+                                historical_session_catch_up(db),
+                                label = "mcp.info.status.session_history"
+                            )
+                            .await,
+                        );
                     }
                     Err(error) => {
-                        output["session_ingest"] = json!({
+                        status.session_ingest = Some(json!({
                             "status": "unavailable",
                             "reason": "session_ingest_query_failed",
                             "message": error,
-                        });
+                        }));
                     }
                 }
             }
         }
     }
 
-    if include_staleness {
-        output["git_staleness"] = json!({
-            "status": "unavailable",
-            "reason": "sealed_generation_git_watermark_not_published",
-            "message": "the verified code generation does not publish a Git commit watermark",
-        });
+    Ok(StatusResultV1::Project(Box::new(status)))
+}
+
+/// The `code_index_freshness.status` label of one freshness reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreshnessLabelV1 {
+    Current,
+    Stale,
+    Restoring,
+    Warming,
+    Parked,
+}
+
+impl FreshnessLabelV1 {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Stale => "stale",
+            Self::Restoring => "restoring",
+            Self::Warming => "warming",
+            Self::Parked => "parked",
+        }
     }
 
-    if let Some(prefix) = scope_prefix {
-        output["scope_prefix"] = json!(prefix);
+    fn with_worktree(self, worktree: CodeIndexWorktreeFreshnessV1) -> StatusCodeIndexFreshnessV1 {
+        let worktree = Box::new(worktree);
+        match self {
+            Self::Current => StatusCodeIndexFreshnessV1::Current { worktree },
+            Self::Stale => StatusCodeIndexFreshnessV1::Stale { worktree },
+            Self::Restoring => StatusCodeIndexFreshnessV1::Restoring { worktree },
+            Self::Warming => StatusCodeIndexFreshnessV1::Warming { worktree },
+            Self::Parked => StatusCodeIndexFreshnessV1::Parked { worktree },
+        }
     }
-    let wait = wait.map(serde_json::to_value).transpose()?;
-    if let Some(wait) = &wait {
-        output["wait"] = wait.clone();
-    }
-
-    let mut result = rendered_tool_result(
-        Some(&ctx.store_layout().response_handle_root),
-        &args,
-        &output,
-        vec![],
-        || render_status_md(&output),
-    );
-    // Structured content beside the rendered body in every format, like a
-    // typed `problem`, so a caller such as `tracedecay tool` can type its
-    // exit status on the outcome.
-    if let (Some(wait), Some(object)) = (wait, result.value.as_object_mut()) {
-        object.insert("structuredContent".to_owned(), json!({ "wait": wait }));
-    }
-    Ok(result)
 }
 
 /// Project one freshness reading into the operator-facing status label and
@@ -613,8 +572,8 @@ pub async fn handle_status(
 /// the warning carries the exact reason and remediation instead of a
 /// wait-longer message.
 fn code_index_freshness_projection(
-    freshness: &tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1,
-) -> (&'static str, Option<String>) {
+    freshness: &CodeIndexWorktreeFreshnessV1,
+) -> (FreshnessLabelV1, Option<String>) {
     let authoritative = freshness.is_authoritative();
     if let Some(parked) = freshness.parked.as_ref() {
         let warning = format!(
@@ -622,19 +581,19 @@ fn code_index_freshness_projection(
             parked.reason, parked.remediation
         );
         let status = if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Parked) {
-            "parked"
+            FreshnessLabelV1::Parked
         } else if authoritative {
-            "current"
+            FreshnessLabelV1::Current
         } else {
-            "warming"
+            FreshnessLabelV1::Warming
         };
         return (status, Some(warning));
     }
     if authoritative {
-        ("current", None)
+        (FreshnessLabelV1::Current, None)
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
         (
-            "restoring",
+            FreshnessLabelV1::Restoring,
             Some(
                 "the sealed lexical artifact is completing bounded authentication before serving"
                     .to_owned(),
@@ -642,7 +601,7 @@ fn code_index_freshness_projection(
         )
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Verifying) {
         (
-            "stale",
+            FreshnessLabelV1::Stale,
             Some(
                 "the last complete code index remains available while the scheduler verifies source freshness"
                     .to_owned(),
@@ -650,7 +609,7 @@ fn code_index_freshness_projection(
         )
     } else {
         (
-            "warming",
+            FreshnessLabelV1::Warming,
             Some(
                 "graph counts are not authoritative until the scheduler seals a complete fresh generation"
                     .to_owned(),
@@ -661,16 +620,16 @@ fn code_index_freshness_projection(
 
 /// Reports daemon-owned historical warming when any provider's backlog exceeds
 /// the ordinary catch-up threshold, so partial recall is never read as current.
-async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
+async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Value {
     match db.session_ingest_health_for_provider(None).await {
-        Ok(ingest) => Some(historical_session_catch_up_state(&ingest)),
-        Err(error) => Some(json!({
+        Ok(ingest) => historical_session_catch_up_state(&ingest),
+        Err(error) => json!({
             "status": "unavailable",
             "coverage": "unknown",
             "authority": "daemon",
             "reason": "historical_backlog_measurement_failed",
             "message": error,
-        })),
+        }),
     }
 }
 
@@ -751,7 +710,7 @@ fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Value {
     })
 }
 
-fn render_status_md(value: &Value) -> String {
+pub(crate) fn render_status_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Project Status");
     if let Some(obj) = value.as_object() {
@@ -834,51 +793,6 @@ fn render_status_md(value: &Value) -> String {
     md.render()
 }
 
-fn active_project_context(
-    ctx: &McpToolContext<'_>,
-    branch: &BranchDiagnostics,
-    server_stats: Option<Value>,
-    scope_prefix: Option<&str>,
-) -> Value {
-    let project_root = ctx.project_root();
-    let layout = ctx.store_layout();
-    let graph_db_path = ctx.graph_db_path();
-    let admitted_scope = ctx.admitted_scope();
-    let mut output = json!({
-        "project_id": layout.identity.project_id.as_deref(),
-        "repository_id": admitted_scope.repository_id.as_str(),
-        "project_root": display_path(project_root),
-        "resolution_source": "active_project",
-        "storage": {
-            "class": store_kind_name(&layout.store_kind),
-            "mode": storage_mode_name(&layout.storage_mode),
-            "data_root": display_path(&layout.data_root),
-            "graph_db_path": display_path(graph_db_path),
-            "graph_db_exists": graph_db_path.exists(),
-            "graph_db_size_bytes": graph_db_path.metadata().map_or(0, |metadata| metadata.len()),
-            "sessions_db_path": display_path(&layout.sessions_db_path),
-            "response_handle_root": display_path(&layout.response_handle_root),
-            "lcm_payload_root": display_path(&layout.lcm_payload_root),
-        },
-        "branch": {
-            "current_branch": branch.current_branch.clone(),
-            "open_active_branch": branch.open_active_branch.clone(),
-            "serving_branch": branch.serving_branch.clone(),
-            "branch_resolution": branch.branch_resolution.clone(),
-            "branch_drifted": branch.branch_drifted,
-            "tracked_branch_count": branch.tracked_branch_count,
-            "warnings": branch.warnings.clone(),
-        }
-    });
-    if let Some(prefix) = scope_prefix {
-        output["scope_prefix"] = json!(prefix);
-    }
-    if let Some(stats) = server_stats {
-        output["server"] = stats;
-    }
-    output
-}
-
 fn storage_mode_name(mode: &StorageMode) -> &'static str {
     match mode {
         StorageMode::ProfileSharded => "profile_sharded",
@@ -891,13 +805,12 @@ fn store_kind_name(kind: &StoreKind) -> &'static str {
     }
 }
 
+/// Computes `tracedecay_active_project` for the admitted project.
 #[hotpath::measure(label = "mcp.info.active_project.total")]
-pub async fn handle_active_project(
+pub async fn compute_active_project(
     ctx: &McpToolContext<'_>,
-    args: &Value,
-    server_stats: Option<Value>,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
+) -> ActiveProjectResultV1 {
     let freshness_payload = ctx.freshness().await;
     let ready_serving_source = ready_serving_source(freshness_payload.as_ref());
     let branch = ctx.branch_diagnostics_for_serving_source(
@@ -905,13 +818,37 @@ pub async fn handle_active_project(
         ready_serving_source.and_then(|source| source.revision),
         ready_serving_source.is_some_and(|source| source.current_source_verified),
     );
-    let output = active_project_context(ctx, &branch, server_stats, scope_prefix);
-    Ok(generic_tool_result(
-        Some(&ctx.store_layout().response_handle_root),
-        args,
-        &output,
-        vec![],
-    ))
+    let layout = ctx.store_layout();
+    let graph_db_path = ctx.graph_db_path();
+    ActiveProjectResultV1 {
+        project_id: layout.identity.project_id.clone(),
+        repository_id: ctx.admitted_scope().repository_id.as_str().to_owned(),
+        project_root: display_path(ctx.project_root()),
+        resolution_source: ActiveProjectResolutionSourceV1::ActiveProject,
+        storage: ActiveProjectStorageV1 {
+            class: store_kind_name(&layout.store_kind).to_owned(),
+            mode: storage_mode_name(&layout.storage_mode).to_owned(),
+            data_root: display_path(&layout.data_root),
+            graph_db_path: display_path(graph_db_path),
+            graph_db_exists: graph_db_path.exists(),
+            graph_db_size_bytes: graph_db_path
+                .metadata()
+                .map_or(0, |metadata| metadata.len()),
+            sessions_db_path: display_path(&layout.sessions_db_path),
+            response_handle_root: display_path(&layout.response_handle_root),
+            lcm_payload_root: display_path(&layout.lcm_payload_root),
+        },
+        branch: ActiveProjectBranchV1 {
+            current_branch: branch.current_branch,
+            open_active_branch: branch.open_active_branch,
+            serving_branch: branch.serving_branch,
+            branch_resolution: branch.branch_resolution,
+            branch_drifted: branch.branch_drifted,
+            tracked_branch_count: branch.tracked_branch_count,
+            warnings: branch.warnings,
+        },
+        scope_prefix: scope_prefix.map(str::to_owned),
+    }
 }
 
 #[cfg(test)]
@@ -925,9 +862,9 @@ mod tests {
     };
 
     use super::{
-        CodeIndexReadinessWaitReadV1, CodeIndexReadinessWaitV1, code_index_freshness_projection,
+        CodeIndexReadinessWaitReadV1, FreshnessLabelV1, code_index_freshness_projection,
         graph_statistics_value, historical_session_catch_up_state, readiness_wait_outcome,
-        render_status_md, schema_convergence_status, status_readiness_wait,
+        render_status_md, schema_convergence_status,
     };
     use tracedecay_contracts::code_index_freshness::{
         CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
@@ -1008,7 +945,7 @@ mod tests {
         );
 
         assert_eq!(
-            memory,
+            serde_json::to_value(memory).expect("memory serializes"),
             serde_json::json!({
                 "status": "nominal",
                 "resident_bytes": 6_000,
@@ -1075,7 +1012,8 @@ mod tests {
                 degraded_row: (state == SchemaConvergenceStateV1::Degraded)
                     .then(|| "observation_id=obs-7".to_owned()),
             };
-            let value = schema_convergence_status(&[finding]);
+            let value = serde_json::to_value(schema_convergence_status(&[finding]))
+                .expect("schema convergence serializes");
             assert_eq!(value["status"], expected);
             assert_eq!(value["findings"][0]["state"], serde_json::json!(state));
             assert_eq!(value["findings"][0]["started_at_micros"], 42);
@@ -1166,44 +1104,6 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_rejects_an_unknown_state() {
-        let refused = status_readiness_wait(
-            &serde_json::json!({ "wait_for": { "state": "sealed", "timeout_ms": 5 } }),
-        )
-        .expect_err("unknown state is refused");
-        assert!(
-            refused.to_string().contains("wait_for must be"),
-            "{refused}"
-        );
-        assert_eq!(
-            status_readiness_wait(
-                &serde_json::json!({ "wait_for": { "state": "ready", "timeout_ms": 5 } })
-            )
-            .expect("valid wait"),
-            Some(CodeIndexReadinessWaitV1 {
-                state:
-                    tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
-                timeout_ms: 5,
-            })
-        );
-    }
-
-    #[test]
-    fn wait_for_accepts_graph_ready() {
-        assert_eq!(
-            status_readiness_wait(
-                &serde_json::json!({ "wait_for": { "state": "graph_ready", "timeout_ms": 5 } })
-            )
-            .expect("graph_ready is a wait state"),
-            Some(CodeIndexReadinessWaitV1 {
-                state:
-                    tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::GraphReady,
-                timeout_ms: 5,
-            })
-        );
-    }
-
-    #[test]
     fn a_parked_deterministic_violation_reports_parked_not_warming() {
         let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
             worktree_root: "/project".to_owned(),
@@ -1225,7 +1125,7 @@ mod tests {
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
-        assert_eq!(status, "parked");
+        assert_eq!(status, FreshnessLabelV1::Parked);
         let warning = warning.expect("a parked read carries the reason");
         assert!(warning.contains("not owner-private (mode 775, need 700)"));
         assert!(warning.contains("restore owner-only access"));
@@ -1280,7 +1180,7 @@ mod tests {
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
-        assert_eq!(status, "current");
+        assert_eq!(status, FreshnessLabelV1::Current);
         assert!(warning.expect("the park stays visible").contains("parked"));
     }
 
@@ -1295,7 +1195,7 @@ mod tests {
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
-        assert_eq!(status, "warming");
+        assert_eq!(status, FreshnessLabelV1::Warming);
         assert!(
             warning
                 .expect("warming names itself")
@@ -1324,7 +1224,7 @@ mod tests {
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
-        assert_eq!(status, "restoring");
+        assert_eq!(status, FreshnessLabelV1::Restoring);
         assert!(!freshness.rebuild_in_flight);
         assert!(
             warning
@@ -1345,7 +1245,7 @@ mod tests {
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
-        assert_eq!(status, "stale");
+        assert_eq!(status, FreshnessLabelV1::Stale);
         assert!(
             warning
                 .expect("verification is named")

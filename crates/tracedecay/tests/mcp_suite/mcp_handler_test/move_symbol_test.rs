@@ -26,7 +26,6 @@ async fn test_move_symbol_dry_run_reports_impact_and_writes_nothing() {
         "tracedecay_move_symbol",
         json!({ "symbol": "compute_grand_total", "dest_file": "src/grand_total.rs" }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -119,7 +118,6 @@ async fn test_move_symbol_resolves_qualified_names_like_bare_names() {
             "tracedecay_move_symbol",
             json!({ "symbol": symbol, "dest_file": "src/grand_total.rs" }),
             None,
-            None,
         )
         .await
         .unwrap_or_else(|error| panic!("move for {symbol:?} failed: {error}"));
@@ -187,7 +185,6 @@ async fn test_move_symbol_only_prefers_callable_for_bare_names() {
         "tracedecay_move_symbol",
         json!({ "symbol": "same", "dest_file": "src/moved.rs" }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -199,7 +196,6 @@ async fn test_move_symbol_only_prefers_callable_for_bare_names() {
         &cg,
         "tracedecay_move_symbol",
         json!({ "symbol": "common::same", "dest_file": "src/moved.rs" }),
-        None,
         None,
     )
     .await
@@ -213,7 +209,6 @@ async fn test_move_symbol_only_prefers_callable_for_bare_names() {
         &cg,
         "tracedecay_move_symbol",
         json!({ "symbol": "wrong::same", "dest_file": "src/moved.rs" }),
-        None,
         None,
     )
     .await
@@ -246,7 +241,6 @@ async fn test_move_symbol_apply_moves_and_rerun_errors_cleanly() {
         &cg,
         "tracedecay_move_symbol",
         json!({ "symbol": "compute_grand_total", "dest_file": "src/grand_total.rs", "dry_run": false }),
-        None,
         None,
     )
     .await
@@ -285,7 +279,6 @@ async fn test_move_symbol_apply_moves_and_rerun_errors_cleanly() {
         "tracedecay_move_symbol",
         json!({ "symbol": "compute_grand_total", "dest_file": "src/grand_total.rs", "dry_run": false }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -320,7 +313,6 @@ async fn test_move_symbol_clean_move_has_empty_impact() {
         &cg,
         "tracedecay_move_symbol",
         json!({ "symbol": "standalone", "dest_file": "src/b.rs" }),
-        None,
         None,
     )
     .await
@@ -361,7 +353,6 @@ async fn test_move_symbol_dest_collision_refuses() {
         &cg,
         "tracedecay_move_symbol",
         json!({ "symbol": "src/a.rs::dup", "dest_file": "src/b.rs", "dry_run": false }),
-        None,
         None,
     )
     .await
@@ -407,7 +398,6 @@ async fn test_move_symbol_private_dependency_hints() {
         &cg,
         "tracedecay_move_symbol",
         json!({ "symbol": "uses_secret", "dest_file": "src/b.rs" }),
-        None,
         None,
     )
     .await
@@ -478,7 +468,6 @@ async fn test_move_symbol_qualified_caller_hint() {
         "tracedecay_move_symbol",
         json!({ "symbol": "compute_grand_total", "dest_file": "src/grand_total.rs" }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -536,7 +525,6 @@ async fn test_move_symbol_first_in_file_docs_travel() {
         "tracedecay_move_symbol",
         json!({ "symbol": "leading", "dest_file": "src/b.rs", "dry_run": false }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -585,7 +573,6 @@ async fn test_move_symbol_dot_prefixed_same_file_refuses() {
         "tracedecay_move_symbol",
         json!({ "symbol": "compute_grand_total", "dest_file": "./src/pricing.rs", "dry_run": false }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -628,7 +615,6 @@ async fn test_move_symbol_symlink_escape_refuses() {
             "dest_file": "src/escape/grand_total.rs",
             "dry_run": false
         }),
-        None,
         None,
     )
     .await
@@ -677,7 +663,6 @@ async fn test_move_symbol_aliases_to_source_refuse() {
                 "dry_run": false
             }),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -709,7 +694,6 @@ async fn test_move_symbol_dot_prefixed_dest_normalizes() {
         &cg,
         "tracedecay_move_symbol",
         json!({ "symbol": "compute_grand_total", "dest_file": "./src/grand_total.rs", "dry_run": false }),
-        None,
         None,
     )
     .await
@@ -758,7 +742,6 @@ async fn test_move_symbol_leaves_contiguous_module_doc_behind() {
         &cg,
         "tracedecay_move_symbol",
         json!({ "symbol": "fact", "dest_file": "src/b.rs", "dry_run": false }),
-        None,
         None,
     )
     .await
@@ -824,7 +807,6 @@ async fn test_move_symbol_non_utf8_destination_refuses() {
         &cg,
         "tracedecay_move_symbol",
         json!({ "symbol": "movable", "dest_file": "src/blob.rs", "dry_run": false }),
-        None,
         None,
     )
     .await

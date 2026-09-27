@@ -48,9 +48,8 @@ async fn lcm_tools_reject_invalid_storage_routing_arguments() {
         args.as_object_mut()
             .unwrap()
             .insert(removed.to_string(), value);
-        let error = expect_tool_error(
-            handle_tool_call(&cg, "tracedecay_lcm_status", args, None, None).await,
-        );
+        let error =
+            expect_tool_error(handle_tool_call(&cg, "tracedecay_lcm_status", args, None).await);
         assert!(
             error.contains(expected),
             "invalid {removed} should fail clearly: {error}"
@@ -80,7 +79,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "tracedecay_lcm_status",
         json!({"provider": "cursor"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -96,7 +94,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "session_id": "lcm-session",
             "content_limit": 24
         }),
-        None,
         None,
     )
     .await
@@ -124,7 +121,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         &cg,
         "tracedecay_lcm_grep",
         json!({"provider": "cursor", "query": "orchard dispatch", "limit": 5}),
-        None,
         None,
     )
     .await
@@ -154,7 +150,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         &cg,
         "tracedecay_lcm_grep",
         json!({"query": "orchard dispatch", "limit": 5}),
-        None,
         None,
     )
     .await
@@ -217,7 +212,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "limit": 5
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -248,7 +242,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "limit": 5
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -273,7 +266,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         &cg,
         "tracedecay_lcm_describe",
         json!({"provider": "cursor", "session_id": "lcm-session"}),
-        None,
         None,
     )
     .await
@@ -321,7 +313,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "content_limit": 16
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -355,7 +346,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "context_max_tokens": 32_000,
             "max_tokens": 64
         }),
-        None,
         None,
     )
     .await
@@ -431,7 +421,7 @@ async fn lcm_load_session_cursor_walk_reads_every_message_exactly_once() {
                 .unwrap()
                 .insert("cursor".to_owned(), json!(cursor));
         }
-        let loaded = handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None, None)
+        let loaded = handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None)
             .await
             .unwrap_or_else(|error| panic!("page {pages} of a large session must load: {error}"));
         let loaded: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
@@ -534,7 +524,6 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
             "session_id": "lcm-status-session"
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -605,7 +594,6 @@ async fn lcm_status_reports_lifecycle_fields_from_active_project() {
             "provider": "cursor",
             "session_id": "lcm-status-frontier"
         }),
-        None,
         None,
     )
     .await
@@ -810,7 +798,6 @@ async fn lcm_grep_raw_hit_store_id_expands_byte_exactly() {
             "limit": 1
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -827,7 +814,6 @@ async fn lcm_grep_raw_hit_store_id_expands_byte_exactly() {
             "session_id": "lcm-grep-expand-session",
             "target": {"kind": "raw_message", "store_id": store_id}
         }),
-        None,
         None,
     )
     .await
@@ -887,7 +873,6 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
             "limit": 10
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -917,7 +902,6 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
             "content_limit": 25_000,
             "limit": 10
         }),
-        None,
         None,
     )
     .await
@@ -996,7 +980,6 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
             "limit": 10
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -1054,7 +1037,6 @@ async fn lcm_grep_accepts_relative_time_filters() {
             "limit": 10
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -1096,7 +1078,7 @@ async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_arg
         ),
     ] {
         let err = expect_tool_error(
-            handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None, None).await,
+            handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None).await,
         );
         assert!(
             err.contains("limit"),
@@ -2307,7 +2289,6 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
         "tracedecay_lcm_status",
         json!({"provider": "cursor", "session_id": "lcm-diag-session"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2359,7 +2340,6 @@ async fn lcm_status_all_provider_aggregates_provider_counts() {
         "tracedecay_lcm_status",
         json!({"provider": "all"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2400,7 +2380,6 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
         &cg,
         "tracedecay_lcm_status",
         json!({"provider": "all"}),
-        None,
         None,
     )
     .await
@@ -2849,7 +2828,6 @@ async fn lcm_grep_rejects_invalid_scope() {
             "tracedecay_lcm_grep",
             json!({"query": "anything", "scope": "everything"}),
             None,
-            None,
         )
         .await,
     );
@@ -2862,7 +2840,6 @@ async fn lcm_grep_rejects_invalid_scope() {
             &cg,
             "tracedecay_lcm_grep",
             json!({"query": "anything", "relationship_scope": "children"}),
-            None,
             None,
         )
         .await,
@@ -2911,7 +2888,7 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
             json!({"provider": "cursor", "session_id": "ghost-session", "prompt": "anything"}),
         ),
     ] {
-        match handle_tool_call(&cg, tool, args.clone(), None, None).await {
+        match handle_tool_call(&cg, tool, args.clone(), None).await {
             Ok(result) => {
                 let text = extract_text(&result.value);
                 let payload: Value = serde_json::from_str(text)
@@ -2978,7 +2955,6 @@ async fn lcm_load_session_missing_store_uses_typed_empty_messages_without_creati
         &cg,
         "tracedecay_lcm_load_session",
         json!({"session_id": "ghost-session"}),
-        None,
         None,
     )
     .await

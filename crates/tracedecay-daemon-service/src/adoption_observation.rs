@@ -312,6 +312,10 @@ mod tests {
                     "capability.application.code-query.type-definition",
                     "available",
                 ),
+                (
+                    "capability.application.primitive.active-project",
+                    "available",
+                ),
                 ("capability.application.primitive.affected", "available"),
                 ("capability.application.primitive.analytics", "available"),
                 (
@@ -382,11 +386,11 @@ mod tests {
                 ("capability.application.primitive.doc-coverage", "available"),
                 ("capability.application.primitive.dsm", "available"),
                 ("capability.application.primitive.field-sites", "available"),
-                ("capability.application.primitive.files", "available"),
                 (
                     "capability.application.primitive.file-dependents",
                     "available",
                 ),
+                ("capability.application.primitive.files", "available"),
                 (
                     "capability.application.primitive.find-exact-symbol",
                     "available",
@@ -414,21 +418,35 @@ mod tests {
                 ("capability.application.primitive.port-status", "available"),
                 ("capability.application.primitive.pr-context", "available"),
                 (
+                    "capability.application.primitive.project-context",
+                    "available",
+                ),
+                ("capability.application.primitive.project-list", "available"),
+                (
+                    "capability.application.primitive.project-search",
+                    "available",
+                ),
+                (
                     "capability.application.primitive.qualified-name",
                     "available",
                 ),
                 ("capability.application.primitive.rank", "available"),
                 ("capability.application.primitive.recursion", "available"),
                 ("capability.application.primitive.redundancy", "available"),
-                ("capability.application.primitive.retrieve", "available"),
+                (
+                    "capability.application.primitive.remote-status",
+                    "available",
+                ),
                 (
                     "capability.application.primitive.rename-preview",
                     "available",
                 ),
+                ("capability.application.primitive.retrieve", "available"),
                 (
                     "capability.application.primitive.run-affected-tests",
                     "available",
                 ),
+                ("capability.application.primitive.runtime", "available"),
                 ("capability.application.primitive.search", "available"),
                 (
                     "capability.application.primitive.session-lookup",
@@ -444,6 +462,7 @@ mod tests {
                     "capability.application.primitive.source-outline",
                     "available",
                 ),
+                ("capability.application.primitive.status", "available"),
                 (
                     "capability.application.primitive.storage-status",
                     "available",

@@ -247,6 +247,7 @@ impl InProcessDaemonInvocationExecutor {
             && !matches!(
                 request.payload,
                 tracedecay_daemon_service::DaemonInvocationPayload::ProfileRetainedApplication { .. }
+                    | tracedecay_daemon_service::DaemonInvocationPayload::ProfileGraphTool { .. }
             )
         {
             let git_service = if invocation_is_git_operation(request.operation()) {

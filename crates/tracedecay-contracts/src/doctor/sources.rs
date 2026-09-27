@@ -33,6 +33,7 @@ use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
@@ -326,7 +327,7 @@ pub trait RuntimeHealthDoctorPort: Send + Sync {
     ) -> DoctorSourceFuture<'a, RuntimeHealthReadV1>;
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteListenerReadV1 {
     Serving,
@@ -1236,7 +1237,9 @@ pub trait CodeIndexMountDoctorPort: Send + Sync {
 }
 
 /// Aggregate state of the project-active language-server analyzers.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LanguageServerStateV1 {
     /// Every active analyzer is ready.
@@ -1260,7 +1263,7 @@ pub enum LanguageServerStateV1 {
 /// executable is missing and how to install it, resolved by the daemon
 /// process (the only PATH that matters, since the daemon spawns analyzers)
 /// rather than by whichever shell ran the CLI.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct LanguageServerAnalyzerV1 {
     /// Adapter language (`typescript`, `rust`, …).
     pub language: String,
@@ -1285,7 +1288,9 @@ pub struct LanguageServerAnalyzerV1 {
 /// `Inactive` is the one state the aggregate never takes: the language has no
 /// files in the project, so Doctor does not grade it, but `lsp servers` still
 /// lists it from this same read so both surfaces share one authority.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LanguageServerAnalyzerStateV1 {
     Ready,
@@ -1355,7 +1360,7 @@ impl LanguageServerReadV1 {
 }
 
 /// One live read from the daemon language-server/analyzer owner.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum LanguageServerReadV1 {
     /// The owner observed all project-active analyzer states.
@@ -1606,7 +1611,7 @@ pub fn observability_finding(
 
 /// One worktree holding a retained owner's memory, and what it holds: a
 /// generation id, or an LSP session id.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ResidentMemoryHolderReadV1 {
     pub worktree_id: String,
     pub holding: String,

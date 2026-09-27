@@ -14,6 +14,7 @@ mod owner_effect_surface;
 mod ports;
 mod primitive_surface;
 mod project_file_surface;
+mod project_info_surface;
 mod requests;
 mod response_handle_surface;
 mod search_surface;
@@ -71,6 +72,8 @@ fn validate_current_temporal_meta(
     PageRequest::new(meta.page.page_size, meta.page.cursor.clone()).map(|_| ())
 }
 
+/// The Remote Brain read is `tracedecay_remote_status`'s catalog result.
+pub use crate::remote::status::RemoteOperationalStatusReadV1;
 pub use analysis_report_surface::{
     CircularCycleV1, CircularResultV1, CircularSurfaceRequestV1, ComplexityReportEntryV1,
     ComplexityReportV1, ComplexitySurfaceRequestV1, ConstructorFieldCoverageV1,
@@ -210,6 +213,17 @@ pub use primitive_surface::{
 pub use project_file_surface::{
     ConfigKeyFoundV1, ConfigKeyMissingV1, ConfigMatchV1, ConfigParseErrorV1, ConfigResultV1,
     ConfigSurfaceRequestV1, FilesLayoutV1, FilesResultV1, FilesSurfaceRequestV1, IndexedFileV1,
+};
+pub use project_info_surface::{
+    ActiveProjectBranchV1, ActiveProjectResolutionSourceV1, ActiveProjectResultV1,
+    ActiveProjectStorageV1, ActiveProjectSurfaceRequestV1, ProjectContextResultV1,
+    ProjectContextSurfaceRequestV1, ProjectListSurfaceRequestV1, ProjectRegistryListingResultV1,
+    ProjectSearchSurfaceRequestV1, ProjectStatusV1, RegisteredProjectIdSelectorV1,
+    RemoteStatusSurfaceRequestV1, RuntimeDoctorReportV1, RuntimeResultV1, RuntimeSurfaceRequestV1,
+    StatusAdmissionV1, StatusBranchMismatchV1, StatusCodeIndexFreshnessV1, StatusGitStalenessV1,
+    StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1,
+    StatusRetrievalServingV1, StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1,
+    StatusServingConditionV1, StatusServingFreshnessV1, StatusSurfaceRequestV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

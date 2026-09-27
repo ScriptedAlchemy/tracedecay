@@ -49,7 +49,6 @@ use tracedecay_sessions::runtime::git_correlation::{
     SpanObservation, SpanSource,
 };
 
-use tracedecay_contracts::ProjectRegistryReadPort;
 use tracedecay_domain::HostIntegrationIdV1;
 use tracedecay_mcp::hook_events::{self, HookEventPlan};
 use tracedecay_mcp::tools::catalog_discovery::default_catalog_discovery_authority;
@@ -82,7 +81,7 @@ pub(crate) use rmcp::RmcpInitializeResponseDecorator;
 pub(crate) use rmcp::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
 pub(crate) use routing::*;
 use tracedecay_daemon_service::DaemonSessionRefreshService;
-use tracedecay_daemon_service::{DaemonProjectRegistryReadService, DaemonWorkflowIndexReadService};
+use tracedecay_daemon_service::DaemonWorkflowIndexReadService;
 pub(crate) use tracedecay_mcp::server::ProjectServerResponseLifecycle;
 use tracedecay_mcp::server::{
     IdenticalReadCoalescer, McpBackgroundTaskOwner, McpDispatchRequest,
@@ -367,9 +366,6 @@ pub struct McpServer {
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
     registry_db: Option<RegisteredGlobalDbLeaseV1>,
-    /// Registry-read service handed to MCP handlers so they read registered
-    /// projects through a port instead of holding [`Self::registry_db`].
-    project_registry_reads: Option<Arc<dyn ProjectRegistryReadPort>>,
     automation_scheduler_reconciler:
         Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
@@ -735,9 +731,8 @@ impl McpServer {
         let retained_owner_transport = if context.application_invocation_executor.is_none()
             && context.cg.store_layout().identity.project_id.is_some()
         {
-            let transport = crate::daemon::retained_test_support::project_retained_owner_transport(
-                context.cg.project_root(),
-            )?;
+            let transport =
+                crate::daemon::retained_test_support::project_retained_owner_transport(&context)?;
             context = context.with_application_invocation_executor(Arc::clone(&transport.executor));
             Some(transport)
         } else {
@@ -985,10 +980,6 @@ impl McpServer {
                     Some(project_id),
                 )) as Arc<dyn SessionRefreshServicePort>
             });
-        let project_registry_reads = registry_db.as_ref().map(|registry| {
-            Arc::new(DaemonProjectRegistryReadService::new(registry.clone()))
-                as Arc<dyn ProjectRegistryReadPort>
-        });
         let project_application_retrieval = project_session_db
             .as_ref()
             .zip(project_session_retrieval_root.clone())
@@ -1041,7 +1032,6 @@ impl McpServer {
             profile_identity,
             project_session_db,
             registry_db,
-            project_registry_reads,
             profile_session_db,
             host_admission_broker,
             background_cpu,

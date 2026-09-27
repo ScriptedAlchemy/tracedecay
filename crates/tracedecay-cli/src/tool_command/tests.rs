@@ -1580,3 +1580,47 @@ fn application_surface_rejects_invalid_output_formats() {
         ));
     }
 }
+
+/// A `status` wait that ends `timed_out` is the retryable readiness refusal
+/// the process exits 75 on, naming the last state; one that cannot reach its
+/// state is the non-retryable refusal naming the reason; one that reached
+/// exits 0.
+#[test]
+fn tool_status_exit_follows_the_wait_outcome() {
+    let status = |wait: Value| {
+        json!({
+            "content": [{"type": "text", "text": "## Project Status"}],
+            "structuredContent": {"wait": wait},
+        })
+    };
+    let refusal = |wait: Value| {
+        let error = tool_result_process_outcome(&status(wait), "tracedecay_status")
+            .expect_err("an unreached wait exits non-zero");
+        error
+            .project_route_context()
+            .map(|(code, retryable, detail)| (code.to_owned(), retryable, detail.to_owned()))
+            .unwrap_or_else(|| panic!("the wait refusal is a typed route error: {error}"))
+    };
+
+    assert_eq!(
+        refusal(json!({"outcome": "timed_out", "last_state": "warming"})),
+        (
+            CODE_INDEX_READINESS_WAIT_TIMED_OUT.to_owned(),
+            true,
+            "tracedecay_status wait_for timed out before the index reached the requested \
+             state; last state: warming"
+                .to_owned(),
+        )
+    );
+    assert_eq!(
+        refusal(json!({"outcome": "unavailable", "reason": "scheduler_not_mounted"})),
+        (
+            CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned(),
+            false,
+            "tracedecay_status wait_for cannot reach the requested state: scheduler_not_mounted"
+                .to_owned(),
+        )
+    );
+    tool_result_process_outcome(&status(json!({"outcome": "reached"})), "tracedecay_status")
+        .expect("a reached wait exits 0");
+}

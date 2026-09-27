@@ -915,15 +915,9 @@ async fn explicit_read_only_open_reports_and_guards_read_only_store() {
         .await
         .expect("current-schema read-only DB should open explicitly");
 
-    let status = handle_tool_call(
-        &cg,
-        "tracedecay_storage_status",
-        json!({"format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let status = handle_tool_call(&cg, "tracedecay_storage_status", json!({"format": "json"}))
+        .await
+        .unwrap();
     let payload: Value = serde_json::from_str(extract_tool_text(&status.value)).unwrap();
     // Plan 21 moved storage_status onto the daemon-retained typed primitive
     // owner. Without a live daemon transport this in-process harness receives

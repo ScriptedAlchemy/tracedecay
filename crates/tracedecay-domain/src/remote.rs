@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -44,7 +45,7 @@ impl RemoteRepositoryScopeV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct RemotePlacementRevisionV1(u64);
 
@@ -85,7 +86,7 @@ impl<'de> Deserialize<'de> for RemotePlacementRevisionV1 {
 }
 
 /// The complete single-writer identity for one mutable shard.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteWriterFenceV1 {
     pub brain_id: BrainId,
@@ -392,7 +393,7 @@ pub struct CredentialRevocationReceiptV1 {
 }
 
 /// Authenticated current authority for a mutable shard.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CurrentRemoteAuthorityV1 {
     pub fence: RemoteWriterFenceV1,
@@ -413,7 +414,9 @@ impl CurrentRemoteAuthorityV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteAuthorityUnavailableReasonV1 {
     RegistryUnavailable,
@@ -431,7 +434,7 @@ pub enum RemoteAuthorityUnavailableReasonV1 {
 
 /// Truthful authority lookup state. Missing evidence is never represented as
 /// an available authority or a successful empty response.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
 pub enum CurrentRemoteAuthorityStateV1 {
     Available(CurrentRemoteAuthorityV1),

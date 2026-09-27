@@ -49,7 +49,7 @@ pub enum CodeIndexBuildBlockedReasonV1 {
 ///
 /// Every count is scoped to `generation_id`. The snapshot never includes a
 /// staged page: work is reported only after the batch that owns it commits.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CodeIndexBuildProgressV1 {
     /// Exact generation receiving the committed build work.
     pub generation_id: String,
@@ -498,7 +498,7 @@ pub struct CodeIndexRestoreProgressV1 {
 /// `Deserialize` is part of the wire contract: the CLI status command decodes
 /// exactly this type back out of the daemon's `tracedecay_status` response,
 /// keeping one authority for the freshness shape.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CodeIndexWorktreeFreshnessV1 {
     /// Display path of the mounted worktree root.
     pub worktree_root: String,

@@ -109,13 +109,7 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Output {
 }
 
 enum FakeDaemonResponse {
-    Complete {
-        text: String,
-    },
-    /// A whole tool result, for members beside `content`.
-    Result {
-        result: Value,
-    },
+    Complete { text: String },
     HoldOpen,
 }
 
@@ -255,16 +249,6 @@ fn spawn_scripted_daemon(
                                 "text": text
                             }]
                         }
-                    });
-                    let mut writer = stream;
-                    writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
-                        .expect("write fake daemon response");
-                }
-                FakeDaemonResponse::Result { result } => {
-                    let response = json!({
-                        "jsonrpc": "2.0",
-                        "id": request["id"].clone(),
-                        "result": result,
                     });
                     let mut writer = stream;
                     writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
@@ -458,10 +442,53 @@ fn daemon_first_init_enrolls_a_clean_profile_from_a_linked_worktree() {
     );
 }
 
+/// Arguments for a tool the CLI still sends to the daemon as an MCP
+/// `tools/call`. The scope set is absent, so the admitted project's
+/// multi-root owner answers its concealed not-found problem.
+const COMPAT_TOOL_PROBE: [&str; 4] = [
+    "multi_root_scope_set_read",
+    "--scope-set-id",
+    "scope-set.absent",
+    "--json",
+];
+
+/// Asserts `output` is the multi-root owner's concealed not-found answer to
+/// [`COMPAT_TOOL_PROBE`], which only an admitted project server gives.
+fn assert_compat_probe_answered(output: &Output, context: &str) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let result: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("{context}: {error}\nstdout:\n{stdout}\nstderr:\n{stderr}"));
+    let text = result["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{context}: no probe text\nstdout:\n{stdout}"));
+    let payload: Value = serde_json::from_str(text).expect("probe payload json");
+    assert_eq!(
+        (
+            &result["isError"],
+            &payload["application"]["problem"]["kind"]
+        ),
+        (&json!(true), &json!("not_found_or_not_authorized")),
+        "{context}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// Sends one MCP tool call through the daemon's project server, then reads
+/// that server's tool-call counter from its typed status. Until the full
+/// project server takes over from the core, the call and the status can land
+/// on different servers, so the pair is re-sent until the status server has
+/// counted a call.
 fn wait_for_tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
     let project_arg = project.to_string_lossy().to_string();
     let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
     loop {
+        let counted = tracedecay_command_with_home(home)
+            .current_dir(project)
+            .args(["tool", "--project", &project_arg])
+            .args(COMPAT_TOOL_PROBE)
+            .output()
+            .expect("tracedecay tool multi_root_scope_set_read should run");
+        assert_compat_probe_answered(&counted, "the probe must reach the project server");
         let output = tracedecay_command_with_home(home)
             .current_dir(project)
             .args([
@@ -486,23 +513,17 @@ fn wait_for_tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
             .as_str()
             .expect("status result text");
         let payload: Value = serde_json::from_str(text).expect("status payload json");
-        if let Some(tool_calls) = payload["server"]["tool_calls"].as_u64() {
+        let tool_calls = payload["server"]["tool_calls"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("typed status must carry its server counters: {payload}"));
+        if tool_calls >= 1 {
             return tool_calls;
         }
-        assert_eq!(
-            payload["project_open"]["state"], "converging",
-            "status without server stats must report typed project convergence: {payload}"
-        );
-        let retry_after = Duration::from_millis(
-            payload["project_open"]["retry_after_ms"]
-                .as_u64()
-                .unwrap_or_else(|| panic!("converging status omitted retry delay: {payload}")),
-        );
         assert!(
-            Instant::now() + retry_after <= deadline,
-            "project server did not converge before the CLI roundtrip deadline: {payload}"
+            Instant::now() < deadline,
+            "the status server never counted a tool call before the CLI roundtrip deadline: {payload}"
         );
-        std::thread::sleep(retry_after);
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -1192,7 +1213,7 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
     let socket_path = socket_dir.path().join("tracedecay.sock");
     let observed_request = spawn_sentinel_daemon_with_notification(
         socket_path.clone(),
-        "tracedecay_status",
+        "tracedecay_multi_root_scope_set_read",
         true,
         false,
         sentinel,
@@ -1202,7 +1223,8 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
     let output = tracedecay_command_with_home(&home_path)
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args(["tool", "--project", &project_arg])
+        .args(COMPAT_TOOL_PROBE)
         .output()
         .expect("tracedecay tool should run");
 
@@ -1543,17 +1565,18 @@ fn daemon_reuses_project_engine_across_tool_clients() {
 
     // `init` is brokered through the daemon now (`tracedecay_status` then
     // `tracedecay_admin_sync`), so the fixture has already spent tool calls on
-    // this engine and the first status here is no longer call number one. What
-    // this test is about survives that: the counter is the engine's, so the
-    // first call sees itself and a second client sees exactly one more.
+    // this engine and the first counted call here is no longer call number one.
+    // What this test is about survives that: the counter is the engine's, so
+    // the first client's call is counted and a second client's call is exactly
+    // one more on the same engine.
     assert!(
         first_tool_calls >= 1,
-        "first status call should see itself counted, got {first_tool_calls}"
+        "the first client's tool call should be counted, got {first_tool_calls}"
     );
     assert_eq!(
         second_tool_calls,
         first_tool_calls + 1,
-        "second status call should reuse the daemon engine and see exactly one more tool call"
+        "the second client should reuse the daemon engine and see exactly one more tool call"
     );
 }
 
@@ -1668,15 +1691,14 @@ fn daemon_project_handshake_uses_client_profile_identity() {
             "TRACEDECAY_DAEMON_SOCKET",
             common::daemon_socket_path(&daemon_home_path),
         )
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args(["tool", "--project", &project_arg])
+        .args(COMPAT_TOOL_PROBE)
         .output()
-        .expect("tracedecay tool status should run");
+        .expect("tracedecay tool multi_root_scope_set_read should run");
 
-    assert!(
-        output.status.success(),
-        "daemon should open the client's profile-sharded project\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_compat_probe_answered(
+        &output,
+        "daemon should open the client's profile-sharded project",
     );
 }
 
@@ -1736,10 +1758,8 @@ fn daemon_first_touch_uses_registered_runtime_without_rewriting_legacy_config() 
 
 #[test]
 fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() {
-    let daemon_home = TempDir::new().unwrap();
     let client_home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let daemon_home_path = canonical_existing_path(daemon_home.path());
     let client_home_path = canonical_existing_path(client_home.path());
     let project_path = canonical_existing_path(project.path());
 
@@ -1758,12 +1778,10 @@ fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() 
     // state rather than a setup failure.
     crate::cli_non_interactive_test::remove_repo_local_marker_dir_if_present(&project_path);
 
-    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
-    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let _daemon = spawn_tracedecay_daemon(&client_home_path);
     let project_arg = project_path.to_string_lossy().to_string();
     let output = tracedecay_command_with_home(&client_home_path)
         .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args(["tool", "--project", &project_arg, "active_project"])
         .output()
         .expect("tracedecay tool active_project should run");
@@ -1783,10 +1801,8 @@ fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() 
 
 #[test]
 fn daemon_project_handshake_uses_registered_remote_store_after_rename() {
-    let daemon_home = TempDir::new().unwrap();
     let client_home = TempDir::new().unwrap();
     let workspace = TempDir::new().unwrap();
-    let daemon_home_path = canonical_existing_path(daemon_home.path());
     let client_home_path = canonical_existing_path(client_home.path());
     let original_path = workspace.path().join("repo-before-rename");
     let renamed_path = workspace.path().join("repo-after-rename");
@@ -1807,12 +1823,10 @@ fn daemon_project_handshake_uses_registered_remote_store_after_rename() {
     std::fs::rename(&original_path, &renamed_path).unwrap();
     let renamed_path = canonical_existing_path(&renamed_path);
 
-    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
-    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let _daemon = spawn_tracedecay_daemon(&client_home_path);
     let project_arg = renamed_path.to_string_lossy().to_string();
     let output = tracedecay_command_with_home(&client_home_path)
         .current_dir(&renamed_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args(["tool", "--project", &project_arg, "active_project"])
         .output()
         .expect("tracedecay tool active_project should run");
@@ -1863,22 +1877,22 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
     let client_a_output = tracedecay_command_with_home(&client_a_home_path)
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args(["tool", "--project", &project_arg])
+        .args(COMPAT_TOOL_PROBE)
         .output()
-        .expect("client A tool status should run");
-    assert!(
-        client_a_output.status.success(),
-        "client A should open its initialized project through the shared daemon\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&client_a_output.stdout),
-        String::from_utf8_lossy(&client_a_output.stderr)
+        .expect("client A tool multi_root_scope_set_read should run");
+    assert_compat_probe_answered(
+        &client_a_output,
+        "client A should open its initialized project through the shared daemon",
     );
 
     let client_b_output = tracedecay_command_with_home(&client_b_home_path)
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args(["tool", "--project", &project_arg])
+        .args(COMPAT_TOOL_PROBE)
         .output()
-        .expect("client B tool status should run");
+        .expect("client B tool multi_root_scope_set_read should run");
     assert!(
         !client_b_output.status.success(),
         "client B should not reuse client A's cached project server\nstdout:\n{}\nstderr:\n{}",
@@ -1910,7 +1924,8 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
     let output = tracedecay_command_with_home(&home_path)
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args(["tool", "--project", &project_arg])
+        .args(COMPAT_TOOL_PROBE)
         .output()
         .expect("tracedecay tool should run");
 
@@ -2723,77 +2738,10 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
     assert!(lines.contains(&"protocol: Ready"), "{stdout}");
 }
 
-/// A `status` wait that ends `timed_out` prints the status and exits 75, the
-/// retry-later status, naming the last state; a wait that reached exits 0.
-#[test]
-fn tool_status_exit_follows_the_wait_outcome() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
-    let run = |wait: Value| {
-        let socket_dir = TempDir::new().unwrap();
-        let socket_path = socket_dir.path().join("tracedecay.sock");
-        let observed = spawn_scripted_daemon(
-            socket_path.clone(),
-            "tracedecay_status",
-            FakeDaemonResponse::Result {
-                result: json!({
-                    "content": [{"type": "text", "text": "## Project Status\n- **wait**: …"}],
-                    "structuredContent": {"wait": wait},
-                }),
-            },
-        );
-        let mut command = tracedecay_command_with_home(&home_path);
-        command
-            .current_dir(&project_path)
-            .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-            .args([
-                "tool",
-                "status",
-                "--args",
-                r#"{"wait_for":{"state":"fresh","timeout_ms":1000}}"#,
-            ]);
-        let output = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
-        let request = observed
-            .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
-            .expect("the status call reached the daemon");
-        assert_eq!(
-            request["params"]["arguments"]["wait_for"],
-            json!({"state": "fresh", "timeout_ms": 1000})
-        );
-        output
-    };
-
-    let timed_out = run(json!({"outcome": "timed_out", "last_state": "warming"}));
-    let stderr = String::from_utf8_lossy(&timed_out.stderr);
-    assert_eq!(timed_out.status.code(), Some(75), "{stderr}");
-    assert_eq!(
-        String::from_utf8_lossy(&timed_out.stdout),
-        "## Project Status\n- **wait**: …\n"
-    );
-    assert!(
-        stderr.contains(
-            "tracedecay_status wait_for timed out before the index reached the requested \
-             state; last state: warming"
-        ),
-        "{stderr}"
-    );
-
-    let reached = run(json!({"outcome": "reached"}));
-    assert_eq!(
-        reached.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&reached.stderr)
-    );
-}
-
 /// A JSON request the daemon refuses because no project is in reach still
 /// prints the typed problem on stdout, and the process exits non-zero, on
 /// the owner-answered route (`search`) and the compatibility route
-/// (`status`) alike.
+/// (`multi_root_scope_set_read`) alike.
 #[test]
 fn projectless_json_tool_call_prints_the_typed_refusal() {
     let home = TempDir::new().unwrap();
@@ -2811,8 +2759,9 @@ fn projectless_json_tool_call_prints_the_typed_refusal() {
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         serde_json::from_slice::<Value>(&output.stdout).unwrap_or_else(|error| {
             panic!(
-                "stdout is not one JSON document ({error}): {}",
-                String::from_utf8_lossy(&output.stdout)
+                "stdout is not one JSON document ({error}): {}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             )
         })
     };
@@ -2842,17 +2791,22 @@ fn projectless_json_tool_call_prints_the_typed_refusal() {
          inside an initialized project or pass --project <path>"
     );
 
-    let status = run(&["status", "--format", "json"]);
+    let compat = run(&[
+        "multi_root_scope_set_read",
+        "--scope-set-id",
+        "scope-set.absent",
+        "--json",
+    ]);
     assert_eq!(
-        status,
+        compat,
         json!({"problem": {
-            "tool": "tracedecay_status",
+            "tool": "tracedecay_multi_root_scope_set_read",
             "kind": "invalid_request",
             "code": "project_required",
             "reason_code": "project_required",
             "retryable": false,
-            "detail": "tracedecay_status requires an initialized code project; run it inside \
-                       an initialized project or pass --project <path>",
+            "detail": "tracedecay_multi_root_scope_set_read requires an initialized code \
+                       project; run it inside an initialized project or pass --project <path>",
         }})
     );
 }

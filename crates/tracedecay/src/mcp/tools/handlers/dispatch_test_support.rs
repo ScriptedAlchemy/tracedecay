@@ -249,7 +249,7 @@ fn verified_graph_options_with_freshness<'a>(
 /// computes them under the owning server's admitted authorities and renders
 /// the typed result; every other tool still dispatches through the MCP
 /// handler table.
-pub(super) async fn dispatch_on_graph_authority(
+pub(crate) async fn dispatch_on_graph_authority(
     cg: &TraceDecay,
     tool_name: &str,
     args: Value,
@@ -268,9 +268,7 @@ pub(super) async fn dispatch_on_graph_authority(
                 completion,
             )
         }
-        None => {
-            handle_tool_call_with_registry_options(cg, tool_name, args, None, None, options).await
-        }
+        None => handle_tool_call_with_registry_options(cg, tool_name, args, options).await,
     }
 }
 
@@ -388,14 +386,9 @@ pub(super) async fn concrete_dispatch_group_accepts(
         McpToolDispatchGroup::MultiRoot => {
             owned(handle_multi_root(tool_name, invalid_args, None, None, None, None).await)
         }
-        McpToolDispatchGroup::Info => {
-            owned(dispatch_info_tools(tool_name, cg, invalid_args, None, None, options).await)
-        }
+        McpToolDispatchGroup::Info => owned(dispatch_info_tools(tool_name, cg, options).await),
         McpToolDispatchGroup::Admin => {
             owned(dispatch_admin_tools(tool_name, cg, invalid_args, options).await)
-        }
-        McpToolDispatchGroup::Health => {
-            owned(dispatch_health_tools(tool_name, cg, invalid_args, options).await)
         }
     }
 }

@@ -158,7 +158,7 @@ async fn open_sources(
 }
 
 async fn call_replace(fixture: &ProductionSourceEditFixture, args: Value) -> Value {
-    let result = handle_tool_call(fixture, "tracedecay_replace_symbol", args, None, None)
+    let result = handle_tool_call(fixture, "tracedecay_replace_symbol", args, None)
         .await
         .expect("tracedecay_replace_symbol dispatch");
     tool_payload(&result.value)
