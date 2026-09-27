@@ -11231,6 +11231,11 @@
           "const": "schedules_work",
           "description": "Queues work on a daemon-owned scheduler; the call answers with the\nscheduler's admission, not the finished work.",
           "type": "string"
+        },
+        {
+          "const": "records_host_evidence",
+          "description": "Records a host's session evidence (transcripts, hook admissions,\nreceipts) in daemon-owned session stores.",
+          "type": "string"
         }
       ]
     },
