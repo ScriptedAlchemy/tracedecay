@@ -64,40 +64,42 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
 /// New files whose contents become durable together, before any is renamed
 /// into place.
 ///
-/// On Linux one `syncfs(2)` through a directory opened before the first
-/// write replaces a fsync per file: it flushes every dirty inode of that
-/// filesystem, and the kernel reports writeback errors raised after the
-/// directory was opened. Other platforms fsync each file as it is written.
+/// On Linux each member's writeback starts as soon as it is written, and
+/// [`Self::sync`] then fsyncs the members: their block allocations share a
+/// journal commit, so the first fsync pays it and the rest only confirm
+/// already-submitted writes. The cost stays proportional to the batch's own
+/// bytes. `syncfs(2)` also paid one commit, but waited for every dirty inode on
+/// the filesystem, so a one-file seal stalled for seconds behind unrelated
+/// writers. Other platforms fsync each file as it is written.
+#[derive(Default)]
 pub struct DurableFileBatch {
+    /// Paths rather than open handles, so a large seal holds no descriptors.
     #[cfg(target_os = "linux")]
-    anchor: File,
+    members: Vec<PathBuf>,
 }
 
 impl DurableFileBatch {
-    /// Open the batch on `directory` before writing any of its files.
-    pub fn open(directory: &Path) -> io::Result<Self> {
-        #[cfg(target_os = "linux")]
-        {
-            Ok(Self {
-                anchor: File::open(directory)?,
-            })
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = directory;
-            Ok(Self {})
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Record one fully written member file.
-    pub fn written(&self, file: &File) -> io::Result<()> {
+    /// Record one fully written member file, created at `path`.
+    pub fn written(&mut self, path: &Path, file: &File) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            let _ = file;
+            // SAFETY: `file` is an open descriptor for the whole call.
+            let started = unsafe {
+                libc::sync_file_range(file.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE)
+            };
+            if started != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.members.push(path.to_path_buf());
             Ok(())
         }
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = path;
             sync_owned_file(file)
         }
     }
@@ -107,12 +109,9 @@ impl DurableFileBatch {
     pub fn sync(&self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            // SAFETY: `anchor` owns an open descriptor for the whole call.
-            if unsafe { libc::syncfs(self.anchor.as_raw_fd()) } == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
+            self.members
+                .iter()
+                .try_for_each(|member| sync_file_at(member))
         }
         #[cfg(not(target_os = "linux"))]
         {

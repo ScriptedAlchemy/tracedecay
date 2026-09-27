@@ -591,12 +591,11 @@ struct StagedGenerationSegmentsV1 {
 }
 
 impl StagedGenerationSegmentsV1 {
-    fn open(segments_root: &Path) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
-        Ok(Self {
-            durable: DurableFileBatch::open(segments_root)
-                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?,
+    fn new() -> Self {
+        Self {
+            durable: DurableFileBatch::new(),
             pending: BTreeMap::new(),
-        })
+        }
     }
 
     fn contains(&self, final_path: &Path) -> bool {
@@ -1173,10 +1172,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .write(true)
             .open(&temporary_path)
             .map_err(Self::unavailable)?;
-        staged.pending.insert(final_path, temporary_path);
+        staged.pending.insert(final_path, temporary_path.clone());
         let mut file = hotpath::io!(file, label = "code_index.generation.sealing.io");
         file.write_all(bytes).map_err(Self::unavailable)?;
-        staged.durable.written(&file).map_err(Self::unavailable)
+        staged
+            .durable
+            .written(&temporary_path, &file)
+            .map_err(Self::unavailable)
     }
 
     fn state_digest_file(path: &Path) -> Result<String, CodeIndexPublicationStoreErrorV1> {
@@ -2769,7 +2771,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             self.segment_temporary_prefix
         ));
         let mut evidence_pack = TemporaryEvidencePackV1::create(evidence_temporary_path)?;
-        let mut staged_segments = StagedGenerationSegmentsV1::open(&self.segments_root)?;
+        let mut staged_segments = StagedGenerationSegmentsV1::new();
         let mut referenced_segment_bytes = 0_u64;
         self.seal_encoded_segment_bytes.store(0, Ordering::Relaxed);
         self.seal_existing_segment_bytes_read
