@@ -281,18 +281,21 @@ async fn typescript_monorepo_checks_each_package_tsconfig() {
             .join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS),
     )
     .expect("the fixture compiler records every invocation");
-    let checked = |package: &str| {
-        let tsconfig = format!("packages/{package}/tsconfig.json");
-        move |line: &str| typescript_fixture_build_info(line, &root, &tsconfig).is_some()
+    let checks = |line: &str, package: &str| {
+        typescript_fixture_build_info(line, &root, &format!("packages/{package}/tsconfig.json"))
+            .is_some()
     };
     assert!(
         invocations
             .lines()
-            .all(|line| checked("app")(line) || checked("lib")(line)),
+            .all(|line| checks(line, "app") || checks(line, "lib")),
         "every run checks one package tsconfig from the workspace root: {invocations}"
     );
     for package in ["app", "lib"] {
-        assert!(invocations.lines().any(checked(package)), "{invocations}");
+        assert!(
+            invocations.lines().any(|line| checks(line, package)),
+            "{invocations}"
+        );
     }
 
     fixture.harness.shutdown().await;
