@@ -1747,14 +1747,27 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
         String::from_utf8_lossy(&client_b_output.stdout),
         String::from_utf8_lossy(&client_b_output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&client_b_output.stderr);
-    let expected_project_path = project_path.to_string_lossy();
-    let stderr_lower = stderr.to_lowercase();
+    let stdout = String::from_utf8_lossy(&client_b_output.stdout);
+    let result: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+        panic!("client B refusal is not one JSON result ({error}): {stdout}")
+    });
+    let payload: Value = serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("client B refusal carries no text: {result}")),
+    )
+    .expect("client B refusal payload");
+    let problem = &payload["application"]["problem"];
+    assert_eq!(
+        (&result["isError"], &problem["code"]),
+        (&json!(true), &json!("project_not_enrolled")),
+        "client B's profile has not initialized the project, so the shared daemon must refuse it: {result}"
+    );
     assert!(
-        stderr.contains("project route error (project_not_enrolled)")
-            && stderr_lower.contains("no tracedecay index found")
-            && stderr.contains(expected_project_path.as_ref()),
-        "expected client B to fail because its profile has not initialized the project, got:\n{stderr}"
+        problem["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(project_path.to_string_lossy().as_ref())),
+        "the refusal must name the project client B asked for: {result}"
     );
 }
 
