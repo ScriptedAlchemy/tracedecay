@@ -16,8 +16,8 @@ use crate::retrieval::{
     GrepSearchResultV1, HealthResultV1, HotspotsResultV1, ImpactResultV1, InheritanceDepthResultV1,
     LargestResultV1, NodeResultV1, PortOrderResultV1, PortStatusResultV1, PrContextResultV1,
     RankResultV1, RecursionResultV1, RedundancyResultV1, RenamePreviewPrimitiveOutcomeV1,
-    SignatureResultV1, SimilarResultV1, TestMapResultV1, TestRiskResultV1, TodosResultV1,
-    UnmountedFilesResultV1, UnsafePatternsResultV1,
+    RetrieveResultV1, SignatureResultV1, SimilarResultV1, TestMapResultV1, TestRiskResultV1,
+    TodosResultV1, UnmountedFilesResultV1, UnsafePatternsResultV1,
 };
 
 /// One graph read's typed result, tagged by its operation.
@@ -72,6 +72,7 @@ pub enum GraphToolResultV1 {
     BranchList(BranchListResultV1),
     Files(FilesResultV1),
     Config(ConfigResultV1),
+    Retrieve(RetrieveResultV1),
 }
 
 impl GraphToolResultV1 {
@@ -130,6 +131,7 @@ impl GraphToolResultV1 {
             Operation::BranchList => Self::BranchList(serde_json::from_value(value)?),
             Operation::Files => Self::Files(serde_json::from_value(value)?),
             Operation::Config => Self::Config(serde_json::from_value(value)?),
+            Operation::Retrieve => Self::Retrieve(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -190,6 +192,7 @@ impl GraphToolResultV1 {
             Self::BranchList(result) => serde_json::to_value(result),
             Self::Files(result) => serde_json::to_value(result),
             Self::Config(result) => serde_json::to_value(result),
+            Self::Retrieve(result) => serde_json::to_value(result),
         }
     }
 }

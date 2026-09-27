@@ -12,6 +12,7 @@ mod ports;
 mod primitive_surface;
 mod project_file_surface;
 mod requests;
+mod response_handle_surface;
 mod service;
 mod source_read;
 mod symbol_graph;
@@ -194,6 +195,10 @@ pub use requests::{
     SourceLinesResult, SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult,
     SourceReference, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
     StorageStatusPrimitiveResult,
+};
+pub use response_handle_surface::{
+    RetrieveHandleExpiredV1, RetrieveHandleMissingV1, RetrieveResultV1, RetrieveSurfaceRequestV1,
+    RetrievedPageV1,
 };
 pub use source_read::{
     MAX_SOURCE_READ_PATH_BYTES, SourceReadModeV1, SourceReadPortContext, SourceReadPortFuture,

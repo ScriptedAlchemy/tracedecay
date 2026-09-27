@@ -26,6 +26,7 @@ pub mod health;
 pub mod hook_runtime;
 pub mod info;
 mod multi_root;
+mod retrieve;
 mod session_authorities;
 pub mod skills;
 pub mod support;
