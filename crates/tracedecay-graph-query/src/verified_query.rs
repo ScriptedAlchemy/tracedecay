@@ -548,56 +548,40 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
-    /// Finds files containing functions targeted by canonical annotation
-    /// edges whose source is a recognized test annotation marker.
+    /// Finds the requested files that contain functions targeted by canonical
+    /// annotation edges whose source is a recognized test annotation marker.
     ///
-    /// A request scoped to specific files resolves through the per-file
-    /// catalog index instead of the whole-corpus symbol stream: the four
-    /// recognized markers are lexically attached attributes, so a marker
-    /// always occupies the same file as the function it annotates, and only
-    /// the requested files can contribute either endpoint. The unscoped
-    /// census keeps the corpus sweep, that is its job.
+    /// The request resolves through the per-file catalog index instead of
+    /// the whole-corpus symbol stream: the four recognized markers are
+    /// lexically attached attributes, so a marker always occupies the same
+    /// file as the function it annotates, and only the requested files can
+    /// contribute either endpoint.
     #[hotpath::measure(label = "usecases.graph.verified.test_annotated_files")]
     pub fn test_annotated_logical_files(
         &self,
-        logical_paths: Option<&HashSet<String>>,
+        logical_paths: &HashSet<String>,
         max_symbols: usize,
         max_relations: usize,
     ) -> Result<HashSet<String>> {
         self.refuse_if_bound_closed()?;
-        let symbols = match logical_paths {
-            Some(requested) => {
-                let mut symbols = Vec::new();
-                for path in requested {
-                    let budget = max_symbols
-                        .checked_sub(symbols.len())
-                        .filter(|remaining| *remaining > 0)
-                        .ok_or_else(|| {
-                            graph_budget_exhausted(
-                                "verified test-attribution census exceeded its symbol budget",
-                            )
-                        })?;
-                    let mut in_file =
-                        self.symbols_in_logical_file(path, budget.saturating_add(1))?;
-                    if in_file.len() > budget {
-                        return Err(graph_budget_exhausted(
-                            "verified test-attribution census exceeded its symbol budget",
-                        ));
-                    }
-                    symbols.append(&mut in_file);
-                }
-                symbols
-            }
-            None => {
-                let page = self.symbols_page(None, max_symbols)?;
-                if page.has_more {
-                    return Err(graph_budget_exhausted(
+        let mut symbols = Vec::new();
+        for path in logical_paths {
+            let budget = max_symbols
+                .checked_sub(symbols.len())
+                .filter(|remaining| *remaining > 0)
+                .ok_or_else(|| {
+                    graph_budget_exhausted(
                         "verified test-attribution census exceeded its symbol budget",
-                    ));
-                }
-                page.symbols
+                    )
+                })?;
+            let mut in_file = self.symbols_in_logical_file(path, budget.saturating_add(1))?;
+            if in_file.len() > budget {
+                return Err(graph_budget_exhausted(
+                    "verified test-attribution census exceeded its symbol budget",
+                ));
             }
-        };
+            symbols.append(&mut in_file);
+        }
         let mut paths = HashMap::new();
         let mut test_markers = HashSet::new();
         for symbol in &symbols {
@@ -615,35 +599,17 @@ impl VerifiedGraphQuery {
                 test_markers.insert(symbol.occurrence.clone());
             }
         }
-        if logical_paths.is_some() {
-            if test_markers.is_empty() {
-                return Ok(HashSet::new());
-            }
-            // Outgoing annotation edges from the scoped markers alone: the
-            // corpus-seeded `edges_among` variant below needs every endpoint
-            // in its seed set, which is exactly the full-corpus hydration a
-            // file-scoped request must not pay.
-            let markers = test_markers.iter().cloned().collect::<Vec<_>>();
-            return Ok(self
-                .callees(&markers, &[RelationEdgeKindV1::Annotates], max_relations)?
-                .into_iter()
-                .flatten()
-                .filter_map(|edge| paths.get(&edge.edge.to_occurrence).cloned())
-                .collect());
+        if test_markers.is_empty() {
+            return Ok(HashSet::new());
         }
-        let occurrences = symbols
-            .iter()
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<Vec<_>>();
+        // Outgoing annotation edges from the scoped markers alone; an
+        // `edges_among` read would need every endpoint in its seed set.
+        let markers = test_markers.iter().cloned().collect::<Vec<_>>();
         Ok(self
-            .edges_among(
-                &occurrences,
-                &[RelationEdgeKindV1::Annotates],
-                max_relations,
-            )?
+            .callees(&markers, &[RelationEdgeKindV1::Annotates], max_relations)?
             .into_iter()
-            .filter(|edge| test_markers.contains(&edge.from_occurrence))
-            .filter_map(|edge| paths.get(&edge.to_occurrence).cloned())
+            .flatten()
+            .filter_map(|edge| paths.get(&edge.edge.to_occurrence).cloned())
             .collect())
     }
 }

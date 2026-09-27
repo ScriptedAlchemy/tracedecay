@@ -75,6 +75,57 @@ fn stale_lanes(coverage: &CodeIndexSearchCoverageV1) -> Vec<String> {
     .collect()
 }
 
+/// Whether the scheduler's reading proves `served_generation` current: the
+/// worktree is fresh, nothing is rebuilding, and no newer generation sealed.
+fn scheduler_proves_current(
+    state: &CodeIndexWorktreeFreshnessV1,
+    served_generation: Option<&str>,
+) -> bool {
+    state.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+        && !state.rebuild_in_flight
+        && (state.latest_generation_id.is_none()
+            || served_generation.is_none()
+            || state.latest_generation_id.as_deref() == served_generation)
+}
+
+/// The executor's lane coverage restated under the scheduler's reading, so
+/// the lanes and the verdict answer to one freshness authority. The query
+/// gate marks a lane stale when it could not prove freshness itself; once
+/// the scheduler proves the generation that lane served current, the lane
+/// is complete for it.
+pub(super) fn lanes_under_scheduler_freshness(
+    mut coverage: CodeIndexSearchCoverageV1,
+    served_generation: &str,
+    worktree: &WorktreeFreshnessSourceV1,
+) -> CodeIndexSearchCoverageV1 {
+    let WorktreeFreshnessSourceV1::Worktree(state) = worktree else {
+        return coverage;
+    };
+    if state.latest_generation_id.as_deref() != Some(served_generation)
+        || !scheduler_proves_current(state, Some(served_generation))
+    {
+        return coverage;
+    }
+    for lane in [
+        &mut coverage.exact,
+        &mut coverage.lexical,
+        &mut coverage.graph,
+    ] {
+        match lane {
+            CodeIndexLaneStatusV1::Stale { generation } if generation == served_generation => {
+                *lane = CodeIndexLaneStatusV1::Complete;
+            }
+            CodeIndexLaneStatusV1::Partial { generation, .. }
+                if generation.as_deref() == Some(served_generation) =>
+            {
+                *generation = None;
+            }
+            _ => {}
+        }
+    }
+    coverage
+}
+
 /// Derive the verdict from the executor's lane coverage and the scheduler's
 /// worktree state.
 pub(super) fn search_freshness(
@@ -89,11 +140,7 @@ pub(super) fn search_freshness(
     };
     let scheduler_says_stale = match worktree {
         WorktreeFreshnessSourceV1::Worktree(state) => {
-            state.staleness_state != Some(CodeIndexStalenessStateV1::Fresh)
-                || state.rebuild_in_flight
-                || (state.latest_generation_id.is_some()
-                    && served_generation.is_some()
-                    && state.latest_generation_id != served_generation)
+            !scheduler_proves_current(state, served_generation.as_deref())
         }
         WorktreeFreshnessSourceV1::NotMounted | WorktreeFreshnessSourceV1::Unattached => false,
     };

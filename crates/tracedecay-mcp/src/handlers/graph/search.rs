@@ -47,7 +47,8 @@ use super::search_evidence::{
     SearchGraphEvidence, bind_verified_graph_to_search, race_primary_search_with_graph,
 };
 use super::search_freshness::{
-    ServedGenerationV1, freshness_lines, search_freshness, worktree_freshness_from_payload,
+    ServedGenerationV1, freshness_lines, lanes_under_scheduler_freshness, search_freshness,
+    worktree_freshness_from_payload,
 };
 use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
 use super::{
@@ -303,9 +304,14 @@ where
                 }
             });
             let result_count = results.len();
+            let coverage = lanes_under_scheduler_freshness(
+                complete.coverage.clone(),
+                &complete.code_generation,
+                &worktree_freshness,
+            );
             let freshness = search_freshness(
                 ServedGenerationV1::Served(&complete.code_generation),
-                &complete.coverage,
+                &coverage,
                 &worktree_freshness,
             );
             let mut output = hotpath::measure_block!(
@@ -318,7 +324,7 @@ where
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
-                "coverage": coverage_value(&complete.coverage),
+                "coverage": coverage_value(&coverage),
                 })
             );
             lexical_routing::attach_route_evidence(
@@ -829,10 +835,15 @@ where
                 let search_matches = context_search_matches(&complete, scope_prefix);
                 let lexical_anchors = context_lexical_anchors(&complete, scope_prefix);
                 let code_generation = Some(complete.code_generation.clone());
-                let coverage = primitive_search_coverage(&complete.coverage);
+                let lanes = lanes_under_scheduler_freshness(
+                    complete.coverage.clone(),
+                    &complete.code_generation,
+                    &worktree_freshness,
+                );
+                let coverage = primitive_search_coverage(&lanes);
                 let freshness = search_freshness(
                     ServedGenerationV1::Served(&complete.code_generation),
-                    &complete.coverage,
+                    &lanes,
                     &worktree_freshness,
                 );
                 (
@@ -982,6 +993,9 @@ where
         ),
         ..retrieval
     };
+    let cost = graph
+        .as_ref()
+        .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost);
     let result = ContextResultV1 {
         task: request.task,
         mode,
@@ -1006,7 +1020,7 @@ where
         touched_files,
         code_graph: None,
         analytics: Some(analytics),
-        cost: None,
+        cost,
     })
 }
 

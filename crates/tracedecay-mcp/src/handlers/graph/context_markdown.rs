@@ -284,8 +284,8 @@ pub(super) fn verified_plan_context(
             test_files: None,
         });
     }
-    let annotated_files = graph.test_annotated_logical_files(None, 500_000, 2_000_000)?;
     let mut test_files = HashSet::new();
+    let mut unnamed_caller_files = HashSet::new();
     for symbol in symbols {
         for caller in traverse_verified_neighbors(
             graph,
@@ -295,12 +295,18 @@ pub(super) fn verified_plan_context(
             2,
         )? {
             let file_path = required_graph_file_path(&caller.symbol)?;
-            if tracedecay_code_index::is_test_file(file_path) || annotated_files.contains(file_path)
-            {
+            if tracedecay_code_index::is_test_file(file_path) {
                 test_files.insert(file_path.to_owned());
+            } else {
+                unnamed_caller_files.insert(file_path.to_owned());
             }
         }
     }
+    test_files.extend(graph.test_annotated_logical_files(
+        &unnamed_caller_files,
+        500_000,
+        2_000_000,
+    )?);
     let mut test_files = test_files.into_iter().collect::<Vec<_>>();
     test_files.sort();
     Ok(ContextPlanV1 {
