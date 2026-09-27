@@ -12,10 +12,12 @@ use tracedecay_application::code_index::open_production_code_index_owner_v1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SnapshotFileDispositionV1,
 };
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
+use tracedecay_runtime_core::resident_memory::ResidentMemoryReservationV1;
 
 use super::{
     CapturedCandidateV1, CapturedSnapshotV1, CodeIndexSchedulerErrorV1,
@@ -69,43 +71,89 @@ pub struct NativeCandidateGenerationIdentityV1 {
     pub seal_digest: tracedecay_domain::ManifestDigest,
 }
 
-/// One source path the privacy boundary refused to hand on.
-///
-/// A refused file produces no sanitization receipt and no sanitized bytes, so
-/// there is nothing a snapshot entry could truthfully carry for it: it is
-/// withheld from the generation and named here instead. The distinction that
-/// matters is scope, a refusal is evidence about *one file*, never about the
-/// tree, so it must not be allowed to cost every other file its index.
-#[derive(Debug)]
-pub struct WithheldSourceV1 {
-    pub logical_path: String,
-    file: Option<SanitizedCodeFileV1>,
-    pub reason: String,
+/// Omitted files still belong to the source roster; only absent paths disappear.
+pub(super) enum CapturedFileOutcomeV1 {
+    Present(CapturedCandidateV1),
+    Omitted(SanitizedCodeFileV1),
+    Withheld {
+        file: SanitizedCodeFileV1,
+        reason: String,
+    },
+    Absent,
 }
 
-/// Classifies a per-file capture failure as either a privacy refusal that the
-/// capture degrades around, or a genuine capture fault that still terminates
-/// it. Only the sanitizer's own refusal is survivable: an I/O, identity, or
-/// production failure says the capture itself is unsound.
-pub fn classify_capture_failure(
-    logical_path: &str,
-    error: CodeIndexSchedulerErrorV1,
-) -> Result<WithheldSourceV1, CodeIndexSchedulerErrorV1> {
-    match error {
-        CodeIndexSchedulerErrorV1::Privacy(reason) => Ok(WithheldSourceV1 {
-            logical_path: logical_path.to_owned(),
-            file: None,
-            reason,
-        }),
-        other => Err(other),
+#[derive(Default)]
+pub(super) struct CapturedFileRosterV1 {
+    pub(super) files: Vec<SanitizedCodeFileV1>,
+    pub(super) captured_files: Vec<CodeIndexCapturedFileV1>,
+    pub(super) sanitization_receipts: BTreeSet<SanitizationReceiptId>,
+    pub(super) retained_bytes: Vec<Arc<[u8]>>,
+    pub(super) retained_reservations: Vec<ResidentMemoryReservationV1>,
+    withheld_sources: Vec<(String, String)>,
+}
+
+// Keep privacy diagnostics bounded to one summary record per capture.
+const MAX_REPORTED_WITHHELD_SOURCES: usize = 16;
+
+impl CapturedFileRosterV1 {
+    pub(super) fn push(&mut self, outcome: CapturedFileOutcomeV1) {
+        match outcome {
+            CapturedFileOutcomeV1::Present(candidate) => {
+                self.sanitization_receipts.insert(candidate.receipt_id);
+                if let Some(reservation) = candidate.retained_reservation {
+                    self.retained_reservations.push(reservation);
+                }
+                self.retained_bytes.push(candidate.retained);
+                self.files.push(candidate.file);
+                self.captured_files.push(candidate.captured);
+            }
+            CapturedFileOutcomeV1::Omitted(file) => self.files.push(file),
+            CapturedFileOutcomeV1::Withheld { file, reason } => {
+                self.withheld_sources
+                    .push((file.logical_path.clone(), reason));
+                self.files.push(file);
+            }
+            CapturedFileOutcomeV1::Absent => {}
+        }
+    }
+
+    pub(super) fn finish(mut self) -> Result<Self, CodeIndexSchedulerErrorV1> {
+        if !self.withheld_sources.is_empty() {
+            let named = self
+                .withheld_sources
+                .iter()
+                .take(MAX_REPORTED_WITHHELD_SOURCES)
+                .map(|(path, reason)| format!("{path}: {reason}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!(
+                withheld = self.withheld_sources.len(),
+                named = %named,
+                "code_index_sources_withheld_by_privacy"
+            );
+        }
+        if self
+            .files
+            .iter()
+            .any(|file| file.disposition == SnapshotFileDispositionV1::Ignored)
+            && !self
+                .files
+                .iter()
+                .any(|file| file.disposition == SnapshotFileDispositionV1::Present)
+        {
+            return Err(CodeIndexSchedulerErrorV1::Privacy(
+                "every indexable source was withheld by the privacy boundary".to_owned(),
+            ));
+        }
+        self.files.sort_by(|left, right| {
+            (&left.logical_path, &left.file_occurrence_id)
+                .cmp(&(&right.logical_path, &right.file_occurrence_id))
+        });
+        self.captured_files
+            .sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
+        Ok(self)
     }
 }
-
-/// Largest number of withheld paths named in the single summary record. The
-/// summary is one line per capture rather than one per file precisely because
-/// an unbounded per-file warning is what turned a handful of refusals into a
-/// log flood.
-const MAX_REPORTED_WITHHELD_SOURCES: usize = 16;
 
 /// Publish capture progress at a coarse cadence so a large tree does not
 /// turn one file into one profiler event. The final values are always flushed
@@ -235,23 +283,6 @@ impl Drop for CaptureProgressV1 {
     }
 }
 
-pub fn report_withheld_sources(withheld: &[WithheldSourceV1]) {
-    if withheld.is_empty() {
-        return;
-    }
-    let named = withheld
-        .iter()
-        .take(MAX_REPORTED_WITHHELD_SOURCES)
-        .map(|source| format!("{}: {}", source.logical_path, source.reason))
-        .collect::<Vec<_>>()
-        .join("; ");
-    tracing::warn!(
-        withheld = withheld.len(),
-        named = %named,
-        "code_index_sources_withheld_by_privacy"
-    );
-}
-
 impl CodeIndexExecutionControlV1 for branch_generations::BranchGenerationReadControlV1 {
     fn is_cancelled(&self) -> bool {
         self.cancellation
@@ -345,26 +376,21 @@ impl DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
-    fn withheld_source(
+    fn omitted_source_file(
         &self,
         logical_path: &str,
         raw_bytes: &[u8],
         disposition: SnapshotFileDispositionV1,
-        reason: String,
-    ) -> Result<WithheldSourceV1, CodeIndexSchedulerErrorV1> {
+    ) -> Result<SanitizedCodeFileV1, CodeIndexSchedulerErrorV1> {
         let digest = content_digest(raw_bytes);
         let occurrence =
             omitted_file_occurrence_id(&self.repository_id, logical_path, &digest, disposition)?;
-        Ok(WithheldSourceV1 {
+        Ok(SanitizedCodeFileV1 {
+            file_occurrence_id: occurrence,
             logical_path: logical_path.to_owned(),
-            file: Some(SanitizedCodeFileV1 {
-                file_occurrence_id: occurrence,
-                logical_path: logical_path.to_owned(),
-                language: None,
-                content_digest: digest,
-                disposition,
-            }),
-            reason,
+            language: None,
+            content_digest: digest,
+            disposition,
         })
     }
 
@@ -374,31 +400,57 @@ impl CodeIndexWorktreeSchedulerV1 {
         logical_path: &str,
         raw_bytes: &[u8],
         progress: Option<&CaptureProgressV1>,
-    ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
+        explicitly_admitted: bool,
+    ) -> Result<CapturedFileOutcomeV1, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
         if let Some(progress) = progress {
             progress.observe_candidate(raw_bytes.len());
         }
-        let result: Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> = (|| {
-            let Some(extension) = Path::new(logical_path)
+        let result = (|| {
+            if !explicitly_admitted && crate::config::is_generated_path_segment(logical_path) {
+                return self
+                    .omitted_source_file(
+                        logical_path,
+                        raw_bytes,
+                        SnapshotFileDispositionV1::Generated,
+                    )
+                    .map(CapturedFileOutcomeV1::Omitted);
+            }
+            let descriptor = Path::new(logical_path)
                 .extension()
                 .and_then(|value| value.to_str())
-            else {
-                return Ok(None);
-            };
-            let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase())
-            else {
-                return Ok(None);
+                .and_then(|extension| registry.descriptor_for_extension(&extension.to_lowercase()));
+            let Some(descriptor) = descriptor else {
+                return self
+                    .omitted_source_file(
+                        logical_path,
+                        raw_bytes,
+                        SnapshotFileDispositionV1::UnsupportedLanguage,
+                    )
+                    .map(CapturedFileOutcomeV1::Omitted);
             };
             let (sanitized_bytes, sensitivity_level, receipt_id) =
-                privacy::sanitize_code_file(&descriptor.language, raw_bytes)?;
+                match privacy::sanitize_code_file(&descriptor.language, raw_bytes) {
+                    Ok(sanitized) => sanitized,
+                    Err(CodeIndexSchedulerErrorV1::Privacy(reason)) => {
+                        return Ok(CapturedFileOutcomeV1::Withheld {
+                            file: self.omitted_source_file(
+                                logical_path,
+                                raw_bytes,
+                                SnapshotFileDispositionV1::Ignored,
+                            )?,
+                            reason,
+                        });
+                    }
+                    Err(error) => return Err(error),
+                };
             let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
             let retained_reservation = self.reserve_snapshot_memory(&digest, shared.len())?;
             let occurrence =
                 file_occurrence_id(&self.repository_id, logical_path, &digest, &receipt_id)?;
-            Ok(Some(CapturedCandidateV1 {
+            Ok(CapturedFileOutcomeV1::Present(CapturedCandidateV1 {
                 file: SanitizedCodeFileV1 {
                     file_occurrence_id: occurrence.clone(),
                     logical_path: logical_path.to_owned(),
@@ -418,7 +470,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         })();
         if let Some(progress) = progress {
             progress.observe_processed(raw_bytes.len());
-            if let Ok(Some(candidate)) = result.as_ref() {
+            if let Ok(CapturedFileOutcomeV1::Present(candidate)) = result.as_ref() {
                 progress.observe_captured(candidate.captured.sanitized_bytes.len());
             }
         }
@@ -527,115 +579,49 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         let registry = StaticLanguageRegistry::new();
         let progress = CaptureProgressV1::new();
-        let mut files = Vec::new();
-        let mut captured_files = Vec::new();
-        let mut sanitization_receipts = BTreeSet::new();
-        let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
-        let mut retained_reservations = Vec::new();
-        let mut withheld_sources = Vec::new();
+        let mut roster = CapturedFileRosterV1::default();
         visit(&mut |logical_path, raw_bytes| {
             control.termination().map_or(Ok(()), Err)?;
-            if crate::config::is_generated_path_segment(logical_path) {
-                withheld_sources.push(
-                    self.withheld_source(
-                        logical_path,
-                        raw_bytes,
-                        SnapshotFileDispositionV1::Generated,
-                        "generated source excluded from indexing".to_owned(),
-                    )
-                    .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?,
-                );
-                return Ok(());
-            }
-            let candidate = match self.capture_candidate_bytes_with_progress(
-                &registry,
-                logical_path,
-                raw_bytes,
-                Some(&progress),
-            ) {
-                Ok(Some(candidate)) => candidate,
-                Ok(None) => {
-                    withheld_sources.push(
-                        self.withheld_source(
-                            logical_path,
-                            raw_bytes,
-                            SnapshotFileDispositionV1::UnsupportedLanguage,
-                            "source language is unsupported".to_owned(),
-                        )
-                        .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?,
-                    );
-                    return Ok(());
+            let outcome = self.capture_candidate_bytes_with_progress(
+                &registry, logical_path, raw_bytes, Some(&progress), false,
+            ).map_err(|error| {
+                if self.shutting_down.load(Ordering::Acquire) {
+                    CodeIndexSearchUnavailableReasonV1::Cancelled
+                } else if matches!(&error, CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission(_)) {
+                    CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
+                } else {
+                    tracing::warn!(error = %error, path = %logical_path, "git_tree_capture_failed");
+                    CodeIndexSearchUnavailableReasonV1::Internal
                 }
-                Err(error) => {
-                    if self.shutting_down.load(Ordering::Acquire) {
-                        return Err(CodeIndexSearchUnavailableReasonV1::Cancelled);
-                    }
-                    match classify_capture_failure(logical_path, error) {
-                        Ok(withheld) => {
-                            withheld_sources.push(
-                                self.withheld_source(
-                                    logical_path,
-                                    raw_bytes,
-                                    SnapshotFileDispositionV1::Ignored,
-                                    withheld.reason,
-                                )
-                                .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?,
-                            );
-                            return Ok(());
-                        }
-                        Err(error) => {
-                            if matches!(
-                                &error,
-                                CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission(_)
-                            ) {
-                                return Err(
-                                    CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
-                                );
-                            }
-                            tracing::warn!(
-                                error = %error,
-                                path = %logical_path,
-                                "git_tree_capture_failed"
-                            );
-                            return Err(CodeIndexSearchUnavailableReasonV1::Internal);
-                        }
-                    }
-                }
-            };
-            sanitization_receipts.insert(candidate.receipt_id);
-            if let Some(reservation) = candidate.retained_reservation {
-                retained_reservations.push(reservation);
-            }
-            retained_bytes.push(candidate.retained);
-            files.push(candidate.file);
-            captured_files.push(candidate.captured);
+            })?;
+            roster.push(outcome);
             Ok(())
         })?;
-        report_withheld_sources(&withheld_sources);
-        if files.is_empty() && !withheld_sources.is_empty() {
-            return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
-        }
-        files.extend(
-            withheld_sources
-                .into_iter()
-                .filter_map(|withheld| withheld.file),
-        );
+        let CapturedFileRosterV1 {
+            files,
+            captured_files,
+            sanitization_receipts,
+            retained_bytes,
+            retained_reservations,
+            ..
+        } = roster
+            .finish()
+            .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
         let mut changed_paths = BTreeSet::new();
         if let Some(active) = self
             .publication
             .load_active_shared()
             .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
         {
-            let active_digests = active
+            let active_files = active
                 .snapshot()
                 .files
                 .iter()
-                .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
-                .map(|file| (file.logical_path.as_str(), &file.content_digest))
+                .map(|file| (file.logical_path.as_str(), file))
                 .collect::<BTreeMap<_, _>>();
             for file in &files {
-                match active_digests.get(file.logical_path.as_str()) {
-                    Some(digest) if **digest == file.content_digest => {}
+                match active_files.get(file.logical_path.as_str()) {
+                    Some(active_file) if **active_file == *file => {}
                     _ => {
                         changed_paths.insert(file.logical_path.clone());
                     }
@@ -646,7 +632,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .map(|file| file.logical_path.as_str())
                 .collect::<BTreeSet<_>>();
             changed_paths.extend(
-                active_digests
+                active_files
                     .keys()
                     .filter(|logical_path| !captured_paths.contains(**logical_path))
                     .map(|logical_path| (*logical_path).to_owned()),
@@ -654,12 +640,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         } else {
             changed_paths.extend(files.iter().map(|file| file.logical_path.clone()));
         }
-        files.sort_by(|left, right| {
-            (&left.logical_path, &left.file_occurrence_id)
-                .cmp(&(&right.logical_path, &right.file_occurrence_id))
-        });
-        captured_files
-            .sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
         let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
         let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
         Ok(CapturedSnapshotV1 {
@@ -966,9 +946,9 @@ mod tests {
     };
 
     use super::{
-        CodeIndexSchedulerErrorV1, CodeIndexSearchUnavailableReasonV1,
+        CapturedFileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSearchUnavailableReasonV1,
         CodeIndexWorktreeSchedulerV1, ExactGitTreeSourceV1, NativeCandidateGenerationIdentityV1,
-        NativeCandidateGenerationSourcesV1, branch_generations, classify_capture_failure,
+        NativeCandidateGenerationSourcesV1, branch_generations,
     };
     use crate::code_index_scheduler::SharedCodeIndexBytePoolV1;
 
@@ -1119,19 +1099,27 @@ mod tests {
         );
     }
 
-    /// A sanitizer refusal is evidence about one file. Before this, the first
-    /// refused path failed the whole tree capture, so a single file the privacy
-    /// boundary would not hand on left the project with no code index at all.
     #[test]
     fn a_privacy_refusal_withholds_only_its_own_path() {
-        let withheld = classify_capture_failure(
-            "src/fixtures/malformed.json",
-            CodeIndexSchedulerErrorV1::Privacy("structured document is malformed".to_owned()),
-        )
-        .expect("a privacy refusal is survivable");
-
-        assert_eq!(withheld.logical_path, "src/fixtures/malformed.json");
-        assert_eq!(withheld.reason, "structured document is malformed");
+        let (_project, _store, scheduler) = generated_source_fixture();
+        let outcome = scheduler
+            .capture_candidate_bytes_with_progress(
+                &super::StaticLanguageRegistry::new(),
+                "malformed.json",
+                b"{broken",
+                None,
+                false,
+            )
+            .expect("privacy refusal is a file outcome");
+        let CapturedFileOutcomeV1::Withheld { file, .. } = outcome else {
+            panic!("malformed structured data must be withheld");
+        };
+        assert_eq!(file.logical_path, "malformed.json");
+        assert_eq!(
+            file.disposition,
+            tracedecay_domain::SnapshotFileDispositionV1::Ignored
+        );
+        assert_eq!(file.content_digest, super::content_digest(b"{broken"));
     }
 
     /// A revision the branch has already moved past is still an immutable
@@ -1225,6 +1213,44 @@ mod tests {
         assert!(
             !bytes.contains("current_tip_value"),
             "the capture must never fall back to the reference's current tip"
+        );
+    }
+
+    #[test]
+    fn repeated_exact_capture_has_no_omitted_row_delta() {
+        let (project, _store, mut scheduler) = generated_source_fixture();
+        scheduler.reconcile_now().expect("publish immutable tree");
+        let source = ExactGitTreeSourceV1 {
+            reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
+            revision: tracedecay_domain::CommitId::new(git_output(
+                project.path(),
+                &["rev-parse", "HEAD"],
+            ))
+            .expect("revision"),
+            tree: tracedecay_domain::TreeId::new(git_output(
+                project.path(),
+                &["rev-parse", "HEAD^{tree}"],
+            ))
+            .expect("tree"),
+        };
+        let captured = scheduler
+            .capture_exact_git_tree_snapshot(
+                &source,
+                &branch_generations::BranchGenerationReadControlV1 {
+                    deadline: None,
+                    cancellation: None,
+                },
+            )
+            .expect("recapture immutable tree");
+        assert!(captured.changed_paths.is_empty());
+        assert_eq!(
+            captured.snapshot.files,
+            scheduler
+                .latest_complete()
+                .expect("published")
+                .generation()
+                .snapshot()
+                .files
         );
     }
 
@@ -1521,17 +1547,62 @@ mod tests {
         );
     }
 
-    /// Everything that is not the sanitizer's own refusal says the capture
-    /// itself is unsound, and must still terminate it rather than quietly
-    /// dropping files out of a generation that claims to be complete.
     #[test]
-    fn a_capture_fault_still_terminates_the_capture() {
-        let error = classify_capture_failure(
-            "src/main.rs",
-            CodeIndexSchedulerErrorV1::Identity("occurrence identity failed".to_owned()),
-        )
-        .expect_err("a capture fault is not survivable");
+    fn wholly_withheld_roster_refuses_both_capture_paths() {
+        let (project, _store, scheduler) = generated_source_fixture();
+        std::fs::remove_file(project.path().join("src/lib.rs")).expect("remove indexable source");
+        std::fs::write(project.path().join("malformed.json"), "{broken").expect("withheld source");
+        git(project.path(), &["add", "."]);
+        git(
+            project.path(),
+            &["commit", "-qm", "only withheld and generated sources"],
+        );
+        let source = ExactGitTreeSourceV1 {
+            reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
+            revision: tracedecay_domain::CommitId::new(git_output(
+                project.path(),
+                &["rev-parse", "HEAD"],
+            ))
+            .expect("revision"),
+            tree: tracedecay_domain::TreeId::new(git_output(
+                project.path(),
+                &["rev-parse", "HEAD^{tree}"],
+            ))
+            .expect("tree"),
+        };
+        assert!(matches!(
+            scheduler.capture_exact_git_tree_snapshot(
+                &source,
+                &branch_generations::BranchGenerationReadControlV1 {
+                    deadline: None,
+                    cancellation: None
+                }
+            ),
+            Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
+        ));
+        assert!(matches!(
+            scheduler.capture_authoritative_snapshot_without_active_generation_reuse(None),
+            Err(CodeIndexSchedulerErrorV1::Privacy(_))
+        ));
+    }
 
-        assert!(matches!(error, CodeIndexSchedulerErrorV1::Identity(_)));
+    #[test]
+    fn cancellation_is_not_a_withheld_file() {
+        let (_project, _store, scheduler) = generated_source_fixture();
+        scheduler
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            scheduler.capture_candidate_bytes_with_progress(
+                &super::StaticLanguageRegistry::new(),
+                "src/lib.rs",
+                b"pub fn kept() {}",
+                None,
+                false,
+            ),
+            Err(CodeIndexSchedulerErrorV1::Production(
+                super::CodeIndexProductionErrorV1::Interrupted(_)
+            ))
+        ));
     }
 }

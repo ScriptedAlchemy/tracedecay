@@ -153,7 +153,8 @@ mod tests {
     use tracedecay_contracts::{RequestContext, now_micros};
     use tracedecay_domain::ObservationScopeV1;
     use tracedecay_domain::{CommitId, ProviderId, UtcMicros};
-    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+    use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
+    use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 
     use super::super::test_support::{
         read_http_request, read_http_request_with_headers, write_http_json,
@@ -302,16 +303,16 @@ mod tests {
         scope.head_commit_id = CommitId::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
         let context = context(&scope);
         let request = request(scope.clone());
-        let profile = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let runtime = RegisteredGlobalDbTestRuntime::project(
-            profile.path(),
-            project.path(),
-            scope.project_id.clone(),
+        let storage = tempfile::tempdir().unwrap();
+        let database_path = storage.path().join("project-sessions.db");
+        let (database, owner) = open_registered_test_database_fixture(
+            &database_path,
+            TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: scope.project_id.clone(),
+            },
         )
         .await
         .unwrap();
-        let database = runtime.project_database_arc().unwrap();
         let anchors =
             ProjectGitHubStackAnchorAuthorityV1::new(database.clone(), scope.clone()).unwrap();
         let provider = ProviderId::new("provider.github").unwrap();
@@ -454,15 +455,15 @@ mod tests {
         );
         drop(anchors);
         drop(database);
-        drop(runtime);
-        let restarted = RegisteredGlobalDbTestRuntime::project(
-            profile.path(),
-            project.path(),
-            scope.project_id.clone(),
+        drop(owner);
+        let (database, _owner) = open_registered_test_database_fixture(
+            &database_path,
+            TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: scope.project_id.clone(),
+            },
         )
         .await
         .unwrap();
-        let database = restarted.project_database_arc().unwrap();
         let anchors =
             ProjectGitHubStackAnchorAuthorityV1::new(database.clone(), scope.clone()).unwrap();
         let durable = anchors

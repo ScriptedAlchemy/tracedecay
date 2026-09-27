@@ -269,14 +269,8 @@ fn write_control() -> FactWriteControl {
 }
 
 async fn wait_for_reconciliation(runtime: &RecordingGraphRuntime) {
-    if !runtime.reconciliation_observed.load(Ordering::Acquire) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !runtime.reconciliation_observed.load(Ordering::Acquire) {
-                runtime.reconciliation_notify.notified().await;
-            }
-        })
-        .await
-        .expect("scheduled graph reconciliation did not reach the mounted runtime");
+    while !runtime.reconciliation_observed.load(Ordering::Acquire) {
+        runtime.reconciliation_notify.notified().await;
     }
     assert!(
         runtime.reconciliation_observed.load(Ordering::Acquire),

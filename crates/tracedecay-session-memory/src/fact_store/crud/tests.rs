@@ -615,42 +615,53 @@ async fn normalized_equivalent_add_is_the_only_no_write_near_duplicate() {
 async fn add_succeeds_past_ten_thousand_eligible_facts() {
     let (_directory, database) = database().await;
     let owner = FactOwnerV1::Profile;
-    let transaction = database
-        .begin_memory_write_transaction("seed content-digest limit fixture")
-        .await
-        .expect("begin content-digest limit fixture");
-    for index in 0..10_001 {
-        let content = format!("Distinct content-digest limit fixture {index}");
-        let sanitized = sanitize_payload(
-            &content,
-            FactCategoryV1::Project,
-            &["digest-limit".to_owned()],
-            &["TraceDecay".to_owned()],
-            &json!({"fixture": "content-digest-limit"}),
-            None,
-        )
-        .expect("sanitize content-digest limit fixture")
-        .expect("content-digest limit fixture is durable");
-        let operation_id = ProvenanceId::new(format!("operation.digest-limit.seed.{index}"))
-            .expect("content-digest limit operation identity");
-        let batch = initial_batch(
-            &owner,
-            &operation_id,
-            sanitized.payload,
-            sanitized.access,
-            Confidence::new(0.5).expect("content-digest limit trust"),
-            None,
-            UtcMicros(1_000_000 + i64::from(index)),
-        )
-        .expect("build content-digest limit batch");
-        commit_batch_tx(&transaction, &batch)
+    // This fixture only has to cross the former 10,000-row materialization
+    // boundary. Commit bounded chunks so it never turns setup into one
+    // production-sized transaction that can exhaust the ordinary write lease
+    // under parallel test load.
+    const FIXTURE_CHUNK: usize = 250;
+    for chunk_start in (0..10_001).step_by(FIXTURE_CHUNK) {
+        let transaction = database
+            .begin_memory_write_transaction("seed content-digest limit fixture")
             .await
-            .expect("commit content-digest limit fixture");
+            .expect("begin content-digest limit fixture chunk");
+        let chunk_end = (chunk_start + FIXTURE_CHUNK).min(10_001);
+        for index in chunk_start..chunk_end {
+            let content = format!("Distinct content-digest limit fixture {index}");
+            let sanitized = sanitize_payload(
+                &content,
+                FactCategoryV1::Project,
+                &["digest-limit".to_owned()],
+                &["TraceDecay".to_owned()],
+                &json!({"fixture": "content-digest-limit"}),
+                None,
+            )
+            .expect("sanitize content-digest limit fixture")
+            .expect("content-digest limit fixture is durable");
+            let operation_id = ProvenanceId::new(format!("operation.digest-limit.seed.{index}"))
+                .expect("content-digest limit operation identity");
+            let batch = initial_batch(
+                &owner,
+                &operation_id,
+                sanitized.payload,
+                sanitized.access,
+                Confidence::new(0.5).expect("content-digest limit trust"),
+                None,
+                UtcMicros(
+                    1_000_000
+                        + i64::try_from(index).expect("content-digest fixture index fits i64"),
+                ),
+            )
+            .expect("build content-digest limit batch");
+            commit_batch_tx(&transaction, &batch)
+                .await
+                .expect("commit content-digest limit fixture");
+        }
+        transaction
+            .commit()
+            .await
+            .expect("commit content-digest limit fixture chunk");
     }
-    transaction
-        .commit()
-        .await
-        .expect("commit content-digest limit transaction");
 
     let store = DatabaseFactStore::new(&database);
     let control = write_control();

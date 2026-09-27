@@ -15,8 +15,8 @@ use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
 use super::{
-    SnapshotReadControl, backup_live_sqlite_database_with, family_state, first_backup_step, open,
-    open_foreign_in, with_suffix,
+    SnapshotReadControl, backup_live_sqlite_database_with, durable_family_witness, family_state,
+    first_backup_step, open, open_foreign_in, with_suffix,
 };
 use crate::db::sqlite_generation_identity;
 
@@ -103,7 +103,7 @@ async fn live_backup_includes_wal_resident_rows_and_does_not_checkpoint_the_sour
     let source = temp.path().join("live.db");
     let destination = temp.path().join("snapshot.db");
     let writer = wal_writer(&source);
-    let before = family_state(&source).unwrap();
+    let before = durable_family_witness(&source).unwrap();
 
     backup_live_sqlite_database_with(&source, &destination, || Ok(())).unwrap();
 
@@ -115,7 +115,7 @@ async fn live_backup_includes_wal_resident_rows_and_does_not_checkpoint_the_sour
             .all(|suffix| !with_suffix(&destination, suffix).exists()),
         "backup must publish one standalone file"
     );
-    assert_eq!(family_state(&source).unwrap(), before);
+    assert_eq!(durable_family_witness(&source).unwrap(), before);
     assert!(
         with_suffix(&source, "-wal").metadata().unwrap().len() > 0,
         "read-only backup must not fold the live source WAL"

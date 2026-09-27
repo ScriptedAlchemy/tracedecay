@@ -405,8 +405,7 @@ impl SnapshotDatabase {
     }
 
     pub fn validate_source(&self) -> io::Result<()> {
-        let current = family_state(&self.source)?;
-        if durable_family_state(&self.source, &current)
+        if durable_family_witness(&self.source)?
             == durable_family_state(&self.source, &self.source_state)
         {
             return Ok(());
@@ -492,9 +491,7 @@ impl SourceGeneration {
     }
 
     pub fn validate(&self) -> io::Result<()> {
-        let current = family_state(&self.source)?;
-        if durable_family_state(&self.source, &current)
-            == durable_family_state(&self.source, &self.states)
+        if durable_family_witness(&self.source)? == durable_family_state(&self.source, &self.states)
         {
             return Ok(());
         }
@@ -942,7 +939,7 @@ fn prepare_one(
         .find(|state| state.path == with_suffix(source, "-shm"))
         .map_or(0, |state| state.bytes);
     let copy_bytes = snapshot_admission_bytes(mode, main.bytes, wal_bytes, shm_bytes);
-    if family_state(source)? != source_state {
+    if durable_family_witness(source)? != durable_family_state(source, &source_state) {
         return Err(changed_during_snapshot(source));
     }
     Ok(PreparedSnapshot {
@@ -1062,7 +1059,9 @@ fn copy_snapshot_family(
         SnapshotMode::DirectImmutable => {}
     }
     control.checkpoint()?;
-    if family_state(&prepared.source)? != prepared.source_state {
+    if durable_family_witness(&prepared.source)?
+        != durable_family_state(&prepared.source, &prepared.source_state)
+    {
         return Err(changed_during_snapshot(&prepared.source));
     }
     Ok((prepared, scratch))
@@ -1381,6 +1380,10 @@ fn durable_family_state(path: &Path, states: &[FileState]) -> Vec<FileState> {
         .collect()
 }
 
+fn durable_family_witness(path: &Path) -> io::Result<Vec<FileState>> {
+    Ok(durable_family_state(path, &family_state(path)?))
+}
+
 pub(super) fn family_paths(path: &Path) -> [PathBuf; 3] {
     [
         path.to_path_buf(),
@@ -1561,7 +1564,7 @@ mod tests {
             )
             .unwrap();
         assert!(with_suffix(&path, "-wal").metadata().unwrap().len() > 0);
-        let before = family_state(&path).unwrap();
+        let before = durable_family_witness(&path).unwrap();
 
         let snapshot = open(&path).await.unwrap();
         let mut rows = snapshot
@@ -1589,7 +1592,7 @@ mod tests {
             )
             .exists())
         );
-        assert_eq!(family_state(&path).unwrap(), before);
+        assert_eq!(durable_family_witness(&path).unwrap(), before);
     }
 
     #[tokio::test]
@@ -1603,7 +1606,7 @@ mod tests {
                  INSERT INTO durable(value) VALUES ('foreign');",
             )
             .unwrap();
-        let before = family_state(&path).unwrap();
+        let before = durable_family_witness(&path).unwrap();
 
         let snapshot = open_foreign_in(
             &path,
@@ -1634,7 +1637,7 @@ mod tests {
                 .unwrap(),
             "foreign"
         );
-        assert_eq!(family_state(&path).unwrap(), before);
+        assert_eq!(durable_family_witness(&path).unwrap(), before);
     }
 
     #[tokio::test]
@@ -1765,8 +1768,8 @@ mod tests {
             )
             .unwrap();
         assert!(with_suffix(&other, "-wal").is_file());
-        let source_before = family_state(&source).unwrap();
-        let other_before = family_state(&other).unwrap();
+        let source_before = durable_family_witness(&source).unwrap();
+        let other_before = durable_family_witness(&other).unwrap();
         let snapshots = SnapshotSet::capture(&[source.clone(), other.clone()])
             .await
             .unwrap();
@@ -1805,8 +1808,8 @@ mod tests {
             .execute("DETACH DATABASE other", ())
             .await
             .unwrap();
-        assert_eq!(family_state(&source).unwrap(), source_before);
-        assert_eq!(family_state(&other).unwrap(), other_before);
+        assert_eq!(durable_family_witness(&source).unwrap(), source_before);
+        assert_eq!(durable_family_witness(&other).unwrap(), other_before);
         drop(other_writer);
     }
 
@@ -1837,6 +1840,19 @@ mod tests {
         assert_eq!(family_fingerprint(&path).unwrap(), before);
         fs::write(with_suffix(&path, "-wal"), b"logical frame").unwrap();
         assert_ne!(family_fingerprint(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn captured_generation_ignores_transient_sidecars_but_not_wal_state() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        fs::write(&path, b"database bytes").unwrap();
+        let generation = SourceGeneration::capture(&path).unwrap();
+        fs::write(with_suffix(&path, "-shm"), b"transient lock state").unwrap();
+        fs::write(with_suffix(&path, "-wal"), b"").unwrap();
+        generation.validate().unwrap();
+        fs::write(with_suffix(&path, "-wal"), b"logical frame").unwrap();
+        assert!(generation.validate().is_err());
     }
 
     #[cfg(unix)]
