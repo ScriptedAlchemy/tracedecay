@@ -1092,15 +1092,21 @@ async fn mounted_core_query_worktree_in(
     fixture: &GitFixture,
     store: &TempDir,
 ) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
+    mounted_core_query_worktree_at(registry, fixture.path(), store.path().to_path_buf()).await
+}
+
+/// [`mounted_core_query_worktree_in`] for any checkout, such as a linked
+/// worktree of a fixture, with its own store root.
+async fn mounted_core_query_worktree_at(
+    registry: CodeIndexSchedulerRegistryV1,
+    root: &Path,
+    store_root: PathBuf,
+) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
     registry
-        .mount_worktree(
-            test_project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
-        )
+        .mount_worktree(test_project_id(), root, store_root)
         .await
         .expect("mount daemon-owned scheduler");
-    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let latest = wait_for_live_complete_generation(&registry, root).await;
     let snapshot = latest.generation.snapshot();
     let scope = ResolvedScope::new(
         test_project_id(),
@@ -1109,7 +1115,7 @@ async fn mounted_core_query_worktree_in(
         snapshot.reference.clone(),
     )
     .expect("resolved scope");
-    mount_core_query_authority(&registry, fixture.path(), &scope, &latest).await;
+    mount_core_query_authority(&registry, root, &scope, &latest).await;
     (registry, scope)
 }
 

@@ -4,6 +4,9 @@ use super::*;
 use tracedecay_lsp::LspRuntimeFailure;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::resident_memory::{ResidentOwnerScopeV1, process_resident_owners_v1};
+
+use super::lsp_residency::LspSessionResidencyV1;
 
 mod project_lifecycle;
 mod workspace_admission;
@@ -50,6 +53,47 @@ pub fn canonicalize_lsp_roots(
     !roots
         .windows(2)
         .any(|pair| pair[0].2.scope_digest == pair[1].2.scope_digest)
+}
+
+/// Register a session under its owner's granted worktree scope.
+fn lsp_session_residency(
+    owner: &DaemonLspInvocationOwner,
+    session: &LspSessionId,
+    actor: &RuntimeLspActor,
+) -> Option<LspSessionResidencyV1> {
+    let Some(grant) = owner.scope_grant.as_ref() else {
+        tracing::warn!(
+            event = "lsp_session_residency_unscoped",
+            "an LSP session opened without a worktree scope grant is not visible to the resident-memory inventory"
+        );
+        return None;
+    };
+    LspSessionResidencyV1::register(
+        process_resident_owners_v1(),
+        ResidentOwnerScopeV1 {
+            project_id: grant.scope.project_id.clone(),
+            worktree_id: grant.scope.worktree_id.clone(),
+        },
+        session,
+        actor.retained_bytes(),
+    )
+    .inspect_err(|error| {
+        tracing::error!(
+            event = "resident_owner_registration_failed",
+            kind = "session",
+            error = %error,
+            "an LSP session is not visible to the resident-memory inventory"
+        );
+    })
+    .ok()
+}
+
+impl RuntimeLspSession {
+    fn observe_residency(&self) {
+        if let Some(residency) = &self.residency {
+            residency.observe(self.actor.retained_bytes());
+        }
+    }
 }
 
 pub(super) async fn runtime_lsp_actor(
@@ -539,12 +583,14 @@ impl DaemonInvocationService {
         let expires_at_ms = now_ms.saturating_add(LSP_SESSION_TTL_MS);
         let session_id = access.session_id().clone();
         let project_identity = lsp_owner.project_identity.clone();
+        let residency = lsp_session_residency(&lsp_owner, &session_id, &actor);
         self.lsp_sessions.lock().await.insert(
             session_id,
             RuntimeLspSession {
                 expires_at_ms,
                 project_identity,
                 actor,
+                residency,
                 delivery_settlements: lsp_owner.delivery_settlements,
                 in_flight_delivery_attempt: None,
                 next_delivery_sequence: 1,
@@ -582,6 +628,7 @@ impl DaemonInvocationService {
         let admission = session
             .actor
             .try_handle_client_payload(frame.as_bytes(), now_ms);
+        session.observe_residency();
         let (backpressured, closed) = match admission {
             ClientFrameAdmission::Consumed(dispatch) => (false, dispatch.closed),
             ClientFrameAdmission::Backpressured => (true, false),
@@ -673,6 +720,7 @@ impl DaemonInvocationService {
             );
         };
         let dispatch = session.actor.flush_due(now_ms);
+        session.observe_residency();
         let outbound = session.actor.poll_outbound().map(ToOwned::to_owned);
         if let Some(frame) = outbound.as_deref() {
             let _ = retain_lsp_delivery_attempt(

@@ -35,6 +35,7 @@ use std::{
 use serde::Serialize;
 use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
+    SharedDecodedContentPoolV1,
 };
 
 #[cfg(feature = "hotpath-alloc")]
@@ -183,11 +184,12 @@ fn restore_once(
     segments: &Path,
     started: Instant,
 ) -> Result<(Vec<String>, u64), String> {
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
-            read_segment(segments, request, buffer)
-        })
-        .map_err(|error| error.to_string())?;
+    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| read_segment(segments, request, buffer),
+    )
+    .map_err(|error| error.to_string())?;
     let mut coverage = restored
         .analysis_coverage()
         .map(|(path, _)| path.to_owned())

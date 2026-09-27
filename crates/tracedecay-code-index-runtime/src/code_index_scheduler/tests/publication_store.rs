@@ -40,8 +40,8 @@ use crate::{
         CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
         CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, SEALED_GENERATION_FORMAT_REVISION_V1,
-        SealedGenerationSegmentReadV1, UninterruptibleCodeIndexControlV1,
-        VerifiedSealedLexicalPageReadV1,
+        SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
+        UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
     },
     code_index_scheduler::{
         CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
@@ -2008,6 +2008,7 @@ fn restart_decode_census(
     let segments = code_generation_segments_root(store);
     let partitioned = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &generation_bytes,
+        &SharedDecodedContentPoolV1::default(),
         |request, buffer| {
             let (digest, size, offset, length) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {

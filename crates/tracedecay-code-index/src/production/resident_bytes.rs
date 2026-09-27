@@ -16,7 +16,9 @@ use tracedecay_domain::{
     ExactTechnicalTermV1, ProjectionKeyV1, SanitizedCodeFileV1,
 };
 
-use super::{CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1};
+use super::{
+    CodeIndexPublishedGenerationV1, DecodedGenerationContentV1, FileGenerationArtifactsV1,
+};
 use crate::chunks::{
     CodeIndexEdgeAbstentionV1, CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
     CodeSearchEligibilityV1,
@@ -235,8 +237,6 @@ fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
         .as_str()
         .len()
         .saturating_add(authority.repository_id.as_str().len())
-        .saturating_add(opt(authority.worktree_id.as_ref().map(|id| id.as_str())))
-        .saturating_add(opt(authority.reference.as_ref().map(|id| id.as_str())))
         .saturating_add(authority.logical_path.capacity())
         .saturating_add(authority.content_digest.as_str().len());
     let extraction_bytes = extraction
@@ -411,5 +411,34 @@ impl CodeIndexPublishedGenerationV1 {
             ))
             .saturating_add(projection)
             .saturating_add(snapshot_bytes)
+    }
+}
+
+impl DecodedGenerationContentV1 {
+    /// Every page with the chunk and symbol records it holds; a generation
+    /// over these pages counts the same records through its own index.
+    pub(super) fn measure_resident_bytes(&self) -> usize {
+        self.files.iter().fold(
+            size_of::<Self>()
+                .saturating_add(self.files.capacity().saturating_mul(size_of::<Arc<()>>())),
+            |bytes, file| {
+                let records = file
+                    .artifacts
+                    .chunks
+                    .chunks
+                    .iter()
+                    .map(|chunk| chunk_bytes(chunk))
+                    .chain(
+                        file.artifacts
+                            .symbols
+                            .iter()
+                            .map(|symbol| symbol_bytes(symbol)),
+                    )
+                    .fold(0_usize, usize::saturating_add);
+                bytes
+                    .saturating_add(file_bytes(file))
+                    .saturating_add(records)
+            },
+        )
     }
 }

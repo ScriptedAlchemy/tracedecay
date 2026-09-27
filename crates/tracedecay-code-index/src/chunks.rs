@@ -784,7 +784,7 @@ fn bind_clone_bodies(
             occurrence: CloneBodyOccurrenceV1 {
                 project_id: authority.project_id.clone(),
                 repository_id: authority.repository_id.clone(),
-                worktree_id: authority.worktree_id.clone(),
+                worktree_id: None,
                 source_generation: batch.generation_id.clone(),
                 snapshot_digest: file.snapshot_digest.clone(),
                 symbol_occurrence_id: (*symbol_occurrence_id).clone(),

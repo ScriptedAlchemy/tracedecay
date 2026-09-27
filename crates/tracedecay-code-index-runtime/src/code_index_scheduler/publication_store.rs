@@ -43,8 +43,8 @@ use crate::code_index::{
         CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1,
         CodeIndexInterruptionV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, SealedGenerationSegmentPublicationV1,
-        SealedGenerationSegmentReadV1, SharedPhysicalCodeArtifactPoolV1,
-        VerifiedSealedTextGenerationMetadataV1,
+        SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
+        SharedPhysicalCodeArtifactPoolV1, VerifiedSealedTextGenerationMetadataV1,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -73,6 +73,9 @@ pub struct CodeIndexBytePoolStatsV1 {
 pub struct SharedCodeIndexBytePoolV1 {
     bytes: ProfiledStdMutex<BTreeMap<ContentDigest, Weak<[u8]>>>,
     pub(super) physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
+    /// Decoded generation pages by content, so linked worktrees that sealed
+    /// identical trees hold one decode between them.
+    pub(super) decoded_content: SharedDecodedContentPoolV1,
     inserted: AtomicU64,
     reused: AtomicU64,
     /// Map length recorded after the last dead-entry prune. Weak entries whose
@@ -90,6 +93,7 @@ impl Default for SharedCodeIndexBytePoolV1 {
                 label = "daemon.code_index.byte_pool"
             ),
             physical_artifacts: SharedPhysicalCodeArtifactPoolV1::default(),
+            decoded_content: SharedDecodedContentPoolV1::default(),
             inserted: AtomicU64::new(0),
             reused: AtomicU64::new(0),
             last_prune_len: AtomicUsize::new(0),
@@ -501,6 +505,7 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     /// after the decode is released: what materializing it again costs.
     active_decode_charge: Arc<Mutex<Option<(CodeGenerationId, u64)>>>,
     decode_admission: Arc<Mutex<Option<GenerationDecodeBudgetV1>>>,
+    decoded_content: SharedDecodedContentPoolV1,
     pub(super) seal_encoded_segment_bytes: Arc<AtomicU64>,
     pub(super) seal_existing_segment_bytes_read: Arc<AtomicU64>,
     pub(super) seal_evidence_page_count: Arc<AtomicU64>,
@@ -869,6 +874,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             active_encoded_bytes: Arc::new(AtomicU64::new(0)),
             active_decode_charge: Arc::new(Mutex::new(None)),
             decode_admission: Arc::new(Mutex::new(None)),
+            decoded_content: SharedDecodedContentPoolV1::default(),
             seal_encoded_segment_bytes: Arc::new(AtomicU64::new(0)),
             seal_existing_segment_bytes_read: Arc::new(AtomicU64::new(0)),
             seal_evidence_page_count: Arc::new(AtomicU64::new(0)),
@@ -917,6 +923,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     pub(super) fn with_shutdown_signal(mut self, shutting_down: Arc<AtomicBool>) -> Self {
         self.shutdown_signal = Some(shutting_down);
+        self
+    }
+
+    /// Decode through the registry's shared content pool, so this store
+    /// references pages another worktree already decoded.
+    pub(super) fn with_decoded_content(
+        mut self,
+        decoded_content: SharedDecodedContentPoolV1,
+    ) -> Self {
+        self.decoded_content = decoded_content;
         self
     }
 
@@ -1774,6 +1790,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let mut pinned_evidence = None;
         match CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
+            &self.decoded_content,
             |request, buffer| {
                 match request {
                     SealedGenerationSegmentReadV1::Whole { .. } => {

@@ -7,6 +7,8 @@ use std::task::{Context, Poll, Waker};
 use super::*;
 use tracedecay_contracts::RegisteredRootLocatorV1;
 
+use super::lsp_residency::LspSessionResidencyV1;
+
 pub use tracedecay_contracts::HookOrchestrationAdmissionV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -860,6 +862,8 @@ pub struct RuntimeLspSession {
     pub(super) expires_at_ms: u64,
     pub(super) project_identity: InvocationProjectRuntimeIdentityV1,
     pub actor: RuntimeLspActor,
+    /// The session's row in the resident-memory inventory, dropped with it.
+    pub(super) residency: Option<LspSessionResidencyV1>,
     pub(super) delivery_settlements:
         Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
     /// Captured at the first poll of the current outbound frame. Retries and

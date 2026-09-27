@@ -1670,6 +1670,75 @@ fn decode_segment_window(
     })
 }
 
+/// The key of the pages a generation's segment roster decodes to: every
+/// input a page restore reads besides the generation and snapshot markers,
+/// which are provenance. Worktrees and generations sealing identical content
+/// share it.
+fn decoded_content_digest(
+    scope: &FileScopeIdentityV1,
+    segments: &[PartitionedFileSegmentDescriptorV1],
+) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.decoded-generation-content.v1\0");
+    hasher.update(FILE_SEGMENT_FORMAT_REVISION.to_le_bytes());
+    scope.update_content_digest(&mut hasher);
+    for segment in segments {
+        hasher.update(segment.file_occurrence_id.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(segment.segment_digest.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(segment.decoded_size_bytes.to_le_bytes());
+    }
+    ManifestDigest::from_sha256_bytes(&hasher.finalize())
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+}
+
+/// Read and decode every file segment of `generation`, one bounded window at
+/// a time, into restored file pages.
+fn decode_file_pages(
+    generation: &PartitionedPublishedGenerationV1,
+    scope: &FileScopeIdentityV1,
+    read_segment: &mut impl FnMut(
+        SealedGenerationSegmentReadV1<'_>,
+        &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
+    let mut files = Vec::with_capacity(generation.file_segments.len());
+    // One segment buffer per window slot, reused across windows: the decode
+    // holds at most `partitioned_decode_window_files()` segments, each buffer
+    // grown only to the largest segment its slot has read.
+    let mut buffers =
+        vec![Vec::new(); CodeIndexPublishedGenerationV1::partitioned_decode_window_files()];
+    while files.len() < generation.file_segments.len() {
+        let pending = &generation.file_segments[files.len()..];
+        let read = read_segment_window(
+            pending,
+            &mut buffers,
+            LEXICAL_FILE_PREFETCH_BYTES_V1,
+            |descriptor, segment| {
+                read_segment(
+                    SealedGenerationSegmentReadV1::Whole {
+                        digest: &descriptor.segment_digest,
+                        size_bytes: descriptor.segment_size_bytes,
+                    },
+                    segment,
+                )
+            },
+        )?;
+        files.extend(decode_segment_window(
+            &pending[..read],
+            &buffers[..read],
+            &generation.manifest.generation_id,
+            &generation.manifest.snapshot_digest,
+            scope,
+        )?);
+    }
+    hotpath::measure_block!(
+        "code_index.sealed_decode.page_restore",
+        restore_file_pages(files)
+    )
+}
+
 /// Reads one sealed segment's bytes into the buffer it is handed.
 pub type SealedGenerationSegmentReaderV1<'a> = dyn FnMut(SealedGenerationSegmentReadV1<'_>, &mut Vec<u8>) -> Result<(), CodeIndexProductionErrorV1>
     + 'a;
@@ -2057,8 +2126,13 @@ impl CodeIndexPublishedGenerationV1 {
         crate::parallelism::indexing_workers().max(1)
     }
 
+    /// Decode a sealed generation. Its file pages come from `content` when
+    /// another generation already decoded the same segment roster, and are
+    /// admitted there otherwise, so identical content is decoded and held
+    /// once.
     pub fn decode_partitioned_sealed(
         bytes: &[u8],
+        content: &SharedDecodedContentPoolV1,
         mut read_segment: impl FnMut(
             SealedGenerationSegmentReadV1<'_>,
             &mut Vec<u8>,
@@ -2068,40 +2142,20 @@ impl CodeIndexPublishedGenerationV1 {
             "code_index.restore.manifest",
             parse_partitioned_manifest(bytes)
         )?;
-        let mut files = Vec::with_capacity(generation.file_segments.len());
-        // One segment buffer per window slot, reused across windows: the
-        // decode holds at most `partitioned_decode_window_files()` segments,
-        // each buffer grown only to the largest segment its slot has read.
-        let mut buffers = vec![Vec::new(); Self::partitioned_decode_window_files()];
         let scope = FileScopeIdentityV1::of(&generation.manifest, &generation.snapshot);
-        while files.len() < generation.file_segments.len() {
-            let pending = &generation.file_segments[files.len()..];
-            let read = read_segment_window(
-                pending,
-                &mut buffers,
-                LEXICAL_FILE_PREFETCH_BYTES_V1,
-                |descriptor, segment| {
-                    read_segment(
-                        SealedGenerationSegmentReadV1::Whole {
-                            digest: &descriptor.segment_digest,
-                            size_bytes: descriptor.segment_size_bytes,
-                        },
-                        segment,
-                    )
-                },
-            )?;
-            files.extend(decode_segment_window(
-                &pending[..read],
-                &buffers[..read],
-                &generation.manifest.generation_id,
-                &generation.manifest.snapshot_digest,
-                &scope,
-            )?);
-        }
+        let digest = decoded_content_digest(&scope, &generation.file_segments)?;
+        let content = match content.lookup(&digest) {
+            Some(shared) => shared,
+            None => content.admit(DecodedGenerationContentV1::new(
+                digest,
+                decode_file_pages(&generation, &scope, &mut read_segment)?,
+            )),
+        };
         let evidence = hotpath::measure_block!(
             "code_index.restore.generation_evidence",
             decode_generation_evidence(&generation.generation_evidence, read_segment)
         )?;
+        let files = &content.files;
         let (lineage, projection_request, projection_receipt) =
             hotpath::measure_block!("code_index.restore.evidence_expand", {
                 let symbols =
@@ -2124,7 +2178,7 @@ impl CodeIndexPublishedGenerationV1 {
             repository_parse_identity: generation.repository_parse_identity,
             ignored_source_admissions: generation.ignored_source_admissions,
             ignored_source_admissions_digest: generation.ignored_source_admissions_digest,
-            files,
+            content,
             lineage,
             coverage: generation.coverage,
             capability: generation.capability,

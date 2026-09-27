@@ -196,7 +196,8 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
             "superseded_generation",
             "graph_catalog",
             "decoded_generation",
-            "graph_engine"
+            "graph_engine",
+            "session"
         ])
     );
     assert_eq!(memory["unmeasured_owners"], 0, "{memory}");
@@ -414,8 +415,11 @@ async fn stored_body(
 /// profile belongs to the one sealed worktree and generation; `measured`
 /// holds exactly when the owner reported a byte count.
 fn owner_row(owner: &Value, worktree_id: &Value, generation_id: &Value) -> Value {
-    assert_eq!(&owner["worktree_id"], worktree_id, "{owner}");
-    assert_eq!(&owner["generation_id"], generation_id, "{owner}");
+    assert_eq!(
+        owner["holders"],
+        json!([{ "worktree_id": worktree_id, "holding": generation_id }]),
+        "{owner}"
+    );
     assert_eq!(
         owner["measured"].as_bool(),
         Some(owner["bytes"].is_u64()),

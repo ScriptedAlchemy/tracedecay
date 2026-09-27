@@ -177,6 +177,7 @@ mod handoff;
 mod invocation_observability;
 mod lsp;
 mod lsp_delivery;
+mod lsp_residency;
 mod native_integration;
 mod observability_producer;
 mod observatory;

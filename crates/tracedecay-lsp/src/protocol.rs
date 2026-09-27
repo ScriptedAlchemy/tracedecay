@@ -147,6 +147,11 @@ where
         self.lifecycle.gateway.workspace()
     }
 
+    /// Bytes of unsaved document text this session holds.
+    pub fn retained_bytes(&self) -> u64 {
+        u64::try_from(self.lifecycle.overlays.retained_bytes()).unwrap_or(u64::MAX)
+    }
+
     /// Admits one bridge-owned frame without ambiguous post-dispatch
     /// backpressure. A consumed frame is never reported as retryable.
     pub fn try_handle_client_payload(

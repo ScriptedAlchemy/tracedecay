@@ -10,8 +10,8 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexReadinessWaitV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
-use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{ManifestDigest, ProjectId};
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::resident_memory::{
     RESIDENT_OWNER_SHED_ORDER_V1, ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
@@ -292,13 +292,20 @@ fn memory_value(
     let rows = report
         .owners
         .iter()
-        .filter(|row| row.scope.project_id == *project_id)
+        .filter(|row| row.project_id == *project_id)
         .map(|row| {
             json!({
-                "project_id": row.scope.project_id.as_str(),
-                "worktree_id": row.scope.worktree_id.as_str(),
+                "project_id": row.project_id.as_str(),
                 "kind": row.kind.as_str(),
-                "generation_id": row.generation_id.as_str(),
+                "holders": row
+                    .holders
+                    .iter()
+                    .map(|holder| json!({
+                        "worktree_id": holder.worktree_id.as_str(),
+                        "holding": holder.holding.as_str(),
+                    }))
+                    .collect::<Vec<_>>(),
+                "content_digest": row.content_digest.as_ref().map(ManifestDigest::as_str),
                 "bytes": row.bytes.measured(),
                 "measured": row.bytes.measured().is_some(),
                 "idle_seconds": row.idle_for.as_secs(),
@@ -902,13 +909,17 @@ mod tests {
         ) -> Option<tracedecay_runtime_core::resident_memory::ResidentOwnerSampleV1> {
             Some(
                 tracedecay_runtime_core::resident_memory::ResidentOwnerSampleV1 {
-                    generation_id: tracedecay_domain::CodeGenerationId::new("generation.fixture")
-                        .expect("generation id"),
+                    holding:
+                        tracedecay_runtime_core::resident_memory::ResidentHoldingV1::Generation(
+                            tracedecay_domain::CodeGenerationId::new("generation.fixture")
+                                .expect("generation id"),
+                        ),
                     bytes: tracedecay_runtime_core::resident_memory::ResidentOwnerBytesV1::Measured(
                         4_096,
                     ),
                     last_used: std::time::Instant::now(),
                     serving: true,
+                    shared: None,
                 },
             )
         }
@@ -970,14 +981,17 @@ mod tests {
                 "low_watermark_bytes": 7_500,
                 "psi_some_avg10": 1.5,
                 "idle_window_seconds": 600,
-                "shed_order": ["superseded_generation", "graph_catalog", "decoded_generation", "graph_engine"],
+                "shed_order": ["superseded_generation", "graph_catalog", "decoded_generation", "graph_engine", "session"],
                 "retained_bytes": 8_192,
                 "unmeasured_owners": 0,
                 "owners": [{
                     "project_id": "project.fixture",
-                    "worktree_id": "worktree.fixture",
                     "kind": "decoded_generation",
-                    "generation_id": "generation.fixture",
+                    "holders": [{
+                        "worktree_id": "worktree.fixture",
+                        "holding": "generation.fixture",
+                    }],
+                    "content_digest": null,
                     "bytes": 4_096,
                     "measured": true,
                     "idle_seconds": 0,

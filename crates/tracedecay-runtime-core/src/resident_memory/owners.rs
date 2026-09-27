@@ -17,13 +17,14 @@
 //! headroom epoch. Work refused for memory subscribes to it and retries then,
 //! instead of waiting for an unrelated wake.
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
-use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
+use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, WorktreeId};
 
 /// How long a worktree keeps its retained state after its last use.
 ///
@@ -51,14 +52,19 @@ pub enum ResidentOwnerKindV1 {
     /// its durable graph and verified head stay; the next graph read answers
     /// the typed warming state while the engine reopens in the background.
     GraphEngine,
+    /// An open LSP session: the editor's unsaved documents and their parses.
+    /// Nothing re-derives an unsaved buffer, so the inventory never releases
+    /// it; the session's own lease ends it.
+    Session,
 }
 
 /// Pressure releases owners in this order.
-pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 4] = [
+pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 5] = [
     ResidentOwnerKindV1::SupersededGeneration,
     ResidentOwnerKindV1::GraphCatalog,
     ResidentOwnerKindV1::DecodedGeneration,
     ResidentOwnerKindV1::GraphEngine,
+    ResidentOwnerKindV1::Session,
 ];
 
 impl ResidentOwnerKindV1 {
@@ -69,9 +75,56 @@ impl ResidentOwnerKindV1 {
             Self::GraphCatalog => "graph_catalog",
             Self::DecodedGeneration => "decoded_generation",
             Self::GraphEngine => "graph_engine",
+            Self::Session => "session",
         }
     }
 }
+
+/// What one owner's memory belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ResidentHoldingV1 {
+    /// A decoded code generation, or state built over one.
+    Generation(CodeGenerationId),
+    /// An open LSP session, by its session id.
+    Session(String),
+}
+
+impl ResidentHoldingV1 {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Generation(generation) => generation.as_str(),
+            Self::Session(session) => session,
+        }
+    }
+}
+
+/// Memory an owner references together with owners in other worktrees: the
+/// decoded pages of one sealed content, held once however many linked
+/// worktrees serve it.
+#[derive(Clone, Debug)]
+pub struct ResidentSharedContentV1 {
+    pub digest: ManifestDigest,
+    pub bytes: u64,
+    /// The shared allocation itself. Owners are one row only when they
+    /// reference the same allocation, never merely equal digests; the weak
+    /// reference keeps its address from being reused while a report runs.
+    pub allocation: Weak<dyn Any + Send + Sync>,
+}
+
+impl ResidentSharedContentV1 {
+    fn same_allocation(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.allocation, &other.allocation)
+    }
+}
+
+impl PartialEq for ResidentSharedContentV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.digest == other.digest && self.bytes == other.bytes && self.same_allocation(other)
+    }
+}
+
+impl Eq for ResidentSharedContentV1 {}
 
 /// Bytes an owner holds, as the owner knows them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,11 +148,14 @@ impl ResidentOwnerBytesV1 {
 /// One owner's current holding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResidentOwnerSampleV1 {
-    pub generation_id: CodeGenerationId,
+    pub holding: ResidentHoldingV1,
+    /// What this owner holds by itself, excluding `shared`.
     pub bytes: ResidentOwnerBytesV1,
     pub last_used: Instant,
     /// The held generation is the one the worktree currently serves.
     pub serving: bool,
+    /// Content this owner references with owners of other worktrees.
+    pub shared: Option<ResidentSharedContentV1>,
 }
 
 /// Outcome of asking an owner to release.
@@ -141,20 +197,32 @@ pub enum ResidentOwnerReleaseCauseV1 {
 pub struct ResidentOwnerReleasedV1 {
     pub scope: ResidentOwnerScopeV1,
     pub kind: ResidentOwnerKindV1,
-    pub generation_id: CodeGenerationId,
+    pub holding: ResidentHoldingV1,
     pub bytes: ResidentOwnerBytesV1,
     pub cause: ResidentOwnerReleaseCauseV1,
 }
 
-/// One owner row of the public report.
+/// One worktree holding a report row's memory.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ResidentOwnerHolderV1 {
+    pub worktree_id: WorktreeId,
+    pub holding: ResidentHoldingV1,
+}
+
+/// One row of the public report: the memory one owner holds, or one shared
+/// content with every worktree referencing it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResidentOwnerReportRowV1 {
-    pub scope: ResidentOwnerScopeV1,
+    pub project_id: ProjectId,
     pub kind: ResidentOwnerKindV1,
-    pub generation_id: CodeGenerationId,
+    /// Ordered by worktree; more than one only when they share `content_digest`.
+    pub holders: Vec<ResidentOwnerHolderV1>,
+    pub content_digest: Option<ManifestDigest>,
+    /// The shared content once plus what each holder holds by itself.
     pub bytes: ResidentOwnerBytesV1,
+    /// Since the most recent holder's last use.
     pub idle_for: Duration,
-    /// Pressure will not release this owner: it holds the generation its
+    /// Pressure will not release some holder: it holds the generation its
     /// worktree serves and the worktree is inside its idle window.
     pub protected: bool,
 }
@@ -322,35 +390,82 @@ impl ResidentOwnersV1 {
         self.note_released(released)
     }
 
+    /// Every live owner as one row, except that owners of one project and
+    /// kind referencing the same shared content form a single row listing
+    /// each worktree, and the content counts once in the row and the total.
     #[must_use]
     pub fn report(&self, now: Instant) -> ResidentOwnersReportV1 {
-        let mut owners = self
-            .live_owners()
-            .into_iter()
-            .map(|live| ResidentOwnerReportRowV1 {
-                protected: self.protected(&live.sample, now),
-                idle_for: now.saturating_duration_since(live.sample.last_used),
-                scope: live.scope,
+        let mut owners: Vec<ResidentOwnerReportRowV1> = Vec::new();
+        let mut row_contents: Vec<Option<ResidentSharedContentV1>> = Vec::new();
+        let mut contents: Vec<ResidentSharedContentV1> = Vec::new();
+        let mut own_measured = 0_u64;
+        let mut unmeasured_owners = 0_usize;
+        for live in self.live_owners() {
+            let protected = self.protected(&live.sample, now);
+            let idle_for = now.saturating_duration_since(live.sample.last_used);
+            match live.sample.bytes {
+                ResidentOwnerBytesV1::Measured(bytes) => {
+                    own_measured = own_measured.saturating_add(bytes);
+                }
+                ResidentOwnerBytesV1::Unmeasured => unmeasured_owners += 1,
+            }
+            let holder = ResidentOwnerHolderV1 {
+                worktree_id: live.scope.worktree_id,
+                holding: live.sample.holding,
+            };
+            let shared = live.sample.shared;
+            if let Some(content) = &shared
+                && !contents.iter().any(|seen| seen.same_allocation(content))
+            {
+                contents.push(content.clone());
+            }
+            let existing = shared.as_ref().and_then(|content| {
+                owners
+                    .iter()
+                    .zip(&row_contents)
+                    .position(|(row, row_content)| {
+                        row.project_id == live.scope.project_id
+                            && row.kind == live.kind
+                            && row_content
+                                .as_ref()
+                                .is_some_and(|row_content| row_content.same_allocation(content))
+                    })
+            });
+            if let Some(row) = existing.and_then(|index| owners.get_mut(index)) {
+                row.holders.push(holder);
+                row.bytes = add_owner_bytes(row.bytes, live.sample.bytes);
+                row.idle_for = row.idle_for.min(idle_for);
+                row.protected |= protected;
+                continue;
+            }
+            let shared_bytes = shared.as_ref().map_or(0, |content| content.bytes);
+            owners.push(ResidentOwnerReportRowV1 {
+                project_id: live.scope.project_id,
                 kind: live.kind,
-                generation_id: live.sample.generation_id,
-                bytes: live.sample.bytes,
-            })
-            .collect::<Vec<_>>();
+                holders: vec![holder],
+                content_digest: shared.as_ref().map(|content| content.digest.clone()),
+                bytes: add_owner_bytes(
+                    ResidentOwnerBytesV1::Measured(shared_bytes),
+                    live.sample.bytes,
+                ),
+                idle_for,
+                protected,
+            });
+            row_contents.push(shared);
+        }
+        for row in &mut owners {
+            row.holders.sort();
+        }
         owners.sort_by(|left, right| {
-            (&left.scope, left.kind, &left.generation_id).cmp(&(
-                &right.scope,
+            (&left.project_id, left.kind, &left.holders).cmp(&(
+                &right.project_id,
                 right.kind,
-                &right.generation_id,
+                &right.holders,
             ))
         });
-        let measured_bytes = owners
-            .iter()
-            .filter_map(|row| row.bytes.measured())
-            .fold(0_u64, u64::saturating_add);
-        let unmeasured_owners = owners
-            .iter()
-            .filter(|row| row.bytes.measured().is_none())
-            .count();
+        let measured_bytes = contents.iter().fold(own_measured, |total, content| {
+            total.saturating_add(content.bytes)
+        });
         ResidentOwnersReportV1 {
             idle_window: self.idle_window,
             owners,
@@ -375,7 +490,7 @@ impl ResidentOwnersV1 {
             ResidentOwnerReleaseV1::Released { bytes } => Some(ResidentOwnerReleasedV1 {
                 scope: live.scope,
                 kind: live.kind,
-                generation_id: live.sample.generation_id,
+                holding: live.sample.holding,
                 bytes,
                 cause,
             }),
@@ -414,6 +529,18 @@ impl ResidentOwnersV1 {
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, OwnersStateV1> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+fn add_owner_bytes(
+    left: ResidentOwnerBytesV1,
+    right: ResidentOwnerBytesV1,
+) -> ResidentOwnerBytesV1 {
+    match (left, right) {
+        (ResidentOwnerBytesV1::Measured(left), ResidentOwnerBytesV1::Measured(right)) => {
+            ResidentOwnerBytesV1::Measured(left.saturating_add(right))
+        }
+        _ => ResidentOwnerBytesV1::Unmeasured,
     }
 }
 
@@ -462,7 +589,19 @@ mod tests {
         bytes: u64,
         last_used: Instant,
         serving: bool,
+        shared: Option<ResidentSharedContentV1>,
         held: AtomicBool,
+    }
+
+    /// One shared allocation several fixture owners reference.
+    fn content(digit: &str, bytes: u64) -> (Arc<dyn Any + Send + Sync>, ResidentSharedContentV1) {
+        let allocation: Arc<dyn Any + Send + Sync> = Arc::new(());
+        let shared = ResidentSharedContentV1 {
+            digest: ManifestDigest::new(format!("sha256:{}", digit.repeat(64))).unwrap(),
+            bytes,
+            allocation: Arc::downgrade(&allocation),
+        };
+        (allocation, shared)
     }
 
     impl FixtureOwner {
@@ -477,6 +616,23 @@ mod tests {
                 bytes,
                 last_used,
                 serving,
+                shared: None,
+                held: AtomicBool::new(true),
+            })
+        }
+
+        fn sharing(
+            generation: &'static str,
+            bytes: u64,
+            content: &ResidentSharedContentV1,
+            last_used: Instant,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                generation,
+                bytes,
+                last_used,
+                serving: true,
+                shared: Some(content.clone()),
                 held: AtomicBool::new(true),
             })
         }
@@ -487,10 +643,13 @@ mod tests {
             self.held
                 .load(Ordering::Acquire)
                 .then(|| ResidentOwnerSampleV1 {
-                    generation_id: CodeGenerationId::new(self.generation).unwrap(),
+                    holding: ResidentHoldingV1::Generation(
+                        CodeGenerationId::new(self.generation).unwrap(),
+                    ),
                     bytes: ResidentOwnerBytesV1::Measured(self.bytes),
                     last_used: self.last_used,
                     serving: self.serving,
+                    shared: self.shared.clone(),
                 })
         }
 
@@ -527,7 +686,19 @@ mod tests {
     fn released_generations(released: &[ResidentOwnerReleasedV1]) -> Vec<&str> {
         released
             .iter()
-            .map(|release| release.generation_id.as_str())
+            .map(|release| release.holding.as_str())
+            .collect()
+    }
+
+    fn row_generations(report: &ResidentOwnersReportV1) -> Vec<(&str, bool)> {
+        report
+            .owners
+            .iter()
+            .flat_map(|row| {
+                row.holders
+                    .iter()
+                    .map(|holder| (holder.holding.as_str(), row.protected))
+            })
             .collect()
     }
 
@@ -574,12 +745,7 @@ mod tests {
             ["generation.old", "generation.recent", "generation.idle"]
         );
         assert_eq!(
-            owners
-                .report(now)
-                .owners
-                .iter()
-                .map(|row| (row.generation_id.as_str(), row.protected))
-                .collect::<Vec<_>>(),
+            row_generations(&owners.report(now)),
             [("generation.active", true)]
         );
     }
@@ -623,13 +789,8 @@ mod tests {
 
         pressure.publish_observed_resident_bytes(7_000);
         assert_eq!(
-            owners
-                .report(now)
-                .owners
-                .iter()
-                .map(|row| row.generation_id.as_str())
-                .collect::<Vec<_>>(),
-            ["generation.serving"],
+            row_generations(&owners.report(now)),
+            [("generation.serving", true)],
             "memory.high sheds the superseded decode first and keeps the serving one"
         );
 
@@ -736,6 +897,90 @@ mod tests {
 
         owners.note_headroom();
         assert_eq!(*headroom.borrow_and_update(), 2);
+    }
+
+    #[test]
+    fn worktrees_sharing_one_content_report_one_row_that_counts_it_once() {
+        let start = Instant::now();
+        let now = start + Duration::from_mins(1);
+        let owners = Arc::new(ResidentOwnersV1::new(Duration::from_mins(5)));
+        let (_shared, shared) = content("a", 9_000);
+        // Equal digest, separate allocation: two copies, never one row.
+        let (_copy, copy) = content("a", 9_000);
+        let (_other, other_content) = content("b", 4_000);
+        let first = FixtureOwner::sharing("generation.first", 100, &shared, start);
+        let second = FixtureOwner::sharing(
+            "generation.second",
+            150,
+            &shared,
+            start + Duration::from_secs(30),
+        );
+        let copied = FixtureOwner::sharing("generation.copied", 70, &copy, start);
+        let other = FixtureOwner::sharing("generation.other", 50, &other_content, start);
+        let _registrations = [
+            register(
+                &owners,
+                "worktree.second",
+                ResidentOwnerKindV1::DecodedGeneration,
+                &second,
+            ),
+            register(
+                &owners,
+                "worktree.first",
+                ResidentOwnerKindV1::DecodedGeneration,
+                &first,
+            ),
+            register(
+                &owners,
+                "worktree.other",
+                ResidentOwnerKindV1::DecodedGeneration,
+                &other,
+            ),
+            register(
+                &owners,
+                "worktree.copied",
+                ResidentOwnerKindV1::DecodedGeneration,
+                &copied,
+            ),
+        ];
+
+        let report = owners.report(now);
+
+        assert_eq!(
+            report
+                .owners
+                .iter()
+                .map(|row| (
+                    row.holders
+                        .iter()
+                        .map(|holder| (holder.worktree_id.as_str(), holder.holding.as_str()))
+                        .collect::<Vec<_>>(),
+                    row.bytes.measured(),
+                    row.idle_for,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    vec![("worktree.copied", "generation.copied")],
+                    Some(9_070),
+                    Duration::from_mins(1),
+                ),
+                (
+                    vec![
+                        ("worktree.first", "generation.first"),
+                        ("worktree.second", "generation.second"),
+                    ],
+                    Some(9_250),
+                    Duration::from_secs(30),
+                ),
+                (
+                    vec![("worktree.other", "generation.other")],
+                    Some(4_050),
+                    Duration::from_mins(1),
+                ),
+            ]
+        );
+        assert_eq!(report.measured_bytes, 22_370);
     }
 
     #[test]

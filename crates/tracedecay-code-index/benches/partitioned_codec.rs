@@ -19,7 +19,8 @@ use tracedecay_code_index::{
         CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
         SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+        SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
+        VerifiedSealedLexicalPageSourceV1,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -460,6 +461,7 @@ fn encode_once(
 fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {
     let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &fixture.manifest,
+        &SharedDecodedContentPoolV1::default(),
         |request, buffer| {
             let (digest, offset, length) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
