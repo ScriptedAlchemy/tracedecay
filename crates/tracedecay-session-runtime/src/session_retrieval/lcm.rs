@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_contracts::RequestContext;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
-    HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
+    CursorBindingV1, HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId,
+    TemporalModeV1,
 };
 use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_lcm::{
@@ -15,9 +16,10 @@ use tracedecay_session_memory::session::{
     SessionDataFreshness, SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionTemporalExecutionError, SessionTemporalQuery,
 };
-use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::cursor::CursorError;
 use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
 use super::contract::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, LcmExpandServiceCommand,
@@ -613,9 +615,21 @@ impl DaemonSessionRetrievalService {
                 ),
             );
         };
+        let Ok(source_cursor_binding) = CursorBindingV1::builder("lcm_expand")
+            .parameter("provider", command.provider())
+            .parameter("session_id", command.session_id())
+            .parameter("target", &Self::lcm_expand_target_key(&target))
+            .parameter("grain", &command.grain())
+            .parameter("content_offset", &command.content_slice().offset)
+            .parameter("content_limit", &command.content_slice().limit)
+            .parameter("source_limit", &command.source_limit())
+            .build()
+        else {
+            return LcmExpandServiceOutcome::Denied;
+        };
         let source_offset = match command.cursor() {
             Some(cursor) => match executor
-                .decode_lcm_source_cursor(&result.snapshot, &retrieval_binding, cursor)
+                .decode_lcm_source_cursor(&result.snapshot, &source_cursor_binding, cursor)
                 .await
             {
                 Ok(offset) => offset,
@@ -669,7 +683,7 @@ impl DaemonSessionRetrievalService {
             .and_then(|pagination| pagination.next_source_offset)
         {
             match executor
-                .encode_lcm_source_cursor(&result.snapshot, &retrieval_binding, offset)
+                .encode_lcm_source_cursor(&result.snapshot, &source_cursor_binding, offset)
                 .await
             {
                 Ok(cursor) => temporal.cursor = Some(cursor),
@@ -812,6 +826,9 @@ fn describe_execution_error(
         SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
             LcmDescribeServiceOutcome::TimedOut
         }
+        SessionTemporalExecutionError::Kernel(TemporalKernelError::Cursor(
+            CursorError::Binding(mismatch),
+        )) => LcmDescribeServiceOutcome::CursorRefused(mismatch),
         SessionTemporalExecutionError::Storage { .. } => {
             LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
@@ -855,6 +872,9 @@ fn expand_execution_error(
         SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
             LcmExpandServiceOutcome::TimedOut
         }
+        SessionTemporalExecutionError::Kernel(TemporalKernelError::Cursor(
+            CursorError::Binding(mismatch),
+        )) => LcmExpandServiceOutcome::CursorRefused(mismatch),
         SessionTemporalExecutionError::Storage { .. } => {
             LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
@@ -904,6 +924,9 @@ pub(super) fn describe_retrieval_outcome(
         SessionRetrievalOutcome::TimedOut => LcmDescribeServiceOutcome::TimedOut,
         SessionRetrievalOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
         SessionRetrievalOutcome::CursorStale => LcmDescribeServiceOutcome::CursorStale,
+        SessionRetrievalOutcome::CursorRefused(mismatch) => {
+            LcmDescribeServiceOutcome::CursorRefused(mismatch)
+        }
         SessionRetrievalOutcome::Stale { freshness } => LcmDescribeServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(lcm_data_freshness(freshness)),
@@ -958,6 +981,9 @@ pub(super) fn expand_retrieval_outcome(
         SessionRetrievalOutcome::TimedOut => LcmExpandServiceOutcome::TimedOut,
         SessionRetrievalOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
         SessionRetrievalOutcome::CursorStale => LcmExpandServiceOutcome::CursorStale,
+        SessionRetrievalOutcome::CursorRefused(mismatch) => {
+            LcmExpandServiceOutcome::CursorRefused(mismatch)
+        }
         SessionRetrievalOutcome::Stale { freshness } => LcmExpandServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(lcm_data_freshness(freshness)),

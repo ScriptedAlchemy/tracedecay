@@ -8,8 +8,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
-    CompactContextLineageEdgeV1, CursorManifestLimitKindV1, HydrationStateV1, RetrievalAnchorId,
-    RetrievalGrainV1, SessionId, SessionSourceCoverageV1, TemporalCoverageCountsV1,
+    CompactContextLineageEdgeV1, CursorBindingMismatchV1, CursorManifestLimitKindV1,
+    HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
+    TemporalCoverageCountsV1,
 };
 use tracedecay_lcm::contracts::LcmRetrievalOutcome;
 use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
@@ -410,6 +411,9 @@ pub enum LcmDescribeServiceOutcome {
         retrieval: LcmRetrievalOutcome,
     },
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     WrongScope,
     Locked,
     Redacted,
@@ -455,6 +459,9 @@ pub enum LcmExpandServiceOutcome {
         retrieval: LcmRetrievalOutcome,
     },
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     WrongScope,
     Locked,
     Redacted,
@@ -499,6 +506,9 @@ pub enum SessionRetrievalServiceOutcome {
         freshness: SessionDataFreshness,
     },
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     Partial {
         page: SessionRetrievalPageView,
         freshness: SessionDataFreshness,

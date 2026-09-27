@@ -670,6 +670,9 @@ impl MessageSearchInput {
             SessionRetrievalServiceOutcome::CursorStale => {
                 return Err(RetainedSurfaceExecutionErrorV1::cursor_stale_refusal());
             }
+            SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+                return Err(RetainedSurfaceExecutionErrorV1::cursor_refused(&mismatch));
+            }
             SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
                 kind,
                 observed,

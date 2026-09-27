@@ -422,7 +422,10 @@ fn task_session_binding_outcome(
             TaskSessionRetrievalOutcomeV1::ResetRequired
         }
         SessionRetrievalServiceOutcome::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
-        SessionRetrievalServiceOutcome::CursorStale => TaskSessionRetrievalOutcomeV1::Unavailable,
+        SessionRetrievalServiceOutcome::CursorStale
+        | SessionRetrievalServiceOutcome::CursorRefused(_) => {
+            TaskSessionRetrievalOutcomeV1::Unavailable
+        }
         SessionRetrievalServiceOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
         SessionRetrievalServiceOutcome::BudgetExhausted { stage, .. } => {
             TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
@@ -450,6 +453,9 @@ fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescr
             LcmDescribeServiceOutcome::ResetRequired { store_scope }
         }
         SessionRetrievalServiceOutcome::CursorStale => LcmDescribeServiceOutcome::CursorStale,
+        SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+            LcmDescribeServiceOutcome::CursorRefused(mismatch)
+        }
         SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
             LcmDescribeServiceOutcome::BudgetExhausted { stage, accounting }
         }
@@ -479,6 +485,9 @@ fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandS
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
         SessionRetrievalServiceOutcome::CursorStale => LcmExpandServiceOutcome::CursorStale,
+        SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+            LcmExpandServiceOutcome::CursorRefused(mismatch)
+        }
         SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
             LcmExpandServiceOutcome::BudgetExhausted { stage, accounting }
         }

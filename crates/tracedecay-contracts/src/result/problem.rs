@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::{CursorBindingMismatchV1, UtcMicros};
 
 use super::{ApplicationProblemDetailV1, CancellationStage, EffectReceipt, EffectTermination};
 use crate::context::{RequestAdmission, RequestContext};
@@ -799,6 +799,28 @@ impl ApplicationProblem {
             },
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::CorrectRequest],
+        }
+    }
+
+    /// A continuation cursor this request cannot redeem as presented: the
+    /// caller corrects the request or restarts paging without the cursor.
+    pub fn cursor_refused(mismatch: &CursorBindingMismatchV1) -> Self {
+        Self::cursor_refusal(SafeDiagnostic {
+            code: mismatch.code().to_owned(),
+            message: mismatch.message(),
+        })
+    }
+
+    /// [`Self::cursor_refused`] for a refusal an adapter carried as its
+    /// diagnostic.
+    pub fn cursor_refusal(diagnostic: SafeDiagnostic) -> Self {
+        Self::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![
+                LegalAction::CorrectRequest,
+                LegalAction::RestartWithoutCursor,
+            ],
         }
     }
 
