@@ -248,7 +248,7 @@ fn entity_endpoint_identity(
         "entity namespace",
     )?)
     .map_err(|error| persisted_validation_error("entity namespace", error))?;
-    let identity = GraphEntityId::new(required_string(
+    let identity = GraphEntityId::new(decode_identity(
         node.get_property(ENTITY_ID_PROPERTY),
         "entity identity",
     )?)
@@ -313,7 +313,7 @@ fn verify_indexed_entity_owner(
     let projection =
         GraphProjectionId::new(required_string(stored_projection, "entity projection")?)
             .map_err(|error| persisted_validation_error("entity projection", error))?;
-    let stored_identity = GraphEntityId::new(required_string(stored_identity, "entity identity")?)
+    let stored_identity = GraphEntityId::new(decode_identity(stored_identity, "entity identity")?)
         .map_err(|error| persisted_validation_error("entity identity", error))?;
     if stored_namespace != *namespace || stored_identity != *identity {
         return Err(GraphDbError::Corrupt {
@@ -389,7 +389,7 @@ pub(crate) fn load_entity_by_node(
         "entity namespace",
     )?)
     .map_err(|error| persisted_validation_error("entity namespace", error))?;
-    let identity = GraphEntityId::new(required_string(
+    let identity = GraphEntityId::new(decode_identity(
         node.get_property(ENTITY_ID_PROPERTY),
         "entity identity",
     )?)

@@ -2,12 +2,14 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
+use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use flate2::read::DeflateDecoder;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::clones::CloneNormalizationClassV1;
@@ -2800,7 +2802,7 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     )
     .expect("the current revision must open");
 
-    for revision in [27i64, 29] {
+    for revision in [28i64, 30] {
         let connection =
             rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
@@ -3148,10 +3150,10 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
             |row| row.get(0),
         )
         .expect("read current format revision");
-    assert_eq!(format_revision, 28);
+    assert_eq!(format_revision, 29);
     let (ngram_lists, ngram_postings, untagged_ngram_lists): (i64, i64, i64) = connection
         .query_row(
-            "SELECT COUNT(*), SUM(document_frequency), SUM(substr(documents, 1, 1) NOT IN (x'00', x'01')) FROM ngram_postings",
+            "SELECT COUNT(*), SUM(document_frequency), SUM(substr(documents, 1, 1) NOT IN (x'00', x'01', x'02')) FROM ngram_postings",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -3708,7 +3710,7 @@ fn decode_frequency_posting_list(mut encoded: &[u8]) -> Vec<(u32, u32)> {
 
 /// Independent oracle for one sealed `term_postings.lists` value: per field,
 /// LEB128 field code, document frequency, and length, then the list bytes.
-fn decode_term_lists_oracle(mut encoded: &[u8]) -> Vec<(i64, i64, Vec<u8>)> {
+fn decode_term_lists_oracle(encoded: &[u8]) -> Vec<(i64, i64, Vec<u8>)> {
     fn take(encoded: &mut &[u8]) -> u64 {
         let mut value = 0u64;
         let mut shift = 0;
@@ -3722,6 +3724,23 @@ fn decode_term_lists_oracle(mut encoded: &[u8]) -> Vec<(i64, i64, Vec<u8>)> {
             shift += 7;
         }
     }
+    // Stored behind a tag: 0 raw, 1 deflated (the varint inflated length,
+    // then a raw deflate stream).
+    let (tag, mut rest) = encoded.split_first().expect("term-list tag");
+    let logical = match tag {
+        0 => rest.to_vec(),
+        1 => {
+            let length = usize::try_from(take(&mut rest)).expect("inflated length");
+            let mut bytes = Vec::with_capacity(length);
+            DeflateDecoder::new(rest)
+                .read_to_end(&mut bytes)
+                .expect("inflate term lists");
+            assert_eq!(bytes.len(), length);
+            bytes
+        }
+        _ => panic!("unknown term-list tag {tag}"),
+    };
+    let mut encoded = logical.as_slice();
     let mut lists = Vec::new();
     while !encoded.is_empty() {
         let field = i64::try_from(take(&mut encoded)).expect("field code");

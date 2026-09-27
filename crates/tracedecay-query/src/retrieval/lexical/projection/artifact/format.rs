@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
@@ -552,6 +553,65 @@ pub(super) fn decode_ngram_bitmap(
 
 const DOCUMENT_SET_DELTAS: u8 = 0;
 const DOCUMENT_SET_BITSET: u8 = 1;
+/// A document set or term list above this many bytes is stored deflated when
+/// that is smaller. The large lists are the common n-grams and terms, whose
+/// bitsets and deltas repeat across a file's neighbouring chunks.
+const POSTING_DEFLATE_MIN_BYTES: usize = 1_024;
+const DOCUMENT_SET_DEFLATED: u8 = 2;
+/// Inflated bound for one stored posting value: a bitset over every document
+/// a sealed artifact can hold.
+const MAX_INFLATED_POSTING_BYTES: usize = 1 << 24;
+const TERM_LISTS_RAW: u8 = 0;
+const TERM_LISTS_DEFLATED: u8 = 1;
+
+/// `encoded` as stored: deflated under `tag` when it is large and deflating
+/// shrinks it, otherwise `None`.
+fn deflated_posting(
+    tag: u8,
+    encoded: &[u8],
+) -> Result<Option<Vec<u8>>, CodeLexicalArtifactErrorV1> {
+    if encoded.len() <= POSTING_DEFLATE_MIN_BYTES {
+        return Ok(None);
+    }
+    let deflated = deflate_bytes_at(tag, encoded, Compression::default())?;
+    Ok((deflated.len() < encoded.len()).then_some(deflated))
+}
+
+/// The logical bytes of a stored n-gram document set, inflating a deflated
+/// one. Query budgets charge this length, so storage compression never
+/// changes which lists a query admits.
+pub(super) fn document_set_bytes(
+    stored: &[u8],
+) -> Result<Cow<'_, [u8]>, CodeLexicalArtifactErrorV1> {
+    match stored.first() {
+        Some(&DOCUMENT_SET_DEFLATED) => {
+            let inflated =
+                inflate_bytes(DOCUMENT_SET_DEFLATED, stored, MAX_INFLATED_POSTING_BYTES)?;
+            if inflated.first() == Some(&DOCUMENT_SET_DEFLATED) {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact document set nests a deflated set".to_owned(),
+                ));
+            }
+            Ok(Cow::Owned(inflated))
+        }
+        _ => Ok(Cow::Borrowed(stored)),
+    }
+}
+
+/// The logical `term_postings.lists` bytes of a stored value.
+pub(super) fn term_lists_bytes(stored: &[u8]) -> Result<Cow<'_, [u8]>, CodeLexicalArtifactErrorV1> {
+    match stored.split_first() {
+        Some((&TERM_LISTS_RAW, lists)) => Ok(Cow::Borrowed(lists)),
+        Some((&TERM_LISTS_DEFLATED, _)) => Ok(Cow::Owned(inflate_bytes(
+            TERM_LISTS_DEFLATED,
+            stored,
+            MAX_INFLATED_POSTING_BYTES,
+        )?)),
+        _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact term lists have an unknown encoding tag".to_owned(),
+        )),
+    }
+}
 
 /// [`document_set_from_deltas`] of a bitmap.
 #[cfg(test)]
@@ -582,24 +642,28 @@ fn document_set_from_deltas(
     encode_varint(u64::from(first), &mut prefix);
     let bitset_bytes = usize::try_from(u64::from(last - first) / 8 + 1)
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-    if prefix.len() + bitset_bytes > deltas.len() {
+    let encoded = if prefix.len() + bitset_bytes > deltas.len() {
         let mut encoded = Vec::with_capacity(1 + deltas.len());
         encoded.push(DOCUMENT_SET_DELTAS);
         encoded.extend_from_slice(&deltas);
-        return Ok(encoded);
-    }
-    let offset = prefix.len();
-    prefix.resize(offset + bitset_bytes, 0);
-    for posting in PostingListDecoderV1::new(&deltas, false) {
-        let bit = posting?.0 - first;
-        prefix[offset + (bit / 8) as usize] |= 1 << (bit % 8);
-    }
-    Ok(prefix)
+        encoded
+    } else {
+        let offset = prefix.len();
+        prefix.resize(offset + bitset_bytes, 0);
+        for posting in PostingListDecoderV1::new(&deltas, false) {
+            let bit = posting?.0 - first;
+            prefix[offset + (bit / 8) as usize] |= 1 << (bit % 8);
+        }
+        prefix
+    };
+    Ok(deflated_posting(DOCUMENT_SET_DEFLATED, &encoded)?.unwrap_or(encoded))
 }
 
 pub(super) fn decode_document_set(
-    encoded: &[u8],
+    stored: &[u8],
 ) -> Result<RoaringBitmap, CodeLexicalArtifactErrorV1> {
+    let encoded = document_set_bytes(stored)?;
+    let encoded = encoded.as_ref();
     let corrupt = |detail: &str| {
         CodeLexicalArtifactErrorV1::Corrupt(format!("lexical artifact document set {detail}"))
     };
@@ -640,7 +704,15 @@ pub(super) fn decode_document_set(
 /// Stored bytes as one tag byte, the varint inflated length, and the raw
 /// deflate stream of `bytes`.
 pub(super) fn deflate_bytes(tag: u8, bytes: &[u8]) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    let mut compressor = Compress::new(Compression::best(), false);
+    deflate_bytes_at(tag, bytes, Compression::best())
+}
+
+fn deflate_bytes_at(
+    tag: u8,
+    bytes: &[u8],
+    level: Compression,
+) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+    let mut compressor = Compress::new(level, false);
     let mut compressed = Vec::with_capacity(bytes.len() / 2 + 64);
     loop {
         if compressed.capacity() - compressed.len() < 1024 {
@@ -788,7 +860,9 @@ pub(super) fn decode_fingerprint_postings(
 
 /// One term's sealed `term_postings.lists`: for each field in strictly
 /// ascending code order, the varint field code, the varint document
-/// frequency, and the length-prefixed frequency posting list.
+/// frequency, and the length-prefixed frequency posting list. The value is
+/// stored behind a tag byte, deflated when large and smaller that way;
+/// [`term_lists_bytes`] restores the lists [`decode_term_lists`] reads.
 pub(super) fn encode_term_lists(
     lists: &[(i64, u64, Vec<u8>)],
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
@@ -815,7 +889,13 @@ pub(super) fn encode_term_lists(
         );
         encoded.extend_from_slice(list);
     }
-    Ok(encoded)
+    if let Some(deflated) = deflated_posting(TERM_LISTS_DEFLATED, &encoded)? {
+        return Ok(deflated);
+    }
+    let mut stored = Vec::with_capacity(1 + encoded.len());
+    stored.push(TERM_LISTS_RAW);
+    stored.extend_from_slice(&encoded);
+    Ok(stored)
 }
 
 /// `(field code, document frequency, posting list)` of one field's list.
@@ -1513,9 +1593,10 @@ mod tests {
     use roaring::RoaringBitmap;
 
     use super::{
-        DOCUMENT_SET_BITSET, DOCUMENT_SET_DELTAS, PostingListDecoderV1, PostingListEncoderV1,
-        decode_document_set, decode_fingerprint_postings, decode_ngram_bitmap, decode_term_lists,
-        encode_document_set, encode_fingerprint_postings, encode_ngram_bitmap, encode_term_lists,
+        DOCUMENT_SET_BITSET, DOCUMENT_SET_DEFLATED, DOCUMENT_SET_DELTAS, PostingListDecoderV1,
+        PostingListEncoderV1, decode_document_set, decode_fingerprint_postings,
+        decode_ngram_bitmap, decode_term_lists, encode_document_set, encode_fingerprint_postings,
+        encode_ngram_bitmap, encode_term_lists, term_lists_bytes,
     };
 
     #[test]
@@ -1632,13 +1713,29 @@ mod tests {
     fn term_lists_round_trip_and_refuse_non_canonical_fields() {
         let lists = vec![(1i64, 2u64, vec![0x02, 0x04]), (7, 1, vec![0x0a])];
         let encoded = encode_term_lists(&lists).expect("encode");
-        let decoded = decode_term_lists(&encoded).expect("decode");
+        assert_eq!(
+            encoded,
+            [0x00, 0x01, 0x02, 0x02, 0x02, 0x04, 0x07, 0x01, 0x01, 0x0a]
+        );
+        let logical = term_lists_bytes(&encoded).expect("stored lists");
+        let decoded = decode_term_lists(&logical).expect("decode");
         assert_eq!(
             decoded,
             vec![
                 (1, 2, [0x02u8, 0x04].as_slice()),
                 (7, 1, [0x0au8].as_slice())
             ]
+        );
+        // A 2,000-document list of unit deltas stores deflated and restores
+        // its exact bytes.
+        let long = vec![(4i64, 2_000u64, vec![0x02; 2_000])];
+        let stored = encode_term_lists(&long).expect("encode long");
+        assert_eq!(stored[0], 0x01);
+        assert!(stored.len() < 64, "stored {} bytes", stored.len());
+        let logical = term_lists_bytes(&stored).expect("inflate long");
+        assert_eq!(
+            decode_term_lists(&logical).expect("decode long"),
+            vec![(4, 2_000, [0x02u8; 2_000].as_slice())]
         );
         assert!(encode_term_lists(&[(7, 1, vec![1]), (7, 1, vec![2])]).is_err());
         assert!(encode_term_lists(&[(1, 0, vec![1])]).is_err());
@@ -1658,15 +1755,26 @@ mod tests {
     fn document_sets_choose_the_smaller_encoding_and_round_trip() {
         let sparse = RoaringBitmap::from_iter([3u32, 90_000, 300_000]);
         let dense = (1_000u32..9_000).step_by(2).collect::<RoaringBitmap>();
+        // A 3,750-byte bitset of a repeating pattern stores deflated.
+        let periodic = (0u32..30_000)
+            .filter(|document| document % 3 != 2)
+            .collect::<RoaringBitmap>();
         for (documents, tag) in [
             (&sparse, DOCUMENT_SET_DELTAS),
             (&dense, DOCUMENT_SET_BITSET),
+            (&periodic, DOCUMENT_SET_DEFLATED),
         ] {
             let encoded = encode_document_set(documents).expect("encode");
             assert_eq!(encoded[0], tag);
             assert_eq!(&decode_document_set(&encoded).expect("decode"), documents);
         }
-        for documents in [&sparse, &dense, &RoaringBitmap::from_iter([7u32])] {
+        assert!(encode_document_set(&periodic).expect("encode").len() < 100);
+        for documents in [
+            &sparse,
+            &dense,
+            &periodic,
+            &RoaringBitmap::from_iter([7u32]),
+        ] {
             let mut list = PostingListEncoderV1::new(false);
             for document in documents {
                 list.push(document, 1).expect("ascending");

@@ -7,7 +7,7 @@ use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 
-/// Revision 28 is the only layout this build serves: interned exact terms,
+/// Revision 29 is the only layout this build serves: interned exact terms,
 /// integer field codes, rows stored as deflated blocks of consecutive
 /// documents (per-file and per-symbol strings interned once as
 /// `row_dictionary` entries, a signature chunk's text stored as the prefix
@@ -15,7 +15,9 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// carrying every field's delta-varint list, one `exact_postings` list per
 /// exact term and field, one `ngram_postings` list per n-gram rebuilt from
 /// the stored rows (the case-preserving kind holds only windows with an ASCII
-/// uppercase byte; every other raw window is its normalized window), and the clone index (binary payloads keyed by 32-byte
+/// uppercase byte; every other raw window is its normalized window), n-gram and
+/// term posting values above 1 KiB stored deflated when that is smaller, and
+/// the clone index (binary payloads keyed by 32-byte
 /// digest, content-only occurrences keyed by symbol digest, and exact and
 /// positional winnowed fingerprint postings, each naming its payload or
 /// occurrence by integer ordinal) sealed by the same build, with the receipt
@@ -30,9 +32,9 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// seal, so identical trees in different worktrees seal byte-identical
 /// files. Every other revision is refused as incompatible and rebuilt from
 /// the sealed generation.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 28;
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 29;
 
-const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v28\0";
+const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v29\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;
@@ -297,7 +299,7 @@ mod tests {
     fn superseded_revisions_are_rejected() {
         require_served_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1)
             .expect("the served revision opens");
-        for revision in [16, 20, 22, 25, 26, 27, 29] {
+        for revision in [16, 20, 22, 25, 26, 27, 28, 30] {
             assert!(matches!(
                 require_served_revision(revision),
                 Err(CodeLexicalArtifactErrorV1::Incompatible(message))
