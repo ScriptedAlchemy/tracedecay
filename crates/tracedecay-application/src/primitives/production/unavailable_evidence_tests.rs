@@ -70,3 +70,43 @@ fn graph_admission_failures_refuse_with_the_typed_graph_state() {
         );
     }
 }
+
+/// A graph query that fails after its projection opened, as reads do while a
+/// generation is still being seated, answers the same typed state as a failed
+/// open; a failure that did not come from the graph stays a failed read.
+#[test]
+fn graph_query_failures_after_open_refuse_like_a_failed_open() {
+    let unavailable: RetrievalPortOutcome<QualifiedNamePrimitiveResult> = graph_query_outcome(
+        &tracedecay_graph_query::map_code_graph_read_runtime_error(
+            CodeGraphReadError::Unavailable {
+                detail: "the projection closed".to_owned(),
+            },
+        ),
+        EvidenceDomain::Graph,
+        UtcMicros(1),
+    );
+    let RetrievalPortOutcome::Refused(_, problem) = &unavailable else {
+        panic!("a graph read failure must refuse: {unavailable:?}");
+    };
+    assert_eq!(
+        (problem.kind(), problem.reason_code()),
+        (
+            ApplicationProblemKind::Unavailable,
+            "application.code-graph.unavailable"
+        )
+    );
+
+    let unrelated: RetrievalPortOutcome<QualifiedNamePrimitiveResult> = graph_query_outcome(
+        &tracedecay_domain::errors::TraceDecayError::Config {
+            message: "not a graph read".to_owned(),
+        },
+        EvidenceDomain::Graph,
+        UtcMicros(1),
+    );
+    assert_eq!(
+        unrelated
+            .into_termination()
+            .map(|(termination, _)| termination),
+        Ok(tracedecay_contracts::OperationTermination::Failed)
+    );
+}

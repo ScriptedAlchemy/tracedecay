@@ -42,6 +42,7 @@ use tracedecay_graph_query::SourceReadContext;
 use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
+    code_graph_read_error_from_runtime,
 };
 use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
 use tracedecay_temporal_query::cursor::SessionCursorAuthenticator;
@@ -289,6 +290,20 @@ fn graph_read_outcome<T>(
             evidence,
             Box::new(code_graph_read_failure(error).into_problem()),
         ),
+    }
+}
+
+/// The outcome of a graph query that failed after its projection opened: the
+/// same typed state an open failure reports when the query surfaced a
+/// code-graph read error, and a failed read otherwise.
+fn graph_query_outcome<T>(
+    error: &tracedecay_domain::errors::TraceDecayError,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    match code_graph_read_error_from_runtime(error) {
+        Some(read_error) => graph_read_outcome(&read_error, domain, finished_at),
+        None => failed(domain, finished_at),
     }
 }
 
@@ -562,14 +577,12 @@ async fn open_code_graph(
 fn all_code_graph_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
-) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
+) -> tracedecay_domain::errors::Result<Vec<CodeGraphSymbolSummaryV1>> {
     const PAGE_SIZE: usize = 4_096;
-    GraphQueryManager::new(graph, cancellation)
-        .page_all_symbols(
-            PAGE_SIZE,
-            "verified symbol census exceeded its analytical budget",
-        )
-        .map_err(|_| ())
+    GraphQueryManager::new(graph, cancellation).page_all_symbols(
+        PAGE_SIZE,
+        "verified symbol census exceeded its analytical budget",
+    )
 }
 
 fn logical_file_symbols(
@@ -627,7 +640,7 @@ fn test_annotation_evidence(
     {
         return Ok(cached.clone());
     }
-    let symbols = all_code_graph_symbols(graph, Arc::clone(&cancellation))?;
+    let symbols = all_code_graph_symbols(graph, Arc::clone(&cancellation)).map_err(|_| ())?;
     let occurrences = symbols
         .iter()
         .map(|symbol| symbol.occurrence.clone())

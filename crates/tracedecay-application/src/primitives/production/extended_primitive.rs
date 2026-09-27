@@ -15,7 +15,7 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::queries::GraphQueryManager;
 use tracedecay_graph_query::{
-    CodeGraphProjectionReadPort, CodeGraphReadRequest, SourceReadContext,
+    CodeGraphProjectionReadPort, CodeGraphReadRequest, SourceReadContext, map_projection_error,
     request_graph_cancellation,
 };
 use tracedecay_runtime_core::db::Database;
@@ -33,8 +33,8 @@ use super::super::symbol_graph::{read_symbol_source_body, symbol_record};
 use super::{
     AuthenticatedDiagnosticCursorAuthorityV1, DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
     all_code_graph_symbols, completed, completed_unsupported, diagnostics_result,
-    diagnostics_unavailable, evidence_unavailable, failed, graph_read_outcome, now_observed,
-    open_code_graph,
+    diagnostics_unavailable, evidence_unavailable, failed, graph_query_outcome, graph_read_outcome,
+    now_observed, open_code_graph,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
@@ -348,13 +348,20 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return graph_read_outcome(&error, EvidenceDomain::Symbol, now_observed());
                     }
                 };
-                let Ok(nodes) = reader.resolve_qualified_name(
+                let nodes = match reader.resolve_qualified_name(
                     &request.qualified_name,
                     None,
                     10_000,
                     cancellation,
-                ) else {
-                    return failed(EvidenceDomain::Symbol, now_observed());
+                ) {
+                    Ok(nodes) => nodes,
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &map_projection_error(error),
+                            EvidenceDomain::Symbol,
+                            now_observed(),
+                        );
+                    }
                 };
                 let symbols = nodes
                     .into_iter()
@@ -408,15 +415,22 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 else {
                     return failed(EvidenceDomain::Graph, now_observed());
                 };
-                let Ok(path) = reader.shortest_path(
+                let path = match reader.shortest_path(
                     &from,
                     &to,
                     &[tracedecay_domain::RelationEdgeKindV1::Calls],
                     request.maximum_depth,
                     100_000,
                     cancellation,
-                ) else {
-                    return failed(EvidenceDomain::Graph, now_observed());
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &map_projection_error(error),
+                            EvidenceDomain::Graph,
+                            now_observed(),
+                        );
+                    }
                 };
                 if !path.complete {
                     return evidence_unavailable(
@@ -485,14 +499,12 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     }
                 };
                 let query = GraphQueryManager::new(&reader, cancellation);
-                let Ok(dependents) = query.get_file_dependents(&request.file).await else {
-                    return evidence_unavailable(
-                        EvidenceDomain::Graph,
-                        now_observed(),
-                        OmissionReason::Unavailable,
-                        0,
-                    )
-                    .with_cost(cost.receipt());
+                let dependents = match query.get_file_dependents(&request.file).await {
+                    Ok(dependents) => dependents,
+                    Err(error) => {
+                        return graph_query_outcome(&error, EvidenceDomain::Graph, now_observed())
+                            .with_cost(cost.receipt());
+                    }
                 };
                 let payload = FileDependentsPrimitiveResult {
                     file: request.file.clone(),
@@ -535,8 +547,16 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 else {
                     return failed(EvidenceDomain::Source, now_observed());
                 };
-                let Ok(Some(node)) = reader.symbol_summary(&occurrence, cancellation) else {
-                    return failed(EvidenceDomain::Source, now_observed());
+                let node = match reader.symbol_summary(&occurrence, cancellation) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => return failed(EvidenceDomain::Source, now_observed()),
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &map_projection_error(error),
+                            EvidenceDomain::Source,
+                            now_observed(),
+                        );
+                    }
                 };
                 let Some(metadata) = node.metadata else {
                     return failed(EvidenceDomain::Source, now_observed());
@@ -597,11 +617,17 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return graph_read_outcome(&error, EvidenceDomain::Source, now_observed());
                     }
                 };
-                let Ok(nodes) =
-                    reader.symbols_in_logical_file(&request.file, 100_000, cancellation)
-                else {
-                    return failed(EvidenceDomain::Source, now_observed());
-                };
+                let nodes =
+                    match reader.symbols_in_logical_file(&request.file, 100_000, cancellation) {
+                        Ok(nodes) => nodes,
+                        Err(error) => {
+                            return graph_read_outcome(
+                                &map_projection_error(error),
+                                EvidenceDomain::Source,
+                                now_observed(),
+                            );
+                        }
+                    };
                 let symbols = nodes
                     .into_iter()
                     .map(|node| symbol_record(node, None))
@@ -643,8 +669,11 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return graph_read_outcome(&error, EvidenceDomain::Symbol, now_observed());
                     }
                 };
-                let Ok(nodes) = all_code_graph_symbols(&reader, cancellation) else {
-                    return failed(EvidenceDomain::Symbol, now_observed());
+                let nodes = match all_code_graph_symbols(&reader, cancellation) {
+                    Ok(nodes) => nodes,
+                    Err(error) => {
+                        return graph_query_outcome(&error, EvidenceDomain::Symbol, now_observed());
+                    }
                 };
                 let Ok(symbols) = public_module_symbols(nodes, &request.path) else {
                     return failed(EvidenceDomain::Symbol, now_observed());
