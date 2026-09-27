@@ -224,23 +224,37 @@ where
     let outcome = upgrade()?;
     match policy {
         RefreshPolicy::Always => match outcome {
-            UpgradeOutcome::Installed { binary, version } => Ok(InstallThenRefresh {
-                refresh: Some(refresh_after_install(post_update, binary.as_deref())),
-                installed_version: version,
-            }),
+            UpgradeOutcome::Installed {
+                binary,
+                version,
+                codesign_failed,
+            } => {
+                report_codesign_failure(codesign_failed);
+                Ok(InstallThenRefresh {
+                    refresh: Some(refresh_after_install(post_update, binary.as_deref())),
+                    installed_version: version,
+                    codesign_failed,
+                })
+            }
             UpgradeOutcome::AlreadyCurrent => Ok(InstallThenRefresh {
                 installed_version: None,
                 refresh: Some(post_update(None)?),
+                codesign_failed: false,
             }),
         },
         RefreshPolicy::AfterInstall => match outcome {
-            UpgradeOutcome::Installed { binary, version } => {
+            UpgradeOutcome::Installed {
+                binary,
+                version,
+                codesign_failed,
+            } => {
                 // Point the retry at the installed binary when we know where
                 // it lives, a bare `tracedecay` may not be on PATH.
                 let retry = match &binary {
                     Some(path) => format!("`{} update`", path.display()),
                     None => "`tracedecay update`".to_string(),
                 };
+                report_codesign_failure(codesign_failed);
                 let refresh = refresh_after_install(post_update, binary.as_deref());
                 match refresh {
                     PluginRefreshOutcome::Complete => {}
@@ -257,6 +271,7 @@ where
                 Ok(InstallThenRefresh {
                     installed_version: version,
                     refresh: Some(refresh),
+                    codesign_failed,
                 })
             }
             UpgradeOutcome::AlreadyCurrent => {
@@ -267,10 +282,39 @@ where
                 Ok(InstallThenRefresh {
                     installed_version: None,
                     refresh: None,
+                    codesign_failed: false,
                 })
             }
         },
     }
+}
+
+fn report_codesign_failure(codesign_failed: bool) {
+    if codesign_failed {
+        eprintln!(
+            "  \x1b[33mwarning:\x1b[0m codesign failed after the binary was replaced. \
+             The installed version is kept for daemon restore."
+        );
+    }
+}
+
+/// Exit status for a codesign failure that happened after the binary was
+/// replaced. The maintenance window must already have adopted
+/// [`InstallThenRefresh::installed_version`]; this error is how the command
+/// still exits non-zero.
+fn codesign_failure_exit(outcome: &InstallThenRefresh) -> tracedecay_domain::errors::Result<()> {
+    if !outcome.codesign_failed {
+        return Ok(());
+    }
+    let installed = outcome
+        .installed_version
+        .as_deref()
+        .unwrap_or("the installed release");
+    Err(tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!(
+            "the TraceDecay binary {installed} is installed, but codesign failed (see above)"
+        ),
+    })
 }
 
 /// Runs the refresh after an install, reporting a refresh that could not run
@@ -292,6 +336,9 @@ pub(crate) struct InstallThenRefresh {
     pub(crate) installed_version: Option<String>,
     /// `None` when the policy left plugins untouched.
     pub(crate) refresh: Option<PluginRefreshOutcome>,
+    /// The binary was replaced and codesign failed. Daemon restore still
+    /// expects [`Self::installed_version`].
+    pub(crate) codesign_failed: bool,
 }
 
 /// What the post-update refresh concluded, read from the `post-update`
@@ -385,25 +432,33 @@ async fn run_update_flow(
     refresh_policy: RefreshPolicy,
     no_reinstall: bool,
 ) -> tracedecay_domain::errors::Result<UpdateFlowOutcome> {
-    let (refresh, installed_version) = daemon_control::with_exclusive_maintenance_window(
-        profile,
-        operation,
-        crate::product_runtime::PRODUCT_BUILD_VERSION,
-        |lease_token| {
-            let outcome = run_install_then_refresh(
-                refresh_policy,
-                || crate::upgrade::run_upgrade(profile),
-                |binary| run_post_update_subcommand(no_reinstall, binary, lease_token),
-            )?;
-            // Report the installed version so the window's daemon restore
-            // validates the binary it actually starts, not the one that was
-            // running before the upgrade.
-            Ok(daemon_control::MaintenanceWindowOutcome {
-                value: (outcome.refresh, outcome.installed_version.clone()),
-                installed_version: outcome.installed_version,
-            })
-        },
-    )?;
+    let (refresh, installed_version, codesign_failed) =
+        daemon_control::with_exclusive_maintenance_window(
+            profile,
+            operation,
+            crate::product_runtime::PRODUCT_BUILD_VERSION,
+            |lease_token| {
+                let outcome = run_install_then_refresh(
+                    refresh_policy,
+                    || crate::upgrade::run_upgrade(profile),
+                    |binary| run_post_update_subcommand(no_reinstall, binary, lease_token),
+                )?;
+                // Report the installed version so the window's daemon restore
+                // validates the binary it actually starts, not the one that was
+                // running before the upgrade. A codesign failure stays on this
+                // success value; returning it as an error would make restore
+                // wait for the replaced binary.
+                let codesign_failed = outcome.codesign_failed;
+                Ok(daemon_control::MaintenanceWindowOutcome {
+                    value: (
+                        outcome.refresh,
+                        outcome.installed_version.clone(),
+                        codesign_failed,
+                    ),
+                    installed_version: outcome.installed_version,
+                })
+            },
+        )?;
     let reset_required = restored_daemon_pending_resets(
         profile,
         operation,
@@ -411,6 +466,11 @@ async fn run_update_flow(
             .as_deref()
             .unwrap_or(crate::product_runtime::PRODUCT_BUILD_VERSION),
     );
+    codesign_failure_exit(&InstallThenRefresh {
+        refresh,
+        installed_version: installed_version.clone(),
+        codesign_failed,
+    })?;
     Ok(UpdateFlowOutcome {
         refresh,
         reset_required,
@@ -772,10 +832,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        InstallThenRefresh, PluginRefreshOutcome, RefreshPolicy, current_tracedecay_exe_from,
-        install_pass_covers_tracked_agents, pending_reset_line, post_update_binary,
-        post_update_binary_from, prepare_post_update_lease, restart_daemon_service_with,
-        run_install_then_refresh, update_completion,
+        InstallThenRefresh, PluginRefreshOutcome, RefreshPolicy, codesign_failure_exit,
+        current_tracedecay_exe_from, install_pass_covers_tracked_agents, pending_reset_line,
+        post_update_binary, post_update_binary_from, prepare_post_update_lease,
+        restart_daemon_service_with, run_install_then_refresh, update_completion,
     };
     use crate::agent_cmd::HostLifecycleCompletion;
     use crate::upgrade::UpgradeOutcome;
@@ -1074,6 +1134,7 @@ mod tests {
             InstallThenRefresh {
                 installed_version: None,
                 refresh: Some(PluginRefreshOutcome::Complete),
+                codesign_failed: false,
             },
             "no install must leave daemon restore validating the running version"
         );
@@ -1135,6 +1196,7 @@ mod tests {
                 Ok(UpgradeOutcome::Installed {
                     binary: None,
                     version: Some("9.9.9".to_string()),
+                    codesign_failed: false,
                 }),
             ),
             record_post_update(
@@ -1151,6 +1213,7 @@ mod tests {
             InstallThenRefresh {
                 installed_version: Some("9.9.9".to_string()),
                 refresh: Some(PluginRefreshOutcome::Failed),
+                codesign_failed: false,
             }
         );
     }
@@ -1171,6 +1234,7 @@ mod tests {
                 Ok(UpgradeOutcome::Installed {
                     binary: None,
                     version: Some("1.0.0-beta.54+3a9af0b1ce".to_string()),
+                    codesign_failed: false,
                 }),
             ),
             record_post_update(
@@ -1187,6 +1251,7 @@ mod tests {
             InstallThenRefresh {
                 installed_version: Some("1.0.0-beta.54+3a9af0b1ce".to_string()),
                 refresh: Some(PluginRefreshOutcome::Failed),
+                codesign_failed: false,
             }
         );
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
@@ -1197,6 +1262,52 @@ mod tests {
             failed,
             "config error: the TraceDecay binary is up to date, but the plugin and \
              agent-integration refresh failed (see above); fix it and run `tracedecay update` again"
+        );
+    }
+
+    /// Codesign runs after the binary has been replaced. Its failure must
+    /// stay on the success value the maintenance window reads, so restore
+    /// expects the installed version, and the command still exits non-zero.
+    #[test]
+    fn codesign_failure_after_install_keeps_the_installed_version() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        let outcome = run_install_then_refresh(
+            RefreshPolicy::Always,
+            record_upgrade(
+                &calls,
+                "upgrade",
+                Ok(UpgradeOutcome::Installed {
+                    binary: None,
+                    version: Some("9.9.9".to_string()),
+                    codesign_failed: true,
+                }),
+            ),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Ok(PluginRefreshOutcome::Complete),
+            ),
+        )
+        .expect("a codesign failure after install is not an error that drops the version");
+
+        assert_eq!(
+            outcome,
+            InstallThenRefresh {
+                installed_version: Some("9.9.9".to_string()),
+                refresh: Some(PluginRefreshOutcome::Complete),
+                codesign_failed: true,
+            }
+        );
+        assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+        let failed = codesign_failure_exit(&outcome)
+            .expect_err("codesign failure exits non-zero")
+            .to_string();
+        assert_eq!(
+            failed,
+            "config error: the TraceDecay binary 9.9.9 is installed, but codesign failed (see above)"
         );
     }
 
@@ -1258,6 +1369,7 @@ mod tests {
                 Ok(UpgradeOutcome::Installed {
                     binary: Some(installed.clone()),
                     version: None,
+                    codesign_failed: false,
                 }),
             ),
             record_post_update(
@@ -1290,6 +1402,7 @@ mod tests {
                 Ok(UpgradeOutcome::Installed {
                     binary: None,
                     version: Some("9.9.9".to_string()),
+                    codesign_failed: false,
                 }),
             ),
             record_post_update(
@@ -1328,6 +1441,7 @@ mod tests {
             InstallThenRefresh {
                 installed_version: None,
                 refresh: None,
+                codesign_failed: false,
             },
             "no install must leave daemon restore validating the running version"
         );
@@ -1346,6 +1460,7 @@ mod tests {
                 Ok(UpgradeOutcome::Installed {
                     binary: None,
                     version: Some("9.9.9".to_string()),
+                    codesign_failed: false,
                 }),
             ),
             record_post_update(
@@ -1364,6 +1479,7 @@ mod tests {
             InstallThenRefresh {
                 installed_version: Some("9.9.9".to_string()),
                 refresh: Some(PluginRefreshOutcome::Failed),
+                codesign_failed: false,
             }
         );
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
