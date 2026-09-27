@@ -430,6 +430,106 @@ async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
 }
 
 #[test]
+fn search_lanes_answer_to_the_freshness_the_verdict_reports() {
+    run_on_current_thread(search_lanes_answer_to_the_freshness_the_verdict_reports_case());
+}
+
+/// The query gate served the latest generation without proving it current,
+/// so the executor marked its lanes stale. When the scheduler reports that
+/// same generation fresh, the response carries one verdict: fresh, with no
+/// lane calling itself stale. A newer sealed generation keeps them stale.
+async fn search_lanes_answer_to_the_freshness_the_verdict_reports_case() {
+    let dir = tempfile::TempDir::new().expect("lane freshness isolation");
+    let profile =
+        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
+    let project = dir.path().join("lane-freshness-search");
+    std::fs::create_dir_all(project.join("src")).expect("create lane freshness sources");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn SparseLexicalWidget() {}\n",
+    )
+    .expect("write lane freshness fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.lane-freshness-search",
+    )
+    .await
+    .expect("registered lane freshness fixture");
+    let served = "generation.mcp-verified-graph-fixture.1";
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = std::sync::Arc::new(
+        move |_| {
+            Box::pin(async move {
+                let tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(mut complete) =
+                    completed_sparse_search_for_generation(served)
+                else {
+                    panic!("sparse search fixture is complete");
+                };
+                let stale = tracedecay_query::code_search::CodeIndexLaneStatusV1::Stale {
+                    generation: served.to_owned(),
+                };
+                complete.coverage = tracedecay_query::code_search::CodeIndexSearchCoverageV1 {
+                    exact: stale.clone(),
+                    lexical: tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial {
+                        generation: Some(served.to_owned()),
+                        reason: Some("candidate_sources_pruned"),
+                    },
+                    graph: stale,
+                };
+                tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete)
+            })
+        },
+    );
+    let search = |latest: &str| {
+        let options = crate::mcp::tools::handlers::ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(freshness_reader(Some(latest), "fresh", false)),
+            ..search_test_options(&cg, executor.clone())
+        };
+        crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+            &cg,
+            "tracedecay_search",
+            json!({"query": "SparseLexicalWidget", "limit": 5, "format": "json"}),
+            options,
+        )
+    };
+
+    let fresh = search(served).await.expect("fresh search renders");
+    let payload: Value = serde_json::from_str(&response_text(&fresh)).expect("search JSON");
+    assert_eq!(
+        payload["freshness"],
+        json!({"state": "fresh"}),
+        "{payload:#}"
+    );
+    assert_eq!(
+        payload["coverage"],
+        json!({
+            "exact": "complete",
+            "lexical": {
+                "status": "partial",
+                "generation": null,
+                "reason": "candidate_sources_pruned",
+            },
+            "graph": "complete",
+            "recall": "partial",
+        }),
+        "{payload:#}"
+    );
+
+    let newer = search("generation.mcp-verified-graph-fixture.2")
+        .await
+        .expect("superseded search renders");
+    let payload: Value = serde_json::from_str(&response_text(&newer)).expect("search JSON");
+    assert_eq!(payload["freshness"]["state"], "possibly_stale");
+    assert_eq!(
+        payload["freshness"]["indexing"]["stale_lanes"],
+        json!(["exact", "graph"]),
+        "{payload:#}"
+    );
+    assert_eq!(payload["coverage"]["exact"]["status"], "stale");
+    cg.close();
+}
+
+#[test]
 fn search_forwards_lexical_routing_and_renders_route_evidence() {
     run_on_current_thread(search_forwards_lexical_routing_and_renders_route_evidence_case());
 }

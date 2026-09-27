@@ -945,7 +945,7 @@ fn scoped_test_annotation_lookup_needs_only_a_file_scale_budget() {
         .collect();
 
     let annotated = graph
-        .test_annotated_logical_files(Some(&requested), 8, 64)
+        .test_annotated_logical_files(&requested, 8, 64)
         .expect("a two-file question must not require a corpus-scale symbol budget");
     assert_eq!(
         annotated,
@@ -955,18 +955,11 @@ fn scoped_test_annotation_lookup_needs_only_a_file_scale_budget() {
         "only the file whose function carries a test marker is reported"
     );
 
-    // The unscoped census keeps its corpus sweep and its budget contract.
-    let census = graph.test_annotated_logical_files(None, 8, 64);
-    assert!(
-        census.is_err(),
-        "the whole-corpus census still refuses a budget below the corpus size"
-    );
-
     // The scoped budget still bounds the requested files themselves.
     let hot_only: HashSet<String> = ["src/hot.rs".to_owned()].into_iter().collect();
     assert!(
         graph
-            .test_annotated_logical_files(Some(&hot_only), 1, 64)
+            .test_annotated_logical_files(&hot_only, 1, 64)
             .is_err(),
         "requested files larger than the budget stay a typed refusal"
     );

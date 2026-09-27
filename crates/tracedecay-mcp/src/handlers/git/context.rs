@@ -533,7 +533,7 @@ where
     let files_with_inline_tests = hotpath::measure_block!(
         "mcp.git.diff_context.test_annotations",
         graph.test_annotated_logical_files(
-            Some(&annotation_paths),
+            &annotation_paths,
             VERIFIED_GRAPH_MAX_SYMBOLS,
             VERIFIED_GRAPH_MAX_RELATIONS,
         )?
@@ -744,7 +744,7 @@ where
     let files_with_inline_tests = hotpath::measure_block!(
         "mcp.git.commit_context.test_annotations",
         graph.test_annotated_logical_files(
-            Some(&changed_paths),
+            &changed_paths,
             VERIFIED_GRAPH_MAX_SYMBOLS,
             VERIFIED_GRAPH_MAX_RELATIONS,
         )?
@@ -1331,7 +1331,7 @@ where
     let mut files_with_inline_tests = hotpath::measure_block!(
         "mcp.pr_context.test_annotations.changed",
         graph.test_annotated_logical_files(
-            Some(&changed_paths),
+            &changed_paths,
             VERIFIED_GRAPH_MAX_SYMBOLS,
             VERIFIED_GRAPH_MAX_RELATIONS,
         )?
@@ -1440,7 +1440,7 @@ where
     files_with_inline_tests.extend(hotpath::measure_block!(
         "mcp.pr_context.test_annotations.impacted",
         graph.test_annotated_logical_files(
-            Some(&impact_path_set),
+            &impact_path_set,
             VERIFIED_GRAPH_MAX_SYMBOLS,
             VERIFIED_GRAPH_MAX_RELATIONS,
         )?

@@ -159,6 +159,68 @@ async fn plan_context_returns_its_plan_sections_and_the_accounting_footer() {
     shutdown_graph_fixture(fixture).await;
 }
 
+/// Unrelated files whose inline tests a plan read has no reason to visit.
+const UNRELATED_TEST_FILES: usize = 40;
+
+/// Plan mode attributes test coverage from the anchors' two-hop caller
+/// neighborhood, so its store cost does not grow with test files elsewhere
+/// in the corpus: a whole-corpus test-annotation census fanned out over
+/// every annotation edge in the generation.
+#[tokio::test]
+async fn plan_context_reads_only_the_anchor_neighborhood() {
+    let fixture = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("src/walk.rs"), WALK_RS).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            "mod walk;\nuse walk::Walk;\npub fn known(walk: &Walk) { walk.read(); }\n\
+             #[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn covers_known() { known(&Walk); }\n}\n",
+        )
+        .unwrap();
+        for index in 0..UNRELATED_TEST_FILES {
+            fs::write(
+                project.join(format!("src/unrelated_{index}.rs")),
+                format!(
+                    "pub fn unrelated_{index}() {{}}\n#[cfg(test)]\nmod tests {{\n    \
+                     use super::*;\n\n    #[test]\n    fn unrelated_{index}_works() {{ unrelated_{index}(); }}\n}}\n"
+                ),
+            )
+            .unwrap();
+        }
+    })
+    .await;
+    // Asking for code makes the read wait for graph admission.
+    let arguments = json!({
+        "task": "known",
+        "mode": "plan",
+        "max_nodes": 1,
+        "include_code": true,
+        "max_code_blocks": 1,
+    });
+
+    let mut json_arguments = arguments.clone();
+    json_arguments["format"] = json!("json");
+    let texts = call(&fixture, "tracedecay_context", json_arguments).await;
+    let payload: Value = serde_json::from_str(&texts[0]).unwrap();
+    assert_eq!(payload["symbols"][0]["name"], "known", "{payload:#}");
+    assert_eq!(
+        payload["plan"]["test_files"],
+        json!(["src/lib.rs"]),
+        "{payload:#}"
+    );
+    let trailer = cost_trailer(&texts);
+    let adjacency_rows = trailer
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("adjacency_rows="))
+        .and_then(|rows| rows.parse::<usize>().ok())
+        .unwrap_or_else(|| panic!("adjacency rows in {trailer:?}"));
+    assert!(
+        adjacency_rows < UNRELATED_TEST_FILES,
+        "a plan read visited unrelated test annotations: {trailer}"
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
 /// A typed symbol-graph read reports the files it answered from and the
 /// generation it served on its envelope, so the MCP response carries the
 /// same footer as every other code read.

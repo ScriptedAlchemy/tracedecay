@@ -34,7 +34,8 @@ use super::primitive_surface::{
 use super::search::execute_code_index_search;
 use super::search_evidence::{bind_verified_graph_to_search, race_primary_search_with_graph};
 use super::search_freshness::{
-    ServedGenerationV1, search_freshness, worktree_freshness_from_payload,
+    ServedGenerationV1, lanes_under_scheduler_freshness, search_freshness,
+    worktree_freshness_from_payload,
 };
 use super::{
     graph_symbol_end_line, graph_symbol_paths, required_graph_file_path, required_graph_metadata,
@@ -321,10 +322,15 @@ where
                 let search_matches = context_search_matches(&complete, scope_prefix);
                 let lexical_anchors = context_lexical_anchors(&complete, scope_prefix);
                 let code_generation = Some(complete.code_generation.clone());
-                let coverage = primitive_search_coverage(&complete.coverage);
+                let lanes = lanes_under_scheduler_freshness(
+                    complete.coverage.clone(),
+                    &complete.code_generation,
+                    &worktree_freshness,
+                );
+                let coverage = primitive_search_coverage(&lanes);
                 let freshness = search_freshness(
                     ServedGenerationV1::Served(&complete.code_generation),
-                    &complete.coverage,
+                    &lanes,
                     &worktree_freshness,
                 );
                 (
@@ -474,6 +480,9 @@ where
         ),
         ..retrieval
     };
+    let cost = graph
+        .as_ref()
+        .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost);
     let result = ContextResultV1 {
         task: request.task,
         mode,
@@ -498,7 +507,7 @@ where
         touched_files,
         code_graph: None,
         analytics: Some(analytics),
-        cost: None,
+        cost,
     })
 }
 

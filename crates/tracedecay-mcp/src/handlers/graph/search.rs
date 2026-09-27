@@ -30,7 +30,8 @@ use super::search_evidence::{
     SearchGraphEvidence, bind_verified_graph_to_search, race_primary_search_with_graph,
 };
 use super::search_freshness::{
-    ServedGenerationV1, freshness_lines, search_freshness, worktree_freshness_from_payload,
+    ServedGenerationV1, freshness_lines, lanes_under_scheduler_freshness, search_freshness,
+    worktree_freshness_from_payload,
 };
 use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
 use super::{graph_occurrence_id, graph_tool_completion};
@@ -269,10 +270,15 @@ where
             } else {
                 None
             };
+            let coverage = lanes_under_scheduler_freshness(
+                complete.coverage.clone(),
+                &complete.code_generation,
+                &worktree_freshness,
+            );
             let result = SearchCompleteV1 {
                 freshness: search_freshness(
                     ServedGenerationV1::Served(&complete.code_generation),
-                    &complete.coverage,
+                    &coverage,
                     &worktree_freshness,
                 ),
                 query_fallback_digest: complete.query_fallback.digest.as_str().to_owned(),
@@ -281,7 +287,7 @@ where
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
-                coverage: search_coverage(&complete.coverage),
+                coverage: search_coverage(&coverage),
                 code_generation: complete.code_generation,
                 results,
                 lexical_routes,
