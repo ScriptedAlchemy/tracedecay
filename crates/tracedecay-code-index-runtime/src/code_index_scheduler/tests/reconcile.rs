@@ -8,6 +8,7 @@ use std::{
 };
 
 use tempfile::TempDir;
+use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, Deadline,
     ExactOccurrenceRequest, ResolvedScope, RetrievalPortContext, RetrievalPortOutcome,
@@ -3002,6 +3003,64 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
         "the graph wake owned by an in-flight reconcile is not query admission"
     );
 
+    registry.shutdown().await;
+}
+
+/// A producer that reads only sealed source must not wait for the serving
+/// swap. While the first publication's text projection is held, nothing
+/// serves, yet the sealed identity already names the generation and its
+/// files; once the projection finishes, the serving identity is that same
+/// generation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_publication_identity_answers_before_the_generation_seats() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let (projection_started, release_projection) = registry
+        .pause_next_published_text_projection(canonical_root)
+        .await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    tokio::time::timeout(Duration::from_secs(10), projection_started)
+        .await
+        .expect("publication did not reach text projection")
+        .expect("publication projection gate stays armed");
+
+    assert!(
+        CodeIndexPublicationIdentityPortV1::resolve(&registry, fixture.path().to_path_buf())
+            .await
+            .is_none(),
+        "no generation serves while its text projection is held"
+    );
+    let sealed = registry
+        .sealed_publication_identity(fixture.path())
+        .await
+        .expect("sealed identity read")
+        .expect("the seal names its generation before it serves");
+    assert_eq!(
+        sealed
+            .file_digests()
+            .map(|(path, _)| path.to_owned())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs"]
+    );
+
+    release_projection
+        .send(())
+        .expect("release publication projection");
+    let serving =
+        wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
+            CodeIndexPublicationIdentityPortV1::resolve(&registry, fixture.path().to_path_buf())
+        })
+        .await;
+    assert_eq!(serving.generation_id(), sealed.generation_id());
     registry.shutdown().await;
 }
 

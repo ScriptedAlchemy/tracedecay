@@ -1,5 +1,5 @@
-//! Project-open owner that runs the project's own TypeScript compiler after
-//! each complete code-index generation and publishes its findings.
+//! Project-open owner that runs the project's own TypeScript compiler when
+//! each code-index generation seals and publishes its findings for it.
 //!
 //! `tracedecay_diagnostics` is a read over generation-bound publications, so a
 //! freshly initialized TypeScript project answered "no producer" until a caller
@@ -13,9 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_application::diagnostics_producer::{
-    CompilerProducerRunV1, run_typescript_producer_v1,
+    CompilerProducerRunV1, TypeScriptProducerStateV1, run_typescript_producer_v1,
 };
-use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::CodeGenerationId;
@@ -24,6 +23,10 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::DaemonInvocationState;
 use super::advisory_runtime::wait_for_generation_change;
+
+/// The project store's directory for tsc's incremental build-info, one file
+/// per checked tsconfig; it leaves with the store.
+const BUILD_INFO_DIR: &str = "typescript-build-info";
 
 /// Spawns the TypeScript producer for `project_root`. Returns `false` when
 /// nothing was spawned: a route that indexes no code by contract, so there is
@@ -71,7 +74,9 @@ pub(super) fn spawn_typescript_diagnostics_producer(
             let mut serving_seats = schedulers.subscribe_serving_seats();
             let mut root_mounted = schedulers.subscribe_root_mounted();
             let mut serving_changes = None;
-            // One compiler run per generation, whatever its outcome: the
+            let build_info_dir = graph.store_layout().data_root.join(BUILD_INFO_DIR);
+            let mut state = TypeScriptProducerStateV1::default();
+            // One producer run per generation, whatever its outcome: the
             // wake sources below are registry-wide, and a project whose
             // compiler keeps failing must not re-run it on every other
             // project's publication.
@@ -85,33 +90,42 @@ pub(super) fn spawn_typescript_diagnostics_producer(
                         let _ = schedulers.request_complete_generation(&project_root).await;
                     }
                 }
-                // Resolve the generation first so an unchanged generation costs
-                // no compiler run; the producer publishes against exactly the
-                // identity it resolved, and a generation sealed mid-run is
-                // caught by the next wake.
-                let current =
-                    CodeIndexPublicationIdentityPortV1::resolve(&schedulers, project_root.clone())
-                        .await
-                        .map(|identity| identity.generation_id().clone());
-                if let Some(generation) = current
-                    && attempted_for.as_ref() != Some(&generation)
-                {
-                    attempted_for = Some(generation);
-                    // A generation can add, drop, or retarget tsconfigs.
-                    let Some(projects) = discover_projects(&project_root).await else {
-                        return;
-                    };
-                    let database = graph.dashboard_database_guard();
-                    let store = DiagnosticsStore::new(database.as_ref().clone());
-                    let run = run_typescript_producer_v1(
-                        &project_root,
-                        &projects,
-                        &schedulers,
-                        &store,
-                        now_micros(),
-                    )
-                    .await;
-                    log_producer_run(&project_root, &run);
+                // The sealed generation, not the serving one: tsc reads only
+                // the source the seal proved, so the check starts at the seal
+                // rather than after the text projection and serving swap. A
+                // generation sealed mid-run is caught by the next wake.
+                match schedulers.sealed_publication_identity(&project_root).await {
+                    Ok(Some(identity))
+                        if attempted_for.as_ref() != Some(identity.generation_id()) =>
+                    {
+                        attempted_for = Some(identity.generation_id().clone());
+                        // A generation can add, drop, or retarget tsconfigs.
+                        let Some(projects) = discover_projects(&project_root).await else {
+                            return;
+                        };
+                        let database = graph.dashboard_database_guard();
+                        let store = DiagnosticsStore::new(database.as_ref().clone());
+                        let run = run_typescript_producer_v1(
+                            &project_root,
+                            &projects,
+                            &identity,
+                            &store,
+                            &build_info_dir,
+                            &mut state,
+                            now_micros(),
+                        )
+                        .await;
+                        log_producer_run(&project_root, &run);
+                    }
+                    Ok(_) => {}
+                    Err(error) => log_daemon_event(
+                        "typescript_diagnostics_producer",
+                        &[
+                            ("project", project_root.display().to_string()),
+                            ("outcome", "sealed_identity_unavailable".to_owned()),
+                            ("detail", error.to_string()),
+                        ],
+                    ),
                 }
                 if !wait_for_generation_change(
                     &project_root,
@@ -170,10 +184,13 @@ fn log_producer_run(project_root: &Path, run: &CompilerProducerRunV1) {
             generation,
             inserted,
             unresolved,
+            checked,
+            reused,
         } => (
             "published",
             format!(
-                "generation={} inserted={inserted} unresolved={unresolved}",
+                "generation={} inserted={inserted} unresolved={unresolved} checked={checked} \
+                 reused={reused}",
                 generation.as_str()
             ),
         ),

@@ -61,8 +61,9 @@ impl Driver for TscDriver {
                             ),
                         });
                     };
-                    diagnostics
-                        .extend(run_compiler(&compiler, project_root, &project.tsconfig).await?);
+                    diagnostics.extend(
+                        run_compiler(&compiler, project_root, &project.tsconfig, None).await?,
+                    );
                 }
                 Ok(diagnostics)
             },
@@ -82,18 +83,29 @@ impl Driver for TscDriver {
 /// `tsconfig.json` that names no inputs, an unreadable option), means the
 /// project was not checked, and that is a typed failure rather than a clean
 /// page.
+///
+/// With `build_info`, the check is incremental against that
+/// `--tsBuildInfoFile`: tsc rechecks only what changed since the check that
+/// wrote it and records the program files it read there.
+#[hotpath::measure(label = "compile_diagnostics.typescript.run_compiler", future = true)]
 pub async fn run_compiler(
     compiler: &Path,
     project_root: &Path,
     tsconfig: &Path,
+    build_info: Option<&Path>,
 ) -> Result<Vec<Diagnostic>> {
     let mut cmd = tokio::process::Command::new(compiler);
     cmd.arg("-p")
         .arg(tsconfig)
         .arg("--noEmit")
         .arg("--pretty")
-        .arg("false")
-        .current_dir(project_root)
+        .arg("false");
+    if let Some(build_info) = build_info {
+        cmd.arg("--incremental")
+            .arg("--tsBuildInfoFile")
+            .arg(build_info);
+    }
+    cmd.current_dir(project_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -270,7 +282,7 @@ src/b.ts(2,2): warning TS6133: Second.
                 ),
             );
 
-            let diagnostics = run_compiler(&compiler, project.path(), &tsconfig)
+            let diagnostics = run_compiler(&compiler, project.path(), &tsconfig, None)
                 .await
                 .unwrap_or_else(|error| panic!("exit {exit} is a checked project: {error}"));
             assert_eq!(diagnostics.len(), 1, "exit {exit}");
@@ -293,6 +305,7 @@ src/b.ts(2,2): warning TS6133: Second.
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
+            None,
         )
         .await
         .expect_err("a file-less tsc error is not a clean project");

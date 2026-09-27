@@ -219,6 +219,13 @@ impl CodeIndexPublicationIdentityV1 {
             .map(|(file, digest)| (file, digest))
     }
 
+    /// Every file of the generation with its content digest, by logical path.
+    pub fn file_digests(&self) -> impl Iterator<Item = (&str, &ContentDigest)> {
+        self.files
+            .iter()
+            .map(|(path, (_, digest))| (path.as_str(), digest))
+    }
+
     #[must_use]
     pub fn logical_path(&self, occurrence: &FileOccurrenceId) -> Option<&str> {
         self.files
@@ -884,6 +891,33 @@ pub async fn publish_compiler_diagnostics_through_code_index_v1(
     let Some(identity) = resolver.resolve(project_root.to_path_buf()).await else {
         return CompilerDiagnosticPublicationOutcomeV1::CodeIndexGenerationUnavailable;
     };
+    publish_compiler_diagnostics_for_identity_v1(
+        project_root,
+        &identity,
+        store,
+        parsed,
+        analyzer_revision,
+        configuration_revision,
+        collected_at,
+    )
+    .await
+}
+
+/// Publishes one clean-generation snapshot under exactly `identity`, for a
+/// producer whose findings were computed against that generation.
+#[hotpath::measure(
+    label = "usecases.diagnostics.publish_compiler_for_identity",
+    future = true
+)]
+pub async fn publish_compiler_diagnostics_for_identity_v1(
+    project_root: &Path,
+    identity: &CodeIndexPublicationIdentityV1,
+    store: &DiagnosticsStore<'_>,
+    parsed: &[crate::diagnose::Diagnostic],
+    analyzer_revision: ComponentVersion,
+    configuration_revision: ComponentVersion,
+    collected_at: UtcMicros,
+) -> CompilerDiagnosticPublicationOutcomeV1 {
     let (resolved, unresolved) = if parsed.is_empty() {
         (Vec::new(), Vec::new())
     } else {
