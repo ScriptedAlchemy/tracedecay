@@ -211,6 +211,7 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
         user_scoped = (
             tool_args.get("memory_scope") == "user"
             or tool_args.get("storage_scope") == "user"
+            or tool_args.get("user_scope") is True
         )
         if user_scoped:
             project_root = None

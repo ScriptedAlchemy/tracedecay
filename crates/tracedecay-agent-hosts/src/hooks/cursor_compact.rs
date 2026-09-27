@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
 use tracedecay_lcm::LcmRelationProjectionStatus;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
@@ -100,10 +101,9 @@ async fn cursor_pre_compact_via_daemon_inner(
     let result = match super::daemon_hook_action(
         runtime,
         Some(&root),
-        serde_json::json!({
-            "action": "cursor_compact",
-            "event_json": event_json,
-        }),
+        HookRuntimeSurfaceRequestV1::CursorCompact {
+            event_json: event_json.to_owned(),
+        },
         telemetry,
     )
     .await

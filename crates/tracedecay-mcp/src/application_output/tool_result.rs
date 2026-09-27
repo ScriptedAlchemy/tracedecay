@@ -41,17 +41,23 @@ impl ApplicationRefusal {
     /// The refusal as the error a first-party command returns: the owner's
     /// reason code, retryability, and typed detail or diagnostic.
     pub fn into_error(self) -> TraceDecayError {
-        let record = *self.problem.problem;
-        let (reason_code, message) = match record.diagnostic {
-            Some(diagnostic) => (diagnostic.code, diagnostic.message),
-            None => (record.code, record.message),
-        };
-        match record.detail {
-            Some(detail) => {
-                TraceDecayError::project_route_with_detail(reason_code, record.retryable, detail)
-            }
-            None => TraceDecayError::project_route(reason_code, record.retryable, message),
+        problem_error(self.problem)
+    }
+}
+
+/// An owner's refusal as the error its first-party caller returns: the
+/// owner's reason code, retryability, and typed detail or diagnostic.
+pub fn problem_error(problem: ApplicationProblemEnvelope) -> TraceDecayError {
+    let record = *problem.problem;
+    let (reason_code, message) = match record.diagnostic {
+        Some(diagnostic) => (diagnostic.code, diagnostic.message),
+        None => (record.code, record.message),
+    };
+    match record.detail {
+        Some(detail) => {
+            TraceDecayError::project_route_with_detail(reason_code, record.retryable, detail)
         }
+        None => TraceDecayError::project_route(reason_code, record.retryable, message),
     }
 }
 

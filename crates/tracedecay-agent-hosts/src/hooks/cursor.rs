@@ -422,7 +422,7 @@ mod tests {
     use tracedecay_runtime_core::config::ProfileRoot;
 
     #[tokio::test]
-    async fn transcript_ingest_forwards_its_budget_to_the_daemon() {
+    async fn transcript_ingest_forwards_its_byte_budget_to_the_daemon() {
         let daemon = crate::hooks::TestDaemonHookActionGuard::install([
             serde_json::json!({ "user_scope": true, "messages_upserted": 2 }),
         ]);
@@ -453,9 +453,19 @@ mod tests {
         assert_eq!(calls[0].0, None);
         assert_eq!(calls[0].1["action"], "ingest_transcript");
         assert_eq!(calls[0].1["provider"], "cursor");
-        assert_eq!(calls[0].1["max_new_bytes"], 4_096);
-        assert_eq!(calls[0].1["timeout_budget_ms"], 250);
-        assert_eq!(calls[0].1["format"], "json");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({
+                "action": "ingest_transcript",
+                "provider": "cursor",
+                "user_scope": true,
+                "session_id": null,
+                "event_json": event,
+                "messages": null,
+                "max_new_bytes": 4_096,
+                "format": "json",
+            })
+        );
     }
 
     #[tokio::test]

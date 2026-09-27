@@ -106,7 +106,18 @@ fn daemon_tool_json<'a>(
                 require_project_identity,
             )?;
             let result = crate::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
-            crate::daemon::tool_json_payload(&result, tool_name)
+            let payload = crate::daemon::tool_json_payload(&result, tool_name)?;
+            // An owner refusal is a semantic result carrying its problem
+            // record; the hook reads it as the owner's typed error.
+            if result.get("problem").is_some() {
+                let problem = serde_json::from_value::<
+                    tracedecay_contracts::ApplicationProblemEnvelope,
+                >(payload)?;
+                return Err(
+                    tracedecay_mcp::application_output::tool_result::problem_error(problem),
+                );
+            }
+            Ok(payload)
         },
         label = "runtime_ports.daemon_tool"
     ))

@@ -113,10 +113,9 @@ pub use tracedecay_mcp_catalog::{
     context_description, context_warming_description, explore_call_budget,
     format_capable_tool_names, get_maximal_tool_definitions,
     get_maximal_tool_definitions_with_budget, get_tool_definitions,
-    get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
-    internal_daemon_tool_definition, mcp_input_schema, project_catalog_discovery_scope,
-    registered_project_reader_tool_names, retain_host_available_tool_definitions,
-    tool_defaults_to_markdown,
+    get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget, mcp_input_schema,
+    project_catalog_discovery_scope, registered_project_reader_tool_names,
+    retain_host_available_tool_definitions, tool_defaults_to_markdown,
 };
 pub use workflow::{
     MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile, TestRunControl,

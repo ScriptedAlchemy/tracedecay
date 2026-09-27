@@ -48,6 +48,11 @@ impl ApplicationSurfaceOperation {
                 ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
                 identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
+            Self::HookRuntime => Some(OwnerSideEffectEntryV1 {
+                effect: EffectClass::RecordsHostEvidence,
+                ceiling_millis: INTERACTIVE_CEILING_MILLIS,
+                identical_calls: IdenticalCallPolicyV1::RunEach,
+            }),
             _ => None,
         }
     }
@@ -91,6 +96,14 @@ mod tests {
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::SchedulesWork,
                         ceiling_millis: 600_000,
+                        identical_calls: IdenticalCallPolicyV1::RunEach,
+                    }
+                ),
+                (
+                    "hook_runtime",
+                    OwnerSideEffectEntryV1 {
+                        effect: EffectClass::RecordsHostEvidence,
+                        ceiling_millis: 120_000,
                         identical_calls: IdenticalCallPolicyV1::RunEach,
                     }
                 ),

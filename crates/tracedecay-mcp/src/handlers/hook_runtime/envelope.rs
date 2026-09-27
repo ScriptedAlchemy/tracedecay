@@ -8,26 +8,16 @@ pub(super) fn hook_now() -> UtcMicros {
     tracedecay_runtime_core::tracedecay::utc_now_or_one()
 }
 
-pub(super) fn hook_v2_envelope(
-    args: &Value,
-    action: &str,
-) -> Result<tracedecay_hooks::HookEventEnvelopeV2> {
-    let envelope = args
-        .get("envelope")
-        .cloned()
-        .ok_or_else(|| config_error(format!("{action} requires envelope")))
-        .and_then(|value| {
-            serde_json::from_value::<tracedecay_hooks::HookEventEnvelopeV2>(value)
-                .map_err(|error| config_error(format!("invalid Hook V2 envelope: {error}")))
-        })?;
-    Ok(envelope)
+pub(super) fn hook_v2_envelope(envelope: Value) -> Result<tracedecay_hooks::HookEventEnvelopeV2> {
+    serde_json::from_value::<tracedecay_hooks::HookEventEnvelopeV2>(envelope)
+        .map_err(|error| config_error(format!("invalid Hook V2 envelope: {error}")))
 }
 
 pub(super) fn hook_v2_native_session_id(
-    args: &Value,
+    native_session_id: Option<&str>,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
 ) -> Option<SessionId> {
-    let session = SessionId::new(args.get("native_session_id")?.as_str()?.to_owned()).ok()?;
+    let session = SessionId::new(native_session_id?.to_owned()).ok()?;
     (tracedecay_agent_hosts::hooks::protected_native_session_id(session.as_str())
         == envelope.protected_session_id)
         .then_some(session)

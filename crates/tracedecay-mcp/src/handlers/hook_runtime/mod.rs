@@ -1,25 +1,22 @@
-use crate::ToolResult;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::Path;
-use std::sync::Arc;
 use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_contracts::retrieval::{
+    HookRuntimeAcceptedV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
+};
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::SharedHostAdmissionBroker;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_sessions::admission::HostAdmissionOutcome;
-use tracedecay_sessions::serving::SessionRefreshWorkerPort;
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use crate::handlers::SessionAuthorities;
-use crate::handlers::tool_json;
 
 mod admission;
 mod context_scout;
 mod envelope;
 mod hermes;
 mod ingest;
-mod terminal;
 
 #[cfg(test)]
 mod entry_tests;
@@ -35,57 +32,75 @@ pub use hermes::replay_projectless_hermes_host_admission;
 
 use crate::map_host_admission_outcome;
 use admission::{hook_v2_admit, hook_v2_profile_admit};
-use context_scout::{
-    ContextScoutReadSurfaceV1, hook_v2_cancel, hook_v2_delivery_receipt, hook_v2_feedback,
-    hook_v2_feedback_notice_delivery, hook_v2_scout_prepare, hook_v2_scout_read, hook_v2_status,
-};
-use hermes::{hermes_receipt, user_review};
-use ingest::{
-    accounting_receipt, claude_compact, codex_compact, cursor_compact, ingest_transcript,
-};
-use terminal::retain_codex_stop;
+use context_scout::{hook_v2_delivery_receipt, hook_v2_feedback_notice_delivery};
+use hermes::{hermes_receipt, user_review_unavailable};
+use ingest::{claude_compact, codex_compact, cursor_compact, ingest_transcript};
 
-fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
-    args.get(key)
-        .and_then(Value::as_str)
+const TOOL_NAME: &str = "tracedecay_hook_runtime";
+
+/// Decodes a `tracedecay_hook_runtime` call against its typed request.
+/// `session_id` is a payload field here, so only presentation keys are
+/// removed first.
+pub fn decode_hook_runtime_request(args: &Value) -> Result<HookRuntimeSurfaceRequestV1> {
+    let mut request = args.clone();
+    if let Some(object) = request.as_object_mut() {
+        for key in ["format", "__mcp_request_id", "_meta"] {
+            object.remove(key);
+        }
+    }
+    serde_json::from_value(request)
+        .map_err(|error| config_error(format!("invalid arguments for {TOOL_NAME}: {error}")))
+}
+
+fn required_field<'a>(value: Option<&'a str>, key: &str) -> Result<&'a str> {
+    value
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error(format!("missing required parameter `{key}`")))
 }
 
+fn requires_projectless_routing(action: &str) -> tracedecay_domain::errors::TraceDecayError {
+    config_error(format!(
+        "hook action `{action}` requires projectless daemon routing"
+    ))
+}
+
+/// Runs one hook-runtime action for the served project.
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.total")]
-pub async fn handle_hook_runtime(
+pub async fn compute_hook_runtime(
     cg: &TraceDecay,
-    args: Value,
+    request: HookRuntimeSurfaceRequestV1,
     global_db: Option<&RegisteredGlobalDb>,
     accounting_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
-) -> Result<ToolResult> {
-    let action = required_str(&args, "action")?;
-    let output = match action {
-        "reset_counter" => {
+) -> Result<HookRuntimeResultV1> {
+    use HookRuntimeSurfaceRequestV1 as Request;
+    Ok(match request {
+        Request::ResetCounter {} => {
             cg.reset_local_counter().await?;
-            json!({ "action": action, "reset": true })
+            HookRuntimeResultV1::ResetCounter { reset: true }
         }
-        "accounting_receipt" => {
-            accounting_receipt(cg, required_project_db(&session_authorities)?).await?
+        Request::HookV2Admit(request) => {
+            HookRuntimeResultV1::HookV2Admit(hook_v2_admit(cg, request, session_authorities).await?)
         }
-        "hook_v2_admit" | "hook_v2_guidance_lookup" => {
-            hook_v2_admit(cg, &args, action, session_authorities).await?
+        Request::HookV2DeliveryReceipt { receipt } => HookRuntimeResultV1::HookV2DeliveryReceipt {
+            status: hook_v2_delivery_receipt(cg, receipt).await?,
+        },
+        Request::HookV2FeedbackNoticeDelivery {
+            envelope,
+            feedback_notice,
+        } => HookRuntimeResultV1::HookV2FeedbackNoticeDelivery(hook_v2_feedback_notice_delivery(
+            cg,
+            envelope,
+            feedback_notice,
+        )?),
+        Request::OpencodeLspUpdated { event } => {
+            opencode_lsp_updated(cg, &event, required_project_db(&session_authorities)?).await?;
+            HookRuntimeResultV1::OpencodeLspUpdated {
+                status: HookRuntimeAcceptedV1::Accepted,
+            }
         }
-        "hook_v2_scout_prepare" => hook_v2_scout_prepare(cg, &args).await?,
-        "hook_v2_delivery_receipt" => hook_v2_delivery_receipt(cg, &args).await?,
-        "hook_v2_feedback_notice_delivery" => hook_v2_feedback_notice_delivery(cg, &args).await?,
-        "hook_v2_feedback" => hook_v2_feedback(cg, &args).await?,
-        "hook_v2_cancel" => hook_v2_cancel(cg, &args).await?,
-        "hook_v2_status" => hook_v2_status(cg, &args).await?,
-        "opencode_lsp_updated" => {
-            opencode_lsp_updated(cg, &args, required_project_db(&session_authorities)?).await?
-        }
-        action if ContextScoutReadSurfaceV1::from_action(action).is_some() => {
-            hook_v2_scout_read(cg, &args, action).await?
-        }
-        "ingest_transcript" => {
-            if args.get("user_scope").and_then(Value::as_bool) == Some(true) {
+        Request::IngestTranscript(request) => {
+            if request.user_scope {
                 return Err(config_error(
                     "user transcript ingest requires projectless daemon routing",
                 ));
@@ -93,46 +108,49 @@ pub async fn handle_hook_runtime(
             // Boxed: transcript ingest composes the deepest session-runtime
             // future in the handler tree; inlining it into the dispatch frame
             // overflows the perf-profile worker stack.
-            Box::pin(ingest_transcript(
-                Some(cg),
-                &args,
-                None,
-                global_db,
-                accounting_db,
-                session_authorities,
+            HookRuntimeResultV1::IngestTranscript(Box::new(
+                Box::pin(ingest_transcript(
+                    Some(cg),
+                    &request,
+                    None,
+                    global_db,
+                    accounting_db,
+                    session_authorities,
+                ))
+                .await?,
             ))
-            .await?
         }
-        "codex_stop" | "user_review" | "hermes_receipt" => {
-            return Err(config_error(format!(
-                "hook action `{action}` requires projectless daemon routing"
-            )));
+        Request::CodexCompact { event_json } => HookRuntimeResultV1::CodexCompact(
+            codex_compact(cg, &event_json, session_authorities).await?,
+        ),
+        Request::ClaudeCompact {
+            event_json,
+            user_scope,
+        } => {
+            if user_scope {
+                return Err(requires_projectless_routing("claude_compact"));
+            }
+            HookRuntimeResultV1::ClaudeCompact(claude_compact(&event_json)?)
         }
-        "codex_compact" => codex_compact(cg, &args, session_authorities).await?,
-        "claude_compact" => claude_compact(&args, session_authorities).await?,
-        "cursor_compact" => cursor_compact(cg, &args, session_authorities).await?,
-        other => {
-            return Err(config_error(format!(
-                "unknown hook runtime action: {other}"
-            )));
+        Request::CursorCompact { event_json } => HookRuntimeResultV1::CursorCompact(
+            cursor_compact(&event_json, session_authorities).await?,
+        ),
+        Request::UserReview { .. } => return Err(requires_projectless_routing("user_review")),
+        Request::HermesReceipt { .. } => {
+            return Err(requires_projectless_routing("hermes_receipt"));
         }
-    };
-    Ok(tool_json(
-        Some(&cg.store_layout().response_handle_root),
-        &args,
-        &output,
-    ))
+        Request::HookV2ProfileAdmit { .. } => {
+            return Err(requires_projectless_routing("hook_v2_profile_admit"));
+        }
+    })
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.lsp")]
 async fn opencode_lsp_updated(
     cg: &TraceDecay,
-    args: &Value,
+    event: &Value,
     project_sessions: &RegisteredGlobalDb,
-) -> Result<Value> {
-    let event = args
-        .get("event")
-        .ok_or_else(|| config_error("missing required parameter `event`"))?;
+) -> Result<()> {
     let payload = serde_json::to_vec(event)
         .map_err(|error| config_error(format!("invalid OpenCode LSP event: {error}")))?;
     tracedecay_hooks::decode_opencode_lsp_event(&payload)
@@ -146,96 +164,83 @@ async fn opencode_lsp_updated(
         Some("opencode_lsp_updated"),
     )
     .await;
-    Ok(json!({
-        "action": "opencode_lsp_updated",
-        "status": "accepted",
-    }))
+    Ok(())
 }
 
+/// Runs one hook-runtime action that has no project route: it lands in the
+/// authenticated profile's stores.
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.projectless")]
-pub async fn handle_projectless_hook_runtime(
-    args: Value,
+pub async fn compute_projectless_hook_runtime(
+    request: HookRuntimeSurfaceRequestV1,
     profile_root: &Path,
-    session_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     global_db: &RegisteredGlobalDb,
     session_authorities: SessionAuthorities<'_>,
     host_admission_broker: std::result::Result<&SharedHostAdmissionBroker, HostAdmissionOutcome>,
-    user_refresh: Arc<dyn SessionRefreshWorkerPort>,
-) -> Result<ToolResult> {
-    let action = required_str(&args, "action")?;
-    if !projectless_action_allowed(action, &args) {
-        return Err(config_error(format!(
-            "projectless hook runtime action `{action}` is forbidden"
-        )));
-    }
-    let output = match action {
-        "ingest_transcript" => {
-            // Projectless (user-scope) ingest has no project session store to
-            // correlate hint outcomes against; the settlement runs on
-            // project-scope ingests only.
-            ingest_transcript(
-                None,
-                &args,
-                Some(profile_root),
-                Some(global_db),
-                None,
-                session_authorities,
-            )
-            .await?
+) -> Result<HookRuntimeResultV1> {
+    use HookRuntimeSurfaceRequestV1 as Request;
+    Ok(match request {
+        // Projectless (user-scope) ingest has no project session store to
+        // correlate hint outcomes against; the settlement runs on
+        // project-scope ingests only.
+        Request::IngestTranscript(request) if request.user_scope => {
+            HookRuntimeResultV1::IngestTranscript(Box::new(
+                ingest_transcript(
+                    None,
+                    &request,
+                    Some(profile_root),
+                    Some(global_db),
+                    None,
+                    session_authorities,
+                )
+                .await?,
+            ))
         }
-        "user_review" => user_review(&args, profile_root, &session_runtime_registry).await?,
-        "codex_stop" => retain_codex_stop(
-            &args,
-            profile_root,
-            &session_runtime_registry,
-            &session_authorities,
-            Arc::clone(&user_refresh),
-        )?,
-        "hermes_receipt" => {
+        Request::UserReview { .. } => return Err(user_review_unavailable()),
+        Request::HermesReceipt { event } => {
             let host_admission_broker =
                 host_admission_broker.map_err(|outcome| map_host_admission_outcome(&outcome))?;
-            hermes_receipt(
-                &args,
-                profile_root,
-                Some(&session_runtime_registry),
-                required_user_db(&session_authorities)?,
-                host_admission_broker,
-            )
-            .await?
+            HookRuntimeResultV1::HermesReceipt {
+                status: hermes_receipt(
+                    event,
+                    profile_root,
+                    required_user_db(&session_authorities)?,
+                    host_admission_broker,
+                )
+                .await?,
+            }
         }
-        "hook_v2_profile_admit" => hook_v2_profile_admit(
-            &args,
-            action,
-            profile_root,
-            session_authorities
-                .profile_identity
-                .as_deref()
-                .ok_or_else(|| {
-                    config_error(
-                        "authenticated profile identity is unavailable for Hook V2 admission",
-                    )
-                })?,
-        )?,
-        "claude_compact" => claude_compact(&args, session_authorities).await?,
-        _ => unreachable!("projectless hook action validated above"),
-    };
-    Ok(tool_json(None, &args, &output))
-}
-
-fn projectless_action_allowed(action: &str, args: &Value) -> bool {
-    matches!(
-        action,
-        "codex_stop" | "user_review" | "hermes_receipt" | "hook_v2_profile_admit"
-    ) || (action == "claude_compact"
-        && args.get("user_scope").and_then(Value::as_bool) == Some(true))
-        || (action == "ingest_transcript"
-            && args.get("user_scope").and_then(Value::as_bool) == Some(true))
-}
-
-fn required_value(args: &Value, key: &str) -> Result<Value> {
-    args.get(key)
-        .cloned()
-        .ok_or_else(|| config_error(format!("missing required field `{key}`")))
+        Request::HookV2ProfileAdmit { admission } => {
+            HookRuntimeResultV1::HookV2ProfileAdmit(hook_v2_profile_admit(
+                admission,
+                profile_root,
+                session_authorities
+                    .profile_identity
+                    .as_deref()
+                    .ok_or_else(|| {
+                        config_error(
+                            "authenticated profile identity is unavailable for Hook V2 admission",
+                        )
+                    })?,
+            )?)
+        }
+        Request::ClaudeCompact {
+            event_json,
+            user_scope: true,
+        } => HookRuntimeResultV1::ClaudeCompact(claude_compact(&event_json)?),
+        Request::ResetCounter {}
+        | Request::HookV2Admit(_)
+        | Request::HookV2DeliveryReceipt { .. }
+        | Request::HookV2FeedbackNoticeDelivery { .. }
+        | Request::OpencodeLspUpdated { .. }
+        | Request::IngestTranscript(_)
+        | Request::CodexCompact { .. }
+        | Request::ClaudeCompact { .. }
+        | Request::CursorCompact { .. } => {
+            return Err(config_error(
+                "projectless hook runtime action requires a project route",
+            ));
+        }
+    })
 }
 
 fn required_project_db<'a>(authorities: &SessionAuthorities<'a>) -> Result<&'a RegisteredGlobalDb> {

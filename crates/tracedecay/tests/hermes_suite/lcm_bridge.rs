@@ -1174,11 +1174,12 @@ for index in range(0, len(calls), 2):
     user_call, project_call = calls[index:index + 2]
     assert user_call[0] == "tracedecay_hook_runtime"
     assert user_call[1]["action"] == "ingest_transcript"
-    assert user_call[1]["storage_scope"] == "user"
+    assert user_call[1]["user_scope"] is True
+    assert "storage_scope" not in user_call[1]
     assert user_call[2] == {}
     assert project_call[0] == "tracedecay_hook_runtime"
     assert project_call[1]["action"] == "ingest_transcript"
-    assert "storage_scope" not in project_call[1]
+    assert project_call[1]["user_scope"] is False
     assert project_call[2]["project_root"] == "/tmp/project"
     assert user_call[1]["messages"] == project_call[1]["messages"]
 

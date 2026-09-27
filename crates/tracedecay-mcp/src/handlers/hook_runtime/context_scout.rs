@@ -1,16 +1,14 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
-use tracedecay_agent_hosts::agents::context_scout::address_registry::{
-    AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
-};
-use tracedecay_agent_hosts::agents::context_scout::{
-    ContextScoutControlV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
-};
+use tracedecay_agent_hosts::agents::context_scout::ContextScoutDurableStoreOutcomeV1;
+use tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_contracts::context_scout::{
-    ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1, ContextScoutFeedbackV1,
-    ContextScoutWorkV1,
+    ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1,
+};
+use tracedecay_contracts::retrieval::{
+    ContextScoutStoreStatusV1, HookRuntimeDispositionV1, HookV2NoticeDeliveryResultV1,
 };
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{
@@ -30,19 +28,8 @@ use tracedecay_sessions::observation::{
 };
 use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
 
-use super::admission::{
-    HookV2BindingAdmission, hook_v2_binding_admission, hook_v2_catchup_response,
-};
-use super::envelope::{hook_now, hook_v2_envelope, hook_v2_native_session_id};
-use super::required_value;
-
-async fn hook_v2_context_scout_lifecycle(
-    args: &Value,
-    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-) -> Option<ContextScoutLifecycleAddressV1> {
-    hook_v2_context_scout_lifecycle_for_session(envelope, hook_v2_native_session_id(args, envelope))
-        .await
-}
+use super::admission::{HookV2BindingAdmission, hook_v2_binding_admission};
+use super::envelope::{hook_now, hook_v2_envelope};
 
 pub(super) async fn hook_v2_context_scout_lifecycle_for_session(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -58,11 +45,11 @@ pub(super) async fn hook_v2_context_scout_lifecycle_for_session(
 }
 
 pub(super) fn hook_v2_native_context_scout_lifecycle(
-    args: &Value,
+    native_lifecycle: Option<Value>,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
 ) -> Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1> {
     let lifecycle: tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1 =
-        serde_json::from_value(args.get("native_lifecycle")?.clone()).ok()?;
+        serde_json::from_value(native_lifecycle?).ok()?;
     lifecycle.matches_envelope(envelope).then_some(lifecycle)
 }
 
@@ -284,257 +271,72 @@ fn release_hook_v2_delivery_claim(
     outcome == ContextScoutDurableStoreOutcomeV1::Unavailable
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_prepare")]
-pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Result<Value> {
-    let envelope = hook_v2_envelope(args, "hook_v2_scout_prepare")?;
-    let now = hook_now();
-    let snapshot = match hook_v2_binding_admission(cg, &envelope, now) {
-        HookV2BindingAdmission::Bound(snapshot) => snapshot,
-        HookV2BindingAdmission::Unavailable => {
-            return Ok(json!({
-                "action": "hook_v2_scout_prepare",
-                "status": "unavailable",
-            }));
-        }
-        HookV2BindingAdmission::CatchupRequired => {
-            return Ok(hook_v2_catchup_response("hook_v2_scout_prepare"));
-        }
-    };
-    let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
-    Ok(orchestration_response(
-        "hook_v2_scout_prepare",
-        tracedecay_daemon_service::admit_registered_hook_orchestration(
-            envelope.clone(),
-            snapshot.binding,
-            lifecycle,
-            snapshot.revision,
-            true,
-            None,
-        ),
-    ))
-}
-
-fn orchestration_response(
-    action: &str,
-    outcome: tracedecay_daemon_service::HookOrchestrationAdmissionV1,
-) -> Value {
-    use tracedecay_daemon_service::HookOrchestrationAdmissionV1 as Admission;
-    match outcome {
-        Admission::Enqueued => json!({ "action": action, "status": "accepted" }),
-        Admission::Backpressured => json!({ "action": action, "status": "deferred" }),
-        Admission::UnsupportedTrigger => json!({ "action": action, "status": "unsupported" }),
-        Admission::Unavailable => json!({
-            "action": action,
-            "status": "unavailable",
-            "reason": "orchestration_unavailable",
-        }),
-    }
-}
-
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_delivery")]
-pub(super) async fn hook_v2_delivery_receipt(cg: &TraceDecay, args: &Value) -> Result<Value> {
-    let receipt = required_value(args, "receipt")?;
+pub(super) async fn hook_v2_delivery_receipt(
+    cg: &TraceDecay,
+    receipt: Value,
+) -> Result<ContextScoutStoreStatusV1> {
     let receipt = serde_json::from_value::<ContextScoutDeliveryReceiptV1>(receipt)
         .map_err(|error| config_error(format!("invalid Context Scout receipt: {error}")))?;
     let Some(owner) = cg.context_scout_owner() else {
-        return Ok(json!({ "status": "unavailable" }));
+        return Ok(ContextScoutStoreStatusV1::Unavailable);
     };
-    let mut retained_project_id = None;
-    let claim = match args.get("claim").cloned() {
-        Some(claim) => serde_json::from_value::<ContextScoutDurableClaimV1>(claim)
-            .map_err(|error| config_error(format!("invalid Context Scout claim: {error}")))?,
-        None => {
-            let Some(project_id) =
-                tracedecay_agent_hosts::hooks::hook_project_id_for_layout(cg.hook_store_layout())
-            else {
-                return Ok(json!({ "status": "unavailable" }));
-            };
-            let Some(claim) = lookup_hook_v2_delivery_claim(project_id, receipt.envelope_id) else {
-                return Ok(json!({ "status": "unavailable" }));
-            };
-            retained_project_id = Some(project_id);
-            claim
-        }
+    let Some(project_id) =
+        tracedecay_agent_hosts::hooks::hook_project_id_for_layout(cg.hook_store_layout())
+    else {
+        return Ok(ContextScoutStoreStatusV1::Unavailable);
+    };
+    let Some(claim) = lookup_hook_v2_delivery_claim(project_id, receipt.envelope_id) else {
+        return Ok(ContextScoutStoreStatusV1::Unavailable);
     };
     let outcome = owner.record_delivery(&claim, &receipt).await;
-    if let Some(project_id) = retained_project_id
-        && release_hook_v2_delivery_claim(project_id, receipt.envelope_id, outcome)
-    {
+    if release_hook_v2_delivery_claim(project_id, receipt.envelope_id, outcome) {
         let _ = owner.requeue(claim).await;
     }
-    Ok(json!({ "status": scout_store_outcome(outcome) }))
+    Ok(scout_store_outcome(outcome))
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_notice")]
-pub(super) async fn hook_v2_feedback_notice_delivery(
+#[hotpath::measure(label = "mcp.hook_runtime.scout_notice")]
+pub(super) fn hook_v2_feedback_notice_delivery(
     cg: &TraceDecay,
-    args: &Value,
-) -> Result<Value> {
-    const ACTION: &str = "hook_v2_feedback_notice_delivery";
-    let envelope = hook_v2_envelope(args, ACTION)?;
+    envelope: Value,
+    feedback_notice: Value,
+) -> Result<HookV2NoticeDeliveryResultV1> {
+    let envelope = hook_v2_envelope(envelope)?;
     match hook_v2_binding_admission(cg, &envelope, hook_now()) {
         HookV2BindingAdmission::Bound(_) => {}
         HookV2BindingAdmission::Unavailable => {
-            return Ok(json!({ "status": "unavailable" }));
+            return Ok(HookV2NoticeDeliveryResultV1::Unavailable {});
         }
         HookV2BindingAdmission::CatchupRequired => {
-            return Ok(hook_v2_catchup_response(ACTION));
+            return Ok(HookV2NoticeDeliveryResultV1::Rejected {
+                disposition: HookRuntimeDispositionV1::CatchupRequired,
+            });
         }
     }
     let notice = serde_json::from_value::<
         tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
-    >(required_value(args, "feedback_notice")?)
+    >(feedback_notice)
     .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
-    let status = if tracedecay_application::advisory::acknowledge_advisory_hook_notice(
-        envelope.project_id,
-        envelope.worktree_id,
-        &notice,
-    ) {
-        "stored"
-    } else {
-        "unavailable"
-    };
-    Ok(json!({ "status": status }))
+    Ok(
+        if tracedecay_application::advisory::acknowledge_advisory_hook_notice(
+            envelope.project_id,
+            envelope.worktree_id,
+            &notice,
+        ) {
+            HookV2NoticeDeliveryResultV1::Stored {}
+        } else {
+            HookV2NoticeDeliveryResultV1::Unavailable {}
+        },
+    )
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_feedback")]
-pub(super) async fn hook_v2_feedback(cg: &TraceDecay, args: &Value) -> Result<Value> {
-    let receipt =
-        serde_json::from_value::<ContextScoutDeliveryReceiptV1>(required_value(args, "receipt")?)
-            .map_err(|error| config_error(format!("invalid Context Scout receipt: {error}")))?;
-    let feedback =
-        serde_json::from_value::<ContextScoutFeedbackV1>(required_value(args, "feedback")?)
-            .map_err(|error| config_error(format!("invalid Context Scout feedback: {error}")))?;
-    let Some(owner) = cg.context_scout_owner() else {
-        return Ok(json!({ "status": "unavailable" }));
-    };
-    Ok(json!({
-        "status": scout_store_outcome(owner.record_feedback(&receipt, feedback).await),
-    }))
-}
-
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_cancel")]
-pub(super) async fn hook_v2_cancel(cg: &TraceDecay, args: &Value) -> Result<Value> {
-    let work = serde_json::from_value::<ContextScoutWorkV1>(required_value(args, "work")?)
-        .map_err(|error| config_error(format!("invalid Context Scout work: {error}")))?;
-    let Some(owner) = cg.context_scout_owner() else {
-        return Ok(json!({ "status": "unavailable" }));
-    };
-    let status = owner
-        .cancel(work)
-        .await
-        .map_or("unavailable", scout_store_outcome);
-    Ok(json!({ "status": status }))
-}
-
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_status")]
-pub(super) async fn hook_v2_status(cg: &TraceDecay, args: &Value) -> Result<Value> {
-    let control = serde_json::from_value::<ContextScoutControlV1>(required_value(args, "control")?)
-        .map_err(|error| config_error(format!("invalid Context Scout control: {error}")))?;
-    let Some(owner) = cg.context_scout_owner() else {
-        return Ok(json!({ "status": "unavailable" }));
-    };
-    let status = owner
-        .status(control)
-        .await
-        .map_err(|error| config_error(format!("Context Scout status unavailable: {error}")))?;
-    serde_json::to_value(status)
-        .map_err(|error| config_error(format!("Context Scout status encoding failed: {error}")))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ContextScoutReadSurfaceV1 {
-    Recent,
-    Explain,
-    Capability,
-    Budget,
-}
-
-impl ContextScoutReadSurfaceV1 {
-    pub(super) fn from_action(action: &str) -> Option<Self> {
-        match action {
-            "hook_v2_scout_recent" => Some(Self::Recent),
-            "hook_v2_scout_explain" => Some(Self::Explain),
-            "hook_v2_scout_capability" => Some(Self::Capability),
-            "hook_v2_scout_budget" => Some(Self::Budget),
-            _ => None,
-        }
-    }
-}
-
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_read")]
-pub(super) async fn hook_v2_scout_read(
-    cg: &TraceDecay,
-    args: &Value,
-    action: &str,
-) -> Result<Value> {
-    let surface = ContextScoutReadSurfaceV1::from_action(action)
-        .ok_or_else(|| config_error("unknown Context Scout read surface"))?;
-    let envelope = hook_v2_envelope(args, action)?;
-    let observed_at = hook_now();
-    let snapshot = match hook_v2_binding_admission(cg, &envelope, observed_at) {
-        HookV2BindingAdmission::Bound(snapshot) => snapshot,
-        HookV2BindingAdmission::Unavailable => {
-            return Ok(json!({ "action": action, "status": "unavailable" }));
-        }
-        HookV2BindingAdmission::CatchupRequired => {
-            return Ok(hook_v2_catchup_response(action));
-        }
-    };
-    let Some(lifecycle) = hook_v2_context_scout_lifecycle(args, &envelope).await else {
-        return Ok(json!({ "action": action, "status": "unavailable" }));
-    };
-    let Some(hook) = AdmittedContextScoutHookV1::new(envelope, &snapshot.binding) else {
-        return Ok(json!({ "action": action, "status": "unavailable" }));
-    };
-    let Some((address, _)) = cg
-        .resolve_current_context_scout_claim_authority(&hook, &lifecycle, observed_at)
-        .await
-    else {
-        return Ok(json!({ "action": action, "status": "unavailable" }));
-    };
-    let Some(owner) = cg.context_scout_owner() else {
-        return Ok(json!({ "action": action, "status": "unavailable" }));
-    };
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .and_then(|limit| usize::try_from(limit).ok())
-        .unwrap_or(8);
-    let value = match surface {
-        ContextScoutReadSurfaceV1::Recent => {
-            owner.recent_exact(address, limit).await.and_then(|recent| {
-                serde_json::to_value(recent).map_err(|_| ContextScoutErrorV1::InvalidLimits)
-            })
-        }
-        ContextScoutReadSurfaceV1::Explain => {
-            owner
-                .explain_exact(address, limit)
-                .await
-                .and_then(|explanation| {
-                    serde_json::to_value(explanation)
-                        .map_err(|_| ContextScoutErrorV1::InvalidLimits)
-                })
-        }
-        ContextScoutReadSurfaceV1::Capability => owner.capability().await.and_then(|capability| {
-            serde_json::to_value(capability).map_err(|_| ContextScoutErrorV1::InvalidLimits)
-        }),
-        ContextScoutReadSurfaceV1::Budget => owner.budget().await.and_then(|budget| {
-            serde_json::to_value(budget).map_err(|_| ContextScoutErrorV1::InvalidLimits)
-        }),
-    };
-    match value {
-        Ok(value) => Ok(json!({ "action": action, "status": "ready", "value": value })),
-        Err(_) => Ok(json!({ "action": action, "status": "unavailable" })),
-    }
-}
-
-fn scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1) -> &'static str {
+fn scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1) -> ContextScoutStoreStatusV1 {
     match outcome {
-        ContextScoutDurableStoreOutcomeV1::Stored => "stored",
-        ContextScoutDurableStoreOutcomeV1::Duplicate => "duplicate",
-        ContextScoutDurableStoreOutcomeV1::Superseded => "superseded",
-        ContextScoutDurableStoreOutcomeV1::Unavailable => "unavailable",
+        ContextScoutDurableStoreOutcomeV1::Stored => ContextScoutStoreStatusV1::Stored,
+        ContextScoutDurableStoreOutcomeV1::Duplicate => ContextScoutStoreStatusV1::Duplicate,
+        ContextScoutDurableStoreOutcomeV1::Superseded => ContextScoutStoreStatusV1::Superseded,
+        ContextScoutDurableStoreOutcomeV1::Unavailable => ContextScoutStoreStatusV1::Unavailable,
     }
 }
 

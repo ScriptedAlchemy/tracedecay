@@ -2423,7 +2423,7 @@ fn user_scoped_transcript_ingest_handshakes_projectless_from_filesystem_root_cwd
         "action": "ingest_transcript",
         "provider": "hermes",
         "session_id": "stock-check-session",
-        "storage_scope": "user",
+        "user_scope": true,
         "messages": [
             {"role": "user", "content": "hello", "id": "m1"},
             {"role": "assistant", "content": "hi there", "id": "m2"}
@@ -2523,6 +2523,7 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
         "action": "ingest_transcript",
         "provider": "hermes",
         "session_id": "stock-check-session",
+        "user_scope": false,
         "messages": [
             {
                 "role": "user",

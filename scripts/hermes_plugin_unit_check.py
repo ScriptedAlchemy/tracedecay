@@ -949,7 +949,8 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
         user_name, user_args, user_kwargs = turn_calls[0]
         assert user_name == "tracedecay_hook_runtime"
         assert user_args["action"] == "ingest_transcript"
-        assert user_args["storage_scope"] == "user", user_args
+        assert user_args["user_scope"] is True, user_args
+        assert "storage_scope" not in user_args, user_args
         assert "project_root" not in user_kwargs, user_kwargs
         name, args, kwargs = turn_calls[1]
         assert name == "tracedecay_hook_runtime", transcript_calls
@@ -973,7 +974,7 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
         provider.sync_turn("only user", "and assistant", session_id="s2", messages=None)
         turn_calls = transcript_calls[before:]
         assert len(turn_calls) == 2, turn_calls
-        assert turn_calls[0][1]["storage_scope"] == "user", turn_calls
+        assert turn_calls[0][1]["user_scope"] is True, turn_calls
         assert "project_root" not in turn_calls[0][2], turn_calls
         name, args, kwargs = turn_calls[1]
         assert name == "tracedecay_hook_runtime", transcript_calls
@@ -1003,7 +1004,7 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
         assert len(transcript_calls) == before + 1
         name, args, kwargs = transcript_calls[-1]
         assert name == "tracedecay_hook_runtime"
-        assert args["storage_scope"] == "user", args
+        assert args["user_scope"] is True, args
         assert "project_root" not in kwargs, kwargs
         provider.handle_tool_call("fact_store", {"action": "add", "content": "pref"})
         name, args, kwargs = calls[-1]
@@ -1033,7 +1034,7 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
         )
         turn_calls = transcript_calls[before:]
         assert len(turn_calls) == 2, turn_calls
-        assert turn_calls[0][1]["storage_scope"] == "user", turn_calls
+        assert turn_calls[0][1]["user_scope"] is True, turn_calls
         assert "project_root" not in turn_calls[0][2], turn_calls
         name, args, kwargs = turn_calls[1]
         assert name == "tracedecay_hook_runtime"

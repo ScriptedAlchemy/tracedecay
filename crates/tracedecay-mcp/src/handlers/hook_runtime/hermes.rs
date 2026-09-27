@@ -1,64 +1,21 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
 use tracedecay_automation_runtime::automation::config_error;
-use tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus;
+use tracedecay_contracts::retrieval::HermesReceiptStatusV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{SharedHostAdmissionBroker, TerminalReason};
 use tracedecay_sessions::admission::HostAdmissionOutcome;
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
-use super::required_str;
 use crate::map_host_admission_outcome;
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.review")]
-pub(super) async fn user_review(
-    args: &Value,
-    profile_root: &Path,
-    session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
-) -> Result<Value> {
-    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
-
-    let provider = required_str(args, "provider")?;
-    let session_id = args
-        .get("session_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let run_id = args
-        .get("run_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let run = run_user_review(
-        profile_root,
-        Arc::clone(session_runtime_registry),
-        provider,
-        session_id,
-        run_id,
-        AutomationTrigger::HostReceipt,
-    )?;
-    Ok(json!({
-        "action": "user_review",
-        "status": "completed",
-        "session_reflector": run.session_reflector.ledger_record.status,
-        "memory_curator": run.memory_curator.ledger_record.status,
-        "skill_writer": run.skill_writer.ledger_record.status,
-    }))
-}
-
-fn run_user_review(
-    _profile_root: &std::path::Path,
-    _session_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-    _provider: &str,
-    _session_id: Option<String>,
-    _run_id: Option<String>,
-    _trigger: tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger,
-) -> Result<tracedecay_automation_runtime::automation::runner::UserSessionAutomationRun> {
-    Err(config_error(
+/// Session review needs automation, which only a pinned project
+/// configuration carries; a projectless route can never run it.
+pub(super) fn user_review_unavailable() -> tracedecay_domain::errors::TraceDecayError {
+    config_error(
         "projectless Hermes review is unavailable: automation requires a pinned project configuration",
-    ))
+    )
 }
 
 async fn apply_projectless_hermes_receipt_plan(
@@ -236,16 +193,15 @@ pub async fn replay_projectless_hermes_host_admission(
 
 async fn continue_projectless_hermes_review(
     profile_root: &Path,
-    session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
     session_db: &RegisteredGlobalDb,
-) -> Result<Value> {
+) -> Result<HermesReceiptStatusV1> {
     let dashboard_root =
         tracedecay_automation_runtime::automation::runner::user_automation_root(profile_root);
     let Some(ready) =
         tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root)
             .await?
     else {
-        return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
+        return Ok(HermesReceiptStatusV1::Ingested);
     };
     if session_db
         .lcm_raw_message_store_id("hermes", &ready.transcript_watermark)
@@ -258,47 +214,18 @@ async fn continue_projectless_hermes_review(
         )?
         .is_none()
     {
-        return Ok(json!({ "action": "hermes_receipt", "status": "awaiting_transcript" }));
+        return Ok(HermesReceiptStatusV1::AwaitingTranscript);
     }
-    let session_id = ready
-        .pending
-        .route
-        .as_ref()
-        .and_then(|route| route.session_id.clone());
-    let run = run_user_review(
-        profile_root,
-        Arc::clone(session_runtime_registry),
-        "hermes",
-        session_id,
-        Some(format!("user_host_receipt_{}", ready.pending.generation)),
-        tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::HostReceipt,
-    )?;
-    if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
-        && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
-        && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded
-    {
-        tracedecay_automation_runtime::automation::host_receipts::mark_consumed(
-            &dashboard_root,
-            &ready.pending.session_key,
-            ready.pending.generation,
-        )
-        .await?;
-    }
-    Ok(json!({ "action": "hermes_receipt", "status": "reviewed" }))
+    Err(user_review_unavailable())
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.hermes")]
 pub(super) async fn hermes_receipt(
-    args: &Value,
+    event_value: Value,
     profile_root: &Path,
-    session_runtime_registry: Option<&Arc<DaemonSessionRuntimeRegistryV1>>,
     session_db: &RegisteredGlobalDb,
     broker: &SharedHostAdmissionBroker,
-) -> Result<Value> {
-    let event_value = args
-        .get("event")
-        .cloned()
-        .ok_or_else(|| config_error("missing required parameter `event`"))?;
+) -> Result<HermesReceiptStatusV1> {
     let event: tracedecay_hooks::core_events::DaemonHookEvent =
         serde_json::from_value(event_value.clone())?;
     if event.receipt.is_none() {
@@ -346,17 +273,9 @@ pub(super) async fn hermes_receipt(
         return Err(map_host_admission_outcome(&outcome));
     }
     if is_turn_ingested {
-        let session_runtime_registry = session_runtime_registry.ok_or_else(|| {
-            config_error("Hermes review requires retained profile runtime registry authority")
-        })?;
-        return continue_projectless_hermes_review(
-            profile_root,
-            session_runtime_registry,
-            session_db,
-        )
-        .await;
+        return continue_projectless_hermes_review(profile_root, session_db).await;
     }
-    Ok(json!({ "action": "hermes_receipt", "status": "recorded" }))
+    Ok(HermesReceiptStatusV1::Recorded)
 }
 
 #[cfg(test)]

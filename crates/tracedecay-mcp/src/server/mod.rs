@@ -20,7 +20,7 @@ pub use dispatch::{
     needs_lazy_sync_before_dispatch,
 };
 pub use live_transcript_refresh::{
-    LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
+    LiveTranscriptRefreshJoin, join_hook_ingest_refresh, join_required_live_transcript_refresh,
 };
 pub use project_host_admission_replay::{
     ProjectHostAdmissionReplayTask, ProjectHostAdmissionReplayWorker,

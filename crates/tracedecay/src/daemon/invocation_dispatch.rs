@@ -379,6 +379,14 @@ pub(super) async fn execute_portable_daemon_invocation(
         DaemonInvocationPayload::ProfileGraphTool { .. } => handshake.project_path.clone(),
         _ => None,
     };
+    let requirement = match &request.payload {
+        DaemonInvocationPayload::GraphTool {
+            surface_operation: tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime,
+            arguments,
+            ..
+        } => super::project_open_admission::hook_runtime_requirement(arguments.get("action")),
+        _ => ProjectServerRequirement::Core,
+    };
     if request.requires_project() {
         let project_server = hotpath::measure_block!(
             "daemon.invocation.project_open",
@@ -389,7 +397,7 @@ pub(super) async fn execute_portable_daemon_invocation(
                 invocation.clone(),
                 http_application_registry.clone(),
                 handshake,
-                ProjectServerRequirement::Core,
+                requirement,
                 #[cfg(test)]
                 project_open_attempts.clone(),
             ))
@@ -449,7 +457,7 @@ pub(super) async fn execute_portable_daemon_invocation(
                     invocation.clone(),
                     http_application_registry.clone(),
                     handshake,
-                    ProjectServerRequirement::Core,
+                    requirement,
                     #[cfg(test)]
                     lsp_project_open_attempts,
                 ),

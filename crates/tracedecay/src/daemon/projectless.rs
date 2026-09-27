@@ -1,23 +1,18 @@
 //! Projectless client handling: tool calls served without a mounted project
 //! (user-scoped LCM, message search, dashboard, doctor, version).
 
-use std::sync::Arc;
-
 use serde_json::json;
 
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_domain::errors::Result;
-use tracedecay_mcp::server::{LiveTranscriptRefreshJoin, join_required_live_transcript_refresh};
 use tracedecay_mcp::tools::catalog_discovery::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
 };
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ToolRegistryMode,
     explore_call_budget, project_catalog_discovery_scope, tool_error_response,
-    tool_result_has_semantic_error,
 };
-use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
 use super::*;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
@@ -521,13 +516,6 @@ async fn projectless_hook_runtime_response(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-    let session_runtime_registry =
-        match boxed_projectless_phase(store_administration.registered_runtime_registry()).await {
-            Ok(registry) => registry,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
     let user_session_db =
         match boxed_projectless_phase(store_administration.registered_profile_session_database())
             .await
@@ -562,12 +550,17 @@ async fn projectless_hook_runtime_response(
             ),
     )
     .await;
-    let user_refresh: Arc<dyn SessionRefreshWorkerPort> = Arc::new(refresh_wake.clone());
-    match boxed_projectless_phase(
-        tracedecay_mcp::handlers::hook_runtime::handle_projectless_hook_runtime(
-            arguments.clone(),
+    let request =
+        match tracedecay_mcp::handlers::hook_runtime::decode_hook_runtime_request(&arguments) {
+            Ok(request) => request,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+    let result = match boxed_projectless_phase(
+        tracedecay_mcp::handlers::hook_runtime::compute_projectless_hook_runtime(
+            request,
             &connection.client_identity.profile_root,
-            session_runtime_registry,
             global_db.as_ref(),
             tracedecay_mcp::handlers::SessionAuthorities::new(None, Some(&user_session_db))
                 .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
@@ -577,31 +570,35 @@ async fn projectless_hook_runtime_response(
                         .background_cpu(),
                 ),
             host_admission_broker,
-            Arc::clone(&user_refresh),
         ),
     )
     .await
     {
-        Ok(result) if tool_result_has_semantic_error(&result) => {
-            JsonRpcResponse::success(id, result.value)
+        Ok(result) => result,
+        Err(error) => {
+            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
         }
-        Ok(result) => match boxed_projectless_phase(join_required_live_transcript_refresh(
-            "tracedecay_hook_runtime",
-            &arguments,
-            None,
-            Some(&refresh_wake),
-        ))
-        .await
+    };
+    if let tracedecay_contracts::retrieval::HookRuntimeResultV1::IngestTranscript(ingest) = &result
+    {
+        if let Err(error) =
+            boxed_projectless_phase(tracedecay_mcp::server::join_hook_ingest_refresh(
+                ingest.user_scope,
+                None,
+                Some(&refresh_wake),
+            ))
+            .await
         {
-            Ok(LiveTranscriptRefreshJoin::PublicationJoined) => {
-                JsonRpcResponse::success(id, result.value)
-            }
-            Ok(LiveTranscriptRefreshJoin::NotRequired) => {
-                refresh_wake.wake();
-                JsonRpcResponse::success(id, result.value)
-            }
-            Err(error) => tool_error_response(id, "tracedecay_hook_runtime", &error),
-        },
+            return tool_error_response(id, "tracedecay_hook_runtime", &error);
+        }
+    } else {
+        refresh_wake.wake();
+    }
+    match serde_json::to_value(&result) {
+        Ok(output) => JsonRpcResponse::success(
+            id,
+            tracedecay_mcp::handlers::tool_json(None, &arguments, &output).value,
+        ),
         Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
 }
@@ -899,59 +896,5 @@ mod projectless_admission_tests {
             !foreign_receipt_exists,
             "retargeting the client symlink must never redirect durable receipt writes"
         );
-    }
-
-    #[tokio::test]
-    async fn removed_client_profile_symlink_keeps_retained_codex_path_pinned() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (real_root, linked_root) = linked_profile_root(temp.path());
-        tracedecay_project::product_runtime::register_fixture_product_runtime();
-        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
-            .expect("install fixture worker authority");
-        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
-            .expect("pin profile identity");
-        let administration = StoreAdministration::default().with_profile_identity(identity);
-        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-            &real_root,
-            1,
-            "projectless-removed-codex-test",
-        )
-        .expect("enter fixture database scope");
-        let client = DaemonClientIdentity::new(linked_root.clone(), linked_root.join("global.db"));
-        let connection = admit_projectless_connection(&client, &administration)
-            .expect("admit symlinked client profile");
-        let runtime_registry = administration
-            .registered_runtime_registry()
-            .await
-            .expect("open profile runtime registry");
-
-        std::fs::remove_file(linked_root.parent().expect("linked profile parent"))
-            .expect("remove client profile symlink after admission");
-        let retained_profile_root = connection.client_identity.profile_root.clone();
-        let retained_global_db_path = connection.client_identity.global_db_path.clone();
-
-        let response = projectless_hook_runtime_response(
-            json!(2),
-            json!({
-                "action": "codex_stop",
-                "session_id": "pinned-codex-session"
-            }),
-            &connection,
-            &administration,
-        )
-        .await;
-        let terminal_shutdown = runtime_registry.shutdown_terminal_tasks().await;
-        administration.shutdown_host_admission_replay().await;
-
-        assert_eq!(retained_profile_root, real_root);
-        assert_eq!(
-            retained_global_db_path,
-            retained_profile_root.join("global.db")
-        );
-        assert!(
-            response.error.is_none(),
-            "retained Codex stop failed after client symlink removal: {response:?}"
-        );
-        terminal_shutdown.expect("join retained Codex task");
     }
 }

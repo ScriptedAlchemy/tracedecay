@@ -109,8 +109,8 @@ async fn admitted_graph_query_for_operation(
     Ok(query)
 }
 
-/// Dispatch administrative tools (`tracedecay_hook_runtime`,
-/// `tracedecay_admin_cli`, `tracedecay_admin_project`).
+/// Dispatch administrative tools (`tracedecay_admin_cli`,
+/// `tracedecay_admin_project`).
 #[hotpath::measure(future = true, label = "mcp.dispatch.admin")]
 pub(super) async fn dispatch_admin_tools(
     tool_name: &str,
@@ -131,16 +131,6 @@ fn dispatch_admin_tools_inner<'a>(
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         match tool_name {
-            "tracedecay_hook_runtime" => {
-                hook_runtime::handle_hook_runtime(
-                    cg,
-                    args,
-                    options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
-                    options.accounting_db,
-                    options.session_authorities,
-                )
-                .await
-            }
             "tracedecay_admin_cli" => {
                 admin_cli::handle_admin_cli(
                     cg,
@@ -743,6 +733,16 @@ async fn compute_owner_side_effect(
                 info::admin_sync(cg, options.code_index_reconcile_sink.as_ref()).await?,
             )
         }
+        ApplicationSurfaceOperation::HookRuntime => GraphToolResultV1::HookRuntime(
+            hook_runtime::compute_hook_runtime(
+                cg,
+                hook_runtime::decode_hook_runtime_request(&args)?,
+                options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
+                options.accounting_db,
+                options.session_authorities.clone(),
+            )
+            .await?,
+        ),
         ApplicationSurfaceOperation::Dashboard => {
             let request = tracedecay_mcp::handlers::decode_primitive_request(
                 &args,

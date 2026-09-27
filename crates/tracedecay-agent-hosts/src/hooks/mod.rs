@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tracedecay_contracts::retrieval::{HookIngestTranscriptRequestV1, HookRuntimeSurfaceRequestV1};
 use tracedecay_hooks::DaemonHookEvent;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
@@ -533,9 +534,10 @@ async fn native_event_project_root(runtime: &HookRuntimeV1, event: &str) -> Opti
 pub(crate) async fn daemon_hook_action(
     runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
-    mut arguments: Value,
+    request: HookRuntimeSurfaceRequestV1,
     telemetry: Option<&analytics::HookTimingSpan>,
 ) -> tracedecay_domain::errors::Result<Value> {
+    let mut arguments = serde_json::to_value(request)?;
     arguments["format"] = serde_json::json!("json");
     let payload_bytes = analytics::measure_json_payload_bytes(&arguments);
     #[cfg(test)]
@@ -577,11 +579,13 @@ pub(crate) async fn ingest_user_session(
     match daemon_hook_action(
         runtime,
         None,
-        serde_json::json!({
-            "action": "ingest_transcript",
-            "provider": provider.to_lowercase(),
-            "user_scope": true,
-            "session_id": session_id,
+        HookRuntimeSurfaceRequestV1::IngestTranscript(HookIngestTranscriptRequestV1 {
+            provider: provider.to_lowercase(),
+            user_scope: true,
+            session_id,
+            event_json: None,
+            messages: None,
+            max_new_bytes: None,
         }),
         telemetry,
     )
@@ -686,16 +690,14 @@ pub(crate) async fn ingest_transcript_for_event(
     budget: Duration,
     telemetry: Option<&analytics::HookTimingSpan>,
 ) -> TranscriptIngestOutcome {
-    let mut args = serde_json::json!({
-        "action": "ingest_transcript",
-        "provider": provider,
-        "user_scope": project_root.is_none(),
-        "event_json": event_json,
+    let args = HookRuntimeSurfaceRequestV1::IngestTranscript(HookIngestTranscriptRequestV1 {
+        provider: provider.to_owned(),
+        user_scope: project_root.is_none(),
+        session_id: None,
+        event_json: Some(event_json.to_owned()),
+        messages: None,
+        max_new_bytes,
     });
-    if let Some(max_new_bytes) = max_new_bytes {
-        args["max_new_bytes"] = serde_json::json!(max_new_bytes);
-    }
-    args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
     match await_within_stop_budget(
         async {
             match daemon_hook_action(runtime, project_root, args, telemetry).await {
@@ -729,7 +731,7 @@ pub(crate) async fn reset_counter_for_project(
     if let Err(error) = daemon_hook_action(
         runtime,
         Some(project_root),
-        serde_json::json!({ "action": "reset_counter" }),
+        HookRuntimeSurfaceRequestV1::ResetCounter {},
         telemetry,
     )
     .await
@@ -748,25 +750,6 @@ pub fn additional_context_json(event_name: &str, additional_context: &str) -> St
         }
     })
     .to_string()
-}
-
-pub(crate) fn compact_daemon_args(
-    action: &str,
-    provider: &str,
-    user_scope: bool,
-    event_json: &str,
-    session_id: Option<&str>,
-) -> Value {
-    let mut args = serde_json::json!({
-        "action": action,
-        "provider": provider,
-        "user_scope": user_scope,
-        "event_json": event_json,
-    });
-    if let Some(session_id) = session_id {
-        args["session_id"] = serde_json::json!(session_id);
-    }
-    args
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.notify_event")]
@@ -841,14 +824,18 @@ pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
     {
         if let Some(project_root) = project_root.as_ref() {
             notify_hook_event_with_telemetry(runtime, project_root, event, &hook_telemetry).await;
-        } else if let Err(error) = daemon_hook_action(
-            runtime,
-            None,
-            serde_json::json!({ "action": "hermes_receipt", "event": event }),
-            Some(&hook_telemetry),
-        )
-        .await
-        {
+        } else if let Err(error) = match serde_json::to_value(&event) {
+            Ok(event) => {
+                daemon_hook_action(
+                    runtime,
+                    None,
+                    HookRuntimeSurfaceRequestV1::HermesReceipt { event },
+                    Some(&hook_telemetry),
+                )
+                .await
+            }
+            Err(error) => Err(error.into()),
+        } {
             tracing::warn!(%error, "user Hermes receipt daemon call failed");
         }
     }
@@ -878,11 +865,10 @@ pub async fn schedule_user_session_review(
     let hint = daemon_hook_action(
         runtime,
         None,
-        serde_json::json!({
-            "action": "user_review",
-            "provider": provider,
-            "session_id": session_id,
-        }),
+        HookRuntimeSurfaceRequestV1::UserReview {
+            provider: provider.to_owned(),
+            session_id: session_id.map(str::to_owned),
+        },
         None,
     );
     let _ = tokio::time::timeout(std::time::Duration::from_millis(25), hint).await;

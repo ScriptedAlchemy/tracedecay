@@ -512,7 +512,7 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
         .call_tool(
             &project,
             "tracedecay_hook_runtime",
-            json!({"action": "ingest_transcript", "provider": "codex", "format": "json"}),
+            json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"}),
         )
         .await
         .expect("production Codex hook ingest invocation");
@@ -742,7 +742,7 @@ async fn production_hook_ingest_reads_only_the_pinned_transcript_home() {
         &harness,
         &project,
         "tracedecay_hook_runtime",
-        json!({"action": "ingest_transcript", "provider": "codex", "format": "json"}),
+        json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"}),
     )
     .await;
     assert_eq!(ingest["completed"], true, "{ingest}");

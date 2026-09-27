@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use serde_json::Value;
+use tracedecay_contracts::retrieval::HookIngestTranscriptRequestV1;
 use tracedecay_domain::ObservationScopeV1;
 
 use tracedecay_automation_runtime::automation::config_error;
@@ -31,7 +32,7 @@ use tracedecay_sessions::runtime::hosts::claude_observation::ClaudeObservationIn
 use tracedecay_sessions::runtime::hosts::hermes::HermesSweepOutcome;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
 
-use super::super::{required_str, required_user_db};
+use super::super::{required_field, required_user_db};
 use super::{
     admit_codex_project_rollouts, drain_host_observation_projections, project_observation_id,
 };
@@ -53,8 +54,8 @@ pub(super) enum TranscriptPayloadRouteV1 {
 }
 
 impl TranscriptPayloadRouteV1 {
-    pub(super) fn from_args(args: &Value) -> Self {
-        if args.get("messages").is_some() {
+    pub(super) fn from_request(request: &HookIngestTranscriptRequestV1) -> Self {
+        if request.messages.is_some() {
             Self::InlineMessages
         } else {
             Self::SourceScan
@@ -66,7 +67,7 @@ impl TranscriptPayloadRouteV1 {
 #[derive(Clone)]
 pub(super) struct TranscriptCaptureContext<'a> {
     pub(super) cg: Option<&'a TraceDecay>,
-    pub(super) args: &'a Value,
+    pub(super) request: &'a HookIngestTranscriptRequestV1,
     pub(super) user_scope: bool,
     pub(super) profile_root: Option<&'a Path>,
     pub(super) global_db: Option<&'a RegisteredGlobalDb>,
@@ -270,7 +271,7 @@ async fn capture_claude_profile(
 ) -> Result<TranscriptCaptureOutcome> {
     let profile_root = ctx.profile_root()?;
     let global_db = ctx.global_db()?;
-    let session_id = required_str(ctx.args, "session_id")?.to_string();
+    let session_id = required_field(ctx.request.session_id.as_deref(), "session_id")?.to_string();
     required_user_db(&ctx.session_authorities)?;
     let roots = registered_project_roots(global_db).await?;
     let stats =
@@ -298,7 +299,7 @@ async fn capture_codex_profile(
 ) -> Result<TranscriptCaptureOutcome> {
     let profile_root = ctx.profile_root()?;
     let global_db = ctx.global_db()?;
-    let session_id = required_str(ctx.args, "session_id")?.to_string();
+    let session_id = required_field(ctx.request.session_id.as_deref(), "session_id")?.to_string();
     let roots = registered_project_roots(global_db).await?;
     let outcome =
         tracedecay_sessions::runtime::try_ingest_user_codex_sessions_with_db_and_admission(
@@ -326,7 +327,7 @@ async fn capture_cursor_profile(
 ) -> Result<TranscriptCaptureOutcome> {
     ctx.profile_root()?;
     let global_db = ctx.global_db()?;
-    let event_json = required_str(ctx.args, "event_json")?;
+    let event_json = required_field(ctx.request.event_json.as_deref(), "event_json")?;
     let roots = registered_project_roots(global_db).await?;
     let stats =
         tracedecay_sessions::runtime::hosts::cursor::try_ingest_cursor_user_transcript_event_capped_with_admission(
@@ -441,7 +442,7 @@ async fn capture_cursor_project(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
     let cg = ctx.project()?;
-    let event_json = required_str(ctx.args, "event_json")?;
+    let event_json = required_field(ctx.request.event_json.as_deref(), "event_json")?;
     let stats = tracedecay_sessions::runtime::hosts::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
         event_json,
         project_observation_id(cg)?,
@@ -497,11 +498,11 @@ fn hermes_capture_outcome(outcome: &HermesSweepOutcome) -> Result<TranscriptCapt
 async fn capture_hermes_callback(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
-    let session_id = required_str(ctx.args, "session_id")?;
+    let session_id = required_field(ctx.request.session_id.as_deref(), "session_id")?;
     let messages = ctx
-        .args
-        .get("messages")
-        .and_then(Value::as_array)
+        .request
+        .messages
+        .as_ref()
         .filter(|messages| !messages.is_empty())
         .ok_or_else(|| config_error("Hermes turn callback requires non-empty messages"))?;
     let (scope, project_root) = if ctx.user_scope {
@@ -569,8 +570,11 @@ async fn capture_kiro_project(
 /// never an empty success.
 async fn capture_pi_project(ctx: TranscriptCaptureContext<'_>) -> Result<TranscriptCaptureOutcome> {
     let cg = ctx.project()?;
-    let event: Value = serde_json::from_str(required_str(ctx.args, "event_json")?)
-        .map_err(|error| config_error(format!("invalid Pi event: {error}")))?;
+    let event: Value = serde_json::from_str(required_field(
+        ctx.request.event_json.as_deref(),
+        "event_json",
+    )?)
+    .map_err(|error| config_error(format!("invalid Pi event: {error}")))?;
     let event_str = |key: &str| {
         event
             .get(key)

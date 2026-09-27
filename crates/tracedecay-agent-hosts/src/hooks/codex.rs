@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
 
 use serde_json::Value;
 
@@ -15,11 +16,10 @@ use super::claude::is_code_research_prompt;
 use super::steering::{HookWorkspaceStatus, index_status_line};
 use super::tool_hints::{HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
-    additional_context_json, append_tool_hint, compact_daemon_args, deduped_project_hint_with_id,
-    event_cwd_from_parsed, event_project_root, event_project_root_from_json,
-    event_project_root_with_identity, event_session_id, format_tool_hint,
-    is_project_like_workspace, mint_hint_id, prompt_like_text, read_hook_event,
-    record_hint_analytics, record_hook_analytics, record_hook_invoked_parsed,
+    additional_context_json, append_tool_hint, deduped_project_hint_with_id, event_cwd_from_parsed,
+    event_project_root, event_project_root_from_json, event_project_root_with_identity,
+    event_session_id, format_tool_hint, is_project_like_workspace, mint_hint_id, prompt_like_text,
+    read_hook_event, record_hint_analytics, record_hook_analytics, record_hook_invoked_parsed,
     record_workspace_status_analytics, rel_under_root, text_field,
 };
 use tracedecay_domain::HostIntegrationIdV1;
@@ -545,14 +545,9 @@ async fn codex_post_compact(
     let Some(root) = event_project_root_with_identity(runtime, &parsed).await else {
         return;
     };
-    let session_id = event_session_id(&parsed);
-    let args = compact_daemon_args(
-        "codex_compact",
-        "codex",
-        false,
-        event_json,
-        session_id.as_deref(),
-    );
+    let args = HookRuntimeSurfaceRequestV1::CodexCompact {
+        event_json: event_json.to_owned(),
+    };
     if let Err(error) = super::daemon_hook_action(runtime, Some(&root), args, telemetry).await {
         tracing::warn!(%error, "Codex PostCompact daemon call failed");
     }

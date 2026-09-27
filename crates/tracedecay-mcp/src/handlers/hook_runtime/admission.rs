@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -22,6 +22,10 @@ use super::envelope::{
 };
 use super::required_project_db;
 use crate::handlers::SessionAuthorities;
+use tracedecay_contracts::retrieval::{
+    HookRuntimeDispositionV1, HookV2AdmissionResultV1, HookV2AdmitRequestV1,
+    HookV2ProfileAdmissionResultV1, HookV2RejectionReasonV1,
+};
 
 pub(super) enum HookV2BindingAdmission {
     Bound(tracedecay_hooks::HookConfigurationSnapshotV1),
@@ -59,14 +63,6 @@ pub(super) fn hook_v2_binding_admission(
         ),
     );
     classify_hook_v2_binding(envelope, subscriber.load_current(envelope.producer, now))
-}
-
-pub(super) fn hook_v2_catchup_response(action: &str) -> Value {
-    json!({
-        "action": action,
-        "status": "rejected",
-        "disposition": tracedecay_hooks::HookTransportDispositionV1::CatchupRequired,
-    })
 }
 
 /// Where the daemon keeps the durable admission idempotency ledgers. One
@@ -746,15 +742,16 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
 
 pub(super) async fn hook_v2_admit(
     cg: &TraceDecay,
-    args: &Value,
-    action: &str,
+    request: HookV2AdmitRequestV1,
     session_authorities: SessionAuthorities<'_>,
-) -> Result<Value> {
+) -> Result<HookV2AdmissionResultV1> {
     let project_sessions = required_project_db(&session_authorities)?;
-    let envelope = hook_v2_envelope(args, action)?;
+    let envelope = hook_v2_envelope(request.envelope)?;
     let now = hook_now();
-    let native_session_id = hook_v2_native_session_id(args, &envelope);
-    let native_lifecycle = hook_v2_native_context_scout_lifecycle(args, &envelope);
+    let native_session_id =
+        hook_v2_native_session_id(request.native_session_id.as_deref(), &envelope);
+    let native_lifecycle =
+        hook_v2_native_context_scout_lifecycle(request.native_lifecycle, &envelope);
     Ok(
         match admit_hook_v2_envelope_with_lifecycle(
             cg,
@@ -776,43 +773,38 @@ pub(super) async fn hook_v2_admit(
                 ready_guidance,
                 feedback_notice,
                 github_stack_signal_available,
-            } => json!({
-                "action": action,
-                "status": "accepted",
-                "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
-                "orchestration": orchestration,
-                "context_scout_address": context_scout_address,
-                "ready_guidance": ready_guidance,
-                "feedback_notice": feedback_notice,
-                "github_stack_signal_available": github_stack_signal_available,
-            }),
+            } => HookV2AdmissionResultV1::Accepted {
+                disposition: HookRuntimeDispositionV1::Accepted,
+                orchestration,
+                context_scout_address: context_scout_address.map(|address| *address),
+                ready_guidance: present(ready_guidance),
+                feedback_notice: present(feedback_notice),
+                github_stack_signal_available,
+            },
             HookV2AdmissionOutcomeV1::ExactDuplicate {
                 context_scout_address,
                 ready_guidance,
-            } => json!({
-                "action": action,
-                "status": "exact_duplicate",
-                "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
-                "context_scout_address": context_scout_address,
-                "ready_guidance": ready_guidance,
-            }),
-            HookV2AdmissionOutcomeV1::Conflict => json!({
-                "action": action,
-                "status": "rejected",
-                "disposition": tracedecay_hooks::HookTransportDispositionV1::CatchupRequired,
-                "reason": "admission_identity_conflict",
-            }),
-            HookV2AdmissionOutcomeV1::CatchupRequired => hook_v2_catchup_response(action),
-            HookV2AdmissionOutcomeV1::Backpressured => json!({
-                "action": action,
-                "status": "backpressured",
-            }),
-            HookV2AdmissionOutcomeV1::Unavailable => json!({
-                "action": action,
-                "status": "unavailable",
-            }),
+            } => HookV2AdmissionResultV1::ExactDuplicate {
+                disposition: HookRuntimeDispositionV1::Accepted,
+                context_scout_address: context_scout_address.map(|address| *address),
+                ready_guidance: present(ready_guidance),
+            },
+            HookV2AdmissionOutcomeV1::Conflict => HookV2AdmissionResultV1::Rejected {
+                disposition: HookRuntimeDispositionV1::CatchupRequired,
+                reason: Some(HookV2RejectionReasonV1::AdmissionIdentityConflict),
+            },
+            HookV2AdmissionOutcomeV1::CatchupRequired => HookV2AdmissionResultV1::Rejected {
+                disposition: HookRuntimeDispositionV1::CatchupRequired,
+                reason: None,
+            },
+            HookV2AdmissionOutcomeV1::Backpressured => HookV2AdmissionResultV1::Backpressured {},
+            HookV2AdmissionOutcomeV1::Unavailable => HookV2AdmissionResultV1::Unavailable {},
         },
     )
+}
+
+fn present(value: Value) -> Option<Value> {
+    (!value.is_null()).then_some(value)
 }
 
 /// Admits a native event that has no project route into the authenticated
@@ -820,11 +812,10 @@ pub(super) async fn hook_v2_admit(
 /// material; the daemon owns the profile scope binding and all durable writes.
 #[hotpath::measure(label = "mcp.hook_runtime.profile_admit")]
 pub(super) fn hook_v2_profile_admit(
-    args: &Value,
-    action: &str,
+    admission: Value,
     profile_root: &Path,
     profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
-) -> Result<Value> {
+) -> Result<HookV2ProfileAdmissionResultV1> {
     let routed_profile_root = std::fs::canonicalize(profile_root).map_err(|error| {
         tracedecay_automation_runtime::automation::config_error(format!(
             "failed to resolve authenticated Hook V2 profile route: {error}"
@@ -836,21 +827,12 @@ pub(super) fn hook_v2_profile_admit(
         ));
     }
     let profile_root = profile_identity.profile_root();
-    let admission = args
-        .get("admission")
-        .cloned()
-        .ok_or_else(|| {
+    let admission =
+        serde_json::from_value::<tracedecay_hooks::ProfileScopedNativeHookAdmissionV1>(admission)
+            .map_err(|error| {
             tracedecay_automation_runtime::automation::config_error(format!(
-                "{action} requires admission"
+                "invalid profile-scoped Hook V2 admission: {error}"
             ))
-        })
-        .and_then(|value| {
-            serde_json::from_value::<tracedecay_hooks::ProfileScopedNativeHookAdmissionV1>(value)
-                .map_err(|error| {
-                    tracedecay_automation_runtime::automation::config_error(format!(
-                        "invalid profile-scoped Hook V2 admission: {error}"
-                    ))
-                })
         })?;
     let binding = profile_hook_v2_binding(profile_identity, admission.decoded.host);
     let envelope = admission.into_envelope(&binding).map_err(|error| {
@@ -866,23 +848,22 @@ pub(super) fn hook_v2_profile_admit(
         ledger.admit(&envelope, now)
     });
     Ok(match outcome {
-        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)) => json!({
-            "action": action,
-            "status": "accepted",
-            "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
-        }),
-        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate)) => json!({
-            "action": action,
-            "status": "exact_duplicate",
-            "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
-        }),
-        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Conflict)) => {
-            hook_v2_catchup_response(action)
+        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)) => {
+            HookV2ProfileAdmissionResultV1::Accepted {
+                disposition: HookRuntimeDispositionV1::Accepted,
+            }
         }
-        None | Some(Err(_)) => json!({
-            "action": action,
-            "status": "unavailable",
-        }),
+        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate)) => {
+            HookV2ProfileAdmissionResultV1::ExactDuplicate {
+                disposition: HookRuntimeDispositionV1::Accepted,
+            }
+        }
+        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Conflict)) => {
+            HookV2ProfileAdmissionResultV1::Rejected {
+                disposition: HookRuntimeDispositionV1::CatchupRequired,
+            }
+        }
+        None | Some(Err(_)) => HookV2ProfileAdmissionResultV1::Unavailable {},
     })
 }
 

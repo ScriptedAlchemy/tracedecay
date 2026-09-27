@@ -40,21 +40,6 @@ fn work_and_workflow_advertise_every_executable_request_schema() {
 }
 
 #[test]
-fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
-    assert!(
-        get_tool_definitions()
-            .expect("tool definitions")
-            .iter()
-            .all(|definition| definition.name != "tracedecay_hook_runtime")
-    );
-    let definition = internal_daemon_tool_definition("tracedecay_hook_runtime")
-        .expect("internal host-ingest definition");
-    assert_eq!(definition.name, "tracedecay_hook_runtime");
-    assert_eq!(definition.input_schema, json!({ "type": "object" }));
-    assert!(internal_daemon_tool_definition("tracedecay_unknown").is_none());
-}
-
-#[test]
 fn stack_snapshot_requires_an_exact_selection_binding() {
     let definition = get_tool_definitions()
         .expect("tool definitions")

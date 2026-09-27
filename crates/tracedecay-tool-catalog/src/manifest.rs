@@ -142,6 +142,9 @@ pub enum EffectClass {
     /// Queues work on a daemon-owned scheduler; the call answers with the
     /// scheduler's admission, not the finished work.
     SchedulesWork,
+    /// Records a host's session evidence (transcripts, hook admissions,
+    /// receipts) in daemon-owned session stores.
+    RecordsHostEvidence,
 }
 
 impl EffectClass {
@@ -154,7 +157,10 @@ impl EffectClass {
     pub const fn is_owner_side_effect(self) -> bool {
         matches!(
             self,
-            Self::SpawnsProcess | Self::BindsServer | Self::SchedulesWork
+            Self::SpawnsProcess
+                | Self::BindsServer
+                | Self::SchedulesWork
+                | Self::RecordsHostEvidence
         )
     }
 

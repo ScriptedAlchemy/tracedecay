@@ -2420,13 +2420,13 @@ class TracedecayMemoryProvider(MemoryProvider):
         # so one turn can be searched from every repository it actually touched
         # without binding the long-lived host session to any one project.
         for project_root in [None, *project_roots]:
-            args = _lcm_store_args({
+            args = {
                 "action": "ingest_transcript",
                 "provider": STANDARD_HERMES_LCM_PROVIDER,
                 "session_id": sid,
                 "messages": turn_messages,
                 "user_scope": project_root is None,
-            }, project_root)
+            }
             try:
                 result = call_tracedecay_json(
                     "tracedecay_hook_runtime",

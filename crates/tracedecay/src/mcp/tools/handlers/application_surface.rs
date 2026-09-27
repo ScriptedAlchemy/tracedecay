@@ -589,6 +589,11 @@ pub(crate) fn graph_tool_error_problem(
     {
         return tracedecay_contracts::ApplicationProblem::from_detail(detail);
     }
+    // A hook's admission authority names its own reason and retry verdict;
+    // they travel as the problem's code and retry directive.
+    if let Some((reason_code, retryable, detail)) = error.hook_runtime_context() {
+        return graph_tool_unavailable(reason_code, retryable, detail);
+    }
     match error {
         TraceDecayError::Config { message } => {
             tracedecay_contracts::ApplicationProblem::invalid_request_without_action(

@@ -79,6 +79,7 @@ mod grep_behavior_test;
 mod health_behavior_test;
 #[cfg(feature = "test-transport")]
 mod hermes_skill_bridge_test;
+mod hook_runtime_request_test;
 mod impact_behavior_test;
 mod implementations_test;
 mod info_file_request_test;
