@@ -285,7 +285,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ProfileExecutor {
                     deadline,
                     cancellation: context,
                     ..
-                } => Box::pin(super::profile_registry::invoke_profile_registry_read(
+                } => Box::pin(super::profile_owner::invoke_profile_owner_operation(
                     &self.store_administration,
                     self.active_project_root.as_deref(),
                     request.request_id,

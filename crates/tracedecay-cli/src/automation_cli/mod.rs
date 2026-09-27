@@ -27,20 +27,6 @@ async fn daemon_project_dashboard_root(
     Ok(std::path::PathBuf::from(data_root).join("dashboard"))
 }
 
-async fn daemon_automation_action(
-    profile: &ProfileRoot,
-    project_path: &std::path::Path,
-    args: serde_json::Value,
-) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    crate::commands::daemon_tool_json(
-        profile,
-        Some(project_path),
-        "tracedecay_admin_project",
-        args,
-    )
-    .await
-}
-
 pub(crate) async fn handle_automation_command(
     profile: &ProfileRoot,
     action: AutomationAction,
@@ -74,28 +60,5 @@ pub(crate) async fn handle_automation_command(
             )
             .await
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::facts::{
-        automatic_fact_receipt_list_rpc_args, automatic_fact_receipt_view_rpc_args,
-    };
-
-    #[test]
-    fn automatic_fact_receipt_rpc_requests_preserve_arguments() {
-        assert_eq!(
-            automatic_fact_receipt_list_rpc_args(Some("applied"), 50),
-            serde_json::json!({
-                "action": "automatic_fact_receipt_list",
-                "state": "applied",
-                "limit": 50,
-            })
-        );
-        assert_eq!(
-            automatic_fact_receipt_view_rpc_args("fact_7"),
-            serde_json::json!({ "action": "automatic_fact_receipt_view", "id": "fact_7" })
-        );
     }
 }

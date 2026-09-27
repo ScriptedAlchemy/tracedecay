@@ -1,3 +1,4 @@
+mod admin_project_surface;
 mod analysis_report_surface;
 mod analytics_surface;
 mod automation_surface;
@@ -74,6 +75,16 @@ fn validate_current_temporal_meta(
 
 /// The Remote Brain read is `tracedecay_remote_status`'s catalog result.
 pub use crate::remote::status::RemoteOperationalStatusReadV1;
+pub use admin_project_surface::{
+    AdminProjectBenchV1, AdminProjectCounterResetV1, AdminProjectCounterV1,
+    AdminProjectGitignoreStatusV1, AdminProjectResultV1, AdminProjectStatusAccountingV1,
+    AdminProjectSurfaceRequestV1, AutomaticFactAddRequestV1, AutomaticFactEvidenceV1,
+    AutomaticFactReceiptAvailabilityV1, AutomaticFactReceiptListV1, AutomaticFactReceiptStateV1,
+    AutomaticFactReceiptV1, AutomaticFactReceiptViewV1, AutomationReconcileScope,
+    AutomationSchedulerOwnerReconcileOutcome, AutomationSchedulerReconcileOutcome,
+    ProfileAutomationReconcileReport, ProjectAutomationReconcileReport,
+    UncachedProjectReconcileOutcome,
+};
 pub use analysis_report_surface::{
     CircularCycleV1, CircularResultV1, CircularSurfaceRequestV1, ComplexityReportEntryV1,
     ComplexityReportV1, ComplexitySurfaceRequestV1, ConstructorFieldCoverageV1,

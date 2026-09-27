@@ -1,21 +1,18 @@
-use super::daemon_automation_action;
 use crate::cli::AutomationFactsAction;
 use crate::resolve_cli_project_root;
+use tracedecay_contracts::retrieval::{
+    AdminProjectResultV1, AdminProjectSurfaceRequestV1, AutomaticFactReceiptStateV1,
+};
 use tracedecay_runtime_core::config::ProfileRoot;
 
-pub(super) fn automatic_fact_receipt_list_rpc_args(
-    state: Option<&str>,
-    limit: usize,
-) -> serde_json::Value {
-    serde_json::json!({
-        "action": "automatic_fact_receipt_list",
-        "state": state,
-        "limit": limit,
+fn receipt_state(state: &str) -> tracedecay_domain::errors::Result<AutomaticFactReceiptStateV1> {
+    serde_json::from_value(serde_json::Value::String(state.to_owned())).map_err(|_| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "invalid automatic fact state `{state}`; expected applied or quarantined"
+            ),
+        }
     })
-}
-
-pub(super) fn automatic_fact_receipt_view_rpc_args(id: &str) -> serde_json::Value {
-    serde_json::json!({ "action": "automatic_fact_receipt_view", "id": id })
 }
 
 pub(super) async fn handle_automation_facts_command(
@@ -28,23 +25,21 @@ pub(super) async fn handle_automation_facts_command(
         }
     };
     let project_path = resolve_cli_project_root(profile, path, None, None).await?;
-    let payload = match action {
+    let request = match action {
         AutomationFactsAction::List { state, limit, .. } => {
-            daemon_automation_action(
-                profile,
-                &project_path,
-                automatic_fact_receipt_list_rpc_args(state.as_deref(), limit),
-            )
-            .await?
+            AdminProjectSurfaceRequestV1::AutomaticFactReceiptList {
+                state: state.as_deref().map(receipt_state).transpose()?,
+                limit,
+            }
         }
         AutomationFactsAction::View { id, .. } => {
-            daemon_automation_action(
-                profile,
-                &project_path,
-                automatic_fact_receipt_view_rpc_args(&id),
-            )
-            .await?
+            AdminProjectSurfaceRequestV1::AutomaticFactReceiptView { id }
         }
+    };
+    let payload = match crate::commands::admin_project(profile, &project_path, request).await? {
+        result @ (AdminProjectResultV1::AutomaticFactReceiptList(_)
+        | AdminProjectResultV1::AutomaticFactReceiptView(_)) => serde_json::to_value(result)?,
+        _ => return Err(crate::commands::unexpected_admin_project_result()),
     };
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())

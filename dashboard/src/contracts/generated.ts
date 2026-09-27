@@ -2390,7 +2390,7 @@ export type DuplicateEffortKindV1 = z.infer<typeof DuplicateEffortKindV1Schema>;
 
 Git index writes remain separate classes so policy cannot accidentally
 substitute one index mutation for another. */
-export const EffectClassSchema = z.union([z.enum(["administrative", "configuration_write", "git_index_commit", "git_index_stage", "git_index_unstage", "preview", "read", "source_edit"]), z.literal("spawns_process"), z.literal("binds_server"), z.literal("schedules_work")]);
+export const EffectClassSchema = z.union([z.enum(["administrative", "configuration_write", "git_index_commit", "git_index_stage", "git_index_unstage", "preview", "read", "source_edit"]), z.literal("spawns_process"), z.literal("binds_server"), z.literal("schedules_work"), z.literal("maintains_owner_state")]);
 export type EffectClass = z.infer<typeof EffectClassSchema>;
 
 /** Durable effect proof. It records identities and receipts, never credentials

@@ -1,26 +1,26 @@
 use crate::cli::AutomationConfigAction;
 use crate::resolve_cli_project_root;
+use tracedecay_contracts::retrieval::{
+    AdminProjectResultV1, AdminProjectSurfaceRequestV1, AutomationReconcileScope,
+};
 use tracedecay_runtime_core::config::ProfileRoot;
-
-pub(crate) fn project_automation_reconcile_args() -> serde_json::Value {
-    serde_json::json!({
-        "action": "automation_reconcile",
-        "scope": "project"
-    })
-}
 
 pub(crate) async fn notify_project_automation_scheduler(
     profile: &ProfileRoot,
     project_path: &std::path::Path,
 ) -> tracedecay_domain::errors::Result<()> {
-    crate::commands::daemon_tool_json(
+    match crate::commands::admin_project(
         profile,
-        Some(project_path),
-        "tracedecay_admin_project",
-        project_automation_reconcile_args(),
+        project_path,
+        AdminProjectSurfaceRequestV1::AutomationReconcile {
+            scope: AutomationReconcileScope::Project,
+        },
     )
-    .await
-    .map(|_| ())
+    .await?
+    {
+        AdminProjectResultV1::ProjectAutomationReconcile(_) => Ok(()),
+        _ => Err(crate::commands::unexpected_admin_project_result()),
+    }
 }
 
 pub(super) async fn handle_automation_config_command(
