@@ -376,6 +376,7 @@ async fn admin_cli_actions_answer_through_the_owner_and_refuse_arguments_outside
         .await,
         json!({"empty": false})
     );
+    // The ledger total only grows: each update records the larger total.
     let first = call_json(
         &fixture,
         "tracedecay_admin_cli",
@@ -387,10 +388,10 @@ async fn admin_cli_actions_answer_through_the_owner_and_refuse_arguments_outside
         call_json(
             &fixture,
             "tracedecay_admin_cli",
-            json!({"action": "registry_update", "tokens": 7}),
+            json!({"action": "registry_update", "tokens": 50}),
         )
         .await,
-        json!({"previous": 42, "current": 7})
+        json!({"previous": 42, "current": 50})
     );
     assert_eq!(
         call_json(
@@ -399,7 +400,7 @@ async fn admin_cli_actions_answer_through_the_owner_and_refuse_arguments_outside
             json!({"action": "registry_project_tokens", "project_args": [root]}),
         )
         .await,
-        json!({"projects": [{"project": root, "tokens": 7}]})
+        json!({"projects": [{"project": root, "tokens": 50}]})
     );
     let context = call_json(
         &fixture,
@@ -433,7 +434,7 @@ async fn admin_cli_actions_answer_through_the_owner_and_refuse_arguments_outside
         refusal(
             &fixture,
             "tracedecay_admin_cli",
-            json!({"action": "registry_update", "tokens": 1, "project_arg": "/elsewhere"})
+            json!({"action": "registry_update", "tokens": 99, "project_arg": "/elsewhere"})
         )
         .await,
         invalid(
@@ -449,7 +450,7 @@ async fn admin_cli_actions_answer_through_the_owner_and_refuse_arguments_outside
             json!({"action": "registry_project_tokens", "project_args": [root]}),
         )
         .await,
-        json!({"projects": [{"project": root, "tokens": 7}]})
+        json!({"projects": [{"project": root, "tokens": 50}]})
     );
 
     fixture.harness.shutdown().await;

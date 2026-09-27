@@ -185,6 +185,44 @@ fn production_tool_payload(response: serde_json::Value) -> Value {
         .unwrap_or(envelope)
 }
 
+/// An owner result's body, read back through `tracedecay_retrieve` the way a
+/// host recovers it when the response budget truncated it to a handle.
+#[cfg(feature = "test-transport")]
+async fn recovered_owner_payload(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    response: Value,
+) -> Value {
+    let payload = production_tool_payload(response);
+    if payload["truncated"] != true {
+        return payload;
+    }
+    let mut body = String::new();
+    let mut offset = 0;
+    loop {
+        let page = harness
+            .call_tool(
+                project,
+                "tracedecay_retrieve",
+                json!({ "handle": payload["handle"], "format": "json", "offset": offset }),
+            )
+            .await
+            .expect("retrieve invocation");
+        let page: Value = serde_json::from_str(
+            page.result.expect("retrieve result")["content"][0]["text"]
+                .as_str()
+                .expect("retrieve text"),
+        )
+        .expect("retrieve page JSON");
+        body.push_str(page["content"].as_str().expect("retrieved content"));
+        match page["next_offset"].as_u64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    serde_json::from_str(&body).expect("recovered owner body JSON")
+}
+
 #[cfg(feature = "test-transport")]
 async fn call_production_tool(
     harness: &ProductionProjectCompositionHarnessV1,
@@ -824,7 +862,7 @@ async fn completed_session_import_immediately_searches_canonical_message() {
                 .expect("production transcript import status");
             let result = status.result.expect("production transcript status result");
             assert_ne!(result["isError"], true, "{result}");
-            let payload = production_tool_payload(result);
+            let payload = recovered_owner_payload(&harness, &project, result).await;
             if payload["status"] == "complete" {
                 break payload;
             }
