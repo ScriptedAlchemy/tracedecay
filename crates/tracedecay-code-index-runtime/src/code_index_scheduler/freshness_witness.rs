@@ -306,10 +306,12 @@ impl CachedCandidateRosterV1 {
     fn holds(&self, git_metadata_signature: &str, admitted_paths: &[String]) -> bool {
         self.git_metadata_signature == git_metadata_signature
             && self.admitted_paths == admitted_paths
-            && self
-                .evidence
-                .iter()
-                .all(|(path, key)| sample(path).is_ok_and(|now| now == *key))
+            && parallelism::install(|| {
+                self.evidence
+                    .par_iter()
+                    .all(|(path, key)| sample(path).is_ok_and(|now| now == *key))
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -501,27 +503,33 @@ impl SourceSweepCacheV1 {
                 candidates
             }
         };
-        let mut present = Vec::new();
-        for candidate in candidates.iter().filter(|candidate| {
-            candidate.explicitly_admitted || !is_generated_path_segment(&candidate.logical_path)
-        }) {
-            let absolute = project_root.join(&candidate.logical_path);
-            let Ok(metadata) = std::fs::symlink_metadata(&absolute) else {
-                continue;
-            };
-            // A link's own key says nothing about its target's bytes.
-            let key = if metadata.file_type().is_symlink() {
-                if !std::fs::metadata(&absolute).is_ok_and(|target| target.is_file()) {
-                    continue;
-                }
-                None
-            } else if metadata.is_file() {
-                Some(StatKeyV1::of(&metadata))
-            } else {
-                continue;
-            };
-            present.push((candidate, key));
-        }
+        let Ok(present) = parallelism::install(|| {
+            candidates
+                .par_iter()
+                .filter(|candidate| {
+                    candidate.explicitly_admitted
+                        || !is_generated_path_segment(&candidate.logical_path)
+                })
+                .filter_map(|candidate| {
+                    let absolute = project_root.join(&candidate.logical_path);
+                    let metadata = std::fs::symlink_metadata(&absolute).ok()?;
+                    // A link's own key says nothing about its target's bytes.
+                    let key = if metadata.file_type().is_symlink() {
+                        if !std::fs::metadata(&absolute).is_ok_and(|target| target.is_file()) {
+                            return None;
+                        }
+                        None
+                    } else if metadata.is_file() {
+                        Some(StatKeyV1::of(&metadata))
+                    } else {
+                        return None;
+                    };
+                    Some((candidate, key))
+                })
+                .collect::<Vec<_>>()
+        }) else {
+            return (false, stats);
+        };
         stats.candidates = present.len();
         hotpath::gauge!("daemon.code_index.freshness.source_sweep.candidates")
             .set(present.len() as u64);
