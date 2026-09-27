@@ -11236,6 +11236,11 @@
           "const": "maintains_owner_state",
           "description": "Maintains bookkeeping the daemon keeps for the project or profile it\nserves: resets a usage counter, records registry token accounting, or\nreconciles automation schedulers with the saved configuration. Each\nwrite settles within the call and answers its new state.",
           "type": "string"
+        },
+        {
+          "const": "records_host_evidence",
+          "description": "Records a host's session evidence (transcripts, hook admissions,\nreceipts) in daemon-owned session stores.",
+          "type": "string"
         }
       ]
     },
