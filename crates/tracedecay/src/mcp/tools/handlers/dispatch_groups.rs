@@ -26,7 +26,6 @@ use tracedecay_mcp::{
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 
 use super::ToolCallRegistryOptions;
-use super::tool_call_support::handle_retrieve;
 use super::{application_surface, dashboard, dispatch_controls, info};
 use tracedecay_mcp::handlers::{
     admin_cli, admin_project, automation_runs, edit, hook_runtime, skills, workflow,
@@ -137,22 +136,15 @@ fn dispatch_graph_tools_inner<'a>(
         let snapshots = AdmittedRequestSnapshotsV1::default();
         let freshness = graph_freshness_reader(tool_name, &options);
         let ctx = admitted_tool_context(&options, &project, &snapshots, freshness)?;
-        match tool_name {
-            // Retrieval reads the live `TraceDecay` store directly rather than
-            // a verified graph open, so it stays with the composition root.
-            "tracedecay_retrieve" => handle_retrieve(cg, &args).await,
-            _ => {
-                portable_graph::dispatch_tool(
-                    &ctx,
-                    &verified_graph_open(&options),
-                    tool_name,
-                    args,
-                    selected_scope_prefix,
-                    options.code_index_ignored_dependency_admission.as_deref(),
-                )
-                .await
-            }
-        }
+        portable_graph::dispatch_tool(
+            &ctx,
+            &verified_graph_open(&options),
+            tool_name,
+            args,
+            selected_scope_prefix,
+            options.code_index_ignored_dependency_admission.as_deref(),
+        )
+        .await
     })
 }
 

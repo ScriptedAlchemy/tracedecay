@@ -208,6 +208,7 @@ application_surface_operations! {
     BranchList => "branch_list";
     Files => "files";
     Config => "config";
+    Retrieve => "retrieve";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -326,6 +327,7 @@ impl ApplicationSurfaceOperation {
         Self::BranchList,
         Self::Files,
         Self::Config,
+        Self::Retrieve,
     ];
 
     pub fn is_graph_tool(self) -> bool {

@@ -290,6 +290,7 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
         | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::Retrieve
         | HealthRead
         | HealthDelta
         | DiagnosticsRead
@@ -340,7 +341,7 @@ macro_rules! binding_groups {
 #[rustfmt::skip]
 const BINDING_GROUPS: &[BindingGroup] = binding_groups![
     [Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_search", "tracedecay_retrieve", "tracedecay_context", "tracedecay_impact",
+        "tracedecay_search", "tracedecay_context", "tracedecay_impact",
         "tracedecay_node", "tracedecay_similar", "tracedecay_redundancy", "tracedecay_rename_preview"],
     [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_status", "tracedecay_remote_status", "tracedecay_active_project",
