@@ -5733,6 +5733,7 @@ name = "tracedecay-code-index"
 version = "0.1.0"
 dependencies = [
  "ast-grep-core",
+ "base64 0.22.1",
  "criterion",
  "flate2",
  "hex",

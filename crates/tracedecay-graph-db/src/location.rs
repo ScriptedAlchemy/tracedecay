@@ -20,7 +20,7 @@ pub struct GraphFormatVersion(u32);
 impl GraphFormatVersion {
     #[must_use]
     pub const fn current() -> Self {
-        Self(4)
+        Self(5)
     }
 
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]

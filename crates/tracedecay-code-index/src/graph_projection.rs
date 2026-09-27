@@ -22,9 +22,9 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphConflictContextV1, GraphDbError, GraphEntity, GraphEntityId,
     GraphEntityRef, GraphGenerationId, GraphGenerationManifest, GraphGenerationManifestIdentity,
     GraphIdempotencyKey, GraphLabel, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
-    GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphServingEnginePin,
-    GraphTraversalDirection, GraphWatermark, SourceGeneration, TraversalRequest,
-    VerifiedGraphSnapshot,
+    GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId,
+    GraphRelationKind, GraphServingEnginePin, GraphWatermark, MAX_VERIFIED_GENERATION_RELATIONS,
+    SourceGeneration, VerifiedGraphSnapshot,
 };
 
 mod builder;
@@ -61,9 +61,9 @@ const CURRENT_GENERATION_ENTITY: &str = "code-current-generation";
 const CURRENT_GENERATION_PROPERTY: &str = "current-generation";
 const PROJECTION_NODE_COUNT_PROPERTY: &str = "projection-node-count";
 const EDGE_RECORD_PROPERTY: &str = "edge-record";
-const EDGE_LABEL: &str = "CodeRelationEvidence";
 const FILE_SYMBOL_EDGE_KIND: &str = "CodeFileContainsSymbol";
-const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
+/// Starts per adjacency fan-out batch; the store bounds one batch's starts.
+const ADJACENCY_SEED_CHUNK: usize = 4_096;
 /// Names the shape of the rows this projector emits for one sealed code
 /// generation; the graph generation id is derived from it, so a revision
 /// bump seals a new graph generation from the same code generation rather
@@ -73,8 +73,11 @@ const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
 /// v7 carries unresolved receiver-call limitations on each source symbol. v8
 /// widens those limitations to bare TypeScript calls whose import the seal
 /// could not bind to project code. v9 names each source relation for its edge
-/// kind, so adjacency filters kinds without decoding the edge.
-pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v9";
+/// kind, so adjacency filters kinds without decoding the edge. v10 stores each
+/// code edge as one relation from its source symbol to its target symbol that
+/// carries the edge record, instead of an edge entity between two relations,
+/// and stores every record as compact text (`schema::compact_record`).
+pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v10";
 
 /// Every semantic edge kind, at its [`relation_edge_kind_index`].
 const RELATION_EDGE_KINDS: [RelationEdgeKindV1; 9] = [
@@ -113,28 +116,28 @@ const _: () = {
     }
 };
 
-/// The kind of the relation from an edge's source symbol to its edge entity:
-/// one per edge kind, so a fan-out names the kinds it admits.
-fn source_edge_kind(kind: RelationEdgeKindV1) -> &'static str {
+/// The relation kind of a code edge row, from its source symbol to its
+/// target symbol: one per edge kind, so a fan-out names the kinds it admits.
+fn code_edge_kind(kind: RelationEdgeKindV1) -> &'static str {
     match kind {
-        RelationEdgeKindV1::Calls => "CodeRelationSource.calls",
-        RelationEdgeKindV1::Uses => "CodeRelationSource.uses",
-        RelationEdgeKindV1::TypeOf => "CodeRelationSource.type_of",
-        RelationEdgeKindV1::Contains => "CodeRelationSource.contains",
-        RelationEdgeKindV1::Implements => "CodeRelationSource.implements",
-        RelationEdgeKindV1::Extends => "CodeRelationSource.extends",
-        RelationEdgeKindV1::Annotates => "CodeRelationSource.annotates",
-        RelationEdgeKindV1::Returns => "CodeRelationSource.returns",
-        RelationEdgeKindV1::Receives => "CodeRelationSource.receives",
+        RelationEdgeKindV1::Calls => "CodeEdge.calls",
+        RelationEdgeKindV1::Uses => "CodeEdge.uses",
+        RelationEdgeKindV1::TypeOf => "CodeEdge.type_of",
+        RelationEdgeKindV1::Contains => "CodeEdge.contains",
+        RelationEdgeKindV1::Implements => "CodeEdge.implements",
+        RelationEdgeKindV1::Extends => "CodeEdge.extends",
+        RelationEdgeKindV1::Annotates => "CodeEdge.annotates",
+        RelationEdgeKindV1::Returns => "CodeEdge.returns",
+        RelationEdgeKindV1::Receives => "CodeEdge.receives",
     }
 }
 
-/// The edge kind a source relation kind names, or `None` for any other
+/// The edge kind a code edge relation kind names, or `None` for any other
 /// relation.
-fn source_edge_kind_edge(relation_kind: &str) -> Option<RelationEdgeKindV1> {
+fn code_edge_kind_edge(relation_kind: &str) -> Option<RelationEdgeKindV1> {
     RELATION_EDGE_KINDS
         .into_iter()
-        .find(|kind| source_edge_kind(*kind) == relation_kind)
+        .find(|kind| code_edge_kind(*kind) == relation_kind)
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -1038,10 +1041,31 @@ fn symbol_entity_id(
     GraphEntityId::new(stable_identity("symbol", occurrence.as_str())).map_err(Into::into)
 }
 
-fn edge_entity_id(
+fn edge_relation_id(
     edge: &CanonicalRelationEdgeV1,
-) -> Result<GraphEntityId, CodeGraphProjectionError> {
-    GraphEntityId::new(stable_identity("edge", &hex::encode(serialize(edge)?))).map_err(Into::into)
+) -> Result<GraphRelationId, CodeGraphProjectionError> {
+    GraphRelationId::new(stable_identity("edge", &hex::encode(serialize(edge)?)))
+        .map_err(Into::into)
+}
+
+/// The validated edge record a code edge relation row carries: its identity,
+/// kind, and both endpoints must be the ones its payload derives.
+fn edge_record(
+    relation: &GraphRelation,
+) -> Result<CanonicalRelationEdgeV1, CodeGraphProjectionError> {
+    let edge: CanonicalRelationEdgeV1 =
+        deserialize_property(&relation.properties, EDGE_RECORD_PROPERTY)?;
+    validate_edge(&edge)?;
+    if edge_relation_id(&edge)? != relation.identity
+        || code_edge_kind(edge.kind) != relation.kind.as_str()
+        || symbol_entity_id(&edge.from_occurrence)? != relation.from
+        || symbol_entity_id(&edge.to_occurrence)? != relation.to
+    {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph edge row does not match its payload".to_owned(),
+        ));
+    }
+    Ok(edge)
 }
 
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
@@ -1217,7 +1241,7 @@ fn load_symbol_entity_record(
             "code graph symbol identity has the wrong label".to_owned(),
         ));
     }
-    let record: SymbolRecordV1 = deserialize_property(&entity, SYMBOL_RECORD_PROPERTY)?;
+    let record: SymbolRecordV1 = deserialize_property(&entity.properties, SYMBOL_RECORD_PROPERTY)?;
     validate_symbol_record(&record)?;
     if symbol_entity_id(&record.occurrence)? != *identity {
         return Err(CodeGraphProjectionError::Corrupt(

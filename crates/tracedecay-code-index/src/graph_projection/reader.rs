@@ -147,54 +147,37 @@ impl CodeGraphEvidenceReader {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>>, CodeGraphProjectionError>
     {
-        let graph_depth = usize::try_from(max_depth)
-            .ok()
-            .and_then(|depth| depth.checked_mul(2))
-            .ok_or_else(|| {
-                CodeGraphProjectionError::Contract(
-                    "code graph traversal depth overflowed".to_owned(),
-                )
-            })?;
-        let result = self.snapshot.traverse(TraversalRequest {
-            namespace: self.projection.namespace.clone(),
-            start: symbol_entity_id(seed)?,
-            relation_kinds: BTreeSet::new(),
-            direction: GraphTraversalDirection::Outgoing,
-            max_depth: graph_depth,
-            max_visits: self.projection_node_count,
-            max_results: self.projection_node_count,
-            cancellation: Arc::clone(&cancellation),
-        })?;
+        let kinds = RELATION_EDGE_KINDS
+            .iter()
+            .map(|kind| GraphRelationKind::new(code_edge_kind(*kind)).map_err(Into::into))
+            .collect::<Result<BTreeSet<_>, CodeGraphProjectionError>>()?;
         let mut adjacency = BTreeMap::<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>>::new();
-        for visit in result.visits {
-            if visit.depth % 2 == 0 {
-                continue;
+        let mut reached = BTreeSet::from([symbol_entity_id(seed)?]);
+        let mut frontier = vec![symbol_entity_id(seed)?];
+        for _ in 0..max_depth {
+            if frontier.is_empty() {
+                break;
             }
-            let entity = self
-                .snapshot
-                .entity(&visit.entity, Arc::clone(&cancellation))?
-                .ok_or_else(|| {
-                    CodeGraphProjectionError::Corrupt(
-                        "graph traversal referenced a missing edge entity".to_owned(),
-                    )
-                })?;
-            if !has_label(&entity, EDGE_LABEL) {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph alternation contains a non-edge entity".to_owned(),
-                ));
+            let mut next = Vec::new();
+            for starts in frontier.chunks(ADJACENCY_SEED_CHUNK) {
+                let per_start = self.snapshot.outgoing_relations(
+                    starts,
+                    &kinds,
+                    MAX_VERIFIED_GENERATION_RELATIONS,
+                    Arc::clone(&cancellation),
+                )?;
+                for relation in per_start.into_iter().flatten() {
+                    let edge = edge_record(&relation)?;
+                    if reached.insert(relation.to.clone()) {
+                        next.push(relation.to);
+                    }
+                    adjacency
+                        .entry(edge.from_occurrence.clone())
+                        .or_default()
+                        .push(edge);
+                }
             }
-            let edge: CanonicalRelationEdgeV1 =
-                deserialize_property(&entity, EDGE_RECORD_PROPERTY)?;
-            validate_edge(&edge)?;
-            if edge_entity_id(&edge)? != entity.identity {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph edge identity does not match its payload".to_owned(),
-                ));
-            }
-            adjacency
-                .entry(edge.from_occurrence.clone())
-                .or_default()
-                .push(edge);
+            frontier = next;
         }
         for edges in adjacency.values_mut() {
             edges.sort_by(compare_edges);

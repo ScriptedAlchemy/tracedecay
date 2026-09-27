@@ -7,10 +7,10 @@ use grafeo_common::types::Value;
 use tempfile::TempDir;
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphEntity,
-    GraphEntityId, GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace,
-    GraphProjectionId, GraphPublication, GraphPublicationInputDigest, GraphRelation,
-    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch,
-    NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
+    GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphLabel, GraphMutation,
+    GraphNamespace, GraphProjectionId, GraphPublication, GraphPublicationInputDigest,
+    GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark,
+    GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
 };
 
 use crate::support;
@@ -1008,12 +1008,12 @@ fn wrong_tracedecay_format_requires_reset() {
 }
 
 #[test]
-fn superseded_format_store_is_rebuilt_fresh_with_its_sealed_generations_discarded() {
+fn superseded_format_store_is_rebuilt_fresh_keeping_only_current_sealed_generations() {
     let temp = TempDir::new().unwrap();
     let path = graph_path(temp.path());
-    // Format 3 stored relation identities as strings on both the locator and
-    // the native edge; the row below is keyed the way format 3 keyed it.
-    let previous_format = 3_i64;
+    // Format 4 kept a relation's payload properties on its locator as well as
+    // its native edge; the row below is keyed the way format 4 keyed it.
+    let previous_format = 4_i64;
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
             .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
@@ -1035,15 +1035,8 @@ fn superseded_format_store_is_rebuilt_fresh_with_its_sealed_generations_discarde
             [
                 (
                     "__tracedecay_graph_db_entity_key",
-                    // sha256("project")[..8], the raw-identity tag, "stale".
-                    Value::Bytes(
-                        [
-                            &[0x24, 0x42, 0x10, 0xe4, 0x84, 0x37, 0xb6, 0x55, 0x00][..],
-                            b"stale",
-                        ]
-                        .concat()
-                        .into(),
-                    ),
+                    // base64url(sha256("project")[..8] ‖ raw-identity tag ‖ "stale").
+                    Value::from("JEIQ5IQ3tlUAc3RhbGU"),
                 ),
                 ("__tracedecay_graph_db_namespace", "project".into()),
                 ("__tracedecay_graph_db_projection", "code".into()),
@@ -1056,13 +1049,36 @@ fn superseded_format_store_is_rebuilt_fresh_with_its_sealed_generations_discarde
     std::fs::create_dir_all(&sealed_generation).unwrap();
     std::fs::write(
         sealed_generation.join("generation.grafeo"),
-        b"format 3 bytes",
+        b"format 4 bytes",
+    )
+    .unwrap();
+
+    // A generation this build sealed before the staging container was
+    // replaced, as a publication racing the rebuild leaves it.
+    let current_generation = temp.path().join("graph.sealed").join("1".repeat(64));
+    std::fs::create_dir_all(&current_generation).unwrap();
+    std::fs::write(
+        current_generation.join("sealed.json"),
+        serde_json::json!({
+            "version": 1,
+            "form": "compact",
+            "namespace": "project",
+            "projection": "code",
+            "generation": "g1",
+            "physical_namespace": format!("generation:{}", "1".repeat(64)),
+            "recovered_digest": "sha256:1",
+            "entities": 1,
+            "relations": 0,
+            "graph_format": GraphFormatVersion::current().get(),
+        })
+        .to_string(),
     )
     .unwrap();
 
     let (_registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
 
-    assert!(!temp.path().join("graph.sealed").exists());
+    assert!(!sealed_generation.exists());
+    assert!(current_generation.join("sealed.json").exists());
     assert_eq!(
         db.entity(&namespace(), &entity_id("stale"), live())
             .unwrap(),

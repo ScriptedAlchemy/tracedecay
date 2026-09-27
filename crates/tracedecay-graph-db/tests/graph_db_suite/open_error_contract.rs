@@ -4,8 +4,8 @@ use std::sync::Arc;
 use grafeo_common::types::Value;
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphDbError, GraphEntityId, GraphNamespace, GraphRelation, GraphRelationId, GraphRelationKind,
-    NeverCancelled,
+    GraphDbError, GraphEntityId, GraphNamespace, GraphProperty, GraphPropertyName, GraphRelation,
+    GraphRelationId, GraphRelationKind, NeverCancelled,
 };
 
 use crate::support;
@@ -38,7 +38,7 @@ fn raw_store(temp: &TempDir) -> grafeo_engine::GrafeoDB {
 }
 
 const FORMAT_MARKER: [(&str, i64); 2] = [
-    ("__tracedecay_graph_db_version", 4),
+    ("__tracedecay_graph_db_version", 5),
     ("__tracedecay_graph_db_sequence", 0),
 ];
 
@@ -88,13 +88,14 @@ fn persisted_scalar_identity_mismatch_is_corrupt_on_point_read() {
     ));
 }
 
-/// A format-4 relation as it lies on disk. Keys are base64url of
-/// `sha256("workspace")[..8] ‖ digest-identity tag ‖ kind ‖ digest`. The
-/// locator owns the identity, source, and target, each stored as U+0001,
-/// kind, and base64url digest, and the native edge carries none of them.
-/// Keyed reads and edge fan-outs both resolve the same relation.
+/// A format-5 relation as it lies on disk: one native edge row carrying the
+/// relation's kind and payload, and its locator carrying the key, identity,
+/// source, and target. Keys are base64url of
+/// `sha256("workspace")[..8] ‖ digest-identity tag ‖ kind ‖ digest`;
+/// identities are U+0001, kind, and base64url digest. Keyed reads and edge
+/// fan-outs both resolve the same relation, payload included.
 #[test]
-fn compact_relation_identities_read_back_through_keys_and_edges() {
+fn single_row_edge_reads_back_its_payload_through_keys_and_fanouts() {
     let temp = TempDir::new().unwrap();
     let raw = raw_store(&temp);
     let session = raw.session();
@@ -132,6 +133,11 @@ fn compact_relation_identities_read_back_through_keys_and_edges() {
                 ("__tracedecay_graph_db_namespace", Value::from("workspace")),
                 ("__tracedecay_graph_db_projection", Value::from("code")),
                 ("__tracedecay_graph_db_relation_kind", Value::from("calls")),
+                // `__tracedecay_graph_db_property_str_` + hex("edge-record").
+                (
+                    "__tracedecay_graph_db_property_str_656467652d7265636f7264",
+                    Value::from("{\"span\":[3,9]}"),
+                ),
             ],
         )
         .unwrap();
@@ -175,7 +181,10 @@ fn compact_relation_identities_read_back_through_keys_and_edges() {
         GraphEntityId::new(format!("symbol:{}", "11".repeat(32))).unwrap(),
         GraphEntityId::new(format!("symbol:{}", "22".repeat(32))).unwrap(),
         GraphRelationKind::new("calls").unwrap(),
-        BTreeMap::new(),
+        BTreeMap::from([(
+            GraphPropertyName::new("edge-record").unwrap(),
+            GraphProperty::String("{\"span\":[3,9]}".to_owned()),
+        )]),
     )
     .unwrap();
     assert_eq!(

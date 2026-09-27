@@ -540,9 +540,8 @@ fn render_search_md(value: &Value) -> String {
 /// tool uses a 50k refuse budget; context used to keep that budget, hydrate
 /// every edge, then discard all but `max_nodes`. That walk is CPU-bound and
 /// shows no warm benefit. Cap examination at a small multiple of the kept
-/// page. Semantic kind lives on the edge entity (not the physical
-/// SOURCE/TARGET relation type), so the page is all-kinds, the same
-/// neighborhood the previous complete walk returned, just a prefix.
+/// page. The page admits every edge kind: the same neighborhood a complete
+/// walk returns, cut to a prefix in store order.
 fn context_related_relation_budget(max_nodes: usize) -> usize {
     max_nodes.saturating_mul(4).clamp(16, 64)
 }

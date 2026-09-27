@@ -30,10 +30,10 @@ use super::schema::{
     stable_identity,
 };
 use super::{
-    CodeGraphProjectionError, CodeGraphSymbolBindingV1, EDGE_LABEL, EDGE_RECORD_PROPERTY,
-    FILE_SYMBOL_EDGE_KIND, SealedCodeGraphRowsError, SymbolRecordV1, TARGET_EDGE_KIND,
+    CodeGraphProjectionError, CodeGraphSymbolBindingV1, EDGE_RECORD_PROPERTY,
+    FILE_SYMBOL_EDGE_KIND, SealedCodeGraphRowsError, SymbolRecordV1, code_edge_kind,
     code_graph_manifest_identity, compare_edges, current_generation_entity, projection,
-    source_edge_kind, symbol_entity, symbol_entity_id, validate_edge,
+    symbol_entity, symbol_entity_id, validate_edge,
 };
 
 /// Builds a sealed generation's code graph from its on-disk file segments and
@@ -532,23 +532,20 @@ fn emit_code_graph_rows(
             ))
         })?;
     // Chunks bind symbols to files and spans above; they are not graph rows.
-    // No reader addresses a chunk through the graph, traversal alternates
-    // symbol and edge-evidence entities, and a symbol's binding already
-    // names its chunk, so projecting one entity plus one relation per chunk
-    // only multiplied every graph artifact by the chunk count.
+    // No reader addresses a chunk through the graph and a symbol's binding
+    // already names its chunk, so projecting one entity plus one relation per
+    // chunk only multiplied every graph artifact by the chunk count.
     hotpath::measure_block!("code_index.seal.collect.emit", {
         let mut entities = Vec::with_capacity(
             batch
                 .files
                 .len()
                 .saturating_add(batch.imports.len())
-                .saturating_add(occurrences.len())
-                .saturating_add(retained_edges.len()),
+                .saturating_add(occurrences.len()),
         );
         let mut relations = Vec::with_capacity(
             retained_edges
                 .len()
-                .saturating_mul(2)
                 .saturating_add(bindings.len())
                 .saturating_add(batch.imports.len()),
         );
@@ -619,13 +616,9 @@ fn emit_code_graph_rows(
         }
         for window in retained_edges.chunks(row_window) {
             check()?;
-            for (entity, source, target) in collect_graph_rows_ordered(window, |edge| {
-                edge_artifacts(projection, edge, &symbol_ids)
-            })? {
-                entities.push(entity);
-                relations.push(source);
-                relations.push(target);
-            }
+            relations.extend(collect_graph_rows_ordered(window, |edge| {
+                edge_relation(projection, edge, &symbol_ids)
+            })?);
         }
         Ok(EmittedRows {
             entities,
@@ -657,47 +650,28 @@ fn endpoint_symbol_id(
     }
 }
 
-/// One retained edge's entity plus both endpoint relations, sharing a single
-/// serialization and identity derivation of the edge payload.
-fn edge_artifacts(
+/// One retained edge as a single relation row from its source symbol to its
+/// target symbol, carrying the edge record as its payload.
+fn edge_relation(
     projection: &GraphProjectionIdentity,
     edge: &CanonicalRelationEdgeV1,
     symbol_ids: &BTreeMap<SymbolOccurrenceId, GraphEntityId>,
-) -> Result<
-    (
-        GraphEntity,
-        GraphGenerationRelation,
-        GraphGenerationRelation,
-    ),
-    CodeGraphProjectionError,
-> {
+) -> Result<GraphGenerationRelation, CodeGraphProjectionError> {
     let payload = serialize(edge)?;
-    let identity = GraphEntityId::new(stable_identity("edge", &hex::encode(&payload)))?;
-    let entity = GraphEntity::new(
-        identity.clone(),
-        BTreeSet::from([GraphLabel::new(EDGE_LABEL)?]),
+    let identity = GraphRelationId::new(stable_identity("edge", &hex::encode(&payload)))?;
+    let from = endpoint_symbol_id(symbol_ids, &edge.from_occurrence)?;
+    let to = endpoint_symbol_id(symbol_ids, &edge.to_occurrence)?;
+    GraphGenerationRelation::new(
+        identity,
+        GraphEntityRef::new(projection.clone(), from),
+        GraphEntityRef::new(projection.clone(), to),
+        GraphRelationKind::new(code_edge_kind(edge.kind))?,
         BTreeMap::from([(
             GraphPropertyName::new(EDGE_RECORD_PROPERTY)?,
             record_property(payload)?,
         )]),
-    )?;
-    let from = endpoint_symbol_id(symbol_ids, &edge.from_occurrence)?;
-    let to = endpoint_symbol_id(symbol_ids, &edge.to_occurrence)?;
-    let source = GraphGenerationRelation::new(
-        GraphRelationId::new(stable_identity("source", identity.as_str()))?,
-        GraphEntityRef::new(projection.clone(), from),
-        GraphEntityRef::new(projection.clone(), identity.clone()),
-        GraphRelationKind::new(source_edge_kind(edge.kind))?,
-        BTreeMap::new(),
-    )?;
-    let target = GraphGenerationRelation::new(
-        GraphRelationId::new(stable_identity("target", identity.as_str()))?,
-        GraphEntityRef::new(projection.clone(), identity),
-        GraphEntityRef::new(projection.clone(), to),
-        GraphRelationKind::new(TARGET_EDGE_KIND)?,
-        BTreeMap::new(),
-    )?;
-    Ok((entity, source, target))
+    )
+    .map_err(Into::into)
 }
 
 fn file_entity(

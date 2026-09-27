@@ -27,17 +27,16 @@ use tracedecay_domain::{
     SanitizedCodeFileV1, SymbolOccurrenceId, repository_path_matches_scope,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity, GraphReadMeter,
-    GraphRelation, GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, RelationFanoutOverflow,
+    GraphCancellation, GraphEntityId, GraphProjectionIdentity, GraphReadMeter, GraphRelation,
+    GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, RelationFanoutOverflow,
     VerifiedGraphSnapshot,
 };
 
 use super::{
     CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation,
-    CodeGraphSymbolBindingV1, EDGE_LABEL, EDGE_RECORD_PROPERTY, RELATION_EDGE_KINDS,
-    SymbolRecordV1, TARGET_EDGE_KIND, compare_edges, deserialize_property, edge_entity_id,
-    has_label, load_symbol_entity_record, load_symbol_record, source_edge_kind,
-    source_edge_kind_edge, symbol_entity_id, validate_edge,
+    CodeGraphSymbolBindingV1, RELATION_EDGE_KINDS, SymbolRecordV1, code_edge_kind,
+    code_edge_kind_edge, compare_edges, edge_record, load_symbol_entity_record, load_symbol_record,
+    symbol_entity_id,
 };
 use crate::lineage::LineageSymbolRecordV1;
 
@@ -494,26 +493,23 @@ impl CodeGraphInteractiveReader {
         let cancellation = self.read_cancellation(request_cancellation)?;
         require_positive(max_relations, "code graph relation key limit")?;
         let starts = seeds.iter().map(|seed| seed.0.clone()).collect::<Vec<_>>();
-        let target_kinds = target_relation_kinds()?;
-        let source_kinds = source_relation_kinds(kinds)?;
-        let (seed_kinds, far_kinds) = if reverse {
-            (&target_kinds, &source_kinds)
-        } else {
-            (&source_kinds, &target_kinds)
-        };
+        // A reverse walk admits every kind at the store and filters after,
+        // so its truncation point is the one the unfiltered fan-out defines.
+        let admitted: BTreeSet<RelationEdgeKindV1> = kinds.iter().copied().collect();
+        let edge_kinds = code_relation_kinds(if reverse { &[] } else { kinds })?;
         let edge_rows = if reverse {
             self.snapshot.incoming_relations_truncated(
                 &starts,
-                seed_kinds,
+                &edge_kinds,
                 max_relations,
-                Arc::clone(&cancellation),
+                cancellation,
             )?
         } else {
             self.snapshot.outgoing_relations_truncated(
                 &starts,
-                seed_kinds,
+                &edge_kinds,
                 max_relations,
-                Arc::clone(&cancellation),
+                cancellation,
             )?
         };
         if edge_rows.len() != seeds.len() {
@@ -521,68 +517,24 @@ impl CodeGraphInteractiveReader {
                 "code graph relation key batch shape does not match its seeds".to_owned(),
             ));
         }
-        let edges = edge_rows
-            .iter()
-            .flatten()
-            .map(|relation| {
-                if reverse {
-                    relation.from.clone()
-                } else {
-                    relation.to.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        let truncated = edges.len() == max_relations;
-        // One far row per edge at most; the batch limit leaves room for one
-        // extra so a second far endpoint shows as corruption, not truncation.
-        let far_limit = edges.len().saturating_add(1);
-        let far_rows = if edges.is_empty() {
-            Vec::new()
-        } else if reverse {
-            self.snapshot.incoming_relations_truncated(
-                &edges,
-                far_kinds,
-                far_limit,
-                cancellation,
-            )?
-        } else {
-            self.snapshot.outgoing_relations_truncated(
-                &edges,
-                far_kinds,
-                far_limit,
-                cancellation,
-            )?
-        };
-        if far_rows.len() != edges.len() {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph edge endpoint batch shape does not match its edges".to_owned(),
-            ));
-        }
-        let mut far_rows = far_rows.into_iter();
+        let truncated = edge_rows.iter().map(Vec::len).sum::<usize>() == max_relations;
         let per_seed = edge_rows
             .into_iter()
             .map(|relations| {
                 let mut keys = Vec::with_capacity(relations.len());
-                for (edge, far) in relations.iter().zip(far_rows.by_ref()) {
-                    let key = match (reverse, far.as_slice()) {
-                        // A reverse walk names the admitted kinds on the far
-                        // hop, so an edge of another kind has no far row.
-                        (true, []) => continue,
-                        (true, [source]) => CodeGraphRelationKeyV1 {
-                            neighbor: CodeGraphSymbolRefV1(source.from.clone()),
-                            kind: relation_edge_kind(source)?,
-                        },
-                        (false, [target]) => CodeGraphRelationKeyV1 {
-                            neighbor: CodeGraphSymbolRefV1(target.to.clone()),
-                            kind: relation_edge_kind(edge)?,
-                        },
-                        _ => {
-                            return Err(CodeGraphProjectionError::Corrupt(
-                                "code graph edge has no single far endpoint".to_owned(),
-                            ));
-                        }
-                    };
-                    keys.push(key);
+                for relation in &relations {
+                    let kind = relation_edge_kind(relation)?;
+                    if reverse && !admitted.is_empty() && !admitted.contains(&kind) {
+                        continue;
+                    }
+                    keys.push(CodeGraphRelationKeyV1 {
+                        neighbor: CodeGraphSymbolRefV1(if reverse {
+                            relation.from.clone()
+                        } else {
+                            relation.to.clone()
+                        }),
+                        kind,
+                    });
                 }
                 Ok(keys)
             })
@@ -805,15 +757,16 @@ impl CodeGraphInteractiveReader {
     ) -> Result<Vec<CodeGraphSymbolDegreesV1>, CodeGraphProjectionError> {
         let cancellation = self.read_cancellation(request_cancellation)?;
         let starts = entity_ids(occurrences)?;
+        let edge_kinds = code_relation_kinds(&[])?;
         let outgoing = self.snapshot.outgoing_relation_ids(
             &starts,
-            &source_relation_kinds(&[])?,
+            &edge_kinds,
             MAX_VERIFIED_GENERATION_RELATIONS,
             Arc::clone(&cancellation),
         )?;
         let incoming = self.snapshot.incoming_relation_ids(
             &starts,
-            &target_relation_kinds()?,
+            &edge_kinds,
             MAX_VERIFIED_GENERATION_RELATIONS,
             cancellation,
         )?;
@@ -1055,9 +1008,9 @@ impl CodeGraphInteractiveReader {
         let mut edges: Vec<CanonicalRelationEdgeV1> = Vec::new();
         for chunk in occurrences.chunks(SEMANTIC_NEIGHBOR_SEED_CHUNK) {
             let starts = entity_ids(chunk)?;
-            let per_seed = self.snapshot.outgoing_relation_targets(
+            let per_seed = self.snapshot.outgoing_relations(
                 &starts,
-                &source_relation_kinds(kinds)?,
+                &code_relation_kinds(kinds)?,
                 max_relations,
                 Arc::clone(&cancellation),
             )?;
@@ -1066,12 +1019,12 @@ impl CodeGraphInteractiveReader {
                     "code graph adjacency batch shape does not match its seeds".to_owned(),
                 ));
             }
-            for (seed, targets) in chunk.iter().zip(per_seed) {
-                for target in targets {
+            for (seed, relations) in chunk.iter().zip(per_seed) {
+                for relation in relations {
                     if cancellation.is_cancelled() {
                         return Err(CodeGraphProjectionError::Cancelled);
                     }
-                    let edge = load_edge_record(&target.target)?;
+                    let edge = edge_record(&relation)?;
                     if edge.from_occurrence != *seed {
                         return Err(CodeGraphProjectionError::Corrupt(
                             "code graph edge endpoint does not match its adjacency seed".to_owned(),
@@ -1407,7 +1360,7 @@ impl CodeGraphInteractiveReader {
             (AdjacencyDirection::Outgoing, RelationFanoutOverflow::Refuse) => {
                 self.snapshot.outgoing_relations(
                     &starts,
-                    &source_relation_kinds(kinds)?,
+                    &code_relation_kinds(kinds)?,
                     max_relations,
                     Arc::clone(&cancellation),
                 )?
@@ -1415,7 +1368,7 @@ impl CodeGraphInteractiveReader {
             (AdjacencyDirection::Outgoing, RelationFanoutOverflow::Truncate) => {
                 self.snapshot.outgoing_relations_truncated(
                     &starts,
-                    &source_relation_kinds(kinds)?,
+                    &code_relation_kinds(kinds)?,
                     max_relations,
                     Arc::clone(&cancellation),
                 )?
@@ -1423,7 +1376,7 @@ impl CodeGraphInteractiveReader {
             (AdjacencyDirection::Incoming, RelationFanoutOverflow::Refuse) => {
                 self.snapshot.incoming_relations(
                     &starts,
-                    &target_relation_kinds()?,
+                    &code_relation_kinds(&[])?,
                     max_relations,
                     Arc::clone(&cancellation),
                 )?
@@ -1431,7 +1384,7 @@ impl CodeGraphInteractiveReader {
             (AdjacencyDirection::Incoming, RelationFanoutOverflow::Truncate) => {
                 self.snapshot.incoming_relations_truncated(
                     &starts,
-                    &target_relation_kinds()?,
+                    &code_relation_kinds(&[])?,
                     max_relations,
                     Arc::clone(&cancellation),
                 )?
@@ -1450,12 +1403,7 @@ impl CodeGraphInteractiveReader {
                 if cancellation.is_cancelled() {
                     return Err(CodeGraphProjectionError::Cancelled);
                 }
-                let edge = self.hydrate_edge_record(
-                    seed,
-                    &relation,
-                    direction,
-                    Arc::clone(&cancellation),
-                )?;
+                let edge = seed_edge_record(seed, &relation, direction)?;
                 if !admitted.is_empty() && !admitted.contains(&edge.kind) {
                     continue;
                 }
@@ -1490,46 +1438,6 @@ impl CodeGraphInteractiveReader {
         }
         Ok(batches)
     }
-
-    /// Loads one adjacency row up to its validated edge payload: the relation,
-    /// the edge entity, and the seed-endpoint check, no far-endpoint read.
-    fn hydrate_edge_record(
-        &self,
-        seed: &SymbolOccurrenceId,
-        relation: &GraphRelation,
-        direction: AdjacencyDirection,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<CanonicalRelationEdgeV1, CodeGraphProjectionError> {
-        let edge_reference = match direction {
-            AdjacencyDirection::Outgoing => &relation.to,
-            AdjacencyDirection::Incoming => &relation.from,
-        };
-        let entity = self
-            .snapshot
-            .entity(
-                &tracedecay_graph_db::GraphEntityRef::new(
-                    self.projection.clone(),
-                    edge_reference.clone(),
-                ),
-                cancellation,
-            )?
-            .ok_or_else(|| {
-                CodeGraphProjectionError::Corrupt(
-                    "code graph adjacency referenced a missing edge entity".to_owned(),
-                )
-            })?;
-        let edge = load_edge_record(&entity)?;
-        let near = match direction {
-            AdjacencyDirection::Outgoing => &edge.from_occurrence,
-            AdjacencyDirection::Incoming => &edge.to_occurrence,
-        };
-        if near != seed {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph edge endpoint does not match its adjacency seed".to_owned(),
-            ));
-        }
-        Ok(edge)
-    }
 }
 
 fn resolve_from_index(
@@ -1561,32 +1469,32 @@ fn summary_from_record(record: SymbolRecordV1) -> CodeGraphSymbolSummaryV1 {
     }
 }
 
-fn load_edge_record(
-    entity: &GraphEntity,
+/// One adjacency row's validated edge payload, checked against the seed it
+/// was read from.
+fn seed_edge_record(
+    seed: &SymbolOccurrenceId,
+    relation: &GraphRelation,
+    direction: AdjacencyDirection,
 ) -> Result<CanonicalRelationEdgeV1, CodeGraphProjectionError> {
-    if !has_label(entity, EDGE_LABEL) {
+    let edge = edge_record(relation)?;
+    let near = match direction {
+        AdjacencyDirection::Outgoing => &edge.from_occurrence,
+        AdjacencyDirection::Incoming => &edge.to_occurrence,
+    };
+    if near != seed {
         return Err(CodeGraphProjectionError::Corrupt(
-            "code graph adjacency contains a non-edge entity".to_owned(),
-        ));
-    }
-    let edge: CanonicalRelationEdgeV1 = deserialize_property(entity, EDGE_RECORD_PROPERTY)?;
-    validate_edge(&edge)?;
-    if edge_entity_id(&edge)? != entity.identity {
-        return Err(CodeGraphProjectionError::Corrupt(
-            "code graph edge identity does not match its payload".to_owned(),
+            "code graph edge endpoint does not match its adjacency seed".to_owned(),
         ));
     }
     Ok(edge)
 }
 
-/// The edge kind a source relation row names.
+/// The edge kind a code edge row names.
 fn relation_edge_kind(
     relation: &GraphRelation,
 ) -> Result<RelationEdgeKindV1, CodeGraphProjectionError> {
-    source_edge_kind_edge(relation.kind.as_str()).ok_or_else(|| {
-        CodeGraphProjectionError::Corrupt(
-            "code graph source relation names no edge kind".to_owned(),
-        )
+    code_edge_kind_edge(relation.kind.as_str()).ok_or_else(|| {
+        CodeGraphProjectionError::Corrupt("code graph edge row names no edge kind".to_owned())
     })
 }
 
@@ -1609,9 +1517,9 @@ fn entity_ids(
         .collect()
 }
 
-/// Source relation kinds for the admitted edge kinds; every kind when none
-/// is named.
-fn source_relation_kinds(
+/// Code edge relation kinds for the admitted edge kinds; every kind when
+/// none is named.
+fn code_relation_kinds(
     kinds: &[RelationEdgeKindV1],
 ) -> Result<BTreeSet<GraphRelationKind>, CodeGraphProjectionError> {
     let admitted = if kinds.is_empty() {
@@ -1621,12 +1529,8 @@ fn source_relation_kinds(
     };
     admitted
         .iter()
-        .map(|kind| GraphRelationKind::new(source_edge_kind(*kind)).map_err(Into::into))
+        .map(|kind| GraphRelationKind::new(code_edge_kind(*kind)).map_err(Into::into))
         .collect()
-}
-
-fn target_relation_kinds() -> Result<BTreeSet<GraphRelationKind>, CodeGraphProjectionError> {
-    Ok(BTreeSet::from([GraphRelationKind::new(TARGET_EDGE_KIND)?]))
 }
 
 fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {

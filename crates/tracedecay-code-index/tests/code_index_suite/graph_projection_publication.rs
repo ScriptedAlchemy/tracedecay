@@ -29,7 +29,6 @@ const IMPORT_SOURCE: &str = concat!(
     "import type { Foo as LocalFoo } from \"pkg\";\n",
     "export function local() { return 1; }\n",
 );
-const IMPORT_RECORD_PROPERTY: &str = "import-record";
 const IMPORT_LABEL: &str = "CodeImport";
 const FILE_LABEL: &str = "CodeFile";
 const SYMBOL_LABEL: &str = "CodeSymbol";
@@ -163,21 +162,6 @@ fn has_label(entity: &GraphEntity, label: &str) -> bool {
         .any(|candidate| candidate.as_str() == label)
 }
 
-fn projected_import(entity: &GraphEntity) -> CodeIndexImportEvidenceV1 {
-    let property = entity
-        .properties
-        .iter()
-        .find(|(name, _)| name.as_str() == IMPORT_RECORD_PROPERTY)
-        .map(|(_, value)| value)
-        .expect("CodeImport carries its exact parser-backed record");
-    // Records travel as JSON text: the sealed compact store keeps byte
-    // payloads as marked hex in its dictionary, which would double them.
-    let GraphProperty::String(record) = property else {
-        panic!("CodeImport record must use the JSON string property");
-    };
-    serde_json::from_str(record).expect("CodeImport record decodes")
-}
-
 fn verified_store(
     manifest: GraphGenerationManifest,
     generation: &CodeIndexPublishedGenerationV1,
@@ -217,7 +201,6 @@ fn published_generation_imports_survive_verified_projection_and_reader_open() {
     assert_eq!(import_entities.len(), 1);
     let import_entity = import_entities[0];
     assert!(!has_label(import_entity, SYMBOL_LABEL));
-    assert_eq!(projected_import(import_entity), expected);
 
     let file_entity = manifest
         .entities
@@ -316,4 +299,110 @@ fn current_projector_changes_generation_identity_without_a_v4_alias() {
     )
     .expect_err("a v4 graph snapshot cannot serve the current generation authority");
     assert_eq!(error, CodeGraphProjectionError::GenerationMismatch);
+}
+
+const CALL_SOURCE: &str = concat!(
+    "pub fn alpha() -> u32 { beta() + gamma() }\n",
+    "pub fn beta() -> u32 { gamma() }\n",
+    "pub fn gamma() -> u32 { 1 }\n",
+);
+
+fn published_call_generation() -> Arc<CodeIndexPublishedGenerationV1> {
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner");
+    owner
+        .build_and_publish(
+            request_with_source(
+                "file.graph-calls",
+                1_600_000,
+                "commit.graph-calls",
+                "tree.graph-calls",
+                CALL_SOURCE,
+            ),
+            &ActiveControl,
+        )
+        .expect("parser-backed call generation publishes")
+}
+
+/// Each code edge is one relation row from its source symbol to its target
+/// symbol carrying the edge record, and every record is stored as compact
+/// text, so a generation's rows and record bytes stay within this budget.
+/// The previous projector added an edge entity plus two relations per edge
+/// and stored records as JSON: 8 entities, 9 relations, 4,259 record bytes.
+#[test]
+fn graph_manifest_stores_each_code_edge_as_one_row_within_the_byte_budget() {
+    let generation = published_call_generation();
+    let manifest = projection_manifest(&generation, &current_projector_revision());
+    let record_bytes = manifest
+        .entities
+        .iter()
+        .flat_map(|entity| entity.properties.values())
+        .chain(
+            manifest
+                .relations
+                .iter()
+                .flat_map(|relation| relation.properties.values()),
+        )
+        .map(|property| match property {
+            GraphProperty::String(text) => text.len(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    let mut relation_kinds = manifest
+        .relations
+        .iter()
+        .map(|relation| relation.kind.as_str().to_owned())
+        .collect::<Vec<_>>();
+    relation_kinds.sort();
+    assert_eq!(manifest.entities.len(), 5);
+    assert_eq!(
+        relation_kinds,
+        [
+            "CodeEdge.calls",
+            "CodeEdge.calls",
+            "CodeEdge.calls",
+            "CodeFileContainsSymbol",
+            "CodeFileContainsSymbol",
+            "CodeFileContainsSymbol",
+        ]
+    );
+    assert!(record_bytes <= 2_200, "records took {record_bytes} bytes");
+
+    let names = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.occurrence.clone(), symbol.simple_name.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let occurrences = names.keys().cloned().collect::<Vec<_>>();
+    let reader = verified_store(manifest, &generation)
+        .interactive_reader_with_cancellation(
+            &generation.manifest().generation_id,
+            Arc::new(NeverCancelled),
+        )
+        .expect("generation-pinned reader");
+    let mut edges = reader
+        .edges_among(&occurrences, &[], 64, Arc::new(NeverCancelled))
+        .expect("edges among the fixture symbols")
+        .into_iter()
+        .map(|edge| {
+            (
+                names[&edge.from_occurrence].as_str().to_owned(),
+                names[&edge.to_occurrence].as_str().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    edges.sort();
+    assert_eq!(
+        edges,
+        vec![
+            ("alpha".to_owned(), "beta".to_owned()),
+            ("alpha".to_owned(), "gamma".to_owned()),
+            ("beta".to_owned(), "gamma".to_owned()),
+        ]
+    );
 }
