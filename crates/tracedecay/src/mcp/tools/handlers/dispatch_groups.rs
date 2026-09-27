@@ -13,8 +13,9 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
 };
 use tracedecay_contracts::retrieval::{
-    ActiveProjectSurfaceRequestV1, AdminProjectSurfaceRequestV1, AdminSyncSurfaceRequestV1,
-    RemoteStatusSurfaceRequestV1, RuntimeSurfaceRequestV1, StatusSurfaceRequestV1,
+    ActiveProjectSurfaceRequestV1, AdminCliResultV1, AdminProjectSurfaceRequestV1,
+    AdminSyncSurfaceRequestV1, RemoteStatusSurfaceRequestV1, RuntimeSurfaceRequestV1,
+    StatusSurfaceRequestV1,
 };
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
 use tracedecay_mcp::handlers::health as portable_health;
@@ -680,11 +681,34 @@ fn admitted_tool_context<'a>(
     Ok(McpToolContext::bind(McpToolBinding { project, request })?)
 }
 
+/// One `tracedecay_admin_cli` action for the served project, under the
+/// profile, session, and sync authorities this owner carries.
+async fn compute_admin_cli(
+    cg: &TraceDecay,
+    args: &Value,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<AdminCliResultV1> {
+    admin_cli::compute_admin_cli(
+        cg,
+        decode_primitive_request(args, ApplicationSurfaceOperation::AdminCli.mcp_tool_name())?,
+        options.global_db,
+        options.accounting_db,
+        options.profile.map(ProfileRoot::data_dir),
+        options.session_authorities.clone(),
+        options.session_sync_service,
+        options.application_request_id.clone(),
+        options.application_deadline.clone(),
+        options.application_cancellation.clone(),
+    )
+    .await
+}
+
 /// Runs one side-effecting owner operation under the owner's admitted
 /// authorities. The dashboard composes the daemon-owned readers and writers
 /// this owner carries; the test run admits the verified graph to select tests;
 /// admin project maintains the project's counter, registry accounting, and
-/// automation scheduler.
+/// automation scheduler; admin CLI runs the served project's profile
+/// maintenance.
 async fn compute_owner_side_effect(
     cg: &TraceDecay,
     operation: ApplicationSurfaceOperation,
@@ -709,22 +733,7 @@ async fn compute_owner_side_effect(
             )
         }
         ApplicationSurfaceOperation::AdminCli => {
-            let request = decode_primitive_request(&args, operation.mcp_tool_name())?;
-            GraphToolResultV1::AdminCli(Box::new(
-                admin_cli::compute_admin_cli(
-                    cg,
-                    request,
-                    options.global_db,
-                    options.accounting_db,
-                    options.profile.map(ProfileRoot::data_dir),
-                    options.session_authorities.clone(),
-                    options.session_sync_service,
-                    options.application_request_id.clone(),
-                    options.application_deadline.clone(),
-                    options.application_cancellation.clone(),
-                )
-                .await?,
-            ))
+            GraphToolResultV1::AdminCli(Box::new(compute_admin_cli(cg, &args, options).await?))
         }
         ApplicationSurfaceOperation::AdminProject => {
             let request: AdminProjectSurfaceRequestV1 =
