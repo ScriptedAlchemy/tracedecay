@@ -74,6 +74,7 @@ impl McpServer {
             verified_graph_query_port: self.verified_graph_query_port.clone(),
             code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
             code_index_publication_identity: self.code_index_publication_identity.clone(),
+            code_index_reconcile_sink: self.code_index_reconcile_sink.clone(),
             code_index_ignored_dependency_admission: self
                 .code_index_ignored_dependency_admission
                 .clone(),

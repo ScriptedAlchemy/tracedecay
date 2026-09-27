@@ -1083,7 +1083,8 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::Runtime
             | ApplicationSurfaceOperation::ProjectList
             | ApplicationSurfaceOperation::ProjectSearch
-            | ApplicationSurfaceOperation::ProjectContext => {
+            | ApplicationSurfaceOperation::ProjectContext
+            | ApplicationSurfaceOperation::AdminSync => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate

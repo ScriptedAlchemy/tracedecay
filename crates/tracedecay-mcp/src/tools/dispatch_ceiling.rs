@@ -39,7 +39,6 @@ const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
     "tracedecay_fact_store_curate",
     "tracedecay_admin_cli",
     "tracedecay_admin_project",
-    "tracedecay_admin_sync",
     "tracedecay_admin_branch_add",
 ];
 

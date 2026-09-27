@@ -6,7 +6,7 @@ use std::path::Path;
 use serde_json::Value;
 use tracedecay_contracts::{ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult};
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
 use super::markdown;
@@ -36,6 +36,22 @@ impl ApplicationRefusal {
             &Err(self.problem),
             requested_output_format(args),
         )
+    }
+
+    /// The refusal as the error a first-party command returns: the owner's
+    /// reason code, retryability, and typed detail or diagnostic.
+    pub fn into_error(self) -> TraceDecayError {
+        let record = *self.problem.problem;
+        let (reason_code, message) = match record.diagnostic {
+            Some(diagnostic) => (diagnostic.code, diagnostic.message),
+            None => (record.code, record.message),
+        };
+        match record.detail {
+            Some(detail) => {
+                TraceDecayError::project_route_with_detail(reason_code, record.retryable, detail)
+            }
+            None => TraceDecayError::project_route(reason_code, record.retryable, message),
+        }
     }
 }
 

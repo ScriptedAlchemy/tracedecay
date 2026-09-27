@@ -7,9 +7,9 @@
 mod application_surface;
 pub(crate) use application_surface::graph_tool_error_problem;
 pub use application_surface::{
-    RetainedSurfaceExecution, execute_graph_tool_surface, execute_retained_surface_tool,
-    render_application_surface_result, render_retained_execution, retained_tool_target,
-    run_retained_surface_tool,
+    GraphToolOutcome, RetainedSurfaceExecution, execute_graph_tool_surface,
+    execute_retained_surface_tool, render_application_surface_result, render_retained_execution,
+    retained_tool_target, run_retained_surface_tool,
 };
 pub(crate) use dispatch_groups::compute_graph_tool_for_owner;
 #[cfg(test)]
@@ -175,9 +175,7 @@ use tracedecay_contracts::{InvocationTarget, RetainedSurfaceOperation};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use super::LegacyToolCompatibilityOwner;
-use dispatch_groups::{
-    dispatch_admin_tools, dispatch_application_surface_tools, dispatch_info_tools,
-};
+use dispatch_groups::{dispatch_admin_tools, dispatch_application_surface_tools};
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
@@ -606,9 +604,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
         let served_code_graph = options.served_code_graph.clone();
         let dispatched = async {
             match dispatch_group {
-                Some(McpToolDispatchGroup::Info) => {
-                    boxed_send(dispatch_info_tools(tool_name, cg, options)).await
-                }
                 Some(McpToolDispatchGroup::Admin) => {
                     boxed_send(dispatch_admin_tools(tool_name, cg, args, options)).await
                 }

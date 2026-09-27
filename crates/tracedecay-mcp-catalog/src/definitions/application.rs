@@ -147,7 +147,9 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
 
     ApplicationSurfaceOperation::ALL
         .into_iter()
-        .filter(|operation| !HANDWRITTEN_DEFINITION_OPERATIONS.contains(operation))
+        .filter(|operation| {
+            !HANDWRITTEN_DEFINITION_OPERATIONS.contains(operation) && !operation.is_internal()
+        })
         .map(|operation| {
             let descriptor = handlers.for_surface_operation(operation).ok_or_else(|| {
                 invalid_application_definition(
@@ -414,6 +416,15 @@ mod tests {
                         .count(),
                     1,
                     "{operation:?}"
+                );
+                continue;
+            }
+            if operation.is_internal() {
+                assert!(
+                    advertised
+                        .iter()
+                        .all(|published| published.name != operation.mcp_tool_name()),
+                    "{operation:?} is served by name and never advertised"
                 );
                 continue;
             }

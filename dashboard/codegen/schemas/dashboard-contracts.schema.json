@@ -11226,6 +11226,11 @@
           "const": "binds_server",
           "description": "Binds a listening server in the daemon process.",
           "type": "string"
+        },
+        {
+          "const": "schedules_work",
+          "description": "Queues work on a daemon-owned scheduler; the call answers with the\nscheduler's admission, not the finished work.",
+          "type": "string"
         }
       ]
     },

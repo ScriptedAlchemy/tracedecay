@@ -927,6 +927,7 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::ProjectList
         | ApplicationSurfaceOperation::ProjectSearch
         | ApplicationSurfaceOperation::ProjectContext
+        | ApplicationSurfaceOperation::AdminSync
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

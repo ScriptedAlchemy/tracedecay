@@ -2088,7 +2088,7 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
         },
     );
 
-    let error = handle_tool_call_with_registry_options(
+    let error = dispatch_on_graph_authority(
         &cg,
         "tracedecay_admin_sync",
         json!({"format": "json"}),

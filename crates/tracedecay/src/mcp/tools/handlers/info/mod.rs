@@ -14,10 +14,7 @@
 mod remote_status_dispatch_tests;
 mod status;
 
-pub(super) use status::handle_admin_sync;
-
-pub(super) use serde_json::json;
+pub(super) use status::admin_sync;
 
 pub(super) use tracedecay_domain::errors::{Result, TraceDecayError};
-pub(super) use tracedecay_mcp::ToolResult;
 pub(super) use tracedecay_project::project::TraceDecay;

@@ -42,6 +42,12 @@ impl ApplicationSurfaceOperation {
                 ceiling_millis: INTERACTIVE_CEILING_MILLIS,
                 identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
+            // Admission can wait out the scheduler's cold mount.
+            Self::AdminSync => Some(OwnerSideEffectEntryV1 {
+                effect: EffectClass::SchedulesWork,
+                ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
+                identical_calls: IdenticalCallPolicyV1::RunEach,
+            }),
             _ => None,
         }
     }
@@ -77,6 +83,14 @@ mod tests {
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::BindsServer,
                         ceiling_millis: 120_000,
+                        identical_calls: IdenticalCallPolicyV1::RunEach,
+                    }
+                ),
+                (
+                    "admin_sync",
+                    OwnerSideEffectEntryV1 {
+                        effect: EffectClass::SchedulesWork,
+                        ceiling_millis: 600_000,
                         identical_calls: IdenticalCallPolicyV1::RunEach,
                     }
                 ),
