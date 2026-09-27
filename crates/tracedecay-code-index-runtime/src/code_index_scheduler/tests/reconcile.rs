@@ -3036,7 +3036,8 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
         .expect("publication projection gate stays armed");
 
     assert!(
-        CodeIndexPublicationIdentityPortV1::resolve(&registry, fixture.path().to_path_buf())
+        registry
+            .latest_text_serving_for_root(fixture.path())
             .await
             .is_none(),
         "no generation serves while its text projection is held"
@@ -3061,16 +3062,26 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
             .is_none(),
         "a caller that handled the sealed generation learns of no newer seal"
     );
+    // A diagnostics read validates the seal-time publication against this
+    // identity, so it must name the sealed generation before text serves.
+    let read_identity =
+        CodeIndexPublicationIdentityPortV1::resolve(&registry, fixture.path().to_path_buf())
+            .await
+            .expect("the retained generation answers identity while its text projection is held");
+    assert_eq!(read_identity.generation_id(), sealed.generation_id());
 
     release_projection
         .send(())
         .expect("release publication projection");
     let serving =
         wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
-            CodeIndexPublicationIdentityPortV1::resolve(&registry, fixture.path().to_path_buf())
+            registry.latest_text_serving_for_root(fixture.path())
         })
         .await;
-    assert_eq!(serving.generation_id(), sealed.generation_id());
+    assert_eq!(
+        &serving.metadata().manifest().generation_id,
+        sealed.generation_id()
+    );
     registry.shutdown().await;
 }
 
@@ -6709,7 +6720,7 @@ async fn readiness_wait_reaches_ready_exactly_when_the_held_graph_publishes() {
     assert!(
         matches!(
             reached,
-            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
         ),
         "{reached:?}"
     );
@@ -6736,7 +6747,7 @@ async fn readiness_wait_reaches_ready_exactly_when_the_held_graph_publishes() {
     assert!(
         matches!(
             graph_ready,
-            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
         ),
         "{graph_ready:?}"
     );
@@ -6799,7 +6810,7 @@ async fn fresh_wait_on_a_current_index_reaches_inside_one_second() {
     assert!(
         matches!(
             outcome,
-            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
         ),
         "{outcome:?}"
     );
@@ -6831,7 +6842,7 @@ async fn fresh_wait_catches_an_unreported_save_and_returns_after_its_reindex() {
     assert!(
         matches!(
             outcome,
-            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
         ),
         "{outcome:?}"
     );
@@ -6878,7 +6889,7 @@ async fn fresh_wait_verifies_the_source_while_a_pass_holds_the_scheduler() {
     assert!(
         matches!(
             quiet,
-            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
         ),
         "{quiet:?}"
     );
@@ -6903,7 +6914,7 @@ async fn fresh_wait_verifies_the_source_while_a_pass_holds_the_scheduler() {
     assert!(
         matches!(
             reindexed,
-            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
         ),
         "{reindexed:?}"
     );

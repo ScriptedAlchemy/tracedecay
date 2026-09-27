@@ -10,7 +10,8 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_project::project::TraceDecay;
 
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
+    CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
+    CodeIndexReadinessWaitV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::retrieval::{
     ActiveProjectSurfaceRequestV1, AdminCliResultV1, AdminProjectSurfaceRequestV1,
@@ -351,11 +352,13 @@ async fn compute_project_info(
             let request: StatusSurfaceRequestV1 = decode_primitive_request(args, tool_name)?;
             // Wait before admitting snapshots, so the payload describes the
             // worktree the wait ended on.
-            let wait = match request.wait_for {
+            let (wait, reached_freshness) = match request.wait_for {
                 Some(wait_for) => {
-                    Some(status_readiness_wait(options, cg.project_root(), wait_for).await?)
+                    let (outcome, reached) =
+                        status_readiness_wait(options, cg.project_root(), wait_for).await?;
+                    (Some(outcome), reached)
                 }
-                None => None,
+                None => (None, None),
             };
             let project = admitted_project_authorities(cg, options)?;
             let snapshots = admitted_status_snapshots(options).await;
@@ -366,6 +369,7 @@ async fn compute_project_info(
                 options.server_stats.clone(),
                 scope_prefix,
                 wait,
+                reached_freshness,
             )
             .await
             .map(GraphToolResultV1::Status)
@@ -513,7 +517,8 @@ async fn admitted_runtime_snapshots(
 }
 
 /// Hold a status read until the project reaches the requested readiness,
-/// for at most the caller's `timeout_ms`.
+/// for at most the caller's `timeout_ms`, returning the reading that reached
+/// it alongside the outcome.
 ///
 /// The budget is the caller's; a budget this call cannot live out is refused
 /// rather than shortened. Cancellation ends the wait with a typed outcome and
@@ -522,7 +527,10 @@ async fn status_readiness_wait(
     options: &ToolCallRegistryOptions<'_>,
     project_root: &std::path::Path,
     request: CodeIndexReadinessWaitV1,
-) -> Result<CodeIndexReadinessWaitOutcomeV1> {
+) -> Result<(
+    CodeIndexReadinessWaitOutcomeV1,
+    Option<CodeIndexWorktreeFreshnessV1>,
+)> {
     let budget = std::time::Duration::from_millis(request.timeout_ms);
     let dispatch_budget =
         tool_dispatch_budget("tracedecay_status", options.application_deadline.as_ref())
@@ -537,9 +545,12 @@ async fn status_readiness_wait(
         });
     }
     let Some(waiter) = options.code_index_readiness_waiter.as_ref() else {
-        return Ok(CodeIndexReadinessWaitOutcomeV1::Unavailable {
-            reason: "code_index_scheduler_authority_not_attached".to_owned(),
-        });
+        return Ok((
+            CodeIndexReadinessWaitOutcomeV1::Unavailable {
+                reason: "code_index_scheduler_authority_not_attached".to_owned(),
+            },
+            None,
+        ));
     };
     let wait = waiter(project_root.to_path_buf(), request.state, budget);
     let cancelled = async {
@@ -550,12 +561,22 @@ async fn status_readiness_wait(
     };
     Ok(tokio::select! {
         biased;
-        () = cancelled => CodeIndexReadinessWaitOutcomeV1::Unavailable { reason: "request_cancelled".to_owned() },
+        () = cancelled => (CodeIndexReadinessWaitOutcomeV1::Unavailable { reason: "request_cancelled".to_owned() }, None),
         read = wait => match read {
-            Ok(read) => portable_info::readiness_wait_outcome(read),
-            Err(_) => CodeIndexReadinessWaitOutcomeV1::Unavailable {
-                reason: "code_index_freshness_read_failed".to_owned(),
-            },
+            Ok(read) => {
+                let reached = match &read {
+                    CodeIndexReadinessWaitReadV1::Reached { reading } => Some(reading.as_ref().clone()),
+                    CodeIndexReadinessWaitReadV1::TimedOut { .. }
+                    | CodeIndexReadinessWaitReadV1::Unreachable { .. } => None,
+                };
+                (portable_info::readiness_wait_outcome(read), reached)
+            }
+            Err(_) => (
+                CodeIndexReadinessWaitOutcomeV1::Unavailable {
+                    reason: "code_index_freshness_read_failed".to_owned(),
+                },
+                None,
+            ),
         },
     })
 }

@@ -43,7 +43,10 @@ where
     F: FnOnce(UtcMicros) -> Fut,
     Fut: Future<Output = Result<AuthorityReceipt, ApplicationProblem>>,
 {
-    let mut prepared = prepare_evidence_for_publication(context, outcome);
+    let mut prepared = match prepare_evidence_for_publication(context, outcome) {
+        Ok(prepared) => prepared,
+        Err(problem) => return problem_envelope(context, operation, problem),
+    };
     let mut authority = admission_receipt.clone();
     if prepared.requires_recheck {
         match recheck_publication(prepared.evidence.finished_at).await {
@@ -71,17 +74,8 @@ impl<T> PreparedEvidence<T> {
 fn prepare_evidence_for_publication<T>(
     context: &RequestContext,
     outcome: RetrievalPortOutcome<T>,
-) -> PreparedEvidence<T> {
-    let (mut termination, mut evidence) = match outcome {
-        RetrievalPortOutcome::Completed(evidence) => (OperationTermination::Completed, evidence),
-        RetrievalPortOutcome::Partial(evidence) => (OperationTermination::Partial, evidence),
-        RetrievalPortOutcome::Cancelled(evidence) => (OperationTermination::Cancelled, evidence),
-        RetrievalPortOutcome::TimedOut(evidence) => (OperationTermination::TimedOut, evidence),
-        RetrievalPortOutcome::Failed(evidence) => (OperationTermination::Failed, evidence),
-        RetrievalPortOutcome::Unavailable(evidence) => {
-            (OperationTermination::Unavailable, evidence)
-        }
-    };
+) -> Result<PreparedEvidence<T>, ApplicationProblem> {
+    let (mut termination, mut evidence) = outcome.into_termination()?;
     let mut requires_recheck = false;
     let terminal_override = match termination {
         OperationTermination::Cancelled => Some((
@@ -133,11 +127,11 @@ fn prepare_evidence_for_publication<T>(
         termination = override_termination;
         suppress_unpublished_evidence(&mut evidence, reason, cancellation);
     }
-    PreparedEvidence {
+    Ok(PreparedEvidence {
         termination,
         evidence,
         requires_recheck,
-    }
+    })
 }
 
 fn finish_evidence_envelope<T>(

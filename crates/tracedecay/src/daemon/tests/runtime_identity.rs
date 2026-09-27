@@ -278,19 +278,31 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
     let routed = files_for_session(primary_server.as_ref(), linked_session_id).await;
     assert!(
-        routed.result.is_none(),
-        "a linked worktree without the watch opt-in must not serve a file listing: {routed:?}"
+        routed.error.is_none(),
+        "the graph-tool owner refuses as an isError tool result: {routed:?}"
     );
-    let routed_error = routed
-        .error
+    let routed_result = routed
+        .result
         .as_ref()
-        .unwrap_or_else(|| panic!("linked route must refuse with a typed error: {routed:?}"));
-    let routed_data = routed_error
-        .data
-        .as_ref()
-        .unwrap_or_else(|| panic!("linked-route refusal must be structured: {routed_error:?}"));
-    assert_eq!(routed_data["reason_code"], "code-graph-unavailable");
-    assert_eq!(routed_data["tool"], "tracedecay_files");
+        .unwrap_or_else(|| panic!("linked route must answer a refusal result: {routed:?}"));
+    assert_eq!(
+        routed_result["isError"],
+        serde_json::json!(true),
+        "a linked worktree without the watch opt-in must not serve a file listing: {routed_result}"
+    );
+    let problem = &routed_result["problem"];
+    assert_eq!(
+        (&problem["kind"], &problem["code"], &problem["message"]),
+        (
+            &serde_json::json!("unavailable"),
+            &serde_json::json!("code-graph-unavailable"),
+            &serde_json::json!(
+                "the exact project code graph is unavailable: the verified code graph is not \
+                 ready for the exact project root"
+            ),
+        ),
+        "{routed_result}"
+    );
 
     // The refusal is exact to the route, not a project-wide outage: the primary
     // route shares the same store authority, is admitted, and still answers the

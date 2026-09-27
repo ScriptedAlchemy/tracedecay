@@ -1558,7 +1558,7 @@ async fn first_index_serves_graph_reads_without_decoding_the_generation() {
     assert!(
         matches!(
             reached,
-            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
         ),
         "the first index must reach fresh with graph serving: {reached:?}"
     );

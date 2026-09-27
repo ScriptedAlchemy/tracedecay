@@ -1324,6 +1324,16 @@ async fn complete_or_failed<T: Send>(
     page.related_edge_count = related_edge_count;
     page.support_gaps = gaps;
     let receipt = graph.cost.receipt();
+    let Some(finished_at) = i64::try_from(receipt.wall_micros)
+        .ok()
+        .and_then(|wall| context.observed_at.0.checked_add(wall))
+        .map(UtcMicros)
+    else {
+        return failed(
+            context,
+            "graph read end time is outside the timestamp domain",
+        );
+    };
     let budget = OperationBudgetUsage {
         elapsed_micros: receipt.wall_micros,
         ..OperationBudgetUsage::default()
@@ -1332,14 +1342,14 @@ async fn complete_or_failed<T: Send>(
     if page.support_gaps.is_empty() {
         SymbolGraphPortOutcome::Completed {
             page,
-            finished_at: context.observed_at,
+            finished_at,
             budget,
             cost,
         }
     } else {
         SymbolGraphPortOutcome::Partial {
             page,
-            finished_at: context.observed_at,
+            finished_at,
             budget,
             cost,
         }

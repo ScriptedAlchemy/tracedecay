@@ -9,7 +9,9 @@ use tracedecay_domain::{
     SnapshotFileDispositionV1, TemporalModeV1, VectorWatermark, canonical_sha256,
 };
 use tracedecay_query::code_search;
-use tracedecay_query::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
+use tracedecay_query::retrieval::{
+    PreparedQueryBindingV1, PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1,
+};
 
 use crate::code_index_scheduler;
 use crate::mcp_admission::{
@@ -364,7 +366,9 @@ fn prepared_error_reason(
     error: PreparedQueryErrorV1,
 ) -> code_search::CodeIndexSearchUnavailableReasonV1 {
     match error {
-        PreparedQueryErrorV1::Invalid | PreparedQueryErrorV1::Foreign => {
+        PreparedQueryErrorV1::Invalid
+        | PreparedQueryErrorV1::Foreign
+        | PreparedQueryErrorV1::ParameterChanged { .. } => {
             code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest
         }
         PreparedQueryErrorV1::Stale => {
@@ -397,15 +401,16 @@ fn branch_diff_scope_digest(
     ))
 }
 
-fn branch_diff_query_binding_digest(
+fn branch_diff_query_binding(
     request: &code_search::CodeIndexBranchDiffRequestV1,
-) -> Result<tracedecay_domain::ManifestDigest, tracedecay_domain::DomainError> {
-    canonical_sha256(&(
-        "tracedecay.code-index-branch-diff.query.v1",
-        request.file_filter.as_deref(),
-        request.kind_filter.as_deref(),
-        "symbol_identity_ascending.v1",
-    ))
+) -> Result<PreparedQueryBindingV1, PreparedQueryErrorV1> {
+    let digest = |value: Option<&str>| {
+        canonical_sha256(&value).map_err(|_| PreparedQueryErrorV1::Unavailable)
+    };
+    PreparedQueryBindingV1::new(vec![
+        ("file_filter", digest(request.file_filter.as_deref())?),
+        ("kind_filter", digest(request.kind_filter.as_deref())?),
+    ])
 }
 
 pub fn code_index_branch_diff_executor<A, S>(
@@ -615,8 +620,8 @@ where
                         );
                     }
                 };
-                let query_binding_digest = match branch_diff_query_binding_digest(&request) {
-                    Ok(digest) => digest,
+                let query_binding = match branch_diff_query_binding(&request) {
+                    Ok(binding) => binding,
                     Err(_) => {
                         return unavailable(
                             Some(base_id),
@@ -634,7 +639,7 @@ where
                         .manifest()
                         .generation_id
                         .clone(),
-                    query_binding_digest,
+                    query_binding,
                 ) {
                     Ok(bindings) => bindings,
                     Err(error) => {
@@ -753,7 +758,7 @@ mod tests {
     use tracedecay_query::code_search::{self, CodeIndexBranchSymbolV1};
 
     use super::{
-        branch_diff_query_binding_digest, branch_diff_scope_digest, diff_symbols, page_diff_changes,
+        branch_diff_query_binding, branch_diff_scope_digest, diff_symbols, page_diff_changes,
     };
 
     fn symbol(
@@ -1039,12 +1044,11 @@ mod tests {
             .expect("changed head generation digest"),
             expected,
         );
-        let expected_query =
-            branch_diff_query_binding_digest(&request).expect("query binding digest");
+        let expected_query = branch_diff_query_binding(&request).expect("query binding");
         let mut changed_filter = request;
         changed_filter.kind_filter = Some("struct".to_owned());
         assert_ne!(
-            branch_diff_query_binding_digest(&changed_filter).expect("changed query digest"),
+            branch_diff_query_binding(&changed_filter).expect("changed query binding"),
             expected_query,
         );
     }

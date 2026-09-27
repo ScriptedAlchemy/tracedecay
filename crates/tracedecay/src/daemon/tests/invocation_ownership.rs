@@ -282,6 +282,93 @@ async fn committed_project_alias_invokes_mounted_primitive_and_shuts_down_cleanl
     );
 }
 
+/// Right after a restart the profile store's readers can all be busy. The
+/// project source-access read then times out, and a mounted project must
+/// answer that as a retryable unavailable state naming the configuration
+/// authority, never as a denial of a project the caller is standing in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn primitive_read_with_a_saturated_configuration_store_is_unavailable_not_denied() {
+    let (_temp, _database_scope, engine, handshake) =
+        committed_fixture("primitive-read-saturated-configuration").await;
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("mounted project server");
+    let configuration_store = server
+        .cg()
+        .await
+        .configuration_runtime()
+        .registered_database();
+    // Lease readers until the pool, burst workers included, refuses one.
+    let mut held_readers = Vec::new();
+    while let Ok(reader) = configuration_store.read_snapshot().await {
+        held_readers.push(reader);
+    }
+    assert!(
+        !held_readers.is_empty(),
+        "the store admitted readers before saturating"
+    );
+
+    let observed_at = tracedecay_contracts::clock::now_micros();
+    let response = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        DaemonInvocationRequest::primitive(
+            "request.saturated-configuration.primitive",
+            ApplicationSurfaceOperation::StorageStatus,
+            PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
+                include_details: false,
+            }),
+            observed_at,
+            Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000)))
+                .expect("daemon invocation deadline"),
+            CancellationContext::active("cancel.saturated-configuration")
+                .expect("daemon invocation cancellation"),
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = &response.outcome else {
+        panic!("a saturated configuration store must answer a typed problem: {response:?}");
+    };
+    assert_eq!(
+        problem.kind(),
+        ApplicationProblemKind::Unavailable,
+        "{problem:?}"
+    );
+    assert_eq!(problem.retry(), RetryDirective::AfterDelay, "{problem:?}");
+    assert_eq!(
+        problem
+            .diagnostic()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        Some("configuration_authority_unavailable"),
+        "{problem:?}"
+    );
+
+    drop(held_readers);
+    let served = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        DaemonInvocationRequest::primitive(
+            "request.saturated-configuration.released",
+            ApplicationSurfaceOperation::StorageStatus,
+            PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
+                include_details: false,
+            }),
+            tracedecay_contracts::clock::now_micros(),
+            Deadline::new(UtcMicros(observed_at.0.saturating_add(60_000_000)))
+                .expect("daemon invocation deadline"),
+            CancellationContext::active("cancel.saturated-configuration.released")
+                .expect("daemon invocation cancellation"),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(served.outcome, DaemonInvocationOutcome::Primitive { .. }),
+        "the same read is served once readers free up: {served:?}"
+    );
+    engine.shutdown_all().await;
+}
+
 #[tokio::test]
 async fn unregistered_project_invocation_reports_truthful_unavailable() {
     let temp = TempDir::new().expect("unregistered project fixture");

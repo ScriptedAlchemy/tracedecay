@@ -266,14 +266,14 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         let deadline = tokio::time::Instant::now() + budget;
         if target != CodeIndexReadinessTargetV1::Fresh
-            && self
+            && let Some(reading) = self
                 .dashboard_freshness_read(project_root)
                 .await?
-                .is_some_and(|freshness| {
-                    freshness.readiness(target) == CodeIndexReadinessV1::Reached
-                })
+                .filter(|freshness| freshness.readiness(target) == CodeIndexReadinessV1::Reached)
         {
-            return Ok(CodeIndexReadinessWaitReadV1::Reached);
+            return Ok(CodeIndexReadinessWaitReadV1::Reached {
+                reading: Box::new(reading),
+            });
         }
         let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
         // The caller's budget bounds the sweep, and an unproven source cannot
@@ -307,7 +307,9 @@ impl CodeIndexSchedulerRegistryV1 {
             if let Some(freshness) = last.as_ref() {
                 match freshness.readiness(target) {
                     CodeIndexReadinessV1::Reached => {
-                        return Ok(CodeIndexReadinessWaitReadV1::Reached);
+                        return Ok(CodeIndexReadinessWaitReadV1::Reached {
+                            reading: Box::new(freshness.clone()),
+                        });
                     }
                     CodeIndexReadinessV1::Unreachable { reason } => {
                         return Ok(CodeIndexReadinessWaitReadV1::Unreachable { reason });

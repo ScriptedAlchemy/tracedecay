@@ -406,6 +406,7 @@ impl CodeIndexSchedulerRegistryV1 {
             repository_id,
             worktree_id,
             serving_generation,
+            graph_activation_enabled,
             flights,
             hints,
             wake,
@@ -428,6 +429,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.repository_id.clone(),
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.serving_generation),
+                worktree.graph_activation.policy().is_enabled(),
                 Arc::clone(&worktree.ignored_dependency_admissions),
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
@@ -435,6 +437,18 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.pending_wake),
             )
         };
+        // A ready generation may serve from its text owner with no decoded
+        // seat; the whole decode runs only on demand. Admission builds on the
+        // decoded generation, so a refusal for an empty seat demands it and
+        // the caller's retry finds it seated.
+        if graph_activation_enabled
+            && serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        {
+            self.request_complete_generation(&project_root).await;
+        }
         let (flight, owns_flight) = {
             let mut active = flights
                 .lock()

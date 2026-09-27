@@ -708,7 +708,11 @@ impl CodeIndexWorktreeFreshnessV1 {
 /// What a readiness wait observed when it ended.
 #[derive(Clone, Debug)]
 pub enum CodeIndexReadinessWaitReadV1 {
-    Reached,
+    /// `reading` is the reading that satisfied the target; a response built
+    /// on the wait describes this reading, not a later one.
+    Reached {
+        reading: Box<CodeIndexWorktreeFreshnessV1>,
+    },
     /// The budget elapsed; `last` is the last reading, `None` while the root
     /// was never mounted.
     TimedOut {
