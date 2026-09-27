@@ -2464,6 +2464,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     // nested guard and publishes the witness before either
                     // lifetime becomes idle.
                 }
+                #[cfg(test)]
+                if matches!(&result, Ok((Ok(_), Some(_), _))) {
+                    Self::wait_for_serving_swap_gate(&worker_project_root).await;
+                }
                 if let Ok((Ok(_), Some(latest), _)) = &result {
                     let scheduler = Arc::clone(&worker_scheduler);
                     let serving_generation = Arc::clone(&worker_serving_generation);

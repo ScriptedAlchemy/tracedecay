@@ -119,6 +119,14 @@ impl CodeIndexOwnerSignalsV1 {
         Ok(())
     }
 
+    /// Whether the worktree's worker finished its last pass, graph tail
+    /// included, and is back at a wait.
+    fn owner_settled(&self) -> bool {
+        self.activity
+            .as_ref()
+            .is_some_and(CodeIndexOwnerActivityV1::pass_finished)
+    }
+
     /// Consume publications until a scheduler turn passes without one.
     async fn settle_burst(&mut self) {
         loop {
@@ -255,6 +263,11 @@ impl CodeIndexSchedulerRegistryV1 {
     /// only where a stat moved, without the scheduler mutex. `ready` and
     /// `graph_ready` accept a reading that already satisfies them, the answer
     /// a plain status read gives; a pending `ready` still sweeps first.
+    /// `fresh` and `ready` are reached only once the worker has also finished
+    /// the pass behind that reading: its graph tail seats the decoded
+    /// generation and binds the source proof to that seat under a counted
+    /// step, so a wait that ended before the tail was followed by reads
+    /// reporting `verifying` for the generation it had just reported fresh.
     /// An unmounted root is waited through: a mount that lands inside the
     /// budget reconciles the source as of that mount. Dropping the future
     /// abandons the wait; a wake the sweep posted is ordinary demand.
@@ -265,17 +278,21 @@ impl CodeIndexSchedulerRegistryV1 {
         budget: Duration,
     ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         let deadline = tokio::time::Instant::now() + budget;
+        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
+        let owner_settled = |signals: &CodeIndexOwnerSignalsV1| {
+            target == CodeIndexReadinessTargetV1::GraphReady || signals.owner_settled()
+        };
         if target != CodeIndexReadinessTargetV1::Fresh
             && let Some(reading) = self
                 .dashboard_freshness_read(project_root)
                 .await?
                 .filter(|freshness| freshness.readiness(target) == CodeIndexReadinessV1::Reached)
+            && owner_settled(&signals)
         {
             return Ok(CodeIndexReadinessWaitReadV1::Reached {
                 reading: Box::new(reading),
             });
         }
-        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
         // The caller's budget bounds the sweep, and an unproven source cannot
         // be reported as reached.
         let sweep_source = target != CodeIndexReadinessTargetV1::GraphReady;
@@ -306,11 +323,12 @@ impl CodeIndexSchedulerRegistryV1 {
             let last = self.dashboard_freshness_read(project_root).await?;
             if let Some(freshness) = last.as_ref() {
                 match freshness.readiness(target) {
-                    CodeIndexReadinessV1::Reached => {
+                    CodeIndexReadinessV1::Reached if owner_settled(&signals) => {
                         return Ok(CodeIndexReadinessWaitReadV1::Reached {
                             reading: Box::new(freshness.clone()),
                         });
                     }
+                    CodeIndexReadinessV1::Reached => {}
                     CodeIndexReadinessV1::Unreachable { reason } => {
                         return Ok(CodeIndexReadinessWaitReadV1::Unreachable { reason });
                     }

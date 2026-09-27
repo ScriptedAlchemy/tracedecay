@@ -9,6 +9,10 @@ use std::{
 
 use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
+    CodeIndexStalenessStateV1,
+};
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, Deadline,
     ExactOccurrenceRequest, ResolvedScope, RetrievalPortContext, RetrievalPortOutcome,
@@ -3081,6 +3085,108 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
     assert_eq!(
         &serving.metadata().manifest().generation_id,
         sealed.generation_id()
+    );
+    registry.shutdown().await;
+}
+
+/// The text owner serves a first publication before the worker's graph tail
+/// seats its decoded generation, and that seat step reads as `verifying`.
+/// A `ready` wait must not end in that gap, or the next read contradicts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let (swap_entered, release_swap) = registry.pause_next_serving_swap(canonical_root);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    tokio::time::timeout(Duration::from_secs(10), swap_entered)
+        .await
+        .expect("publication did not reach its serving swap")
+        .expect("serving swap gate stays armed");
+
+    let before_seat = registry
+        .dashboard_freshness_read(fixture.path())
+        .await
+        .expect("freshness read")
+        .expect("mounted worktree");
+    assert_eq!(
+        (
+            before_seat.staleness_state,
+            before_seat.readiness(CodeIndexReadinessTargetV1::Ready),
+        ),
+        (
+            Some(CodeIndexStalenessStateV1::Fresh),
+            CodeIndexReadinessV1::Reached
+        ),
+        "the text owner already serves the generation: {before_seat:?}"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none(),
+        "the decoded generation is not seated yet"
+    );
+    let held = registry
+        .wait_for_readiness(
+            fixture.path(),
+            CodeIndexReadinessTargetV1::Ready,
+            Duration::ZERO,
+        )
+        .await
+        .expect("readiness wait");
+    assert!(
+        matches!(held, CodeIndexReadinessWaitReadV1::TimedOut { .. }),
+        "ready must not be reached while the graph tail is held: {held:?}"
+    );
+
+    release_swap.send(()).expect("release serving swap");
+    let reached = registry
+        .wait_for_readiness(
+            fixture.path(),
+            CodeIndexReadinessTargetV1::Ready,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("readiness wait");
+    let CodeIndexReadinessWaitReadV1::Reached { reading } = reached else {
+        panic!("ready after the graph tail: {reached:?}");
+    };
+    assert_eq!(
+        reading.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh)
+    );
+    assert_eq!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .map(|seat| seat
+                .generation()
+                .manifest()
+                .generation_id
+                .as_str()
+                .to_owned()),
+        before_seat.latest_generation_id,
+        "ready implies the advertised generation is seated"
+    );
+    assert_eq!(
+        registry
+            .dashboard_freshness_read(fixture.path())
+            .await
+            .expect("freshness read")
+            .expect("mounted worktree")
+            .staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh),
+        "a read after ready still reads fresh"
     );
     registry.shutdown().await;
 }

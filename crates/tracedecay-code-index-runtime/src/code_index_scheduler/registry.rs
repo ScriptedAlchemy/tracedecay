@@ -422,15 +422,22 @@ fn retained_text_projection_gate() -> &'static Mutex<BTreeMap<PathBuf, RetainedT
 }
 
 #[cfg(test)]
-struct PublishedTextProjectionGateV1 {
+struct WorkerStepGateV1 {
     entered: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
 #[cfg(test)]
-fn published_text_projection_gate()
--> &'static Mutex<BTreeMap<PathBuf, PublishedTextProjectionGateV1>> {
-    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, PublishedTextProjectionGateV1>>> =
+fn published_text_projection_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Holds a worker's graph tail right before it seats the decoded generation.
+#[cfg(test)]
+fn serving_swap_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
         std::sync::OnceLock::new();
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
