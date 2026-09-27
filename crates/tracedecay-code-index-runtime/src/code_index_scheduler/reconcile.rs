@@ -614,9 +614,10 @@ impl SourceFreshnessFenceV1 {
     ///
     /// Age is deliberately not evidence. The proof holds until a hook hint or
     /// observed change advances the source epoch, or Git metadata moves.
-    /// Unhinted raw writes are the watcher backstop's and the read-refresh
-    /// probe's to find ([`CodeIndexWorktreeSchedulerV1::freshness_probe_verdict`]
-    /// sweeps the sealed digests and posts a wake only on proven movement).
+    /// Unhinted raw writes are the watcher backstop's, the read-refresh
+    /// probe's, and a publication's post-projection sweep's to find
+    /// ([`CodeIndexWorktreeSchedulerV1::freshness_probe_verdict`] sweeps the
+    /// sealed digests and posts a wake only on proven movement).
     /// Expiring the proof on a clock made every read after the window
     /// schedule a verification pass of an unchanged tree.
     fn proof_is_unmoved(

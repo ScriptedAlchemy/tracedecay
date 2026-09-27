@@ -53,7 +53,8 @@ use crate::{
         CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,
         CodeIndexHintPolicyV1, CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
         CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
-        CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
+        CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
+        SharedCodeIndexBytePoolV1,
         classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1},
         feedback_document_identity_from_generation,
         freshness_witness::RestoreFreshnessWitnessV1,
@@ -3180,6 +3181,117 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
         "a real source change still refuses the old seat"
     );
 
+    registry.shutdown().await;
+}
+
+/// A plain write lands while a publication's text projection runs: no hook
+/// hint, no Git metadata move, so the source epoch still equals the proof
+/// sealed before the projection. That proof does not cover the write. The
+/// seat must report the generation stale and the next pass must index the
+/// write without an explicit sync.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_without_sync() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let (projection_started, release_projection) = registry
+        .pause_next_published_text_projection(canonical_root)
+        .await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    tokio::time::timeout(Duration::from_secs(10), projection_started)
+        .await
+        .expect("publication did not reach text projection")
+        .expect("publication projection gate stays armed");
+    let identity = super::super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("mounted worktree identity");
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("resolved scope");
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn edited_during_projection() -> u32 { 2 }\n",
+    );
+    // The publishing pass released the admission before its projection; hold
+    // it so the seat's freshness is read before any successor pass runs.
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the successor pass at its dequeue point");
+    release_projection
+        .send(())
+        .expect("release publication projection");
+    let seated =
+        wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
+            registry.latest_complete_serving_for_test(fixture.path())
+        })
+        .await;
+    let simple_names = |latest: &LatestCompleteCodeIndexV1| {
+        latest
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.simple_name.clone())
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        simple_names(&seated),
+        BTreeSet::from(["alpha".to_owned()]),
+        "the seated generation was sealed before the write"
+    );
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
+
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Refreshing),
+        "a seat whose source moved during its projection is not current"
+    );
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "a ready read refuses the seat the write outdated"
+    );
+
+    drop(admission);
+    let reconciled = wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        Duration::from_secs(10),
+        || async {
+            registry
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+                .filter(|latest| {
+                    latest.generation.manifest().generation_id
+                        != seated.generation.manifest().generation_id
+                })
+        },
+    )
+    .await;
+    assert_eq!(
+        simple_names(&reconciled),
+        BTreeSet::from(["alpha".to_owned(), "edited_during_projection".to_owned()]),
+    );
     registry.shutdown().await;
 }
 

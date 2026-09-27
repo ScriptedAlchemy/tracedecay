@@ -2147,28 +2147,61 @@ impl CodeIndexSchedulerRegistryV1 {
                             // exact current generation seats without a witness
                             // and every readiness read schedules another
                             // identical Noop.
-                            let proof_is_current = graph_text.as_ref().is_some_and(|text| {
-                                worker_source_freshness.serves_verified_source(
+                            //
+                            // A plain write moves neither the source epoch nor
+                            // Git metadata, so an unmoved proof does not mean
+                            // an unchanged tree. Whatever the proof says, the
+                            // sealed digests are swept again here: a write that
+                            // landed during the projection is observed now,
+                            // leaves the seat stale, and wakes its successor.
+                            if let Some(text) = graph_text.as_ref() {
+                                let proof_unmoved = worker_source_freshness.serves_verified_source(
                                     &text.metadata().snapshot().content_identity,
                                     &worker_project_root,
                                     &worker_shutting_down,
-                                )
-                            });
-                            if !proof_is_current && let Some(text) = graph_text.as_ref() {
+                                );
                                 let scheduler = Arc::clone(&worker_scheduler);
                                 let shutting_down = Arc::clone(&worker_shutting_down);
+                                let pending_wake = Arc::clone(&worker_pending_wake);
+                                let wake = Arc::clone(&worker_wake);
+                                let source_freshness = worker_source_freshness.clone();
                                 let metadata = text.metadata().clone();
-                                let renewed = tokio::task::spawn_blocking(move || {
-                                    Self::lock_scheduler_unless_shutting_down(
+                                let source_current = tokio::task::spawn_blocking(move || {
+                                    let mut scheduler = Self::lock_scheduler_unless_shutting_down(
                                         &scheduler,
                                         &shutting_down,
-                                    )?
-                                    .reconcile_retained_text_generation_with(&metadata, false)
+                                    )?;
+                                    if !proof_unmoved
+                                        && matches!(
+                                            scheduler.reconcile_retained_text_generation_with(
+                                                &metadata, false,
+                                            )?,
+                                            Some(CodeIndexReconcileOutcomeV1::Noop(_))
+                                        )
+                                    {
+                                        return Ok(true);
+                                    }
+                                    // A pending hint or observed change already
+                                    // carries its own wake; sweeping on top of
+                                    // it would turn that targeted pass into an
+                                    // overflow rescan.
+                                    if source_freshness.source_change_pending() {
+                                        return Ok(false);
+                                    }
+                                    let moved = scheduler.request_fresh_now_background();
+                                    if moved {
+                                        Self::note_wake(
+                                            &pending_wake,
+                                            &wake,
+                                            CodeIndexCadenceTriggerV1::Overflow,
+                                        );
+                                    }
+                                    Ok::<_, CodeIndexSchedulerErrorV1>(!moved)
                                 })
                                 .await;
-                                match renewed {
-                                    Ok(Ok(Some(CodeIndexReconcileOutcomeV1::Noop(_)))) => {}
-                                    Ok(Ok(Some(_) | None)) => tracing::info!(
+                                match source_current {
+                                    Ok(Ok(true)) => {}
+                                    Ok(Ok(false)) => tracing::info!(
                                         event = "code_index_post_projection_source_unverified",
                                         "source moved while text projection ran; the completed generation may only take a stale seat"
                                     ),
