@@ -220,6 +220,35 @@ describe('summaries', () => {
     expect(building.stateDetail).toBe('1 of 1 worktrees building · 1 blocked');
     expect(building.affected).toBe('1 worktrees · 1 building · 0 stale · 1 blocked');
 
+    const restoring = pipelineSummary(
+      read(
+        envelope(
+          {
+            note: 'live',
+            worktrees: [
+              {
+                ...worktree,
+                progress: null,
+                rebuild_in_flight: false,
+                staleness_state: 'restoring',
+                coverage: 'partial_artifact_restore',
+                restore_progress: {
+                  generation_id: 'g1',
+                  artifact_digest: `sha256:${'a'.repeat(64)}`,
+                  authenticated_completed: 4,
+                  authenticated_total: 6,
+                  authenticated_remaining: 2,
+                },
+              },
+            ],
+          },
+          { domain_state: 'loading' },
+        ),
+      ),
+    );
+    expect(restoring.state).toBe('building');
+    expect(restoring.stateDetail).toBe('1 of 1 worktrees building');
+
     const empty = pipelineSummary(read(envelope({ note: 'live', worktrees: [] })));
     expect(empty.state).toBe('empty');
     expect(empty.stateDetail).toBe('no mounted code-index worktree');

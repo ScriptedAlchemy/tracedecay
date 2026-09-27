@@ -307,6 +307,14 @@ fn print_freshness_row(freshness: Option<&CodeIndexWorktreeFreshnessV1>, inner_w
             if let Some(state) = freshness.staleness_state {
                 parts.push(state.as_str().to_owned());
             }
+            if let Some(restore) = freshness.restore_progress.as_ref() {
+                parts.push(format!(
+                    "{} / {} checks, {} remaining",
+                    restore.authenticated_completed,
+                    restore.authenticated_total,
+                    restore.authenticated_remaining
+                ));
+            }
             if parts.is_empty() {
                 "no sealed generation yet".to_owned()
             } else {

@@ -114,6 +114,33 @@ describe('Code index freshness', () => {
     expect(text).toContain('240ms');
   });
 
+  it('renders bounded artifact restore progress separately from a rebuild', async () => {
+    renderFreshness('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          staleness_state: 'restoring',
+          coverage: 'partial_artifact_restore',
+          rebuild_in_flight: false,
+          restore_progress: {
+            generation_id: 'generation.4f21c9',
+            artifact_digest: `sha256:${'a'.repeat(64)}`,
+            authenticated_completed: 4,
+            authenticated_total: 6,
+            authenticated_remaining: 2,
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+
+    const reading = await screen.findByRole('progressbar', { name: 'Artifact restore progress' });
+    expect(reading.getAttribute('value')).toBe('4');
+    expect(reading.getAttribute('max')).toBe('6');
+    expect(screen.getByText('restoring')).toBeTruthy();
+    expect(screen.getByText('2 authentication checks remaining')).toBeTruthy();
+  });
+
   it('does not render rate-dependent ETA without an established backend rate', async () => {
     renderFreshness('loading', {
       worktrees: [

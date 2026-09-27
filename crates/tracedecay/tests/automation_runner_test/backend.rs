@@ -563,8 +563,6 @@ fn codex_app_server_backend_uses_configured_executable_model_when_unpinned() {
 
 #[test]
 fn codex_app_server_backend_propagates_timeout_errors_and_reaps_child() {
-    // Short but not tight: the fake must have time to start and write its pid
-    // file on Linux before the client gives up and reaps it.
     let (err, pid) = backend_error_for_behavior("timeout", Duration::from_millis(300));
 
     assert!(
@@ -708,6 +706,12 @@ impl FakeCodexAppServer {
 }
 
 fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32) {
+    let (err, fake) = run_backend_for_behavior(behavior, timeout);
+    let pid = fake.child_pid();
+    (err, pid)
+}
+
+fn run_backend_for_behavior(behavior: &str, timeout: Duration) -> (String, FakeCodexAppServer) {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior(behavior);
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
@@ -723,8 +727,7 @@ fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32
         json!({}),
     );
     let err = backend.run_task(&request).unwrap_err().to_string();
-    let pid = fake.child_pid();
-    (err, pid)
+    (err, fake)
 }
 
 impl FakeCodexAppServer {
@@ -760,13 +763,11 @@ impl FakeCodexAppServer {
 
     #[cfg(target_os = "linux")]
     fn child_pid(&self) -> u32 {
-        for _ in 0..100 {
-            if let Ok(raw) = fs::read_to_string(&self.pid) {
-                return raw.trim().parse().unwrap();
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        panic!("fake codex app-server did not write pid file");
+        fs::read_to_string(&self.pid)
+            .expect("completed fake codex app-server must publish its pid")
+            .trim()
+            .parse()
+            .unwrap()
     }
 
     #[cfg(not(target_os = "linux"))]

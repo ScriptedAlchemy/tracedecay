@@ -43,6 +43,7 @@ task = "what does world do"
             reason_code,
             retryable,
             detail,
+            ..
         } => {
             assert_eq!(reason_code, "verified-code-context-benchmark-unavailable");
             assert!(!retryable);

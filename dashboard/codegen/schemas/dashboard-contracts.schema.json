@@ -4097,6 +4097,7 @@
         "unobserved",
         "complete",
         "partial_refresh_in_progress",
+        "partial_artifact_restore",
         "partial_source_verification",
         "partial_unverified_restore",
         "partial_hook_hint_overflow"
@@ -4155,6 +4156,45 @@
       ],
       "type": "object"
     },
+    "CodeIndexRestoreProgressV1": {
+      "description": "Bounded authentication work required to restore one immutable lexical\nartifact as a serving reader.\n\nThe unit is a fixed restore check, not bytes or build work. Completed\nchecks are published only after they pass. `authenticated_remaining` is\nalways `authenticated_total - authenticated_completed`, so a caller can\ndistinguish bounded cold restore from an unbounded rebuild.",
+      "properties": {
+        "artifact_digest": {
+          "description": "Whole-file content address from the durable artifact descriptor.",
+          "type": "string"
+        },
+        "authenticated_completed": {
+          "description": "Successfully completed authentication checks.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "authenticated_remaining": {
+          "description": "Checks that have not completed yet.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "authenticated_total": {
+          "description": "Fixed number of authentication checks for this restore.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation_id": {
+          "description": "Generation whose lexical serving seat is being restored.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "generation_id",
+        "artifact_digest",
+        "authenticated_completed",
+        "authenticated_total",
+        "authenticated_remaining"
+      ],
+      "type": "object"
+    },
     "CodeIndexStalenessStateV1": {
       "description": "Closed staleness ladder for one mounted worktree.\n\nThe scheduler publishes one of these tokens. MCP, the dashboard, and the\nCLI must match the variant, not a hand-copied string, so a new ladder\nstate cannot appear at one caller and be missed at the others.",
       "enum": [
@@ -4162,6 +4202,7 @@
         "stale",
         "indexing",
         "refreshing",
+        "restoring",
         "verifying",
         "parked"
       ],
@@ -4380,6 +4421,17 @@
             "string",
             "null"
           ]
+        },
+        "restore_progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexRestoreProgressV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Bounded immutable-artifact restore work currently in flight. This is\nseparate from build progress because restore commits no index data."
         },
         "sealed_at_micros": {
           "description": "Time the complete generation was durably sealed.",

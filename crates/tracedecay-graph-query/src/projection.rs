@@ -313,6 +313,7 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
                     | CodeGraphReadError::TimedOut
             ),
             detail: error.to_string(),
+            typed_detail: None,
         },
     }
 }

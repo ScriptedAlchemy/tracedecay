@@ -18,6 +18,7 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1, canonical_sha256};
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
+use super::git_tree_capture::CapturedFileOutcomeV1;
 use super::{
     CapturedSnapshotV1, CodeIndexPublishEvidenceV1, CodeIndexSchedulerErrorV1,
     CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SourceContentManifestV1,
@@ -407,10 +408,11 @@ impl CodeIndexWorktreeSchedulerV1 {
                 else {
                     return false;
                 };
-                self.capture_candidate(&registry, &admission.logical_path, None)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|captured| captured.file == *expected)
+                matches!(
+                    self.capture_candidate(&registry, &admission.logical_path, None),
+                    Ok(CapturedFileOutcomeV1::Present(captured))
+                        if captured.file == *expected
+                )
             })
     }
 }

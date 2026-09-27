@@ -98,7 +98,7 @@ pub use lexical_page_source::{
 mod decoded_content;
 pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1};
 mod graph_inputs;
-pub(crate) use graph_inputs::{CodeGraphFileBatchV1, CodeGraphResolutionV1};
+pub(crate) use graph_inputs::CodeGraphResolutionV1;
 mod partitioned_codec;
 pub(crate) mod resident_bytes;
 pub use partitioned_codec::{

@@ -2063,5 +2063,13 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
         detail.contains("injected sync refusal"),
         "sync must report the terminal cause: {detail}"
     );
+    assert_eq!(
+        error.project_route_typed_detail(),
+        Some(&tracedecay_domain::ApplicationProblemDetailV1::Parked {
+            cause: "the publication authority is corrupt and requires an index reset: injected sync refusal".to_owned(),
+            remedy: "reset the code-index publication authority".to_owned(),
+            retries_on_wake: false,
+        })
+    );
     cg.close();
 }

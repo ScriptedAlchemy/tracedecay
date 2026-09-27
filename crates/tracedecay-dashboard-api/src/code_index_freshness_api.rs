@@ -202,6 +202,7 @@ mod tests {
                     hook_hint_count: Some(0),
                     coverage: CodeIndexFreshnessCoverageV1::Complete,
                     progress: None,
+                    restore_progress: None,
                     parked: None,
                     generation_recovery: None,
                 }))

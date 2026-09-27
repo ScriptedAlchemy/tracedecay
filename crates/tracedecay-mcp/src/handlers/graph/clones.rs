@@ -77,6 +77,7 @@ pub async fn compute_similar(
                 reason_code: "similar-source-not-found".to_owned(),
                 retryable: false,
                 detail: "the selected source has no body in the verified clone index".to_owned(),
+                typed_detail: None,
             });
         }
         tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason) => {
@@ -90,6 +91,7 @@ pub async fn compute_similar(
             reason_code: "similar-source-not-found".to_owned(),
             retryable: false,
             detail: "the selected source is outside the authorized repository scope".to_owned(),
+            typed_detail: None,
         });
     }
     let source = similar_occurrence(&similar.source.occurrence);
@@ -196,6 +198,7 @@ fn clone_lane_unavailable_error(
             "the maintained clone {lane} lane is unavailable: {}",
             reason.as_str()
         ),
+        typed_detail: None,
     }
 }
 
@@ -213,6 +216,7 @@ pub async fn compute_redundancy(
             reason_code: "redundancy-repository-not-authorized".to_owned(),
             retryable: false,
             detail: "the selected repository is outside the authorized repository scope".to_owned(),
+            typed_detail: None,
         });
     }
     let match_classes = request

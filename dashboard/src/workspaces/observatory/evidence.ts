@@ -574,7 +574,8 @@ export function pipelineSummary(read: EvidenceRead<CodeIndexFreshnessPayloadV1>)
     const building = worktrees.filter(
       (worktree) =>
         (worktree.progress != null && worktree.progress.phase !== 'ready') ||
-        worktree.rebuild_in_flight,
+        worktree.rebuild_in_flight ||
+        worktree.restore_progress != null,
     ).length;
     const stale = worktrees.filter((worktree) => worktree.staleness_state === 'stale').length;
     const blocked = worktrees.filter((worktree) => worktree.progress?.blocked_reason != null).length;

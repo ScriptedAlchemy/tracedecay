@@ -1099,7 +1099,7 @@ while the ladder would otherwise say ready.
 
 `Unobserved` is only the constructed default. A projected read never emits
 it, so an absent observation cannot be mistaken for `complete`. */
-export const CodeIndexFreshnessCoverageV1Schema = z.enum(["complete", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]);
+export const CodeIndexFreshnessCoverageV1Schema = z.enum(["complete", "partial_artifact_restore", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]);
 export type CodeIndexFreshnessCoverageV1 = z.infer<typeof CodeIndexFreshnessCoverageV1Schema>;
 
 export const CodeIndexFreshnessPayloadV1Schema = z.object({
@@ -1121,12 +1121,28 @@ export const CodeIndexGenerationRecoveryV1Schema = z.object({
 });
 export type CodeIndexGenerationRecoveryV1 = z.infer<typeof CodeIndexGenerationRecoveryV1Schema>;
 
+/** Bounded authentication work required to restore one immutable lexical
+artifact as a serving reader.
+
+The unit is a fixed restore check, not bytes or build work. Completed
+checks are published only after they pass. `authenticated_remaining` is
+always `authenticated_total - authenticated_completed`, so a caller can
+distinguish bounded cold restore from an unbounded rebuild. */
+export const CodeIndexRestoreProgressV1Schema = z.object({
+  artifact_digest: z.string(),
+  authenticated_completed: z.number().int().safe().min(0),
+  authenticated_remaining: z.number().int().safe().min(0),
+  authenticated_total: z.number().int().safe().min(0),
+  generation_id: z.string(),
+});
+export type CodeIndexRestoreProgressV1 = z.infer<typeof CodeIndexRestoreProgressV1Schema>;
+
 /** Closed staleness ladder for one mounted worktree.
 
 The scheduler publishes one of these tokens. MCP, the dashboard, and the
 CLI must match the variant, not a hand-copied string, so a new ladder
 state cannot appear at one caller and be missed at the others. */
-export const CodeIndexStalenessStateV1Schema = z.enum(["fresh", "indexing", "parked", "refreshing", "stale", "verifying"]);
+export const CodeIndexStalenessStateV1Schema = z.enum(["fresh", "indexing", "parked", "refreshing", "restoring", "stale", "verifying"]);
 export type CodeIndexStalenessStateV1 = z.infer<typeof CodeIndexStalenessStateV1Schema>;
 
 export const CodeIndexWorkerLimitingReasonV1Schema = z.enum(["automatic_all_cores", "automatic_half_cores", "configured_exact", "environment_override", "resident_memory"]);
@@ -1179,6 +1195,7 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   progress: z.union([z.lazy(() => CodeIndexBuildProgressV1Schema), z.null()]),
   rebuild_in_flight: z.boolean(),
   repository_id: z.string().nullable(),
+  restore_progress: z.union([z.lazy(() => CodeIndexRestoreProgressV1Schema), z.null()]).optional(),
   sealed_at_micros: z.number().int().safe().nullable(),
   snapshot_content_identity: z.string().nullable(),
   source_reference: z.string().nullable(),

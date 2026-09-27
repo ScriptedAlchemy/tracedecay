@@ -403,6 +403,9 @@ pub async fn handle_status(
                 let retrieval_serving = if freshness.latest_generation_id.is_some() {
                     let (serving_freshness, condition) = match freshness.staleness_state {
                         Some(CodeIndexStalenessStateV1::Fresh) => ("current", None),
+                        Some(CodeIndexStalenessStateV1::Restoring) => {
+                            ("restoring", Some("artifact_restore"))
+                        }
                         Some(CodeIndexStalenessStateV1::Verifying) => {
                             ("last_complete_stale", Some("source_verification"))
                         }
@@ -420,7 +423,13 @@ pub async fn handle_status(
                     }
                 } else {
                     CodeIndexRetrievalServingV1::NotServing {
-                        reason: "generation_rebuilding",
+                        reason: if freshness.staleness_state
+                            == Some(CodeIndexStalenessStateV1::Restoring)
+                        {
+                            "generation_restoring"
+                        } else {
+                            "generation_rebuilding"
+                        },
                     }
                 };
                 (
@@ -615,6 +624,14 @@ fn code_index_freshness_projection(
     }
     if authoritative {
         ("current", None)
+    } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
+        (
+            "restoring",
+            Some(
+                "the sealed lexical artifact is completing bounded authentication before serving"
+                    .to_owned(),
+            ),
+        )
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Verifying) {
         (
             "stale",
@@ -1264,6 +1281,36 @@ mod tests {
             warning
                 .expect("warming names itself")
                 .contains("not authoritative")
+        );
+    }
+
+    #[test]
+    fn bounded_artifact_restore_is_named_without_a_rebuild() {
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            staleness_state: Some(CodeIndexStalenessStateV1::Restoring),
+            rebuild_in_flight: false,
+            coverage: CodeIndexFreshnessCoverageV1::PartialArtifactRestore,
+            restore_progress: Some(
+                tracedecay_contracts::code_index_freshness::CodeIndexRestoreProgressV1 {
+                    generation_id: "generation.fixture".to_owned(),
+                    artifact_digest: format!("sha256:{}", "a".repeat(64)),
+                    authenticated_completed: 4,
+                    authenticated_total: 6,
+                    authenticated_remaining: 2,
+                },
+            ),
+            ..Default::default()
+        };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(status, "restoring");
+        assert!(!freshness.rebuild_in_flight);
+        assert!(
+            warning
+                .expect("restore names its bounded work")
+                .contains("bounded authentication")
         );
     }
 

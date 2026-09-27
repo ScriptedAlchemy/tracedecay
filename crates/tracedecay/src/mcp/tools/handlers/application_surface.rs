@@ -1,7 +1,7 @@
 use serde_json::Value;
 use tracedecay_contracts::{
-    ApplicationOutcome, ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline,
-    InvocationTarget, RequestId, RetainedSurfaceOperation,
+    ApplicationOutcome, ApplicationResult, CancellationSignal, Deadline, InvocationTarget,
+    RequestId, RetainedSurfaceOperation,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
@@ -460,8 +460,8 @@ pub type GraphToolOutcome = std::result::Result<
 >;
 
 /// Invoke one graph-tool operation through the project's graph-tool owner and
-/// return its typed result. A refusal with typed detail comes back whole for
-/// the surface to render; a code-only refusal stays the handler's error.
+/// return its typed result. Every refusal keeps the owner's whole problem
+/// record for the surface to render.
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure(future = true, label = "mcp.graph_tool.total")]
 pub async fn execute_graph_tool_surface(
@@ -517,16 +517,23 @@ pub async fn execute_graph_tool_surface(
     .await
     .map_err(application_surface_dispatch_error)?
     .result;
+    settle_graph_tool_result(operation, binding_id, result)
+}
+
+fn settle_graph_tool_result(
+    operation: ApplicationSurfaceOperation,
+    binding_id: BindingId,
+    result: ApplicationResult<Value>,
+) -> Result<GraphToolOutcome> {
     let envelope = match result {
         Ok(envelope) => envelope,
-        Err(problem) if problem.problem.detail.is_some() => {
+        Err(problem) => {
             return Ok(Err(ApplicationRefusal {
                 operation,
                 binding_id,
                 problem,
             }));
         }
-        Err(problem) => return Err(graph_tool_problem_error(*problem.problem)),
     };
     let ApplicationOutcome::Result(value) = envelope.outcome else {
         return Err(TraceDecayError::project_route(
@@ -561,27 +568,15 @@ pub async fn execute_graph_tool_surface(
     ))
 }
 
-/// A code-only graph-tool refusal is the owner's flattening of a handler
-/// error (see [`graph_tool_error_problem`]), so it carries no kind or action
-/// of its own: it reports as the handler's argument or project-route error.
-fn graph_tool_problem_error(
-    problem: tracedecay_contracts::ApplicationProblemRecord,
-) -> TraceDecayError {
-    let message = problem
-        .diagnostic
-        .map_or(problem.message, |diagnostic| diagnostic.message);
-    match problem.kind {
-        ApplicationProblemKind::InvalidRequest => TraceDecayError::Config { message },
-        _ => TraceDecayError::project_route(problem.code, problem.retryable, message),
-    }
-}
-
 /// The graph-tool owner reports handler argument errors as invalid requests,
 /// a lock that missed its deadline as its typed detail, and every other
 /// refusal under its own reason code.
 pub(crate) fn graph_tool_error_problem(
     error: &TraceDecayError,
 ) -> tracedecay_contracts::ApplicationProblem {
+    if let Some(detail) = error.project_route_typed_detail() {
+        return tracedecay_contracts::ApplicationProblem::from_detail(detail.clone());
+    }
     if let Some(detail) =
         tracedecay_contracts::ApplicationProblemDetailV1::from_lock_deadline(error)
     {
@@ -598,6 +593,7 @@ pub(crate) fn graph_tool_error_problem(
             reason_code,
             retryable,
             detail,
+            ..
         } => graph_tool_unavailable(reason_code, *retryable, detail),
         error => graph_tool_unavailable("graph_tool.failed", false, &error.to_string()),
     }
@@ -658,7 +654,7 @@ mod tests {
     use tracedecay_mcp::tools::response_trailers::account_tool_result;
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
 
-    use super::{complete_protocol_controls, render_application_result};
+    use super::{complete_protocol_controls, render_application_result, settle_graph_tool_result};
 
     #[test]
     fn retained_calls_target_the_profile_only_through_their_canonical_selector() {
@@ -858,5 +854,33 @@ mod tests {
                 "{format:?}"
             );
         }
+    }
+
+    #[test]
+    fn graph_tool_adapter_preserves_a_code_only_problem_record() {
+        let operation = ApplicationSurfaceOperation::Signature;
+        let binding = BindingId::new("binding.mcp.signature.v1").unwrap();
+        let problem = tracedecay_contracts::ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.test.graph-problem.v1").unwrap(), 1)
+                .unwrap(),
+            RequestId::new("request.mcp.graph-problem").unwrap(),
+            tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
+                "application.surface.invalid_request",
+                "the graph request is invalid",
+            ),
+        )
+        .unwrap();
+        let expected = serde_json::to_value(problem.problem.as_ref()).unwrap();
+
+        let refusal = settle_graph_tool_result(operation, binding.clone(), Err(problem))
+            .unwrap()
+            .expect_err("the typed problem must remain a refusal record");
+
+        assert_eq!(refusal.operation, operation);
+        assert_eq!(refusal.binding_id, binding);
+        assert_eq!(
+            serde_json::to_value(refusal.problem.problem.as_ref()).unwrap(),
+            expected
+        );
     }
 }

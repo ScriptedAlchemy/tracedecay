@@ -15,7 +15,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ProjectId, PublicRetrieverStatus, RefId, RetrieverKind,
-    SensitivityLevelV1, UtcMicros, WorktreeId,
+    SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros, WorktreeId,
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentHoldingV1,
@@ -25,20 +25,20 @@ use tracedecay_runtime_core::resident_memory::{
 
 use super::{
     ALPHA_LIB_V1, GitFixture, OwnerSignals, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
-    advance_pointer_to_unseated_successor, application_context, clear_pending_wake_until_quiet,
-    committed_capture_corpus_files, core_search_request, git, git_stdout, hold_scheduler_for_root,
-    mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit, move_git_metadata,
-    published, query_authority, query_meta, quiesced_background_reconcile_admission,
-    replace_scheduler_chunker_revision, replace_scheduler_policy_revision,
-    rewrite_active_rust_extractor_revision, rewrite_preserving_stat, scheduler,
-    scheduler_with_policy, served_lexical_texts, settle_text_projection,
-    settled_owner_with_idle_admission, test_project_id, wait_for_dashboard_ready,
-    wait_for_event_to_ready, wait_for_generation_change, wait_for_initial_generation,
-    wait_for_live_complete_generation, wait_for_live_complete_generation_by_polling,
-    wait_for_owner_pass, wait_for_queryable_text_generation,
-    wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
-    wait_for_quiescent_owner_pass, wait_for_settled_owner, wait_for_worker_phase,
-    wait_until_serving_seat, write,
+    active_text_artifact_path, advance_pointer_to_unseated_successor, application_context,
+    clear_pending_wake_until_quiet, committed_capture_corpus_files, core_search_request, git,
+    git_stdout, hold_scheduler_for_root, mounted_core_query_worktree,
+    mounted_core_query_worktree_with_one_permit, move_git_metadata, published, query_authority,
+    query_meta, quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
+    replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
+    rewrite_preserving_stat, scheduler, scheduler_with_policy, served_lexical_texts,
+    settle_text_projection, settled_owner_with_idle_admission, test_project_id,
+    wait_for_dashboard_ready, wait_for_event_to_ready, wait_for_generation_change,
+    wait_for_initial_generation, wait_for_live_complete_generation,
+    wait_for_live_complete_generation_by_polling, wait_for_owner_pass,
+    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
+    wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
+    wait_for_worker_phase, wait_until_serving_seat, write,
 };
 use crate::{
     code_index::{
@@ -63,6 +63,301 @@ use crate::{
     },
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+
+const MIXED_SOURCE_ROSTER: &[(&str, &str)] = &[
+    ("src/lib.rs", "pub fn kept() {}\n"),
+    ("src/twin.rs", "pub fn kept() {}\n"),
+    ("dist/generated.js", "export function generatedOnly() {}\n"),
+    ("fixture.unknown", "pub fn unsupported() {}\n"),
+    ("NOTICE", "extensionless payload\n"),
+    ("malformed.json", "{broken"),
+];
+
+#[test]
+fn unchanged_mixed_roster_restart_retains_generation_pointer_and_artifact() {
+    let fixture = GitFixture::new(MIXED_SOURCE_ROSTER);
+    let store = TempDir::new().expect("store root");
+    let mut initial = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let first = published(initial.reconcile_now().expect("initial immutable capture"));
+    let latest = initial.latest_complete().expect("initial generation");
+    let snapshot = latest.generation().snapshot().clone();
+    let coverage = *latest.generation().coverage();
+    assert_eq!(coverage.files_eligible, 2);
+    assert_eq!(coverage.files_excluded, 2);
+    assert_eq!(coverage.files_unsupported, 2);
+    assert_eq!(snapshot.files.len(), MIXED_SOURCE_ROSTER.len());
+    for (path, disposition) in [
+        ("dist/generated.js", SnapshotFileDispositionV1::Generated),
+        (
+            "fixture.unknown",
+            SnapshotFileDispositionV1::UnsupportedLanguage,
+        ),
+        ("NOTICE", SnapshotFileDispositionV1::UnsupportedLanguage),
+        ("malformed.json", SnapshotFileDispositionV1::Ignored),
+    ] {
+        assert_eq!(
+            snapshot
+                .files
+                .iter()
+                .find(|file| file.logical_path == path)
+                .expect(path)
+                .disposition,
+            disposition
+        );
+    }
+    while !latest.advance_text_serving(64).expect("seal text artifact") {}
+    let pointer =
+        std::fs::read(store.path().join("active-code-generation-v1.json")).expect("pointer");
+    let artifact_path = active_text_artifact_path(store.path());
+    let artifact_digest = content_digest(&std::fs::read(&artifact_path).expect("artifact"));
+    let artifact_modified = artifact_path
+        .metadata()
+        .expect("artifact metadata")
+        .modified()
+        .expect("mtime");
+    drop(latest);
+    drop(initial);
+
+    let mut restarted = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    for capture in [
+        restarted
+            .capture_authoritative_snapshot(None)
+            .expect("reuse every unchanged row"),
+        restarted
+            .capture_authoritative_snapshot_without_active_generation_reuse(None)
+            .expect("recompute every row"),
+    ] {
+        assert_eq!(capture.snapshot.files, snapshot.files);
+        assert_eq!(
+            capture.snapshot.sanitization_receipts,
+            snapshot.sanitization_receipts
+        );
+        assert_eq!(capture.snapshot.content_identity, snapshot.content_identity);
+    }
+    // Exercise both the graph owner and the decode-free retained-text restart path.
+    assert!(matches!(
+        restarted.reconcile_now().expect("restart reconcile"),
+        CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    let metadata = restarted
+        .servable_retained_text_generation()
+        .expect("retained metadata")
+        .expect("sealed metadata");
+    let capture = restarted
+        .capture_retained_reconcile_attempt()
+        .expect("capture retained reconcile")
+        .expect("not cancelled");
+    assert!(matches!(
+        restarted
+            .finish_retained_reconcile(metadata.metadata(), None, capture)
+            .expect("finish retained reconcile"),
+        Some(CodeIndexReconcileOutcomeV1::Noop(_))
+    ));
+    let restored = restarted.latest_complete().expect("restored generation");
+    assert_eq!(
+        restored.generation().manifest().generation_id,
+        first.generation_id
+    );
+    assert_eq!(restored.generation().snapshot(), &snapshot);
+    assert_eq!(restored.generation().coverage(), &coverage);
+    while !restored
+        .advance_text_serving(64)
+        .expect("open retained artifact")
+    {}
+    assert_eq!(active_text_artifact_path(store.path()), artifact_path);
+    assert_eq!(
+        content_digest(&std::fs::read(&artifact_path).expect("retained artifact")),
+        artifact_digest
+    );
+    assert_eq!(
+        artifact_path
+            .metadata()
+            .expect("metadata")
+            .modified()
+            .expect("mtime"),
+        artifact_modified
+    );
+    assert_eq!(
+        std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("retained pointer"),
+        pointer
+    );
+}
+
+#[test]
+fn mixed_roster_reconcile_recomputes_omissions_and_removes_only_deleted_paths() {
+    let fixture = GitFixture::new(MIXED_SOURCE_ROSTER);
+    let store = TempDir::new().expect("store root");
+    let mut owner = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(owner.reconcile_now().expect("initial publication"));
+    let original = owner
+        .latest_complete()
+        .expect("initial")
+        .generation()
+        .snapshot()
+        .clone();
+
+    fixture.edit("src/lib.rs", "pub fn changed() {}\n");
+    let incremental = owner
+        .capture_authoritative_snapshot(None)
+        .expect("one changed file");
+    assert_eq!(incremental.captured_files.len(), 1);
+    for file in original
+        .files
+        .iter()
+        .filter(|file| file.logical_path != "src/lib.rs")
+    {
+        assert_eq!(
+            incremental
+                .snapshot
+                .files
+                .iter()
+                .find(|row| row.logical_path == file.logical_path),
+            Some(file)
+        );
+    }
+    let full = owner
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("full capture");
+    assert_eq!(incremental.snapshot.files, full.snapshot.files);
+    assert_eq!(
+        incremental.snapshot.content_identity,
+        full.snapshot.content_identity
+    );
+    assert_eq!(
+        incremental.snapshot.sanitization_receipts,
+        full.snapshot.sanitization_receipts
+    );
+    published(owner.reconcile_now().expect("publish ordinary edit"));
+
+    fixture.edit(
+        "dist/generated.js",
+        "export function newGeneratedOnly() {}\n",
+    );
+    fixture.edit("fixture.unknown", "pub fn newly_supported() {}\n");
+    fixture.edit("malformed.json", "{still broken");
+    let changed = owner
+        .capture_authoritative_snapshot(None)
+        .expect("changed omitted rows");
+    let full = owner
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("full comparison");
+    assert_eq!(changed.snapshot.files, full.snapshot.files);
+    assert_eq!(
+        changed.snapshot.content_identity,
+        full.snapshot.content_identity
+    );
+    for path in ["dist/generated.js", "fixture.unknown", "malformed.json"] {
+        let before = original
+            .files
+            .iter()
+            .find(|file| file.logical_path == path)
+            .expect(path);
+        let after = changed
+            .snapshot
+            .files
+            .iter()
+            .find(|file| file.logical_path == path)
+            .expect(path);
+        assert_eq!(before.disposition, after.disposition);
+        assert_ne!(before.content_digest, after.content_digest);
+        assert_ne!(before.file_occurrence_id, after.file_occurrence_id);
+    }
+    published(owner.reconcile_now().expect("publish omitted edits"));
+
+    fixture.edit("malformed.json", r#"{"safe": true}"#);
+    std::fs::rename(
+        fixture.path().join("fixture.unknown"),
+        fixture.path().join("fixture.rs"),
+    )
+    .expect("supported rename");
+    std::fs::remove_file(fixture.path().join("NOTICE")).expect("delete unsupported source");
+    std::fs::remove_file(fixture.path().join("dist/generated.js"))
+        .expect("delete generated source");
+    std::fs::remove_file(fixture.path().join("src/twin.rs")).expect("delete ordinary source");
+    let recovered = owner
+        .capture_authoritative_snapshot(None)
+        .expect("recover and delete rows");
+    assert_eq!(
+        recovered
+            .snapshot
+            .files
+            .iter()
+            .map(|file| file.logical_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fixture.rs", "malformed.json", "src/lib.rs"]
+    );
+    assert!(
+        recovered
+            .snapshot
+            .files
+            .iter()
+            .all(|file| file.disposition == SnapshotFileDispositionV1::Present)
+    );
+    let full = owner
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("full recovery comparison");
+    assert_eq!(recovered.snapshot.files, full.snapshot.files);
+    assert_eq!(
+        recovered.snapshot.sanitization_receipts,
+        full.snapshot.sanitization_receipts
+    );
+    assert_eq!(
+        recovered.snapshot.content_identity,
+        full.snapshot.content_identity
+    );
+    published(owner.reconcile_now().expect("publish recovery"));
+    fixture.edit("malformed.json", "{broken again");
+    let withheld = owner
+        .capture_authoritative_snapshot(None)
+        .expect("withhold formerly present file");
+    let full = owner
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("full withholding comparison");
+    assert_eq!(withheld.snapshot.files, full.snapshot.files);
+    assert_eq!(
+        withheld.snapshot.sanitization_receipts,
+        full.snapshot.sanitization_receipts
+    );
+    assert_eq!(
+        withheld.snapshot.content_identity,
+        full.snapshot.content_identity
+    );
+    assert_eq!(
+        withheld
+            .snapshot
+            .files
+            .iter()
+            .find(|file| file.logical_path == "malformed.json")
+            .expect("withheld row")
+            .disposition,
+        SnapshotFileDispositionV1::Ignored
+    );
+    published(owner.reconcile_now().expect("publish withholding"));
+    std::fs::remove_file(fixture.path().join("malformed.json")).expect("delete withheld source");
+    let deleted = owner
+        .capture_authoritative_snapshot(None)
+        .expect("delete withheld row");
+    assert!(
+        !deleted
+            .snapshot
+            .files
+            .iter()
+            .any(|file| file.logical_path == "malformed.json")
+    );
+}
 
 #[test]
 fn one_file_increment_captures_only_edited_bytes_with_one_thousand_unchanged_files() {

@@ -186,6 +186,15 @@ pub(super) fn search_freshness(
         let _ = write!(summary, " latest_generation={latest}");
     }
     if let WorktreeFreshnessSourceV1::Worktree(state) = worktree {
+        if let Some(progress) = &state.restore_progress {
+            let _ = write!(
+                summary,
+                " restore={}/{} authenticated_checks remaining={}",
+                progress.authenticated_completed,
+                progress.authenticated_total,
+                progress.authenticated_remaining
+            );
+        }
         if let Some(hints) = state.hook_hint_count.filter(|count| *count > 0) {
             let _ = write!(summary, " pending_hook_hints={hints}");
         }
@@ -246,7 +255,7 @@ pub(super) fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String 
 mod tests {
     use tracedecay_contracts::code_index_freshness::{
         CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1, CodeIndexFreshnessCoverageV1,
-        CodeIndexStalenessStateV1,
+        CodeIndexRestoreProgressV1, CodeIndexStalenessStateV1,
     };
 
     use super::*;
@@ -395,6 +404,40 @@ mod tests {
         );
         assert_eq!(indexing.reason.as_deref(), Some("generation_unavailable"));
         assert!(indexing.stale_lanes.is_empty());
+    }
+
+    #[test]
+    fn unavailable_search_reports_bounded_restore_progress_without_a_rebuild() {
+        let state = CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/fixture".to_owned(),
+            latest_generation_id: Some("generation.restoring".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Restoring),
+            rebuild_in_flight: false,
+            hook_hint_count: Some(0),
+            coverage: CodeIndexFreshnessCoverageV1::PartialArtifactRestore,
+            restore_progress: Some(CodeIndexRestoreProgressV1 {
+                generation_id: "generation.restoring".to_owned(),
+                artifact_digest: format!("sha256:{}", "a".repeat(64)),
+                authenticated_completed: 4,
+                authenticated_total: 6,
+                authenticated_remaining: 2,
+            }),
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        let freshness = search_freshness(
+            ServedGenerationV1::Unavailable {
+                reason: "generation_restoring",
+            },
+            &CodeIndexSearchCoverageV1::unavailable("generation_restoring"),
+            &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
+        );
+
+        let indexing = freshness.indexing.expect("restore indexing line");
+        assert_eq!(
+            indexing.summary,
+            "state=restoring rebuild_in_flight=false served_generation=none latest_generation=generation.restoring restore=4/6 authenticated_checks remaining=2 unavailable=generation_restoring"
+        );
+        assert!(!indexing.summary.contains("generation_rebuilding"));
     }
 
     #[test]

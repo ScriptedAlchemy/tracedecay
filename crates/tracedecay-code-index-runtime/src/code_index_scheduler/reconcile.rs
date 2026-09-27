@@ -60,6 +60,7 @@ use crate::code_index::{
 use super::freshness_witness::{
     ReconciledSourceWitnessV1, RestoreFreshnessWitnessV1, SourceContentManifestV1,
 };
+use super::git_tree_capture::{CapturedFileOutcomeV1, CapturedFileRosterV1};
 use super::publication_store::GenerationDecodeBudgetV1;
 use super::{
     CodeGraphActivationStateV1, CodeGraphReplayBindingV1, CodeIndexBuildProgressSlotStateV1,
@@ -867,6 +868,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 label = "query.artifact.progress.historical_state"
             )),
             text_progress_slot: Arc::new(RwLock::new(progress_slot)),
+            restore_progress: Arc::new(RwLock::new(None)),
             text_progress_owner_epoch,
             text_progress_daemon_incarnation: self.progress_daemon_incarnation,
             text_progress_producer_incarnation: self.progress_producer_incarnation,
@@ -2486,6 +2488,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 text_control,
                 text_progress_state,
                 text_progress_slot: Arc::clone(&self.build_progress),
+                restore_progress: Arc::new(RwLock::new(None)),
                 text_progress_owner_epoch,
                 text_progress_daemon_incarnation: self.progress_daemon_incarnation,
                 text_progress_producer_incarnation: self.progress_producer_incarnation,
@@ -3504,6 +3507,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 text_control,
                 text_progress_state,
                 text_progress_slot: Arc::clone(&self.build_progress),
+                restore_progress: Arc::new(RwLock::new(None)),
                 text_progress_owner_epoch,
                 text_progress_daemon_incarnation: self.progress_daemon_incarnation,
                 text_progress_producer_incarnation: self.progress_producer_incarnation,
@@ -3600,18 +3604,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.publication.active_encoded_bytes()
     }
 
-    /// Read, sanitize, intern and identify one candidate path.
-    /// `Ok(None)` means the path is not an indexable source file (vanished,
-    /// no extension, or no language descriptor), the sequential loop's
-    /// `continue` arms. Pure with respect to the shared byte pool: the pool
-    /// is content-addressed under its own lock, so concurrent interning
-    /// yields the same digests and the same shared buffers.
+    /// Capture a path without conflating omitted source with filesystem absence.
     pub(super) fn capture_candidate(
         &self,
         registry: &StaticLanguageRegistry,
         logical_path: &str,
         control: Option<&dyn CodeIndexExecutionControlV1>,
-    ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
+    ) -> Result<CapturedFileOutcomeV1, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
@@ -3637,13 +3636,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         control: Option<&dyn CodeIndexExecutionControlV1>,
         progress: Option<&git_tree_capture::CaptureProgressV1>,
         explicitly_admitted: bool,
-    ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
-        if !explicitly_admitted && crate::config::is_generated_path_segment(logical_path) {
-            return Ok(None);
-        }
+    ) -> Result<CapturedFileOutcomeV1, CodeIndexSchedulerErrorV1> {
         let absolute = self.project_root.join(logical_path);
-        if !absolute.is_file() {
-            return Ok(None);
+        match absolute.metadata() {
+            Ok(metadata) if !metadata.is_file() => return Ok(CapturedFileOutcomeV1::Absent),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(CapturedFileOutcomeV1::Absent);
+            }
+            Err(error) => return Err(error.into()),
         }
         let raw_bytes = if explicitly_admitted {
             ignored_dependencies::read_explicitly_admitted_source(
@@ -3655,7 +3656,13 @@ impl CodeIndexWorktreeSchedulerV1 {
             ignored_dependencies::read_bounded_snapshot_source(&absolute, control)?
         };
         ignored_dependencies::checkpoint_if_present(control)?;
-        self.capture_candidate_bytes_with_progress(registry, logical_path, &raw_bytes, progress)
+        self.capture_candidate_bytes_with_progress(
+            registry,
+            logical_path,
+            &raw_bytes,
+            progress,
+            explicitly_admitted,
+        )
     }
 
     #[hotpath::measure(label = "code_index.capture.authoritative_snapshot")]
@@ -3687,8 +3694,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         // Classify committed/staged/unstaged/untracked/deleted/renamed paths
         // truthfully from gix. Deletions drop out of the present candidate set;
         // their tombstones flow through `changed_paths`.
-        let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
-        let mut retained_reservations = Vec::new();
         let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         if self.shutting_down.load(Ordering::Acquire) {
@@ -3856,7 +3861,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .snapshot()
                     .files
                     .iter()
-                    .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
                     .filter(|file| {
                         remembered_dirty_paths
                             .is_none_or(|paths| !paths.contains(&file.logical_path))
@@ -3865,7 +3869,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
-        let mut files = candidate_paths
+        let files = candidate_paths
             .iter()
             .filter(|logical_path| !changed_paths.contains(*logical_path))
             .filter_map(|logical_path| active_files.get(logical_path.as_str()).copied())
@@ -3910,7 +3914,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Parallelism(error))
         })?;
 
-        let mut captured_files = Vec::new();
         let mut sanitization_receipts = BTreeSet::new();
         if let Some(active) = reusable_active.as_ref() {
             sanitization_receipts.extend(active.snapshot().sanitization_receipts.iter().cloned());
@@ -3955,41 +3958,20 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
             }
         }
-        // A privacy refusal is evidence about one file. Withholding it keeps
-        // the rest of the worktree indexable; only a genuine capture fault
-        // still terminates the pass.
-        let mut withheld_sources = Vec::new();
-        for (logical_path, outcome) in candidates.iter().zip(outcomes) {
-            let candidate = match outcome {
-                Ok(Some(candidate)) => candidate,
-                Ok(None) => continue,
-                Err(error) => {
-                    let withheld = git_tree_capture::classify_capture_failure(logical_path, error)?;
-                    withheld_sources.push(withheld);
-                    continue;
-                }
-            };
-            sanitization_receipts.insert(candidate.receipt_id);
-            if let Some(reservation) = candidate.retained_reservation {
-                retained_reservations.push(reservation);
-            }
-            retained_bytes.push(candidate.retained);
-            files.push(candidate.file);
-            captured_files.push(candidate.captured);
+        let mut roster = CapturedFileRosterV1::default();
+        roster.files = files;
+        roster.sanitization_receipts = sanitization_receipts;
+        for outcome in outcomes {
+            roster.push(outcome?);
         }
-        git_tree_capture::report_withheld_sources(&withheld_sources);
-        if files.is_empty() && !withheld_sources.is_empty() {
-            return Err(CodeIndexSchedulerErrorV1::Privacy(
-                "every indexable source in this worktree was withheld by the privacy boundary"
-                    .to_owned(),
-            ));
-        }
-        files.sort_by(|left, right| {
-            (&left.logical_path, &left.file_occurrence_id)
-                .cmp(&(&right.logical_path, &right.file_occurrence_id))
-        });
-        captured_files
-            .sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
+        let CapturedFileRosterV1 {
+            files,
+            captured_files,
+            sanitization_receipts,
+            retained_bytes,
+            retained_reservations,
+            ..
+        } = roster.finish()?;
         let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
         let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
         let captured = CapturedSnapshotV1 {

@@ -3,6 +3,9 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
+use tracedecay_contracts::code_index_freshness::{
+    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT, CodeIndexConvergenceParkedV1,
+};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::tool_error_response;
 use tracedecay_project::project::TraceDecay;
@@ -306,6 +309,7 @@ fn project_route_error_messages_keep_retry_authority_when_clients_hide_error_dat
         reason_code: "code-graph-unavailable".to_owned(),
         retryable: true,
         detail: "the verified code graph is not ready for the exact project root".to_owned(),
+        typed_detail: None,
     };
 
     let response = tool_error_response(serde_json::json!(9), "tracedecay_test_map", &error);
@@ -318,6 +322,38 @@ fn project_route_error_messages_keep_retry_authority_when_clients_hide_error_dat
     let data = rpc_error.data.expect("structured project-route data");
     assert_eq!(data["reason_code"], "code-graph-unavailable");
     assert_eq!(data["retryable"], true);
+}
+
+#[test]
+fn publication_corruption_keeps_park_facts_typed_at_the_rpc_boundary() {
+    let error = super::code_index_publication_corrupt(CodeIndexConvergenceParkedV1 {
+        reason: "source mode is not owner-private".to_owned(),
+        blocked_reason: None,
+        remediation: "restore mode 0600".to_owned(),
+        parked_at_micros: 1,
+        observed_passes: 2,
+        retries_on_wake: true,
+    });
+    let response = tool_error_response(serde_json::json!(10), "tracedecay_sync", &error);
+    let data = response
+        .error
+        .expect("JSON-RPC error")
+        .data
+        .expect("structured route data");
+
+    assert_eq!(
+        data["reason_code"],
+        CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT
+    );
+    assert_eq!(
+        data["detail"],
+        serde_json::json!({
+            "kind": "parked",
+            "cause": "source mode is not owner-private",
+            "remedy": "restore mode 0600",
+            "retries_on_wake": true,
+        })
+    );
 }
 
 // ---- ledger settle is bounded when a recorder task wedges ---------

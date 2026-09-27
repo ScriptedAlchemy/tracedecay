@@ -106,8 +106,14 @@ impl RecordingGraphRuntime {
 
     async fn wait_for_held_reconcile(&self) {
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !self.hold_reconcile_entered.load(Ordering::Acquire) {
-                self.reconciliation_notify.notified().await;
+            loop {
+                let notified = self.reconciliation_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.hold_reconcile_entered.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
             }
         })
         .await
@@ -269,15 +275,19 @@ fn write_control() -> FactWriteControl {
 }
 
 async fn wait_for_reconciliation(runtime: &RecordingGraphRuntime) {
-    if !runtime.reconciliation_observed.load(Ordering::Acquire) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !runtime.reconciliation_observed.load(Ordering::Acquire) {
-                runtime.reconciliation_notify.notified().await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let notified = runtime.reconciliation_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if runtime.reconciliation_observed.load(Ordering::Acquire) {
+                return;
             }
-        })
-        .await
-        .expect("scheduled graph reconciliation did not reach the mounted runtime");
-    }
+            notified.await;
+        }
+    })
+    .await
+    .expect("scheduled graph reconciliation did not reach the mounted runtime");
     assert!(
         runtime.reconciliation_observed.load(Ordering::Acquire),
         "scheduled graph reconciliation did not reach the mounted runtime"

@@ -1118,6 +1118,113 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn work_app_server_timeout_reaps_the_launched_child() {
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty()
+        );
+        let temporary = tempfile::tempdir().expect("temporary app-server directory");
+        let executable = temporary.path().join("fake-codex");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nwhile IFS= read -r line; do sleep 30; done\n",
+        )
+        .expect("write timeout fake app-server");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("timeout fake app-server metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("make timeout fake app-server executable");
+
+        let config = CodexAppServerSummaryConfig {
+            codex_bin: executable.to_string_lossy().into_owned(),
+            model: None,
+            timeout: Duration::from_millis(50),
+        };
+        let launch_receipt = CodexAppServerLaunchReceipt::default();
+        let error = run_work_with_codex_app_server(
+            "This turn never responds.",
+            &config,
+            "tracedecay_work_attempt",
+            CodexAppServerWorkExecution {
+                cancellation: &CodexAppServerCancellation::default(),
+                cwd: temporary.path(),
+                timeout: Duration::from_millis(50),
+                admitted_environment: &BTreeMap::new(),
+                launch_receipt: &launch_receipt,
+                approval: WorkApprovalPolicy::Never,
+                filesystem: WorkFilesystemPolicy::ReadOnly,
+                egress: WorkEgressPolicy::Deny,
+            },
+        )
+        .expect_err("unresponsive app-server must time out");
+
+        assert!(error.to_string().contains("timed out waiting"));
+        assert!(
+            launch_receipt.started_at().is_some(),
+            "the timeout path must have crossed the exact child-launch boundary"
+        );
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty(),
+            "the launched process group must be removed before the timeout returns"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_guard_drop_synchronously_reaps_the_launched_pid() {
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty()
+        );
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let child = spawn_codex_app_server(&mut command, "sh").expect("spawn child");
+        let process_group = child.id();
+        assert_eq!(unsafe { kill(process_group as i32, 0) }, 0);
+
+        drop(ChildGuard {
+            child,
+            cancellation: None,
+        });
+
+        assert_ne!(
+            unsafe { kill(process_group as i32, 0) },
+            0,
+            "ChildGuard::drop must synchronously reap the process it launched"
+        );
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty(),
+            "the launched process group must be removed before the timeout returns"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn shutdown_guard_terminates_active_child_and_rejects_new_spawns() {
         let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
             .lock()

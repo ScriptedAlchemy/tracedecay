@@ -234,6 +234,7 @@ pub fn graph_symbol_corrupt(detail: String) -> TraceDecayError {
         reason_code: "verified-code-graph-symbol-corrupt".to_owned(),
         retryable: false,
         detail,
+        typed_detail: None,
     }
 }
 

@@ -671,6 +671,7 @@ fn unavailable(detail: &str) -> TraceDecayError {
         reason_code: "verified-code-graph-evidence-unavailable".to_owned(),
         retryable: false,
         detail: detail.to_owned(),
+        typed_detail: None,
     }
 }
 

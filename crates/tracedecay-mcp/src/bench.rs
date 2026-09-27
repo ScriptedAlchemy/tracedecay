@@ -80,6 +80,7 @@ pub fn run_bench_with_toml(
         reason_code: "verified-code-context-benchmark-unavailable".to_owned(),
         retryable: false,
         detail: "the benchmark is not yet mounted on an admitted code-graph authority".to_owned(),
+        typed_detail: None,
     })
 }
 
