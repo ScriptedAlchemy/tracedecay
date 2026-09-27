@@ -110,7 +110,15 @@ impl DaemonCallableCodeAuthorizationSource {
         &self,
         observed_at: UtcMicros,
     ) -> Result<ProjectSourceAccessSnapshot, ApplicationProblem> {
-        (self.access)(observed_at).await
+        let current = (self.access)(observed_at).await;
+        if let Err(problem) = &current {
+            tracing::warn!(
+                kind = ?problem.kind(),
+                code = problem.diagnostic().map(|diagnostic| diagnostic.code.as_str()),
+                "project source access refused the request"
+            );
+        }
+        current
     }
 
     pub fn authorize(
@@ -126,7 +134,10 @@ impl DaemonCallableCodeAuthorizationSource {
 
 impl CallableCodeAuthorizationSourcePort for DaemonCallableCodeAuthorizationSource {
     fn current(&self, observed_at: UtcMicros) -> CurrentCallableCodeAccessFuture<'_> {
-        (self.access)(observed_at)
+        Box::pin(DaemonCallableCodeAuthorizationSource::current(
+            self,
+            observed_at,
+        ))
     }
 
     fn authorize(
