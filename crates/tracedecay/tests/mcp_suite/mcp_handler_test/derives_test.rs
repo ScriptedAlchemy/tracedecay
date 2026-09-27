@@ -7,7 +7,7 @@
 
 use crate::support::{
     ProductionCompositionFixture, dispatch_mcp_tool_call,
-    production_composition_fixture_with_sources, warm_code_index_search,
+    production_composition_fixture_with_sources, refusal_problem, warm_code_index_search,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -211,33 +211,33 @@ async fn derives_reports_exact_attached_macro_names() {
         "No matching symbol found."
     );
 
+    let missing_selector = call_error(&fixture, json!({})).await;
+    assert_eq!(missing_selector["kind"], "invalid_request");
     assert_eq!(
-        call_error(&fixture, json!({})).await,
-        json!({
-            "code": -32602,
-            "message": "missing required parameter: qualified_name or node_id",
-            "data": {
-                "tool": "tracedecay_derives",
-                "reason_code": "missing_required_parameter",
-                "retryable": false,
-                "detail": "missing required parameter: qualified_name or node_id"
-            }
-        })
+        missing_selector["code"],
+        "application.surface.invalid_request"
+    );
+    assert_eq!(
+        missing_selector["message"],
+        "missing required parameter: qualified_name or node_id"
     );
     let empty_id = call_error(&fixture, json!({"node_id": ""})).await;
-    assert_eq!(empty_id["code"], -32603);
+    assert_eq!(empty_id["kind"], "invalid_request");
+    assert_eq!(empty_id["code"], "application.surface.invalid_request");
     assert_eq!(
         empty_id["message"],
-        "tool execution failed: config error: invalid parameter: node_id must not be empty"
+        "invalid parameter: node_id must not be empty"
     );
-    assert_eq!(empty_id["data"]["tool"], "tracedecay_derives");
     let evidence_anchor = call_error(&fixture, json!({"node_id": "code-file:not-a-symbol"})).await;
-    assert_eq!(evidence_anchor["code"], -32603);
+    assert_eq!(evidence_anchor["kind"], "invalid_request");
+    assert_eq!(
+        evidence_anchor["code"],
+        "application.surface.invalid_request"
+    );
     assert_eq!(
         evidence_anchor["message"],
-        "tool execution failed: config error: invalid parameter: node_id `code-file:not-a-symbol` is an evidence anchor, not a graph symbol occurrence"
+        "invalid parameter: node_id `code-file:not-a-symbol` is an evidence anchor, not a graph symbol occurrence"
     );
-    assert_eq!(evidence_anchor["data"]["tool"], "tracedecay_derives");
 
     fixture.harness.shutdown().await;
 }
@@ -288,8 +288,8 @@ async fn call_text(fixture: &ProductionCompositionFixture, arguments: Value) -> 
 
 async fn call_error(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
     match call_derives(fixture, arguments).await {
-        Ok(result) => panic!("expected a JSON-RPC error, got: {result}"),
-        Err(error) => error,
+        Ok(result) => refusal_problem(&result).clone(),
+        Err(error) => panic!("expected an isError refusal, got a JSON-RPC error: {error}"),
     }
 }
 

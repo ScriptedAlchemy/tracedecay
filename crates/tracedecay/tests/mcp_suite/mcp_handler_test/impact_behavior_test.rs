@@ -20,8 +20,8 @@
 //!
 //! Impact walks incoming dependents. `callee` is therefore reached by
 //! `local_caller` and `direct` at depth 1, and by `indirect` at depth 2.
-//! `untouched` has no dependents. Argument failures stay typed JSON-RPC
-//! errors rather than an empty radius.
+//! `untouched` has no dependents. Argument failures are typed problem
+//! records on an isError tool result rather than an empty radius.
 
 use std::collections::HashMap;
 use std::fs;
@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
 use crate::support::{
-    handle_real_server_tool_call_raw, production_composition_fixture_with_sources,
+    handle_real_server_tool_call_raw, production_composition_fixture_with_sources, refusal_problem,
     warm_code_index_search,
 };
 
@@ -166,31 +166,31 @@ async fn impact_reports_callers_by_depth_and_refuses_invalid_requests() {
     assert_refused(
         &server,
         json!({ "node_id": "   ", "format": "json" }),
-        "tool execution failed: config error: invalid parameter: node_id must not be empty",
+        "invalid parameter: node_id must not be empty",
     )
     .await;
     assert_refused(
         &server,
         json!({ "node_id": ids["callee"], "max_depth": 0, "format": "json" }),
-        "tool execution failed: config error: invalid parameter: max_depth must be at least 1",
+        "invalid parameter: max_depth must be at least 1",
     )
     .await;
     assert_refused(
         &server,
         json!({ "format": "json" }),
-        "tool execution failed: config error: invalid arguments for tracedecay_impact: missing field `node_id`",
+        "invalid arguments for tracedecay_impact: missing field `node_id`",
     )
     .await;
     assert_refused(
         &server,
         json!({ "node_id": "bad\u{0001}id", "format": "json" }),
-        "tool execution failed: config error: invalid graph symbol occurrence: SymbolOccurrenceId is not canonical",
+        "invalid graph symbol occurrence: SymbolOccurrenceId is not canonical",
     )
     .await;
     assert_refused(
         &server,
         json!({ "node_id": "code-chunk:not-a-symbol", "format": "json" }),
-        "tool execution failed: config error: invalid parameter: node_id `code-chunk:not-a-symbol` is an evidence anchor, not a graph symbol occurrence",
+        "invalid parameter: node_id `code-chunk:not-a-symbol` is an evidence anchor, not a graph symbol occurrence",
     )
     .await;
 
@@ -280,18 +280,18 @@ async fn symbol_id(server: &McpServer, name: &str) -> String {
 
 async fn assert_refused(server: &McpServer, arguments: Value, message: &str) {
     let response = handle_real_server_tool_call_raw(server, "tracedecay_impact", arguments).await;
-    assert_eq!(
-        response["error"]["code"],
-        json!(-32603),
-        "typed refusal code: {response}"
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "typed refusal is a tool result: {response}"
     );
+    let problem = refusal_problem(&response["result"]);
     assert_eq!(
-        response["error"]["message"], message,
+        problem["kind"], "invalid_request",
         "typed refusal: {response}"
     );
     assert_eq!(
-        response["error"]["data"]["tool"],
-        json!("tracedecay_impact"),
-        "typed refusal names the tool: {response}"
+        problem["code"], "application.surface.invalid_request",
+        "typed refusal: {response}"
     );
+    assert_eq!(problem["message"], message, "typed refusal: {response}");
 }

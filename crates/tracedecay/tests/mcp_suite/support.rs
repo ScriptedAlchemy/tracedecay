@@ -1177,6 +1177,54 @@ pub(crate) fn expect_tool_error<T>(result: tracedecay_domain::errors::Result<T>)
     }
 }
 
+/// The owner's typed problem record from a refused `tools/call` result.
+///
+/// Owner-served tools answer every refusal, including arguments their typed
+/// request parser rejects, as an `isError` tool result carrying the whole
+/// problem record (an MCP 2025-11-25 tool-execution error), not as a JSON-RPC
+/// error. In-process dispatch keeps the record at `problem`; the rmcp
+/// transport moves it under `structuredContent`.
+pub(crate) fn refusal_problem(result: &Value) -> &Value {
+    assert_eq!(
+        result["isError"],
+        Value::Bool(true),
+        "expected an isError refusal: {result}"
+    );
+    let problem = match &result["structuredContent"]["problem"] {
+        Value::Null => &result["problem"],
+        transported => transported,
+    };
+    assert!(
+        problem.is_object(),
+        "refusal carries no problem record: {result}"
+    );
+    problem
+}
+
+/// [`refusal_problem`] for a [`ToolResult`]: a handler's own result carries
+/// the semantic-error mark the transport later renders as `isError`, and a
+/// result rebuilt from the transport's reply carries `isError` itself.
+pub(crate) fn tool_result_problem(result: &ToolResult) -> &Value {
+    if result.semantic_error() != Some(true) {
+        return refusal_problem(&result.value);
+    }
+    let problem = &result.value["problem"];
+    assert!(
+        problem.is_object(),
+        "refusal carries no problem record: {}",
+        result.value
+    );
+    problem
+}
+
+/// [`tool_result_problem`] for a handler call that must not fail outright.
+pub(crate) fn expect_tool_refusal(result: tracedecay_domain::errors::Result<ToolResult>) -> Value {
+    match result {
+        Ok(result) => tool_result_problem(&result).clone(),
+        Err(error) => panic!("expected a semantic refusal, got an error: {error}"),
+    }
+}
+
 #[cfg(feature = "test-transport")]
 pub(crate) async fn seed_project_registry(
     db_path: &Path,

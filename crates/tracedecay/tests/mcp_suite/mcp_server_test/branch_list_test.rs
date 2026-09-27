@@ -9,7 +9,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
-use crate::support::test_temp_dir;
+use crate::support::{refusal_problem, test_temp_dir};
 
 const HEAD_COMMIT: &str = "dbc21220c25f50fce6ac93b6e7859062cd3d3ca8";
 
@@ -219,16 +219,10 @@ async fn branch_list_reports_exact_local_refs_and_typed_rejections() {
     );
 
     let zero = call(json!({"limit": 0})).await;
-    assert!(zero["result"].is_null(), "{zero}");
-    assert_eq!(zero["error"]["code"], json!(-32603));
-    assert_eq!(
-        zero["error"]["message"],
-        json!("tool execution failed: config error: branch-list limit must be positive")
-    );
-    assert_eq!(
-        zero["error"]["data"]["tool"],
-        json!("tracedecay_branch_list")
-    );
+    let problem = refusal_problem(&zero["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], "branch-list limit must be positive");
 
     std::fs::rename(project_root.join(".git"), project_root.join(".git-hidden"))
         .expect("hide git dir");

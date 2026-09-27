@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     ProductionCompositionFixture, extract_text, production_composition_fixture_with_sources,
-    wait_for_current_graph,
+    refusal_problem, wait_for_current_graph,
 };
 
 const TODO_MARKDOWN: &str = r#"## Risky Patterns
@@ -91,18 +91,23 @@ async fn tool_text(fixture: &ProductionCompositionFixture, args: Value) -> Strin
     extract_text(&response.result.expect("tools/call result")).to_owned()
 }
 
-/// The refusal message of a `tools/call` the tool must reject.
-async fn tool_error(fixture: &ProductionCompositionFixture, args: Value) -> String {
+/// Asserts a `tools/call` is refused for naming a kind the tool does not scan.
+async fn assert_unknown_kind_refused(fixture: &ProductionCompositionFixture, args: Value) {
     let response = fixture
         .harness
         .call_tool(&fixture.project_root, "tracedecay_unsafe_patterns", args)
         .await
         .unwrap_or_else(|error| panic!("tools/call failed: {error}"));
-    assert!(response.result.is_none(), "{:?}", response.result);
-    response.error.expect("tools/call must refuse").message
+    assert!(response.error.is_none(), "{:?}", response.error);
+    let result = response.result.expect("tools/call must refuse");
+    let problem = refusal_problem(&result);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(
+        problem["message"],
+        "invalid arguments for tracedecay_unsafe_patterns: unknown variant `not_a_kind`, expected one of `unwrap`, `expect`, `panic`, `todo`, `unimplemented`, `unsafe_block`"
+    );
 }
-
-const UNKNOWN_KIND_REFUSAL: &str = "tool execution failed: config error: invalid arguments for tracedecay_unsafe_patterns: unknown variant `not_a_kind`, expected one of `unwrap`, `expect`, `panic`, `todo`, `unimplemented`, `unsafe_block`";
 
 fn parse_json(text: &str) -> Value {
     serde_json::from_str(text)
@@ -322,10 +327,7 @@ async fn unsafe_patterns_reports_literal_sites_for_each_kind() {
     assert_eq!(parse_json(&empty_json), empty_report());
 
     // An unknown kind is refused rather than silently matching nothing.
-    assert_eq!(
-        tool_error(&fixture, json!({"kinds": ["not_a_kind"], "format": "json"})).await,
-        UNKNOWN_KIND_REFUSAL
-    );
+    assert_unknown_kind_refused(&fixture, json!({"kinds": ["not_a_kind"], "format": "json"})).await;
 
     let mut all_sites = production_sites();
     all_sites.push(widget_helper());
@@ -386,14 +388,11 @@ async fn unsafe_patterns_reports_literal_sites_for_each_kind() {
         report(2, json!({"panic": 2}), vec![fail_closed(), ship_panic()])
     );
 
-    assert_eq!(
-        tool_error(
-            &fixture,
-            json!({"kinds": ["unwrap", "not_a_kind"], "format": "json"}),
-        )
-        .await,
-        UNKNOWN_KIND_REFUSAL
-    );
+    assert_unknown_kind_refused(
+        &fixture,
+        json!({"kinds": ["unwrap", "not_a_kind"], "format": "json"}),
+    )
+    .await;
     let unwraps = tool_text(&fixture, json!({"kinds": ["unwrap"], "format": "json"})).await;
     assert_eq!(
         parse_json(&unwraps),

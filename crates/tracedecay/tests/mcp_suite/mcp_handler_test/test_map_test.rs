@@ -14,7 +14,7 @@ use tracedecay_mcp::jsonrpc::JsonRpcResponse;
 
 use crate::support::{
     ProductionCompositionFixture, extract_first_json_content,
-    production_composition_fixture_with_sources, wait_for_current_graph,
+    production_composition_fixture_with_sources, refusal_problem, wait_for_current_graph,
 };
 
 const LIB_RS: &str = "\
@@ -119,15 +119,21 @@ fn success_payload(response: &JsonRpcResponse) -> Value {
     extract_first_json_content(result)
 }
 
+/// The stable fields of a refusal's problem record; request and trace ids
+/// are per-call.
 fn failure(response: &JsonRpcResponse) -> Value {
-    let error = response
-        .error
-        .as_ref()
-        .unwrap_or_else(|| panic!("expected a tool error, got {:?}", response.result));
+    assert!(
+        response.error.is_none(),
+        "expected a tool refusal, got a JSON-RPC error: {:?}",
+        response.error
+    );
+    let result = response.result.as_ref().expect("refused tools/call result");
+    let problem = refusal_problem(result);
     json!({
-        "code": error.code,
-        "message": error.message,
-        "data": error.data,
+        "kind": problem["kind"],
+        "code": problem["code"],
+        "message": problem["message"],
+        "retryable": problem["retryable"],
     })
 }
 
@@ -324,25 +330,19 @@ async fn test_map_reports_literal_coverage_and_typed_refusals() {
     assert_eq!(
         failure(&call_test_map(&fixture, json!({})).await),
         json!({
-            "code": -32602,
+            "kind": "invalid_request",
+            "code": "application.surface.invalid_request",
             "message": "missing required parameter: 'file' or 'node_id'",
-            "data": {
-                "tool": "tracedecay_test_map",
-                "reason_code": "missing_required_parameter",
-                "retryable": false,
-                "detail": "missing required parameter: 'file' or 'node_id'"
-            }
+            "retryable": false
         })
     );
     assert_eq!(
         failure(&call_test_map(&fixture, json!({"node_id": " lead"})).await),
         json!({
-            "code": -32603,
-            "message": "tool execution failed: config error: invalid test-map symbol occurrence: SymbolOccurrenceId is not canonical",
-            "data": {
-                "tool": "tracedecay_test_map",
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool test_map ...` (`tracedecay tool test_map --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-            }
+            "kind": "invalid_request",
+            "code": "application.surface.invalid_request",
+            "message": "invalid test-map symbol occurrence: SymbolOccurrenceId is not canonical",
+            "retryable": false
         })
     );
 
@@ -359,14 +359,10 @@ async fn test_map_refuses_when_the_test_is_beyond_depth_three() {
     assert_eq!(
         failure(&call_test_map(&fixture, json!({"file": "src/deep.rs"})).await),
         json!({
-            "code": -32602,
-            "message": "tool project route failed: reason_code=verified-test-evidence-unavailable retryable=false: verified test-map caller expansion exceeded its budget",
-            "data": {
-                "tool": "tracedecay_test_map",
-                "reason_code": "verified-test-evidence-unavailable",
-                "retryable": false,
-                "detail": "verified test-map caller expansion exceeded its budget"
-            }
+            "kind": "unavailable",
+            "code": "verified-test-evidence-unavailable",
+            "message": "verified test-map caller expansion exceeded its budget",
+            "retryable": false
         })
     );
     fixture.harness.shutdown().await;

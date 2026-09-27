@@ -8,7 +8,9 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::support::{ProductionCompositionFixture, production_composition_fixture_with_sources};
+use crate::support::{
+    ProductionCompositionFixture, production_composition_fixture_with_sources, refusal_problem,
+};
 
 const RUST_CHECKOUT: &str = "\
 fn checkout(qty: u32, sku: &str) {
@@ -86,17 +88,15 @@ fn tool_text(response: &Value) -> &str {
         .unwrap_or_else(|| panic!("tools/call returned no text: {response}"))
 }
 
-fn assert_config_error(response: &Value, detail: &str) {
-    assert_eq!(response.get("result"), None);
-    assert_eq!(response["error"]["code"], -32603);
-    assert_eq!(
-        response["error"]["message"],
-        format!("tool execution failed: config error: {detail}")
+fn assert_config_error(response: &Value, message: &str) {
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "tools/call returned a JSON-RPC error: {response}"
     );
-    assert_eq!(
-        response["error"]["data"]["tool"],
-        "tracedecay_ast_grep_search"
-    );
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
 }
 
 fn rust_hit(line: u64, matched: &str, line_text: &str) -> Value {

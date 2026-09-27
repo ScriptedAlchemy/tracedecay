@@ -19,6 +19,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         &server,
         "tracedecay_search",
         json!({}),
+        Refusal::Problem,
         "invalid arguments for tracedecay_search: missing field `query`",
     )
     .await;
@@ -31,6 +32,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         &server,
         "tracedecay_callers",
         json!({}),
+        Refusal::JsonRpc,
         "missing field `node_id`",
     )
     .await;
@@ -45,6 +47,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         &server,
         "tracedecay_insert_at",
         json!({ "path": "src/lib.rs" }),
+        Refusal::JsonRpc,
         "missing required parameter: anchor",
     )
     .await;
@@ -55,45 +58,53 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
     // call with no arguments" is checked together with "the schema told the
     // caller which arguments were missing", either half alone lets the two
     // drift apart.
-    for (tool_name, required_args, expected_message) in [
+    for (tool_name, required_args, refusal, expected_message) in [
         (
             "tracedecay_fact_store_add",
             &["content"][..],
+            Refusal::JsonRpc,
             "missing field `content`",
         ),
         (
             "tracedecay_fact_store_search",
             &["query"][..],
+            Refusal::JsonRpc,
             "missing field `query`",
         ),
         (
             "tracedecay_fact_store_probe",
             &["entity"][..],
+            Refusal::JsonRpc,
             "missing field `entity`",
         ),
         (
             "tracedecay_fact_store_related",
             &["entity"][..],
+            Refusal::JsonRpc,
             "missing field `entity`",
         ),
         (
             "tracedecay_fact_store_get",
             &["fact_id"][..],
+            Refusal::JsonRpc,
             "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_update",
             &["fact_id"][..],
+            Refusal::JsonRpc,
             "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_remove",
             &["fact_id"][..],
+            Refusal::JsonRpc,
             "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_supersede",
             &["fact_id", "superseded_by"][..],
+            Refusal::JsonRpc,
             "missing field `fact_id`",
         ),
         // Generated schemas, decoded straight into a typed request struct, so
@@ -101,28 +112,43 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         (
             "tracedecay_diff_context",
             &["files"][..],
+            Refusal::Problem,
             "missing field `files`",
         ),
         (
             "tracedecay_changelog",
             &["from_ref", "to_ref"][..],
+            Refusal::Problem,
             "missing field `from_ref`",
         ),
         (
             "tracedecay_port_status",
             &["source_dir", "target_dir"][..],
+            Refusal::Problem,
             "missing field `source_dir`",
         ),
         (
             "tracedecay_port_order",
             &["source_dir"][..],
+            Refusal::Problem,
             "missing field `source_dir`",
         ),
-        ("tracedecay_context", &["task"][..], "missing field `task`"),
+        (
+            "tracedecay_context",
+            &["task"][..],
+            Refusal::Problem,
+            "missing field `task`",
+        ),
     ] {
         assert_schema_requires(&tools, tool_name, required_args);
-        expect_real_server_missing_argument_error(&server, tool_name, json!({}), expected_message)
-            .await;
+        expect_real_server_missing_argument_error(
+            &server,
+            tool_name,
+            json!({}),
+            refusal,
+            expected_message,
+        )
+        .await;
     }
     // Nested-object parser style.
     assert_schema_requires(
@@ -153,6 +179,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         &server,
         "tracedecay_lcm_expand",
         json!({ "provider": "cursor", "session_id": "session-1", "target": {} }),
+        Refusal::JsonRpc,
         "target: missing field `kind`",
     )
     .await;
@@ -633,16 +660,45 @@ pub(crate) fn assert_schema_requires(
     );
 }
 
+/// How a tool's parser rejection reaches the client.
+#[derive(Clone, Copy)]
+enum Refusal {
+    /// Graph-tool owner: an `isError` result carrying an `invalid_request`
+    /// problem record.
+    Problem,
+    /// Retained, source-edit, and other application-surface handlers: a
+    /// JSON-RPC error.
+    JsonRpc,
+}
+
 async fn expect_real_server_missing_argument_error(
     server: &Arc<McpServer>,
     tool_name: &str,
     args: Value,
+    refusal: Refusal,
     expected_message: &str,
 ) {
     let response = handle_real_server_tool_call_raw(server, tool_name, args).await;
-    let message = response["error"]["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{tool_name} should reject missing arguments: {response}"));
+    let message = match refusal {
+        Refusal::Problem => {
+            assert!(
+                response.get("error").is_none(),
+                "{tool_name} should refuse as a tool result: {response}"
+            );
+            let problem = refusal_problem(&response["result"]);
+            assert_eq!(
+                problem["kind"], "invalid_request",
+                "{tool_name}: {response}"
+            );
+            assert_eq!(
+                problem["code"], "application.surface.invalid_request",
+                "{tool_name}: {response}"
+            );
+            problem["message"].as_str()
+        }
+        Refusal::JsonRpc => response["error"]["message"].as_str(),
+    }
+    .unwrap_or_else(|| panic!("{tool_name} should reject missing arguments: {response}"));
     assert!(
         message.contains(expected_message),
         "{tool_name} parser error should mention `{expected_message}`, got `{message}`"

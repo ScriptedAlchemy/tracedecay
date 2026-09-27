@@ -5,7 +5,7 @@
 
 use crate::support::{
     extract_real_server_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
-    production_composition_fixture_with_sources, warm_code_index_search,
+    production_composition_fixture_with_sources, refusal_problem, warm_code_index_search,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -40,22 +40,22 @@ async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed
         .server(&fixture.project_root)
         .expect("production search server");
 
-    let refusal = |detail: &str| {
-        json!({
-            "code": -32603,
-            "message": format!("tool execution failed: config error: invalid arguments for tracedecay_search: {detail}"),
-            "data": {
-                "tool": "tracedecay_search",
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool search ...` (`tracedecay tool search --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
-            },
-        })
+    let assert_refused = |response: &Value, detail: &str| {
+        assert!(response.get("error").is_none(), "{response}");
+        let problem = refusal_problem(&response["result"]);
+        assert_eq!(problem["kind"], "invalid_request", "{response}");
+        assert_eq!(
+            problem["code"], "application.surface.invalid_request",
+            "{response}"
+        );
+        assert_eq!(
+            problem["message"],
+            format!("invalid arguments for tracedecay_search: {detail}"),
+            "{response}"
+        );
     };
     let missing = handle_real_server_tool_call_raw(&server, "tracedecay_search", json!({})).await;
-    assert_eq!(
-        missing["error"],
-        refusal("missing field `query`"),
-        "{missing}"
-    );
+    assert_refused(&missing, "missing field `query`");
     // Arguments outside the typed request are refused, not silently ignored.
     let unknown = handle_real_server_tool_call_raw(
         &server,
@@ -63,14 +63,11 @@ async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed
         json!({"query": "ledger_post_entry", "semantic_mode": "hybrid"}),
     )
     .await;
-    assert_eq!(
-        unknown["error"],
-        refusal(
-            "unknown field `semantic_mode`, expected one of `query`, `limit`, `cursor`, \
-             `lexical_anchors`, `prefer_symbol`, `lexical_aliases`, `lexical_phrases`, \
-             `lexical_proximities`, `lexical_field_filters`, `lazy_index_ignored_dependencies`"
-        ),
-        "{unknown}"
+    assert_refused(
+        &unknown,
+        "unknown field `semantic_mode`, expected one of `query`, `limit`, `cursor`, \
+         `lexical_anchors`, `prefer_symbol`, `lexical_aliases`, `lexical_phrases`, \
+         `lexical_proximities`, `lexical_field_filters`, `lazy_index_ignored_dependencies`",
     );
     let untyped_limit = handle_real_server_tool_call_raw(
         &server,
@@ -78,11 +75,7 @@ async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed
         json!({"query": "ledger_post_entry", "limit": "5"}),
     )
     .await;
-    assert_eq!(
-        untyped_limit["error"],
-        refusal("invalid type: string \"5\", expected u64"),
-        "{untyped_limit}"
-    );
+    assert_refused(&untyped_limit, "invalid type: string \"5\", expected u64");
 
     warm_code_index_search(&server, "ledger_post_entry").await;
 

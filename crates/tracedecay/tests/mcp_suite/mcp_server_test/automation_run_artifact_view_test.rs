@@ -7,7 +7,7 @@
 //! file is rejected instead of returned.
 
 use super::support::{jsonrpc_request, response_with_id, run_server_with_messages};
-use crate::support::{init_test_project, real_mcp_server};
+use crate::support::{init_test_project, real_mcp_server, refusal_problem};
 use serde_json::{Value, json};
 use std::fs;
 use tempfile::TempDir;
@@ -134,36 +134,17 @@ fn assert_tool_text(response: &Value, id: i64, expected: &str) {
     );
 }
 
-fn invalid_params(id: i64, message: &str, reason_code: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": -32602,
-            "message": message,
-            "data": {
-                "tool": TOOL,
-                "reason_code": reason_code,
-                "retryable": false,
-                "detail": message
-            }
-        }
-    })
-}
-
-fn internal_error(id: i64, message: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": -32603,
-            "message": message,
-            "data": {
-                "tool": TOOL,
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool automation_run_artifact_view ...` (`tracedecay tool automation_run_artifact_view --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-            }
-        }
-    })
+fn assert_invalid_request(response: &Value, id: i64, message: &str) {
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], id);
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "tools/call refusal is an isError result: {response}"
+    );
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
 }
 
 #[tokio::test]
@@ -341,52 +322,40 @@ async fn automation_run_artifact_view_returns_the_exact_hash_checked_payload() {
     assert_tool_text(&response_with_id(&responses, json!(4)), 4, TRACES_MARKDOWN);
     assert_tool_text(&response_with_id(&responses, json!(5)), 5, OTHER_JSON);
 
-    assert_eq!(
-        response_with_id(&responses, json!(6)),
-        invalid_params(
-            6,
-            "automation run artifact not found: run-artifact-exact/generated_evals",
-            "not_found"
-        )
+    assert_invalid_request(
+        &response_with_id(&responses, json!(6)),
+        6,
+        "automation run artifact not found: run-artifact-exact/generated_evals",
     );
-    assert_eq!(
-        response_with_id(&responses, json!(7)),
-        invalid_params(7, "automation run not found: run-missing", "not_found")
+    assert_invalid_request(
+        &response_with_id(&responses, json!(7)),
+        7,
+        "automation run not found: run-missing",
     );
-    assert_eq!(
-        response_with_id(&responses, json!(8)),
-        internal_error(
-            8,
-            "tool execution failed: config error: invalid arguments for tracedecay_automation_run_artifact_view: missing field `run_id`"
-        )
+    assert_invalid_request(
+        &response_with_id(&responses, json!(8)),
+        8,
+        "invalid arguments for tracedecay_automation_run_artifact_view: missing field `run_id`",
     );
-    assert_eq!(
-        response_with_id(&responses, json!(9)),
-        internal_error(
-            9,
-            "tool execution failed: config error: invalid arguments for tracedecay_automation_run_artifact_view: missing field `kind`"
-        )
+    assert_invalid_request(
+        &response_with_id(&responses, json!(9)),
+        9,
+        "invalid arguments for tracedecay_automation_run_artifact_view: missing field `kind`",
     );
-    assert_eq!(
-        response_with_id(&responses, json!(10)),
-        internal_error(
-            10,
-            "tool execution failed: config error: automation run_id '' is not safe for artifact paths"
-        )
+    assert_invalid_request(
+        &response_with_id(&responses, json!(10)),
+        10,
+        "automation run_id '' is not safe for artifact paths",
     );
-    assert_eq!(
-        response_with_id(&responses, json!(11)),
-        internal_error(
-            11,
-            "tool execution failed: config error: invalid arguments for tracedecay_automation_run_artifact_view: unknown variant ``, expected one of `traces`, `feedback`, `generated_evals`, `validation_gate`, `optimizer_diagnosis`, `codex_handoff`"
-        )
+    assert_invalid_request(
+        &response_with_id(&responses, json!(11)),
+        11,
+        "invalid arguments for tracedecay_automation_run_artifact_view: unknown variant ``, expected one of `traces`, `feedback`, `generated_evals`, `validation_gate`, `optimizer_diagnosis`, `codex_handoff`",
     );
-    assert_eq!(
-        response_with_id(&responses, json!(12)),
-        internal_error(
-            12,
-            "tool execution failed: config error: automation run artifact 'automation_artifacts/run-artifact-tampered/codex_handoff.json' hash mismatch"
-        )
+    assert_invalid_request(
+        &response_with_id(&responses, json!(12)),
+        12,
+        "automation run artifact 'automation_artifacts/run-artifact-tampered/codex_handoff.json' hash mismatch",
     );
 
     assert_eq!(

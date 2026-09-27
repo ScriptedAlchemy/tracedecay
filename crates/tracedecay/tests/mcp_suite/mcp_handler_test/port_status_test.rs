@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     ProductionCompositionFixture, extract_text, production_composition_fixture_with_sources,
-    wait_for_current_graph,
+    refusal_problem, wait_for_current_graph,
 };
 
 /// `source/biquad.rs`. Default-kind symbols: struct `Biquad` line 1, method
@@ -316,33 +316,33 @@ async fn port_status_reports_cross_language_partial_coverage() {
 async fn port_status_rejects_unknown_kinds_and_missing_source_dir() {
     let fixture = open_port_project().await;
 
-    let unknown_kind = tool_error(
+    let unknown_kind = tool_refusal(
         &fixture,
         json!({"source_dir": "source", "target_dir": "ported", "kinds": ["not_a_kind"]}),
     )
     .await;
-    assert_eq!(unknown_kind.0, -32603);
+    assert_eq!(unknown_kind["kind"], "invalid_request");
+    assert_eq!(unknown_kind["code"], "application.surface.invalid_request");
     assert_eq!(
-        unknown_kind.1,
-        "tool execution failed: config error: invalid parameter: kinds must contain at least one supported node kind"
+        unknown_kind["message"],
+        "invalid parameter: kinds must contain at least one supported node kind"
     );
-    assert_eq!(unknown_kind.2, "tracedecay_port_status");
 
-    let missing_source_dir = tool_error(&fixture, json!({"target_dir": "ported"})).await;
-    assert_eq!(missing_source_dir.0, -32603);
+    let missing_source_dir = tool_refusal(&fixture, json!({"target_dir": "ported"})).await;
+    assert_eq!(missing_source_dir["kind"], "invalid_request");
     assert_eq!(
-        missing_source_dir.1,
-        "tool execution failed: config error: invalid arguments for tracedecay_port_status: missing field `source_dir`"
+        missing_source_dir["code"],
+        "application.surface.invalid_request"
     );
-    assert_eq!(missing_source_dir.2, "tracedecay_port_status");
+    assert_eq!(
+        missing_source_dir["message"],
+        "invalid arguments for tracedecay_port_status: missing field `source_dir`"
+    );
 
     fixture.harness.shutdown().await;
 }
 
-async fn tool_error(
-    fixture: &ProductionCompositionFixture,
-    mut arguments: Value,
-) -> (i32, String, String) {
+async fn tool_refusal(fixture: &ProductionCompositionFixture, mut arguments: Value) -> Value {
     arguments
         .as_object_mut()
         .expect("port_status arguments are an object")
@@ -353,19 +353,12 @@ async fn tool_error(
         .await
         .expect("production MCP tools/call");
     assert!(
-        response.result.is_none(),
-        "invalid port_status input must not return a result: {:?}",
-        response.result
+        response.error.is_none(),
+        "invalid port_status input must be a tool refusal, not a JSON-RPC error: {:?}",
+        response.error
     );
-    let error = response
-        .error
-        .expect("invalid port_status input must return a JSON-RPC error");
-    let tool = error
-        .data
-        .as_ref()
-        .and_then(|data| data.get("tool"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    (error.code, error.message, tool)
+    let result = response
+        .result
+        .expect("invalid port_status input must return a refusal result");
+    refusal_problem(&result).clone()
 }
