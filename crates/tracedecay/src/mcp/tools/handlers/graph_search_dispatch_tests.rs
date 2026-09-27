@@ -72,6 +72,7 @@ fn completed_sparse_search_for_generation(
                 matches_by_anchor: std::collections::BTreeMap::new(),
                 anchors: Vec::new(),
                 dropped_sites: std::collections::BTreeMap::new(),
+                declaring_sites: std::collections::BTreeSet::new(),
             },
         },
     )
@@ -316,6 +317,7 @@ fn completed_sparse_search_with_anchor_route(
         )]),
         anchors: Vec::new(),
         dropped_sites: std::collections::BTreeMap::new(),
+        declaring_sites: std::collections::BTreeSet::new(),
     };
     tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete)
 }

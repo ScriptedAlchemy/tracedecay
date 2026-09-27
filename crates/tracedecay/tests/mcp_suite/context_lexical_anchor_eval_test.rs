@@ -475,3 +475,43 @@ async fn context_returns_a_rare_anchor_site_over_an_exact_word_neighborhood() {
 
     production.harness.shutdown().await;
 }
+
+#[tokio::test]
+async fn an_identifier_named_in_the_task_leads_plan_and_explore_context() {
+    let production = production_composition_fixture_with_sources(write_update_anchor_project).await;
+    let server = production
+        .harness
+        .server(&production.project_root)
+        .expect("update anchor server");
+    warm_code_index_search(&server, "run_update_command").await;
+
+    // No caller anchors: the identifier only appears in the task, among the
+    // ordinary words the forty lifecycle stages declare as symbols.
+    let task = "Plan a change to run_update_command so the update command coordinates \
+                daemon shutdown and restoration";
+    for mode in ["plan", "explore"] {
+        let payload = context_json(
+            &server,
+            json!({"task": task, "mode": mode, "format": "json"}),
+        )
+        .await;
+        let files = matched_files(&payload);
+        assert!(
+            UPDATE_SITES.contains(&files[0]),
+            "{mode}: the named identifier's definition must lead search_matches: {files:?}"
+        );
+        assert_eq!(
+            payload["symbols"][0]["name"], "run_update_command",
+            "{mode}: {payload}"
+        );
+        // Both definitions and both call sites spell the identifier; the
+        // page carries two of those sites.
+        assert_eq!(
+            anchor_receipt(&payload),
+            [("run_update_command", "matched", 4, 2)],
+            "{mode}: {payload}"
+        );
+    }
+
+    production.harness.shutdown().await;
+}

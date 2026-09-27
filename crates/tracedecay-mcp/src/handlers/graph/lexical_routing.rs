@@ -432,6 +432,7 @@ mod tests {
             matches_by_anchor: BTreeMap::new(),
             anchors: Vec::new(),
             dropped_sites: BTreeMap::new(),
+            declaring_sites: std::collections::BTreeSet::new(),
         };
         assert_eq!(route_evidence(&mut results, &query_only), (None, None));
         assert_eq!(results[0].lexical_routes, None);
@@ -505,6 +506,7 @@ mod tests {
                 },
             ],
             dropped_sites: BTreeMap::new(),
+            declaring_sites: std::collections::BTreeSet::new(),
         };
         let (routes, anchors) = route_evidence(&mut results, &receipt);
         let output = json!({"lexical_routes": routes, "lexical_anchors": anchors});

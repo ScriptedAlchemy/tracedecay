@@ -26,7 +26,8 @@ use tracedecay_contracts::retrieval::{LexicalAnchorDropReasonV1, LexicalAnchorDr
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, FixedPointScore, RetrievalAnchorId, RetrievalBudget,
     RetrievalFailure, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, SourceOccurrenceId, split_subtokens,
+    RetrieverOutcome, SourceOccurrenceId, is_identifier_token, is_qualified_name_token,
+    split_subtokens, technical_tokens,
 };
 
 use super::{
@@ -177,6 +178,18 @@ impl LexicalAnchorV1 {
     }
 }
 
+/// A token only code would spell: a `::` path, an inner underscore, or a
+/// lowercase-to-uppercase hump. Plain words such as `update` stay prose.
+fn names_identifier(token: &str) -> bool {
+    is_qualified_name_token(token)
+        || (is_identifier_token(token)
+            && (token.trim_matches('_').contains('_')
+                || token
+                    .as_bytes()
+                    .windows(2)
+                    .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())))
+}
+
 impl LexicalAliasV1 {
     fn validate(
         &self,
@@ -259,6 +272,27 @@ impl LexicalRoutingV1 {
             proximities: Vec::new(),
             field_filters: Vec::new(),
         })
+    }
+
+    /// Anchors each identifier `task` names (`run_update_command`,
+    /// `camelCase`, `a::b`) after the caller's anchors, up to the anchor cap.
+    /// An exact symbol-name hit on an ordinary task word would otherwise
+    /// outrank the one symbol the task actually names.
+    #[must_use]
+    pub fn with_task_identifiers(mut self, task: &str) -> Self {
+        for (_, token) in technical_tokens(task) {
+            if self.anchors.len() >= MAX_LEXICAL_ANCHORS_V1 {
+                break;
+            }
+            let token = token.trim_matches(['.', ':']);
+            if names_identifier(token)
+                && !self.anchors.iter().any(|anchor| anchor.as_str() == token)
+                && LexicalAnchorV1::validate(token, self.anchors.len()).is_ok()
+            {
+                self.anchors.push(LexicalAnchorV1(token.to_owned()));
+            }
+        }
+        self
     }
 
     pub fn with_aliases(
@@ -581,6 +615,9 @@ pub struct LexicalRouteReceiptV1 {
     /// Lane-admitted sites a serving stage removed from the response.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dropped_sites: BTreeMap<RetrievalAnchorId, LexicalAnchorDropReasonV1>,
+    /// Sites whose own symbol or qualified name an anchor route matched.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub declaring_sites: BTreeSet<RetrievalAnchorId>,
 }
 
 impl LexicalRouteReceiptV1 {
@@ -588,9 +625,10 @@ impl LexicalRouteReceiptV1 {
         self.routes.len() > 1 || !self.matches_by_anchor.is_empty()
     }
 
-    /// How many distinct caller anchors each lane-admitted site carries;
-    /// composition ranks a site carrying more anchors ahead of every site
-    /// carrying fewer.
+    /// Each lane-admitted site's anchor tier: twice the distinct caller
+    /// anchors it carries, plus one when it declares one of them.
+    /// Composition ranks a site carrying more anchors ahead of every site
+    /// carrying fewer, and among equals the definition ahead of its mentions.
     pub fn anchor_tiers(&self) -> BTreeMap<RetrievalAnchorId, u32> {
         self.matches_by_anchor
             .iter()
@@ -602,7 +640,11 @@ impl LexicalRouteReceiptV1 {
                         _ => None,
                     })
                     .collect::<BTreeSet<_>>();
-                (!anchors.is_empty()).then(|| (site.clone(), anchors.len() as u32))
+                // At most `MAX_LEXICAL_ANCHORS_V1` anchors, so the tier fits.
+                (!anchors.is_empty()).then(|| {
+                    let declares = u32::from(self.declaring_sites.contains(site));
+                    (site.clone(), anchors.len() as u32 * 2 + declares)
+                })
             })
             .collect()
     }
@@ -772,13 +814,14 @@ pub fn merge_lexical_routes(
             }
         }
     }
-    let (batch, matches_by_anchor, anchors) =
+    let (batch, matches_by_anchor, anchors, declaring_sites) =
         merged.into_batch(generation, lane_candidate_cap(lane_budget, base_budget))?;
     let mut receipt = LexicalRouteReceiptV1 {
         routes: descriptors,
         matches_by_anchor,
         anchors,
         dropped_sites: BTreeMap::new(),
+        declaring_sites,
     };
     receipt.reconcile_served(|_| None);
     let outcome = match partial_reason {
@@ -853,6 +896,8 @@ struct MergedCandidate {
     strict: bool,
     /// Distinct caller anchors whose routes ranked this occurrence.
     anchors: BTreeSet<LexicalAnchorV1>,
+    /// An anchor route matched this occurrence's own symbol or qualified name.
+    declares_anchor: bool,
 }
 
 /// One caller anchor route's contribution, in caller order.
@@ -881,6 +926,7 @@ type MergedLexicalLane = (
     RetrieverBatch<LexicalLaneEvidence>,
     BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>>,
     Vec<LexicalAnchorReceiptV1>,
+    BTreeSet<RetrievalAnchorId>,
 );
 
 /// Canonical merged order: strict routes before alternatives, then the
@@ -969,6 +1015,14 @@ impl MergedRoutes {
                 LexicalRouteKindV1::Anchor { anchor } => Some(anchor.clone()),
                 _ => None,
             };
+            let declares_anchor = route_anchor.is_some()
+                && evidence.field_scores_micros.iter().any(|(field, score)| {
+                    *score > 0
+                        && matches!(
+                            field,
+                            LexicalFieldV1::SymbolName | LexicalFieldV1::QualifiedName
+                        )
+                });
             match self.by_occurrence.get_mut(&candidate.source_occurrence_id) {
                 Some(existing) => {
                     if existing.candidate.anchor_id != candidate.anchor_id
@@ -993,6 +1047,7 @@ impl MergedRoutes {
                     merge_evidence(&mut existing.evidence, evidence)?;
                     existing.matches.push(route_match);
                     existing.anchors.extend(route_anchor);
+                    existing.declares_anchor |= declares_anchor;
                 }
                 None => {
                     self.by_occurrence.insert(
@@ -1003,6 +1058,7 @@ impl MergedRoutes {
                             matches: vec![route_match],
                             strict: !is_alternative,
                             anchors: route_anchor.into_iter().collect(),
+                            declares_anchor,
                         },
                     );
                 }
@@ -1100,9 +1156,13 @@ impl MergedRoutes {
         let mut evidence_by_occurrence = BTreeMap::new();
         let mut matches_by_anchor: BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>> =
             BTreeMap::new();
+        let mut declaring_sites = BTreeSet::new();
         for (ordinal, merged) in admitted.into_iter().enumerate() {
             let mut candidate = merged.candidate;
             candidate.ordinal_rank = ordinal as u32;
+            if merged.declares_anchor {
+                declaring_sites.insert(candidate.anchor_id.clone());
+            }
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), merged.evidence);
             matches_by_anchor
                 .entry(candidate.anchor_id.clone())
@@ -1128,7 +1188,7 @@ impl MergedRoutes {
             }),
         };
         batch.validate().map_err(contract_error)?;
-        Ok((batch, matches_by_anchor, anchors))
+        Ok((batch, matches_by_anchor, anchors, declaring_sites))
     }
 }
 

@@ -70,6 +70,38 @@ fn routing_bounds_anchor_count_and_bytes() {
 }
 
 #[test]
+fn task_identifiers_follow_caller_anchors_and_plain_words_stay_prose() {
+    let routing = LexicalRoutingV1::new(anchors(&["Hono"]), false)
+        .expect("caller anchor")
+        .with_task_identifiers(
+            "Plan how run_update_command refreshes plugins via VectorWatermark::merge_max, \
+             reloadBinary and MAX_RETRIES. Keep run_update_command; skip _private and Hono.",
+        );
+    let names: Vec<&str> = routing
+        .anchors
+        .iter()
+        .map(LexicalAnchorV1::as_str)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Hono",
+            "run_update_command",
+            "VectorWatermark::merge_max",
+            "reloadBinary",
+            "MAX_RETRIES"
+        ]
+    );
+
+    let crowded: String = (0..MAX_LEXICAL_ANCHORS_V1 + 2)
+        .map(|index| format!("anchor_{index} "))
+        .collect();
+    let capped = LexicalRoutingV1::default().with_task_identifiers(&crowded);
+    assert_eq!(capped.anchors.len(), MAX_LEXICAL_ANCHORS_V1);
+    assert_eq!(capped.anchors[0].as_str(), "anchor_0");
+}
+
+#[test]
 fn routing_rejects_empty_multi_term_control_and_duplicate_anchors() {
     assert_eq!(
         LexicalRoutingV1::new(anchors(&["reserve_stock", ""]), false),
@@ -1085,11 +1117,12 @@ fn anchor_receipt_counts_only_the_sites_the_response_carries() {
     assert_eq!(
         receipt.anchor_tiers(),
         BTreeMap::from([
-            (site("occ.allocate"), 1),
-            (site("occ.release"), 2),
-            (site("occ.reserve"), 1),
+            (site("occ.allocate"), 2),
+            (site("occ.release"), 5),
+            (site("occ.reserve"), 3),
         ]),
-        "tiers count distinct anchors per site; the query-only site has none"
+        "two per distinct anchor a site carries, one more when it declares one; \
+         the query-only site has none"
     );
     let matched = |matched, admitted, dropped: &[(LexicalAnchorDropReasonV1, u64)]| {
         LexicalAnchorOutcomeV1::Matched {
