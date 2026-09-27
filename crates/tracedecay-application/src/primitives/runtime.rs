@@ -32,12 +32,12 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemDetailV1, ApplicationProblemEnvelope,
     ApplicationProblemKind, ApplicationResult, AuthorityReceipt, CancellationContext,
     CancellationObservation, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
-    CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass, EvidenceCoverage,
-    EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, Omission, OmissionReason,
-    OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor,
-    PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext,
-    RequestCostReceiptV1, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective,
-    SafeDiagnostic, TemporalState,
+    CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticsSearchedTsconfigV1,
+    DisclosureClass, EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, LegalAction,
+    Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
+    OperationTermination, PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission,
+    RequestContext, RequestCostReceiptV1, RequestId, ResolvedScope, RetrievalEvidence,
+    RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::text::forward_slash_path;
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
@@ -2074,7 +2074,7 @@ fn unpublished_diagnostics_problem(
 ) -> Result<ApplicationProblem, ApplicationContractError> {
     let problem = match typescript_diagnostics_availability(project_root, file) {
         TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { searched } => {
-            no_tsconfig_problem(file, &searched)?
+            no_tsconfig_problem(file, &searched)
         }
         TypeScriptDiagnosticsAvailabilityV1::CompilerMissing {
             tsconfig,
@@ -2087,28 +2087,29 @@ fn unpublished_diagnostics_problem(
         TypeScriptDiagnosticsAvailabilityV1::Configured {
             compiler, last_run, ..
         } => {
-            let compiler = compiler
-                .strip_prefix(project_root)
-                .unwrap_or(&compiler)
-                .display()
-                .to_string();
+            let compiler =
+                forward_slash_path(compiler.strip_prefix(project_root).unwrap_or(&compiler));
             match last_run {
                 // A read that found no publication while the last run published
                 // is the same pending state: the producer publishes exactly once
                 // per generation, so the current generation's run is what the
                 // caller is waiting on.
-                None
-                | Some(
-                    CompilerProducerRunV1::CodeIndexGenerationUnavailable
-                    | CompilerProducerRunV1::Published { .. },
-                ) => ApplicationProblem::unavailable(SafeDiagnostic::new(
-                    "application.diagnostics.pending",
-                    format!(
-                        "The TypeScript producer ({compiler}) has not published diagnostics for \
-                         this project's current generation yet; it runs after the code index \
-                         seals a complete generation. Retry shortly."
-                    ),
-                )?),
+                None | Some(CompilerProducerRunV1::CodeIndexGenerationUnavailable) => {
+                    ApplicationProblem::from_detail(
+                        ApplicationProblemDetailV1::DiagnosticsPending {
+                            producer: compiler,
+                            generation: None,
+                        },
+                    )
+                }
+                Some(CompilerProducerRunV1::Published { generation, .. }) => {
+                    ApplicationProblem::from_detail(
+                        ApplicationProblemDetailV1::DiagnosticsPending {
+                            producer: compiler,
+                            generation: Some(generation.as_str().to_owned()),
+                        },
+                    )
+                }
                 Some(CompilerProducerRunV1::NoResolvableDiagnostics { unresolved }) => {
                     ApplicationProblem::Unsupported {
                         diagnostic: SafeDiagnostic::new(
@@ -2122,6 +2123,7 @@ fn unpublished_diagnostics_problem(
                         )?,
                         retry: RetryDirective::AfterRevalidate,
                         legal_actions: vec![LegalAction::Refresh],
+                        detail: None,
                     }
                 }
                 Some(CompilerProducerRunV1::CompilerFailed { reason }) => {
@@ -2167,7 +2169,7 @@ fn unchecked_owner_problem(
                 .extension()
                 .is_some_and(|ext| ["ts", "tsx", "mts", "cts"].iter().any(|ts| ext == *ts)) =>
         {
-            no_tsconfig_problem(Some(file), &searched)?
+            no_tsconfig_problem(Some(file), &searched)
         }
         TypeScriptDiagnosticsAvailabilityV1::Configured { .. }
         | TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { .. } => return Ok(None),
@@ -2179,45 +2181,16 @@ fn unchecked_owner_problem(
 /// Nothing runs a compiler automatically, so the route is publishing the
 /// project's own check through `tracedecay_diagnose`. A file read names every
 /// tsconfig location the owner search checked.
-fn no_tsconfig_problem(
-    file: Option<&Path>,
-    searched: &[SearchedTsconfig],
-) -> Result<ApplicationProblem, ApplicationContractError> {
-    let reason = match file {
-        None => "no tsconfig.json was found under the project root".to_owned(),
-        Some(file) if searched.is_empty() => {
-            format!("`{}` is outside the project root", file.display())
-        }
-        Some(file) => {
-            let searched = searched
-                .iter()
-                .map(|candidate| {
-                    let path = forward_slash_path(&candidate.path);
-                    if candidate.present {
-                        format!("{path} (does not include it)")
-                    } else {
-                        path
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "no tsconfig owns `{}` (searched {searched}, and their project references)",
-                forward_slash_path(file)
-            )
-        }
-    };
-    Ok(ApplicationProblem::Unsupported {
-        diagnostic: SafeDiagnostic::new(
-            "application.diagnostics.unsupported",
-            safe_problem_message(&format!(
-                "No diagnostic producer is configured for this scope: {reason}, so no compiler \
-                 runs automatically. Run the project's own build or type check and publish its \
-                 output with tracedecay_diagnose (`cargo_output`), then read again."
-            )),
-        )?,
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
+fn no_tsconfig_problem(file: Option<&Path>, searched: &[SearchedTsconfig]) -> ApplicationProblem {
+    ApplicationProblem::from_detail(ApplicationProblemDetailV1::DiagnosticsUnsupported {
+        file: file.map(forward_slash_path),
+        searched: searched
+            .iter()
+            .map(|candidate| DiagnosticsSearchedTsconfigV1 {
+                path: forward_slash_path(&candidate.path),
+                present: candidate.present,
+            })
+            .collect(),
     })
 }
 
@@ -2239,6 +2212,7 @@ fn compiler_missing_problem(
         )?,
         retry: RetryDirective::AfterRevalidate,
         legal_actions: vec![LegalAction::Refresh],
+        detail: None,
     })
 }
 
@@ -2253,6 +2227,7 @@ fn producer_failed_problem(reason: &str) -> Result<ApplicationProblem, Applicati
         )?,
         retry: RetryDirective::AfterRevalidate,
         legal_actions: vec![LegalAction::Refresh],
+        detail: None,
     })
 }
 
@@ -2297,8 +2272,9 @@ mod tests {
         SymbolGraphPage, SymbolGraphScope, SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
     };
     use tracedecay_contracts::{
-        ApplicationProblemKind, CancellationContext, Deadline, FreshnessState, LegalAction,
-        PageRequest, RequestId, RetryDirective, SafeDiagnostic,
+        ApplicationProblemDetailV1, ApplicationProblemKind, CancellationContext, Deadline,
+        DiagnosticsSearchedTsconfigV1, FreshnessState, LegalAction, PageRequest, RequestId,
+        RetryDirective, SafeDiagnostic,
     };
     use tracedecay_domain::{
         CodeGenerationId, EphemeralSanitizedQueryViewV1, QueryNormalizationRevision,
@@ -2428,8 +2404,33 @@ mod tests {
         let root = project.path();
         let file = Path::new("packages/app/src/index.ts");
 
-        for scope in [None, Some(file)] {
+        for (scope, detail) in [
+            (
+                None,
+                ApplicationProblemDetailV1::DiagnosticsUnsupported {
+                    file: None,
+                    searched: Vec::new(),
+                },
+            ),
+            (
+                Some(file),
+                ApplicationProblemDetailV1::DiagnosticsUnsupported {
+                    file: Some("packages/app/src/index.ts".to_owned()),
+                    searched: ["packages/app/src", "packages/app", "packages", ""]
+                        .map(|dir| DiagnosticsSearchedTsconfigV1 {
+                            path: if dir.is_empty() {
+                                "tsconfig.json".to_owned()
+                            } else {
+                                format!("{dir}/tsconfig.json")
+                            },
+                            present: false,
+                        })
+                        .to_vec(),
+                },
+            ),
+        ] {
             let no_tsconfig = unpublished_diagnostics_problem(root, scope).expect("no tsconfig");
+            assert_eq!(no_tsconfig.detail(), Some(&detail));
             assert_eq!(no_tsconfig.kind(), ApplicationProblemKind::Unsupported);
             assert_eq!(
                 no_tsconfig.legal_actions(),
@@ -2490,6 +2491,13 @@ mod tests {
                 .is_none()
         );
         let pending = unpublished_diagnostics_problem(root, Some(file)).expect("pending");
+        assert_eq!(
+            pending.detail(),
+            Some(&ApplicationProblemDetailV1::DiagnosticsPending {
+                producer: "node_modules/.bin/tsc".to_owned(),
+                generation: None,
+            })
+        );
         assert_eq!(pending.kind(), ApplicationProblemKind::Unavailable);
         assert_eq!(pending.legal_actions(), [LegalAction::Retry]);
         assert_eq!(

@@ -157,6 +157,7 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
         | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::Retrieve
         | ApplicationSurfaceOperation::AutomationRunList
         | ApplicationSurfaceOperation::AutomationRunView
         | ApplicationSurfaceOperation::AutomationRunArtifactView

@@ -897,6 +897,7 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
         | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::Retrieve
         | ApplicationSurfaceOperation::AutomationRunList
         | ApplicationSurfaceOperation::AutomationRunView
         | ApplicationSurfaceOperation::AutomationRunArtifactView

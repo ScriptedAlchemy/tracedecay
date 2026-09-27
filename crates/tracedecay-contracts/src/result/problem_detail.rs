@@ -37,6 +37,33 @@ pub enum ApplicationProblemDetailV1 {
         reason: String,
         remedy: String,
     },
+    /// No compiler runs automatically for the diagnostics scope: no tsconfig
+    /// owns `file`, or, for a workspace read (`file` null), none exists under
+    /// the project root. `searched` lists the owner search's candidates,
+    /// nearest first; it is empty for a workspace read or a file outside the
+    /// project root.
+    DiagnosticsUnsupported {
+        file: Option<String>,
+        searched: Vec<DiagnosticsSearchedTsconfigV1>,
+    },
+    /// The TypeScript `producer` has not published diagnostics for the
+    /// current code generation yet. `generation` is the last generation it
+    /// published, null when it has published none.
+    DiagnosticsPending {
+        producer: String,
+        generation: Option<String>,
+    },
+}
+
+/// One tsconfig location the diagnostics owner search checked.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsSearchedTsconfigV1 {
+    /// Relative to the project root, forward-slash separated.
+    pub path: String,
+    /// The config exists, but neither it nor its references include the
+    /// file.
+    pub present: bool,
 }
 
 impl ApplicationProblemDetailV1 {
@@ -89,6 +116,8 @@ impl ApplicationProblemDetailV1 {
             Self::StaleRefreshFrontier { .. } => "application.retained.refresh-frontier-stale",
             Self::LockDeadline { .. } => "application.lock-deadline",
             Self::ResetRequired { .. } => "application.reset-required",
+            Self::DiagnosticsUnsupported { .. } => "application.diagnostics.unsupported",
+            Self::DiagnosticsPending { .. } => "application.diagnostics.pending",
         }
     }
 
@@ -118,6 +147,37 @@ impl ApplicationProblemDetailV1 {
                 remedy,
                 ..
             } => format!("The {authority} requires an explicit reset with `{remedy}`: {reason}"),
+            Self::DiagnosticsUnsupported { file, searched } => {
+                let reason = match file {
+                    None => "no tsconfig.json was found under the project root".to_owned(),
+                    Some(file) if searched.is_empty() => {
+                        format!("`{file}` is outside the project root")
+                    }
+                    Some(file) => format!(
+                        "no tsconfig owns `{file}` (searched {}, and their project references)",
+                        searched_list(searched)
+                    ),
+                };
+                format!(
+                    "No diagnostic producer is configured for this scope: {reason}, so no \
+                     compiler runs automatically. Run the project's own build or type check and \
+                     publish its output with tracedecay_diagnose (`cargo_output`), then read \
+                     again."
+                )
+            }
+            Self::DiagnosticsPending {
+                producer,
+                generation,
+            } => {
+                let last = generation.as_ref().map_or_else(String::new, |generation| {
+                    format!(" (its last publication was generation {generation})")
+                });
+                format!(
+                    "The TypeScript producer ({producer}) has not published diagnostics for this \
+                     project's current generation yet{last}; it runs after the code index seals \
+                     a complete generation. Retry shortly."
+                )
+            }
         };
         let folded = tracedecay_domain::fold_control_characters(&text);
         tracedecay_domain::utf8_prefix_at_or_before(folded.trim(), MAX_RENDERED_MESSAGE_BYTES)
@@ -175,6 +235,44 @@ impl ApplicationProblemDetailV1 {
                 fields.push(("Reset remedy", remedy.clone()));
                 fields
             }
+            Self::DiagnosticsUnsupported { file, searched } => vec![
+                (
+                    "Diagnostics file",
+                    file.clone().unwrap_or_else(|| "workspace".to_owned()),
+                ),
+                (
+                    "Searched tsconfigs",
+                    if searched.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        searched_list(searched)
+                    },
+                ),
+            ],
+            Self::DiagnosticsPending {
+                producer,
+                generation,
+            } => vec![
+                ("Diagnostics producer", producer.clone()),
+                (
+                    "Last published generation",
+                    generation.clone().unwrap_or_else(|| "none".to_owned()),
+                ),
+            ],
         }
     }
+}
+
+fn searched_list(searched: &[DiagnosticsSearchedTsconfigV1]) -> String {
+    searched
+        .iter()
+        .map(|candidate| {
+            if candidate.present {
+                format!("{} (does not include it)", candidate.path)
+            } else {
+                candidate.path.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

@@ -1034,6 +1034,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: x86_64-pc-windows-gnu
 
       - uses: ./.github/actions/setup-linux-mold
 
@@ -1050,6 +1051,21 @@ jobs:
 
       - name: Check lean build
         run: cargo check -p tracedecay --no-default-features --locked
+
+      # Master pushes run no Windows lane, so `cfg(windows)` code otherwise
+      # first compiles in the release build. `cargo check` needs no linker;
+      # mingw supplies the C compiler the native build scripts run. macOS has
+      # no equivalent: its build scripts need the Apple SDK headers.
+      - name: Install the Windows C cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+
+      - name: Check the Windows target
+        run: >-
+          cargo check --workspace --all-targets --locked
+          --target x86_64-pc-windows-gnu
+          --features tracedecay/test-transport,tracedecay/test-helpers,tracedecay-cli/test-transport
 
   # Compile-only gate for feature graphs beyond the default test-lane
   # selections. `test-transport` acceptance suites (`mcp_suite`,

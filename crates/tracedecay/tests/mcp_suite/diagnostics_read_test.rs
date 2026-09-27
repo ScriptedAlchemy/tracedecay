@@ -31,19 +31,28 @@ async fn diagnostics_read_names_a_missing_producer_and_rejects_a_bad_scope() {
         .server(&fixture.project_root)
         .expect("production project server");
 
-    for (arguments, message) in [
+    for (arguments, message, detail) in [
         (
             json!({"scope": "workspace", "maximum_diagnostics": 1}),
             ABSENT_PRODUCER_MESSAGE,
+            workspace_absent_detail(),
         ),
         (
             json!({"scope": "file", "path": "src/main.rs", "maximum_diagnostics": 1}),
             ABSENT_FILE_PRODUCER_MESSAGE,
+            json!({
+                "kind": "diagnostics_unsupported",
+                "file": "src/main.rs",
+                "searched": [
+                    {"path": "src/tsconfig.json", "present": false},
+                    {"path": "tsconfig.json", "present": false},
+                ],
+            }),
         ),
     ] {
         let result =
             handle_real_server_tool_call(&server, "tracedecay_diagnostics", arguments).await;
-        assert_absent_producer(&result, message);
+        assert_absent_producer(&result, message, &detail);
     }
 
     let markdown = handle_real_server_tool_call(
@@ -378,7 +387,93 @@ async fn typescript_file_no_tsconfig_owns_names_the_searched_paths() {
         )),
         "{problem}"
     );
+    assert_eq!(
+        problem["detail"],
+        json!({
+            "kind": "diagnostics_unsupported",
+            "file": "scripts/release.ts",
+            "searched": [
+                {"path": "scripts/tsconfig.json", "present": false},
+                {"path": "tsconfig.json", "present": false},
+            ],
+        }),
+        "{problem}"
+    );
 
+    fixture.harness.shutdown().await;
+}
+
+/// While the project's own compiler is still running, the read is the pending
+/// state, naming the compiler and that nothing has published yet.
+#[cfg(unix)]
+#[tokio::test]
+async fn typescript_producer_still_running_is_pending_with_typed_detail() {
+    use crate::common::fixture::{
+        TYPESCRIPT_FIXTURE_TSC_RELEASE, TypeScriptFixtureCompiler,
+        write_typescript_diagnostics_fixture,
+    };
+    use crate::support::production_composition_fixture_with_sources;
+
+    let fixture = production_composition_fixture_with_sources(|project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Held);
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    wait_for_current_graph(&server).await;
+
+    let arguments = json!({"scope": "file", "path": "src/index.ts", "maximum_diagnostics": 10});
+    let mut pending = Value::Null;
+    for _ in 0..120 {
+        let result =
+            handle_real_server_tool_call(&server, "tracedecay_diagnostics", arguments.clone())
+                .await;
+        let code = &result["structuredContent"]["problem"]["code"];
+        if code == "application.diagnostics.pending" {
+            pending = result;
+            break;
+        }
+        assert_eq!(
+            code, "application.diagnostics.stale",
+            "a held producer can only be stale or pending: {result}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let problem = &pending["structuredContent"]["problem"];
+    assert_eq!(
+        (
+            &problem["kind"],
+            &problem["retry"],
+            &problem["legal_actions"],
+            &problem["detail"],
+        ),
+        (
+            &json!("unavailable"),
+            &json!("after_delay"),
+            &json!(["retry"]),
+            &json!({
+                "kind": "diagnostics_pending",
+                "producer": "node_modules/.bin/tsc",
+                "generation": null,
+            }),
+        ),
+        "{pending}"
+    );
+    assert_eq!(
+        problem["message"],
+        "The TypeScript producer (node_modules/.bin/tsc) has not published diagnostics for \
+         this project's current generation yet; it runs after the code index seals a \
+         complete generation. Retry shortly.",
+        "{pending}"
+    );
+
+    std::fs::write(
+        fixture.project_root.join(TYPESCRIPT_FIXTURE_TSC_RELEASE),
+        "",
+    )
+    .expect("release the held compiler");
     fixture.harness.shutdown().await;
 }
 
@@ -426,7 +521,11 @@ fn rejected_diagnostics_request(detail: &str) -> Value {
     })
 }
 
-fn assert_absent_producer(result: &Value, message: &str) {
+fn workspace_absent_detail() -> Value {
+    json!({"kind": "diagnostics_unsupported", "file": null, "searched": []})
+}
+
+fn assert_absent_producer(result: &Value, message: &str, detail: &Value) {
     assert_eq!(result["isError"], json!(true));
     assert_eq!(result["content"][0]["type"], "text");
     let text = extract_real_server_text(result);
@@ -434,7 +533,10 @@ fn assert_absent_producer(result: &Value, message: &str) {
         panic!("diagnostics JSON should be the problem envelope: {error}\n{text}")
     });
     let request_id = assert_mcp_request_id(envelope["request_id"].as_str());
-    assert_eq!(envelope, absent_producer_envelope(&request_id, message));
+    assert_eq!(
+        envelope,
+        absent_producer_envelope(&request_id, message, detail)
+    );
     assert_eq!(result["structuredContent"]["problem"], envelope["problem"]);
 }
 
@@ -444,7 +546,11 @@ fn assert_absent_producer_markdown(result: &Value) {
         assert_mcp_request_id(result["structuredContent"]["problem"]["request_id"].as_str());
     assert_eq!(
         result["structuredContent"]["problem"],
-        absent_producer_problem(&request_id, ABSENT_PRODUCER_MESSAGE)
+        absent_producer_problem(
+            &request_id,
+            ABSENT_PRODUCER_MESSAGE,
+            &workspace_absent_detail()
+        )
     );
     assert_eq!(
         extract_real_server_text(result),
@@ -464,6 +570,8 @@ fn assert_absent_producer_markdown(result: &Value) {
 - Request: `{request_id}`
 - Trace: `{request_id}`
 - Message: {ABSENT_PRODUCER_MESSAGE_MARKDOWN}
+- Diagnostics file: workspace
+- Searched tsconfigs: none
 - Retryable: `false`
 - Retry: `never`
 - Retry scope: `none`
@@ -486,18 +594,18 @@ fn assert_mcp_request_id(request_id: Option<&str>) -> String {
     request_id.to_owned()
 }
 
-fn absent_producer_envelope(request_id: &str, message: &str) -> Value {
+fn absent_producer_envelope(request_id: &str, message: &str, detail: &Value) -> Value {
     json!({
         "contract": {
             "schema_id": "schema.application.primitive.diagnostics-read.result",
             "schema_revision": 1
         },
         "request_id": request_id,
-        "problem": absent_producer_problem(request_id, message)
+        "problem": absent_producer_problem(request_id, message, detail)
     })
 }
 
-fn absent_producer_problem(request_id: &str, message: &str) -> Value {
+fn absent_producer_problem(request_id: &str, message: &str, detail: &Value) -> Value {
     json!({
         "revision": 1,
         "kind": "unsupported",
@@ -507,7 +615,7 @@ fn absent_producer_problem(request_id: &str, message: &str) -> Value {
             "code": ABSENT_PRODUCER_CODE,
             "message": message
         },
-        "detail": null,
+        "detail": detail,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": "pre_admission",

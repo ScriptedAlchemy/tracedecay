@@ -742,7 +742,7 @@ async fn dispatch_cli_source_edit(
         let Some(delay) = outcome
             .as_ref()
             .err()
-            .and_then(tracedecay_contracts::ApplicationProblemRecord::owner_mount_resend_delay)
+            .and_then(|refusal| refusal.problem.problem.owner_mount_resend_delay())
         else {
             break outcome;
         };
@@ -804,7 +804,7 @@ async fn dispatch_cli_graph_tool(
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
-    let completion = loop {
+    let outcome = loop {
         let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
         let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
             tracedecay_tool_catalog::BindingSurface::Cli,
@@ -815,25 +815,28 @@ async fn dispatch_cli_graph_tool(
             Some(request_deadline),
             Some(cancellation),
         )
-        .await;
-        let mounting = outcome.as_ref().err().is_some_and(|error| {
-            error.project_route_context().is_some_and(|(code, _, _)| {
-                code == tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
-            })
-        });
-        if !mounting
-            || deadline.saturating_duration_since(Instant::now()) <= OWNER_MOUNT_RESEND_DELAY
-        {
-            break outcome?;
+        .await?;
+        let Some(delay) = outcome
+            .as_ref()
+            .err()
+            .and_then(|refusal| refusal.problem.problem.owner_mount_resend_delay())
+        else {
+            break outcome;
+        };
+        if deadline.saturating_duration_since(Instant::now()) <= delay {
+            break outcome;
         }
-        tokio::time::sleep(OWNER_MOUNT_RESEND_DELAY).await;
+        tokio::time::sleep(delay).await;
     };
     let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
-    let mut result = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-        response_handle_root.as_deref(),
-        &tool_args,
-        completion,
-    )?;
+    let mut result = match outcome {
+        Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+            response_handle_root.as_deref(),
+            &tool_args,
+            completion,
+        )?,
+        Err(refusal) => refusal.render(response_handle_root.as_deref(), &tool_args)?,
+    };
     account_tool_result(project.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
     print_tool_output(&result.value, raw_json);

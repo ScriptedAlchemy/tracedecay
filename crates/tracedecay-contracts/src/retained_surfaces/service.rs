@@ -558,6 +558,7 @@ pub fn retained_surface_execution_problem(
             ),
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::CorrectRequest],
+            detail: None,
         },
         RetainedSurfaceExecutionErrorV1::Saturated => ApplicationProblem::saturated(
             "application.retained.saturated",

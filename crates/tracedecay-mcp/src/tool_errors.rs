@@ -4,7 +4,9 @@ use serde_json::{Value, json};
 use tracedecay_domain::errors::{PROFILE_RESET_COMMAND, TraceDecayError};
 use tracedecay_sessions::admission::HostAdmissionStatus;
 
-use crate::response_handles::RESPONSE_RETRIEVE_TOOL;
+use crate::response_handles::{
+    RESPONSE_RETRIEVE_TOOL, RETRIEVE_CORRUPT_RECORD_REASON, RETRIEVE_READ_FAILED_REASON,
+};
 use crate::tools::ToolResult;
 use crate::transport::{ErrorCode, JsonRpcResponse};
 
@@ -186,7 +188,9 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
     if tool_name == RESPONSE_RETRIEVE_TOOL {
         match error {
             TraceDecayError::Config { message }
-                if message.starts_with("missing required parameter: handle") =>
+                if message.starts_with(
+                    "invalid arguments for tracedecay_retrieve: missing field `handle`",
+                ) =>
             {
                 return JsonRpcResponse::error_with_data(
                     id,
@@ -216,8 +220,8 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
                     })),
                 );
             }
-            TraceDecayError::File { message, .. }
-                if message.starts_with("corrupt response-handle record") =>
+            TraceDecayError::ProjectRoute { reason_code, .. }
+                if reason_code == RETRIEVE_CORRUPT_RECORD_REASON =>
             {
                 return JsonRpcResponse::error_with_data(
                     id,
@@ -232,7 +236,9 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
                     })),
                 );
             }
-            TraceDecayError::File { .. } => {
+            TraceDecayError::ProjectRoute { reason_code, .. }
+                if reason_code == RETRIEVE_READ_FAILED_REASON =>
+            {
                 return JsonRpcResponse::error_with_data(
                     id,
                     ErrorCode::InternalError,

@@ -149,6 +149,7 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
         | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::Retrieve
         | ApplicationSurfaceOperation::AutomationRunList
         | ApplicationSurfaceOperation::AutomationRunView
         | ApplicationSurfaceOperation::AutomationRunArtifactView

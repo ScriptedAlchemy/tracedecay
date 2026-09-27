@@ -327,10 +327,8 @@ fn retrieve_tool_schema_requires_handle_and_canonical_project_selector() {
     assert!(!properties.contains_key("retrieve_handle"));
     assert_eq!(retrieve.input_schema["required"], json!(["handle"]));
     assert_eq!(properties["offset"]["default"], json!(0));
-    assert_eq!(
-        properties["max_chars"]["maximum"],
-        json!(tracedecay_mcp::MAX_RESPONSE_CHARS)
-    );
+    // Pages above the response-frame budget are clamped, not refused.
+    assert_eq!(properties["max_chars"]["minimum"], json!(1));
     assert_eq!(
         properties["project_selector"]["required"],
         json!(["project_id"])

@@ -371,6 +371,19 @@ fn graph_manifest_stores_each_code_edge_as_one_row_within_the_byte_budget() {
         ]
     );
     assert!(record_bytes <= 2_200, "records took {record_bytes} bytes");
+    let symbol_record_bytes = manifest
+        .entities
+        .iter()
+        .filter(|entity| has_label(entity, SYMBOL_LABEL))
+        .flat_map(|entity| entity.properties.values())
+        .map(|property| match property {
+            GraphProperty::String(text) => text.len(),
+            _ => 0,
+        })
+        .collect::<Vec<_>>();
+    // A symbol record names its occurrence once, through its metadata; the
+    // previous projector also spelled it at the top level: [494, 490, 492].
+    assert_eq!(symbol_record_bytes, [444, 440, 442], "symbol record bytes");
 
     let names = generation
         .symbols()

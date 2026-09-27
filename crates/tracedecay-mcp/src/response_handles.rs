@@ -88,6 +88,15 @@ fn public_inventory_problem(error: &TraceDecayError) -> (&'static str, &'static 
     }
 }
 
+/// Why a stored record could not be read back: the record exists but failed
+/// integrity validation.
+pub const RETRIEVE_CORRUPT_RECORD_REASON: &str = "corrupt_handle_record";
+/// Why a stored record could not be read back: the cache itself is unreadable.
+pub const RETRIEVE_READ_FAILED_REASON: &str = "handle_read_failed";
+
+/// The caller-facing form of a handle-read failure. An invalid handle stays a
+/// request error; a store failure becomes a typed, retryable route problem
+/// that names no local path, so it keeps its reason across the owner boundary.
 pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
     match error {
         TraceDecayError::Config { message } if message.starts_with("invalid response handle:") => {
@@ -96,12 +105,11 @@ pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
         TraceDecayError::File { message, .. }
             if message.starts_with("corrupt response-handle record:") =>
         {
-            TraceDecayError::File {
-                message:
-                    "corrupt response-handle record: cached payload failed integrity validation"
-                        .to_string(),
-                path: "response-handles".to_string(),
-            }
+            TraceDecayError::project_route(
+                RETRIEVE_CORRUPT_RECORD_REASON,
+                true,
+                "corrupt response-handle record: cached payload failed integrity validation",
+            )
         }
         TraceDecayError::File { .. }
         | TraceDecayError::Database { .. }
@@ -116,10 +124,11 @@ pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
         | TraceDecayError::Io(_)
         | TraceDecayError::Sqlite(_)
         | TraceDecayError::Json(_)
-        | TraceDecayError::Automation(_) => TraceDecayError::File {
-            message: "response-handle cache is unavailable".to_string(),
-            path: "response-handles".to_string(),
-        },
+        | TraceDecayError::Automation(_) => TraceDecayError::project_route(
+            RETRIEVE_READ_FAILED_REASON,
+            true,
+            "response-handle cache is unavailable",
+        ),
     }
 }
 
@@ -431,12 +440,13 @@ mod tests {
         assert!(!detail.contains("/private/operator"));
 
         let sanitized = public_retrieve_error(error);
-        assert!(matches!(
-            sanitized,
-            TraceDecayError::File { message, path }
-                if message.starts_with("corrupt response-handle record:")
-                    && !message.contains("invalid JSON")
-                    && path == "response-handles"
-        ));
+        assert_eq!(
+            sanitized.project_route_context(),
+            Some((
+                "corrupt_handle_record",
+                true,
+                "corrupt response-handle record: cached payload failed integrity validation"
+            ))
+        );
     }
 }

@@ -71,6 +71,7 @@ use crate::retrieval::requests::{
     SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusPrimitiveRequest,
     StorageStatusPrimitiveResult,
 };
+use crate::retrieval::response_handle_surface::{RetrieveResultV1, RetrieveSurfaceRequestV1};
 use crate::retrieval::symbol_graph::{
     ImplementationRecord, SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord,
     TypeHierarchyRecord,
@@ -244,6 +245,7 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("ast_grep_search"),
     graph_report_spec("files"),
     graph_report_spec("config"),
+    graph_report_spec("retrieve"),
     graph_report_spec("automation_run_list"),
     graph_report_spec("automation_run_view"),
     graph_report_spec("automation_run_artifact_view"),
@@ -340,6 +342,7 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "branch_list"
         | "files"
         | "config"
+        | "retrieve"
         | "automation_run_list"
         | "automation_run_view"
         | "automation_run_artifact_view"
@@ -540,6 +543,9 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "config" => {
             "Query TOML or JSON config files by dotted key path, reporting each file's value and defining line."
+        }
+        "retrieve" => {
+            "Read one bounded page of a truncated tool response cached in the project's store."
         }
         "automation_run_list" => {
             "List the newest durable automation run ledger records for the active project."
@@ -1003,6 +1009,7 @@ fn primitive_executable_schemas(
     );
     add!("files", FilesSurfaceRequestV1, FilesResultV1);
     add!("config", ConfigSurfaceRequestV1, ConfigResultV1);
+    add!("retrieve", RetrieveSurfaceRequestV1, RetrieveResultV1);
     add!(
         "automation_run_list",
         AutomationRunListSurfaceRequestV1,

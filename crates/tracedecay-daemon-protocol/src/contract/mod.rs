@@ -1032,6 +1032,7 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::BranchList
             | ApplicationSurfaceOperation::Files
             | ApplicationSurfaceOperation::Config
+            | ApplicationSurfaceOperation::Retrieve
             | ApplicationSurfaceOperation::AutomationRunList
             | ApplicationSurfaceOperation::AutomationRunView
             | ApplicationSurfaceOperation::AutomationRunArtifactView

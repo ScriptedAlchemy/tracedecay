@@ -6821,7 +6821,7 @@ fn require_integrity(
 mod tests {
     use super::super::clone_census::tests::payload;
     use super::super::clone_codec::encode_clone_payload;
-    use super::super::format::{decode_term_lists, sourceless_test_receipt};
+    use super::super::format::{decode_term_lists, sourceless_test_receipt, term_lists_bytes};
     use super::super::{
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactReaderV1,
         CodeLexicalCloneIndexCensusV1,
@@ -7569,6 +7569,7 @@ mod tests {
             .expect("collect term lists")
             .into_iter()
             .map(|(term, in_fuzzy, lists)| {
+                let lists = term_lists_bytes(&lists).expect("stored term lists");
                 let lists = decode_term_lists(&lists)
                     .expect("canonical term lists")
                     .into_iter()

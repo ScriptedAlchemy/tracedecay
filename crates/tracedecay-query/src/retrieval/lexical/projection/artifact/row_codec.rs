@@ -78,13 +78,20 @@ const EXACT_TERM_KIND_ORDER: &[ExactTechnicalTermKindV1] =
 
 /// Dictionary entries a revision-14 row references by content-addressed id:
 /// one per file (occurrence identity, logical path, descriptor revision) and
-/// one per symbol display (occurrence identity and parser-attested fields).
+/// one per symbol (occurrence identity, names, and kind), and one per symbol
+/// display (signature and documentation). Only a symbol's signature-grain
+/// rows carry its display, so its body and signature rows share one symbol
+/// entry.
 /// The encoder fills one table per prepared page; the batch writer stages
 /// the union and finalization derives the sealed `row_dictionary`.
 pub(super) type RowDictionaryTableV1 = BTreeMap<i64, Vec<u8>>;
 
 const ENTRY_FILE: u8 = 1;
 const ENTRY_SYMBOL: u8 = 2;
+const ENTRY_SYMBOL_DISPLAY: u8 = 3;
+/// Symbol presence tag beyond `OPTIONAL_PRESENT`: a symbol reference
+/// followed by its display reference.
+const SYMBOL_WITH_DISPLAY: u8 = 2;
 
 /// A decoded dictionary entry. Rows reference entries, not strings, so one
 /// lookup restores every per-file or per-symbol field at once.
@@ -100,6 +107,8 @@ pub(super) enum RowDictionaryEntryV1 {
         simple_name: Option<String>,
         qualified_name: Option<QualifiedNameV1>,
         kind: Option<String>,
+    },
+    SymbolDisplay {
         signature: Option<String>,
         documentation: Option<String>,
     },
@@ -152,8 +161,6 @@ impl RowDictionaryEntryV1 {
                 simple_name,
                 qualified_name,
                 kind,
-                signature,
-                documentation,
             } => {
                 out.push(ENTRY_SYMBOL);
                 match symbol_occurrence_id
@@ -182,9 +189,15 @@ impl RowDictionaryEntryV1 {
                         put_bytes(&mut out, suffix.as_bytes())?;
                     }
                 }
-                for field in [kind, signature, documentation] {
-                    put_optional_string(&mut out, field.as_deref())?;
-                }
+                put_optional_string(&mut out, kind.as_deref())?;
+            }
+            Self::SymbolDisplay {
+                signature,
+                documentation,
+            } => {
+                out.push(ENTRY_SYMBOL_DISPLAY);
+                put_optional_string(&mut out, signature.as_deref())?;
+                put_optional_string(&mut out, documentation.as_deref())?;
             }
         }
         Ok(out)
@@ -224,6 +237,8 @@ impl RowDictionaryEntryV1 {
                     }
                 },
                 kind: cursor.take_optional_string()?,
+            },
+            ENTRY_SYMBOL_DISPLAY => Self::SymbolDisplay {
                 signature: cursor.take_optional_string()?,
                 documentation: cursor.take_optional_string()?,
             },
@@ -326,14 +341,16 @@ pub(super) fn decode_artifact_row(
 // ---------------------------------------------------------------------------
 //
 // In order:
-//   ref file entry · opt-ref symbol entry · parent (tag, digest | literal)
+//   ref file entry · symbol tag [ref symbol entry [ref display entry]]
+//   parent (tag, digest | literal)
 //   varint span start/end · u8 grain · varint ordinal
 //   varint term count × (u8 kind, bytes, varint span start/end, symbol tag [ref])
 //   u16 field bitmap · varint lengths
 //
 // The sanitized text is not part of the row; its row block stores it.
-// A `ref` is the little-endian `row_dictionary.entry_id`; an `opt-ref` is one
-// presence byte followed by the ref when present. `bytes` is a varint length
+// A `ref` is the little-endian `row_dictionary.entry_id`. The symbol tag is
+// absent (0), a symbol ref (1), or a symbol ref and a display ref (2).
+// `bytes` is a varint length
 // followed by the bytes. Decoders consume the whole payload and fail closed
 // on any trailing byte.
 
@@ -363,8 +380,6 @@ fn encode_binary(
             .as_deref()
             .map(|name| QualifiedNameV1::for_path(name, &row.logical_path)),
         kind: row.symbol_kind.clone(),
-        signature: row.symbol_signature.clone(),
-        documentation: row.symbol_documentation.clone(),
     };
     let has_symbol = row.anchor.symbol_occurrence_id.is_some()
         || row.symbol_simple_name.is_some()
@@ -372,7 +387,18 @@ fn encode_binary(
         || row.symbol_kind.is_some()
         || row.symbol_signature.is_some()
         || row.symbol_documentation.is_some();
-    if has_symbol {
+    if row.symbol_signature.is_some() || row.symbol_documentation.is_some() {
+        out.push(SYMBOL_WITH_DISPLAY);
+        put_reference(&mut out, dictionary, &symbol)?;
+        put_reference(
+            &mut out,
+            dictionary,
+            &RowDictionaryEntryV1::SymbolDisplay {
+                signature: row.symbol_signature.clone(),
+                documentation: row.symbol_documentation.clone(),
+            },
+        )?;
+    } else if has_symbol {
         out.push(OPTIONAL_PRESENT);
         put_reference(&mut out, dictionary, &symbol)?;
     } else {
@@ -420,8 +446,6 @@ fn encode_binary(
                         simple_name: None,
                         qualified_name: None,
                         kind: None,
-                        signature: None,
-                        documentation: None,
                     },
                 )?;
             }
@@ -483,11 +507,16 @@ fn decode_binary(
         symbol_kind,
         symbol_signature,
         symbol_documentation,
-    ) = match cursor.take_optional_reference()? {
-        None => (None, None, None, None, None, None),
-        Some(entry_id) => {
-            let (symbol_occurrence_id, simple_name, qualified_name, kind, signature, documentation) =
-                symbol_entry_fields(dictionary.entry(entry_id)?.as_ref())?;
+    ) = match cursor.take_u8()? {
+        OPTIONAL_ABSENT => (None, None, None, None, None, None),
+        tag @ (OPTIONAL_PRESENT | SYMBOL_WITH_DISPLAY) => {
+            let (symbol_occurrence_id, simple_name, qualified_name, kind) =
+                symbol_entry_fields(dictionary.entry(cursor.take_reference()?)?.as_ref())?;
+            let (signature, documentation) = if tag == SYMBOL_WITH_DISPLAY {
+                symbol_display_fields(dictionary.entry(cursor.take_reference()?)?.as_ref())?
+            } else {
+                (None, None)
+            };
             (
                 symbol_occurrence_id
                     .map(SymbolOccurrenceId::new)
@@ -499,6 +528,11 @@ fn decode_binary(
                 signature,
                 documentation,
             )
+        }
+        _ => {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact row symbol tag is unknown".to_owned(),
+            ));
         }
     };
     let parent_chunk_id = match cursor.take_u8()? {
@@ -549,7 +583,7 @@ fn decode_binary(
                 )
             })?),
             TERM_SYMBOL_REFERENCE => {
-                let (symbol_occurrence_id, _, _, _, _, _) =
+                let (symbol_occurrence_id, _, _, _) =
                     symbol_entry_fields(dictionary.entry(cursor.take_reference()?)?.as_ref())?;
                 let symbol_occurrence_id = symbol_occurrence_id.ok_or_else(|| {
                     CodeLexicalArtifactErrorV1::Corrupt(
@@ -621,8 +655,6 @@ type SymbolEntryFieldsV1 = (
     Option<String>,
     Option<QualifiedNameV1>,
     Option<String>,
-    Option<String>,
-    Option<String>,
 );
 
 fn symbol_entry_fields(
@@ -634,19 +666,33 @@ fn symbol_entry_fields(
             simple_name,
             qualified_name,
             kind,
-            signature,
-            documentation,
         } => Ok((
             symbol_occurrence_id.clone(),
             simple_name.clone(),
             qualified_name.clone(),
             kind.clone(),
-            signature.clone(),
-            documentation.clone(),
         )),
-        RowDictionaryEntryV1::File { .. } => Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact row symbol reference resolved to a file entry".to_owned(),
-        )),
+        RowDictionaryEntryV1::File { .. } | RowDictionaryEntryV1::SymbolDisplay { .. } => {
+            Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact row symbol reference resolved to a non-symbol entry".to_owned(),
+            ))
+        }
+    }
+}
+
+fn symbol_display_fields(
+    entry: &RowDictionaryEntryV1,
+) -> Result<(Option<String>, Option<String>), CodeLexicalArtifactErrorV1> {
+    match entry {
+        RowDictionaryEntryV1::SymbolDisplay {
+            signature,
+            documentation,
+        } => Ok((signature.clone(), documentation.clone())),
+        RowDictionaryEntryV1::File { .. } | RowDictionaryEntryV1::Symbol { .. } => {
+            Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact row display reference resolved to a non-display entry".to_owned(),
+            ))
+        }
     }
 }
 
@@ -1153,16 +1199,6 @@ impl<'a> RowCursorV1<'a> {
         Ok(i64::from_le_bytes(bytes))
     }
 
-    fn take_optional_reference(&mut self) -> Result<Option<i64>, CodeLexicalArtifactErrorV1> {
-        match self.take_u8()? {
-            OPTIONAL_ABSENT => Ok(None),
-            OPTIONAL_PRESENT => self.take_reference().map(Some),
-            _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact row optional tag is unknown".to_owned(),
-            )),
-        }
-    }
-
     /// Canonical LEB128: at most ten bytes, no overflow past 64 bits, and
     /// no zero final byte after a continuation (no padding encodings).
     fn take_varint(&mut self) -> Result<u64, CodeLexicalArtifactErrorV1> {
@@ -1435,8 +1471,6 @@ mod tests {
                     .as_deref()
                     .map(|name| QualifiedNameV1::for_path(name, &row.logical_path)),
                 kind: row.symbol_kind.clone(),
-                signature: row.symbol_signature.clone(),
-                documentation: row.symbol_documentation.clone(),
             })
         );
         let parent_hex = "c0".repeat(32);
@@ -1544,6 +1578,54 @@ mod tests {
                 .is_err(),
             "documents must ascend"
         );
+    }
+
+    #[test]
+    fn body_and_signature_rows_share_one_symbol_entry() {
+        let signature_row = symbol_row();
+        let body_row = legacy_symbol_row();
+        let mut dictionary = RowDictionaryTableV1::new();
+        let mut decoded = Vec::new();
+        for row in [&body_row, &signature_row] {
+            let encoded = encode_artifact_row(row, &mut dictionary).expect("encode");
+            decoded.push(
+                decode_artifact_row(
+                    &row.anchor.generation_id,
+                    row.id.as_str(),
+                    &encoded,
+                    row.sanitized_text.as_str(),
+                    &dictionary,
+                )
+                .expect("decode"),
+            );
+        }
+        assert_eq!(decoded, [body_row, signature_row]);
+        let kinds = dictionary
+            .values()
+            .map(|bytes| bytes[0])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds.iter().filter(|kind| **kind == 1).count(),
+            1,
+            "one file entry"
+        );
+        assert_eq!(
+            kinds.iter().filter(|kind| **kind == 2).count(),
+            1,
+            "one symbol entry"
+        );
+        let display = dictionary
+            .values()
+            .find(|bytes| bytes[0] == 3)
+            .expect("display entry");
+        assert_eq!(
+            RowDictionaryEntryV1::decode(display).expect("display"),
+            RowDictionaryEntryV1::SymbolDisplay {
+                signature: Some("pub fn cancellation_probe_0001_003(input: u32) -> u32".to_owned()),
+                documentation: Some("Cancels one probe after its bounded input.".to_owned()),
+            }
+        );
+        assert_eq!(dictionary.len(), 3);
     }
 
     #[test]

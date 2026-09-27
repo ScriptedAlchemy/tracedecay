@@ -933,6 +933,7 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
         | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::Retrieve
         | ApplicationSurfaceOperation::AutomationRunList
         | ApplicationSurfaceOperation::AutomationRunView
         | ApplicationSurfaceOperation::AutomationRunArtifactView

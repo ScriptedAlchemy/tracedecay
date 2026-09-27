@@ -49,6 +49,7 @@ impl ApplicationKind {
                 },
                 retry: RetryDirective::Never,
                 legal_actions: vec![LegalAction::CorrectRequest],
+                detail: None,
             },
             DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)

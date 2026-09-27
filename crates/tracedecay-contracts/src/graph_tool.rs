@@ -17,9 +17,9 @@ use crate::retrieval::{
     GrepSearchResultV1, HealthResultV1, HermesSkillBridgeResultV1, HotspotsResultV1,
     ImpactResultV1, InheritanceDepthResultV1, LargestResultV1, NodeResultV1, PortOrderResultV1,
     PortStatusResultV1, PrContextResultV1, RankResultV1, RecursionResultV1, RedundancyResultV1,
-    RenamePreviewPrimitiveOutcomeV1, SignatureResultV1, SimilarResultV1, SkillListResultV1,
-    SkillViewResultV1, TestMapResultV1, TestRiskResultV1, TodosResultV1, UnmountedFilesResultV1,
-    UnsafePatternsResultV1,
+    RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, SignatureResultV1, SimilarResultV1,
+    SkillListResultV1, SkillViewResultV1, TestMapResultV1, TestRiskResultV1, TodosResultV1,
+    UnmountedFilesResultV1, UnsafePatternsResultV1,
 };
 
 /// One graph read's typed result, tagged by its operation.
@@ -74,6 +74,7 @@ pub enum GraphToolResultV1 {
     BranchList(BranchListResultV1),
     Files(FilesResultV1),
     Config(ConfigResultV1),
+    Retrieve(RetrieveResultV1),
     AutomationRunList(AutomationRunListResultV1),
     AutomationRunView(Box<AutomationRunViewResultV1>),
     AutomationRunArtifactView(Box<AutomationRunArtifactViewResultV1>),
@@ -139,6 +140,7 @@ impl GraphToolResultV1 {
             Operation::BranchList => Self::BranchList(serde_json::from_value(value)?),
             Operation::Files => Self::Files(serde_json::from_value(value)?),
             Operation::Config => Self::Config(serde_json::from_value(value)?),
+            Operation::Retrieve => Self::Retrieve(serde_json::from_value(value)?),
             Operation::AutomationRunList => Self::AutomationRunList(serde_json::from_value(value)?),
             Operation::AutomationRunView => Self::AutomationRunView(serde_json::from_value(value)?),
             Operation::AutomationRunArtifactView => {
@@ -208,6 +210,7 @@ impl GraphToolResultV1 {
             Self::BranchList(result) => serde_json::to_value(result),
             Self::Files(result) => serde_json::to_value(result),
             Self::Config(result) => serde_json::to_value(result),
+            Self::Retrieve(result) => serde_json::to_value(result),
             Self::AutomationRunList(result) => serde_json::to_value(result),
             Self::AutomationRunView(result) => serde_json::to_value(result),
             Self::AutomationRunArtifactView(result) => serde_json::to_value(result),

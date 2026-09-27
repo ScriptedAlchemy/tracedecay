@@ -41,8 +41,9 @@ use super::fingerprints::{
 use super::format::{
     ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, PostingListDecoderV1,
     VerifiedCodeLexicalArtifactV1, content_metadata_bytes, decode_document_set,
-    decode_ngram_bitmap, decode_padded_receipt, decode_term_lists, receipt_artifact_digest,
-    stored_metadata_digest as stored_metadata_digest_of, verify_artifact_table_layout,
+    decode_ngram_bitmap, decode_padded_receipt, decode_term_lists, document_set_bytes,
+    receipt_artifact_digest, stored_metadata_digest as stored_metadata_digest_of, term_lists_bytes,
+    verify_artifact_table_layout,
 };
 use super::postings::{NGRAM_NORMALIZED, query_ngrams, raw_override_query_ngrams};
 use super::row_codec::{
@@ -1497,6 +1498,7 @@ fn ngram_bitmap_candidates(
                 Ok((row.get(0)?, row.get(1)?))
             })
             .map_err(map_query_sql_error)?;
+        let encoded = document_set_bytes(&encoded).map_err(map_query_artifact_error)?;
         charge_ngram_encoded_list_bytes(
             &mut budget.remaining_encoded_bytes,
             encoded.len(),
@@ -2128,10 +2130,12 @@ impl<'a> ArtifactQueryV1<'a> {
             let mut remaining_bytes = ARTIFACT_TERM_POSTING_QUERY_BYTES_V1;
             while let Some(row) = rows.next().map_err(map_query_sql_error)? {
                 let term: String = row.get(0).map_err(map_query_sql_error)?;
-                let encoded = row
+                let stored = row
                     .get_ref(1)
                     .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
                     .map_err(map_query_sql_error)?;
+                let encoded = term_lists_bytes(stored).map_err(map_query_artifact_error)?;
+                let encoded = encoded.as_ref();
                 remaining_bytes = remaining_bytes
                     .checked_sub(encoded.len())
                     .ok_or(RetrievalPortError::BudgetExceeded)?;

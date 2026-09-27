@@ -325,7 +325,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_search(),
         def_grep(request_schema("grep")?),
         def_ast_grep_search(request_schema("ast_grep_search")?),
-        def_retrieve(),
+        def_retrieve(request_schema("retrieve")?),
         def_context(request_schema("context")?),
         def_impact(request_schema("impact")?),
         def_node(request_schema("node")?),

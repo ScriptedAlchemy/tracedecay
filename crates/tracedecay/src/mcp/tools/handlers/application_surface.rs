@@ -12,12 +12,13 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_mcp::application_output::view::CanonicalHumanView;
+use tracedecay_mcp::application_output::tool_result::{
+    ApplicationRefusal, render_application_result,
+};
 use tracedecay_mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
-use tracedecay_mcp::tools::response_trailers::ResponseTrailer;
 use tracedecay_project::project::TraceDecay;
 
 pub(super) fn request_id() -> Result<RequestId> {
@@ -207,78 +208,13 @@ pub fn render_application_surface_result(
     response_handle_root: Option<&std::path::Path>,
     result: &ApplicationSurfaceInvocationResult,
 ) -> Result<tracedecay_mcp::ToolResult> {
-    render_result_parts(
+    render_application_result(
         response_handle_root,
         result.operation.as_str(),
         &result.binding_id,
         &result.result,
         result.requested_format,
     )
-}
-
-fn render_result_parts(
-    response_handle_root: Option<&std::path::Path>,
-    operation: &str,
-    binding_id: &BindingId,
-    result: &ApplicationResult<Value>,
-    requested_format: RequestedOutputFormat,
-) -> Result<tracedecay_mcp::ToolResult> {
-    let (value, failure_message) = match result {
-        Ok(application) => (serde_json::to_value(application)?, None),
-        Err(problem) => {
-            let failure_message = match problem.problem.kind() {
-                ApplicationProblemKind::NotFoundOrNotAuthorized => {
-                    "application surface was not found or is not authorized"
-                }
-                ApplicationProblemKind::Unavailable => "application surface unavailable",
-                _ => "application surface request failed",
-            };
-            (serde_json::to_value(problem)?, Some(failure_message))
-        }
-    };
-    let markdown = match requested_format {
-        RequestedOutputFormat::Json => None,
-        RequestedOutputFormat::Markdown => {
-            Some(render_canonical_markdown(operation, binding_id, result)?)
-        }
-    };
-    let text = tracedecay_mcp::tools::render::finalize_with_format(
-        response_handle_root,
-        requested_format,
-        &value,
-        || markdown.unwrap_or_default(),
-    );
-    let mut rendered = super::text_tool_result(&text);
-    match result {
-        Ok(envelope) => ResponseTrailer {
-            touched_files: &envelope.touched_files,
-            code_graph: envelope.code_graph.as_ref(),
-            cost: envelope.cost.as_ref(),
-        }
-        .attach(&mut rendered),
-        // Keep the typed problem machine-readable in every presentation
-        // format: markdown rendering alone would strand it in prose that
-        // clients cannot classify. The whole record travels, not a
-        // kind/code summary, the parts a caller must *act* on are the
-        // legal actions, the retry directive, and, for an admitted partial
-        // effect, the committed receipt. Publishing only kind/code left the
-        // one instruction that matters ("reconcile this committed effect")
-        // readable by humans and invisible to every client.
-        Err(problem) => {
-            if let Some(object) = rendered.value.as_object_mut() {
-                object.insert(
-                    "problem".to_string(),
-                    serde_json::to_value(problem.problem.as_ref())?,
-                );
-            }
-        }
-    }
-    Ok(match failure_message {
-        Some(failure_message) => rendered
-            .with_semantic_error(true)
-            .with_failure_message(failure_message),
-        None => rendered,
-    })
 }
 
 /// A settled retained tool call, before rendering.
@@ -323,7 +259,7 @@ pub fn render_retained_execution(
 ) -> Result<tracedecay_mcp::ToolResult> {
     hotpath::measure_block!(
         "mcp.retained.render",
-        render_result_parts(
+        render_application_result(
             response_handle_root,
             execution.operation.as_str(),
             &execution.binding_id,
@@ -517,9 +453,15 @@ pub async fn execute_retained_surface_tool(
     })
 }
 
+/// A settled graph-tool call: the typed completion, or the owner's refusal.
+pub type GraphToolOutcome = std::result::Result<
+    tracedecay_contracts::graph_tool::GraphToolCompletionV1,
+    ApplicationRefusal,
+>;
+
 /// Invoke one graph-tool operation through the project's graph-tool owner and
-/// return its typed result. A refusal comes back as the handler's own error
-/// kind, so every surface reports the failure it always reported.
+/// return its typed result. A refusal with typed detail comes back whole for
+/// the surface to render; a code-only refusal stays the handler's error.
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure(future = true, label = "mcp.graph_tool.total")]
 pub async fn execute_graph_tool_surface(
@@ -530,7 +472,7 @@ pub async fn execute_graph_tool_surface(
     protocol_request_id: Option<RequestId>,
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
-) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
+) -> Result<GraphToolOutcome> {
     let request = parse_application_surface_request(operation, args).map_err(|error| {
         TraceDecayError::Config {
             message: match error {
@@ -568,13 +510,24 @@ pub async fn execute_graph_tool_surface(
         RequestedOutputFormat::Json,
     )
     .map_err(application_surface_dispatch_error)?;
+    let binding_id = dispatched.invocation.binding_id.clone();
     let result = tracedecay_daemon_service::application_surface::execute_application_surface(
         operation, dispatched, executor,
     )
     .await
     .map_err(application_surface_dispatch_error)?
     .result;
-    let envelope = result.map_err(|problem| graph_tool_problem_error(&problem.problem))?;
+    let envelope = match result {
+        Ok(envelope) => envelope,
+        Err(problem) if problem.problem.detail.is_some() => {
+            return Ok(Err(ApplicationRefusal {
+                operation,
+                binding_id,
+                problem,
+            }));
+        }
+        Err(problem) => return Err(graph_tool_problem_error(*problem.problem)),
+    };
     let ApplicationOutcome::Result(value) = envelope.outcome else {
         return Err(TraceDecayError::project_route(
             "application_surface_invalid_response",
@@ -597,34 +550,43 @@ pub async fn execute_graph_tool_surface(
                     ),
                 )
             })?;
-    Ok(tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
-        result,
-        touched_files: envelope.touched_files,
-        code_graph: envelope.code_graph,
-        analytics: envelope.analytics,
-        cost: envelope.cost,
-    })
+    Ok(Ok(
+        tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
+            result,
+            touched_files: envelope.touched_files,
+            code_graph: envelope.code_graph,
+            analytics: envelope.analytics,
+            cost: envelope.cost,
+        },
+    ))
 }
 
-/// The graph-tool owner reports handler argument errors as invalid requests
-/// and every other refusal under its own reason code.
+/// A code-only graph-tool refusal is the owner's flattening of a handler
+/// error (see [`graph_tool_error_problem`]), so it carries no kind or action
+/// of its own: it reports as the handler's argument or project-route error.
 fn graph_tool_problem_error(
-    problem: &tracedecay_contracts::ApplicationProblemRecord,
+    problem: tracedecay_contracts::ApplicationProblemRecord,
 ) -> TraceDecayError {
-    let message = problem.diagnostic.as_ref().map_or_else(
-        || problem.message.clone(),
-        |diagnostic| diagnostic.message.clone(),
-    );
+    let message = problem
+        .diagnostic
+        .map_or(problem.message, |diagnostic| diagnostic.message);
     match problem.kind {
         ApplicationProblemKind::InvalidRequest => TraceDecayError::Config { message },
-        _ => TraceDecayError::project_route(problem.code.clone(), problem.retryable, message),
+        _ => TraceDecayError::project_route(problem.code, problem.retryable, message),
     }
 }
 
-/// The owner-side counterpart of [`graph_tool_problem_error`].
+/// The graph-tool owner reports handler argument errors as invalid requests,
+/// a lock that missed its deadline as its typed detail, and every other
+/// refusal under its own reason code.
 pub(crate) fn graph_tool_error_problem(
     error: &TraceDecayError,
 ) -> tracedecay_contracts::ApplicationProblem {
+    if let Some(detail) =
+        tracedecay_contracts::ApplicationProblemDetailV1::from_lock_deadline(error)
+    {
+        return tracedecay_contracts::ApplicationProblem::from_detail(detail);
+    }
     match error {
         TraceDecayError::Config { message } => {
             tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
@@ -683,17 +645,6 @@ fn graph_tool_unavailable(
     }
 }
 
-fn render_canonical_markdown(
-    operation: &str,
-    binding_id: &BindingId,
-    result: &ApplicationResult<Value>,
-) -> serde_json::Result<String> {
-    let view = CanonicalHumanView::from_application_result(operation, binding_id, result)?;
-    Ok(tracedecay_mcp::application_output::markdown::render(view)
-        .as_str()
-        .to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -707,7 +658,7 @@ mod tests {
     use tracedecay_mcp::tools::response_trailers::account_tool_result;
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
 
-    use super::{complete_protocol_controls, render_result_parts};
+    use super::{complete_protocol_controls, render_application_result};
 
     #[test]
     fn retained_calls_target_the_profile_only_through_their_canonical_selector() {
@@ -881,7 +832,7 @@ mod tests {
         };
         let binding = BindingId::new("binding.mcp.code-callers.v1").unwrap();
         for format in [RequestedOutputFormat::Markdown, RequestedOutputFormat::Json] {
-            let mut rendered = render_result_parts(
+            let mut rendered = render_application_result(
                 Some(root.path()),
                 "code_callers",
                 &binding,

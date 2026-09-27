@@ -11,7 +11,7 @@ use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_contracts::retrieval::{
-    DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1,
+    DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -37,6 +37,7 @@ use crate::handlers::info::{
     compute_config, compute_files, compute_port_order, compute_port_status, compute_todos,
     render_files_md,
 };
+use crate::handlers::retrieve::{compute_retrieve, render_retrieved_page};
 use crate::handlers::support::{
     decode_primitive_request, generic_tool_result, rendered_tool_result, text_tool_result,
     unknown_tool_error,
@@ -179,6 +180,9 @@ pub async fn compute_graph_tool(
             compute_files(&open(operation).await?, request, scope_prefix).await
         }
         ApplicationSurfaceOperation::Config => compute_config(ctx.project_root(), args).await,
+        ApplicationSurfaceOperation::Retrieve => {
+            compute_retrieve(&ctx.store_layout().response_handle_root, &args).await
+        }
         operation => Err(unknown_tool_error(operation.mcp_tool_name())),
     }
 }
@@ -280,6 +284,9 @@ pub fn render_graph_tool(
             Vec::new(),
             || render_files_md(files),
         ),
+        GraphToolResultV1::Retrieve(RetrieveResultV1::Page(page)) => {
+            render_retrieved_page(args, page)?
+        }
         GraphToolResultV1::AstGrepSearch(search) => {
             render_ast_grep_search(response_handle_root, args, search)?
         }

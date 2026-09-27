@@ -157,7 +157,6 @@ mod workflow_dispatch_tests;
 
 use std::sync::Arc;
 pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
-pub(super) use tool_call_support::text_tool_result;
 
 use serde_json::Value;
 use tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1;

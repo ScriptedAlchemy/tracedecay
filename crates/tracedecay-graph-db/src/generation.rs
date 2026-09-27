@@ -20,7 +20,7 @@ use tracedecay_store::runtime::{
 };
 
 use crate::limits::{MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS};
-use crate::schema::{NAMESPACE_PROPERTY, required_string};
+use crate::schema::{ENTITY_ID_PROPERTY, NAMESPACE_PROPERTY, decode_identity, required_string};
 use crate::state::{latest_projection, projection_node_counts};
 use crate::{
     GraphBudgetKind, GraphDbError, GraphEntity, GraphEntityId, GraphGenerationId,
@@ -1112,8 +1112,8 @@ pub(crate) fn recovered_entity_ref(
         .ok_or_else(|| GraphDbError::Corrupt {
             message: "recovered generation relation escapes its dependency closure".to_owned(),
         })?;
-    let identity = GraphEntityId::new(required_string(
-        entity.get_property(crate::schema::ENTITY_ID_PROPERTY),
+    let identity = GraphEntityId::new(decode_identity(
+        entity.get_property(ENTITY_ID_PROPERTY),
         "recovered generation endpoint identity",
     )?)
     .map_err(|error| GraphDbError::Corrupt {

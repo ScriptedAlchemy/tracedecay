@@ -25,6 +25,7 @@ import {
   TraceDecayProtocolError,
   TraceDecayResetRequiredError,
   TraceDecayUnavailableError,
+  TraceDecayUnsupportedError,
   createClient,
   type OperationRequestOptions,
 } from "../src/client";
@@ -1041,6 +1042,76 @@ describe("TraceDecayClient transport envelopes", () => {
         );
       },
     );
+  });
+
+  it("surfaces the diagnostics detail an unsupported problem carries", async () => {
+    const detail = {
+      kind: "diagnostics_unsupported",
+      file: "src/main.rs",
+      searched: [
+        { path: "src/tsconfig.json", present: false },
+        { path: "tsconfig.json", present: true },
+      ],
+    };
+    const unsupported = problemEnvelope("unsupported", "application.diagnostics.unsupported", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["correct_request"],
+      detail,
+    });
+    const malformed = problemEnvelope("unsupported", "application.diagnostics.unsupported", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["correct_request"],
+      detail: { ...detail, searched: [{ path: "tsconfig.json" }] },
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 422, unsupported),
+        (_request, response) => json(response, 422, malformed),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(TraceDecayUnsupportedError);
+        expect((refusal as TraceDecayUnsupportedError).problem.detail).toEqual(detail);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("surfaces the reset-required store detail", async () => {
+    const detail = {
+      kind: "reset_required",
+      authority: "project store",
+      found_version: 3,
+      required_version: 4,
+      reason: "the store predates this binary",
+      remedy: "tracedecay reset --project",
+    };
+    const reset = problemEnvelope("reset_required", "application.reset-required", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["reset"],
+      detail,
+    });
+
+    await withServer([(_request, response) => json(response, 503, reset)], async (baseUrl) => {
+      const client = createClient({
+        baseUrl,
+        projectId: "project.sdk",
+        token: "sdk-secret",
+      });
+
+      const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(TraceDecayResetRequiredError);
+      expect((refusal as TraceDecayResetRequiredError).problem.detail).toEqual(detail);
+    });
   });
 
   it("rejects classified admitted terminals that Rust would reject", async () => {

@@ -74,6 +74,7 @@ const HANDWRITTEN_DEFINITION_OPERATIONS: &[ApplicationSurfaceOperation] = &[
     ApplicationSurfaceOperation::BranchList,
     ApplicationSurfaceOperation::Files,
     ApplicationSurfaceOperation::Config,
+    ApplicationSurfaceOperation::Retrieve,
     ApplicationSurfaceOperation::AutomationRunList,
     ApplicationSurfaceOperation::AutomationRunView,
     ApplicationSurfaceOperation::AutomationRunArtifactView,

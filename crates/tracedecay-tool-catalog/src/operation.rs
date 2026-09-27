@@ -208,6 +208,7 @@ application_surface_operations! {
     BranchList => "branch_list";
     Files => "files";
     Config => "config";
+    Retrieve => "retrieve";
     AutomationRunList => "automation_run_list";
     AutomationRunView => "automation_run_view";
     AutomationRunArtifactView => "automation_run_artifact_view";
@@ -333,6 +334,7 @@ impl ApplicationSurfaceOperation {
         Self::BranchList,
         Self::Files,
         Self::Config,
+        Self::Retrieve,
         Self::AutomationRunList,
         Self::AutomationRunView,
         Self::AutomationRunArtifactView,
