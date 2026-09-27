@@ -145,6 +145,9 @@ Notes:
   - --project <path> targets another project; the default is the nearest
     initialised project walking up from the current directory.
   - Exit code is non-zero on unknown tools, bad arguments, or handler errors.
+    A `status` wait_for that ends `timed_out` exits 75 (rerun the wait); one
+    that ends `unavailable` exits 1. A typed daemon refusal of a JSON request
+    still prints `{\"problem\": …}` on stdout.
 
 Related: tracedecay serve (same tools over MCP stdio), tracedecay status.";
 

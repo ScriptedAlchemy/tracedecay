@@ -109,7 +109,13 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Output {
 }
 
 enum FakeDaemonResponse {
-    Complete { text: String },
+    Complete {
+        text: String,
+    },
+    /// A whole tool result, for members beside `content`.
+    Result {
+        result: Value,
+    },
     HoldOpen,
 }
 
@@ -249,6 +255,16 @@ fn spawn_scripted_daemon(
                                 "text": text
                             }]
                         }
+                    });
+                    let mut writer = stream;
+                    writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+                        .expect("write fake daemon response");
+                }
+                FakeDaemonResponse::Result { result } => {
+                    let response = json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"].clone(),
+                        "result": result,
                     });
                     let mut writer = stream;
                     writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
@@ -2705,4 +2721,138 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
         "{stdout}"
     );
     assert!(lines.contains(&"protocol: Ready"), "{stdout}");
+}
+
+/// A `status` wait that ends `timed_out` prints the status and exits 75, the
+/// retry-later status, naming the last state; a wait that reached exits 0.
+#[test]
+fn tool_status_exit_follows_the_wait_outcome() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+    let run = |wait: Value| {
+        let socket_dir = TempDir::new().unwrap();
+        let socket_path = socket_dir.path().join("tracedecay.sock");
+        let observed = spawn_scripted_daemon(
+            socket_path.clone(),
+            "tracedecay_status",
+            FakeDaemonResponse::Result {
+                result: json!({
+                    "content": [{"type": "text", "text": "## Project Status\n- **wait**: …"}],
+                    "structuredContent": {"wait": wait},
+                }),
+            },
+        );
+        let mut command = tracedecay_command_with_home(&home_path);
+        command
+            .current_dir(&project_path)
+            .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+            .args([
+                "tool",
+                "status",
+                "--args",
+                r#"{"wait_for":{"state":"fresh","timeout_ms":1000}}"#,
+            ]);
+        let output = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
+        let request = observed
+            .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
+            .expect("the status call reached the daemon");
+        assert_eq!(
+            request["params"]["arguments"]["wait_for"],
+            json!({"state": "fresh", "timeout_ms": 1000})
+        );
+        output
+    };
+
+    let timed_out = run(json!({"outcome": "timed_out", "last_state": "warming"}));
+    let stderr = String::from_utf8_lossy(&timed_out.stderr);
+    assert_eq!(timed_out.status.code(), Some(75), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&timed_out.stdout),
+        "## Project Status\n- **wait**: …\n"
+    );
+    assert!(
+        stderr.contains(
+            "tracedecay_status wait_for timed out before the index reached the requested \
+             state; last state: warming"
+        ),
+        "{stderr}"
+    );
+
+    let reached = run(json!({"outcome": "reached"}));
+    assert_eq!(
+        reached.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&reached.stderr)
+    );
+}
+
+/// A JSON request the daemon refuses because no project is in reach still
+/// prints the typed problem on stdout, and the process exits non-zero, on
+/// the owner-answered route (`search`) and the compatibility route
+/// (`status`) alike.
+#[test]
+fn projectless_json_tool_call_prints_the_typed_refusal() {
+    let home = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let outside = TempDir::new().unwrap();
+    let _daemon = spawn_tracedecay_daemon(&home);
+    let run = |args: &[&str]| {
+        let output = tracedecay_command_with_home(&home)
+            .current_dir(outside.path())
+            .arg("tool")
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("tracedecay tool should run");
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "stdout is not one JSON document ({error}): {}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        })
+    };
+
+    let search = run(&["search", "--query", "daemon", "--format", "json"]);
+    let problem = &search["problem"];
+    assert_eq!(
+        (
+            &problem["kind"],
+            &problem["code"],
+            &problem["detail"],
+            &problem["retryable"],
+            &problem["legal_actions"],
+        ),
+        (
+            &json!("invalid_request"),
+            &json!("project_required"),
+            &Value::Null,
+            &json!(false),
+            &json!(["correct_request"]),
+        ),
+        "{search}"
+    );
+    assert_eq!(
+        problem["message"],
+        "this operation needs a TraceDecay project, and the request named none; run it \
+         inside an initialized project or pass --project <path>"
+    );
+
+    let status = run(&["status", "--format", "json"]);
+    assert_eq!(
+        status,
+        json!({"problem": {
+            "tool": "tracedecay_status",
+            "kind": "invalid_request",
+            "code": "project_required",
+            "reason_code": "project_required",
+            "retryable": false,
+            "detail": "tracedecay_status requires an initialized code project; run it inside \
+                       an initialized project or pass --project <path>",
+        }})
+    );
 }

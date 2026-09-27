@@ -133,10 +133,39 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         "tool_dispatch_shutdown"
         | "mcp_dispatch_effect_journey_unverified"
         | "application_surface_unavailable" => Some("unavailable"),
-        "application_surface_invalid_request" => Some("invalid_request"),
+        "application_surface_invalid_request" | "project_required" | "project_not_enrolled" => {
+            Some("invalid_request")
+        }
         "application_surface_not_found_or_not_authorized" => Some("denied"),
         _ => None,
     }
+}
+
+/// The typed problem a project-route refusal of `tool_name` carries: the
+/// JSON-RPC error `data` of an MCP tool call, and the `problem` member
+/// `tracedecay tool` prints for a JSON request. `None` for any other error.
+#[must_use]
+pub fn project_route_problem(tool_name: &str, error: &TraceDecayError) -> Option<Value> {
+    let (reason_code, retryable, detail) = error.project_route_context()?;
+    let mut data = json!({
+        "tool": tool_name,
+        "reason_code": reason_code,
+        "retryable": retryable,
+        "detail": detail,
+    });
+    if let (Some(typed_detail), Some(object)) =
+        (error.project_route_typed_detail(), data.as_object_mut())
+    {
+        object.insert("detail".to_string(), json!(typed_detail));
+    }
+    if let (Some(kind), Some(object)) = (
+        project_route_problem_kind(reason_code),
+        data.as_object_mut(),
+    ) {
+        object.insert("kind".to_string(), json!(kind));
+        object.insert("code".to_string(), json!(reason_code));
+    }
+    Some(data)
 }
 
 /// Map response-handle failures onto actionable JSON-RPC errors at the MCP
@@ -149,31 +178,13 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
         } else {
             ErrorCode::InvalidParams
         };
-        let mut data = json!({
-            "tool": tool_name,
-            "reason_code": reason_code,
-            "retryable": retryable,
-            "detail": detail,
-        });
-        if let (Some(typed_detail), Some(object)) =
-            (error.project_route_typed_detail(), data.as_object_mut())
-        {
-            object.insert("detail".to_string(), json!(typed_detail));
-        }
-        if let (Some(kind), Some(object)) = (
-            project_route_problem_kind(reason_code),
-            data.as_object_mut(),
-        ) {
-            object.insert("kind".to_string(), json!(kind));
-            object.insert("code".to_string(), json!(reason_code));
-        }
         return JsonRpcResponse::error_with_data(
             id,
             code,
             format!(
                 "tool project route failed: reason_code={reason_code} retryable={retryable}: {detail}"
             ),
-            Some(data),
+            project_route_problem(tool_name, error),
         );
     }
     if tool_name == "tracedecay_hook_runtime"

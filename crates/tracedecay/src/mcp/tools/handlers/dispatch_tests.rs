@@ -556,6 +556,98 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
     cg.close();
 }
 
+/// A `wait_for` status read carries its outcome beside the body in both
+/// formats, so a caller types its exit on it without parsing the rendering,
+/// and a budget this call cannot live out is refused by naming that budget.
+#[tokio::test]
+async fn status_wait_outcome_rides_beside_the_body_and_the_budget_refusal_names_it() {
+    let dir = TempDir::new().unwrap();
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("status-wait-outcome");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.mcp-status-wait-outcome",
+    )
+    .await
+    .unwrap();
+    let waiter: tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter =
+        std::sync::Arc::new(|worktree_root, _, _| {
+            Box::pin(async move {
+                Ok(
+                    tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::TimedOut {
+                        last: Some(Box::new(
+                            tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                                worktree_root: worktree_root.display().to_string(),
+                                staleness_state: Some(
+                                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Indexing,
+                                ),
+                                rebuild_in_flight: true,
+                                ..Default::default()
+                            },
+                        )),
+                    },
+                )
+            })
+        });
+    let status = |args: Value| {
+        handle_tool_call_with_registry_options(
+            &cg,
+            "tracedecay_status",
+            args,
+            None,
+            None,
+            ToolCallRegistryOptions {
+                code_index_readiness_waiter: Some(std::sync::Arc::clone(&waiter)),
+                ..Default::default()
+            }
+            .admit_opened_project(&cg)
+            .expect("opened fixture admits"),
+        )
+    };
+
+    let markdown = status(json!({"wait_for": {"state": "fresh", "timeout_ms": 1000}}))
+        .await
+        .expect("a timed-out wait still answers the status");
+    let expected_wait = json!({"outcome": "timed_out", "last_state": "warming"});
+    assert_eq!(
+        markdown.value["structuredContent"],
+        json!({"wait": expected_wait}),
+        "{}",
+        markdown.value
+    );
+    let text = markdown.value["content"][0]["text"]
+        .as_str()
+        .expect("status markdown");
+    assert!(
+        text.lines()
+            .any(|line| line == "**wait:** timed_out (warming)"),
+        "{text}"
+    );
+    let json_status = status(json!({
+        "format": "json",
+        "wait_for": {"state": "fresh", "timeout_ms": 1000},
+    }))
+    .await
+    .expect("a timed-out wait still answers the status");
+    assert_eq!(
+        json_status.value["structuredContent"],
+        json!({"wait": expected_wait})
+    );
+
+    let refused = status(json!({"wait_for": {"state": "fresh", "timeout_ms": 120_001}}))
+        .await
+        .expect_err("a wait longer than the dispatch ceiling is refused");
+    assert_eq!(
+        refused.to_string(),
+        "config error: tracedecay_status wait_for.timeout_ms 120001 exceeds this \
+         call's 120000 ms dispatch budget"
+    );
+    cg.close();
+}
+
 /// Status must report the serving truth the retrieval lanes enforce. On a
 /// fresh daemon the census answers before any generation seals; claiming
 /// `serving_branch` there contradicted every lane's truthful

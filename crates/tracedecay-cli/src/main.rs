@@ -387,6 +387,10 @@ enum CommandOutcome {
     Exit(i32),
 }
 
+/// `EX_TEMPFAIL`: a `wait_for` status read ended before the index reached
+/// the requested state; rerunning the wait may reach it.
+const READINESS_WAIT_TIMED_OUT_EXIT_CODE: u8 = 75;
+
 fn process_exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
@@ -621,6 +625,10 @@ fn main() -> ExitCode {
         Err(e) => {
             let code = if tracedecay_daemon_identity::daemon_unreachable(&e) {
                 ExitCode::from(tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE)
+            } else if e.project_route_context().is_some_and(|(code, _, _)| {
+                code == tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT
+            }) {
+                ExitCode::from(READINESS_WAIT_TIMED_OUT_EXIT_CODE)
             } else {
                 ExitCode::FAILURE
             };
