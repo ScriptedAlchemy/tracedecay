@@ -313,8 +313,21 @@ mod tests {
                     "available",
                 ),
                 ("capability.application.primitive.affected", "available"),
+                ("capability.application.primitive.analytics", "available"),
                 (
                     "capability.application.primitive.ast-grep-search",
+                    "available",
+                ),
+                (
+                    "capability.application.primitive.automation-run-artifact-view",
+                    "available",
+                ),
+                (
+                    "capability.application.primitive.automation-run-list",
+                    "available",
+                ),
+                (
+                    "capability.application.primitive.automation-run-view",
                     "available",
                 ),
                 ("capability.application.primitive.branch-diff", "available"),
@@ -383,6 +396,10 @@ mod tests {
                 ("capability.application.primitive.health", "available"),
                 ("capability.application.primitive.health-delta", "available"),
                 ("capability.application.primitive.health-read", "available"),
+                (
+                    "capability.application.primitive.hermes-skill-bridge",
+                    "available",
+                ),
                 ("capability.application.primitive.hotspots", "available"),
                 ("capability.application.primitive.impact", "available"),
                 (
@@ -407,12 +424,15 @@ mod tests {
                     "capability.application.primitive.rename-preview",
                     "available",
                 ),
+                ("capability.application.primitive.search", "available"),
                 (
                     "capability.application.primitive.session-lookup",
                     "available",
                 ),
                 ("capability.application.primitive.signature", "available"),
                 ("capability.application.primitive.similar", "available"),
+                ("capability.application.primitive.skill-list", "available"),
+                ("capability.application.primitive.skill-view", "available"),
                 ("capability.application.primitive.source-body", "available"),
                 ("capability.application.primitive.source-lines", "available"),
                 (
