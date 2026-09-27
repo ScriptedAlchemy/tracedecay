@@ -410,6 +410,17 @@ async fn typed_callers_carry_their_read_cost() {
         payload["outcome"]["value"]["execution"]["budget"]["elapsed_micros"], cost["wall_micros"],
         "the receipt's elapsed time is the metered read's wall time: {payload:#}"
     );
+    let execution = &payload["outcome"]["value"]["execution"];
+    let interval = execution["ended_at"]
+        .as_i64()
+        .zip(execution["started_at"].as_i64())
+        .map(|(ended, started)| ended - started)
+        .unwrap_or_else(|| panic!("the receipt names its interval: {payload:#}"));
+    assert_eq!(
+        Some(interval),
+        cost["wall_micros"].as_i64(),
+        "the receipt ends where the metered read ended: {payload:#}"
+    );
 
     let markdown = call(
         &fixture,

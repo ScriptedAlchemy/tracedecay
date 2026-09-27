@@ -342,27 +342,47 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
         "dependency starts outside the index: {absent}"
     );
 
-    let error = tokio::time::timeout(
-        RECEIPT_TIMEOUT,
-        call_tool(
-            &socket,
-            &handshake,
-            "tracedecay_find_exact_symbol",
-            json!({
-                "name": "LifecycleIgnoredDependency",
-                "limit": 5,
-                "lazy_index_ignored_dependencies": true,
-            }),
-        ),
-    )
+    // A ready generation may serve without its decoded seat; the first
+    // admission demands that decode and asks for a retry until it seats.
+    let refusal = tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            let refusal = call_tool(
+                &socket,
+                &handshake,
+                "tracedecay_find_exact_symbol",
+                json!({
+                    "name": "LifecycleIgnoredDependency",
+                    "limit": 5,
+                    "lazy_index_ignored_dependencies": true,
+                }),
+            )
+            .await
+            .expect("the owner answers lazy admission as a tool result");
+            if refusal["structuredContent"]["problem"]["code"]
+                != "application.symbol-graph.ignored-dependency-scheduler-unavailable"
+            {
+                break refusal;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
     .await
-    .expect("lazy admission timed out")
-    .expect_err("generation-advancing admission must require a retry");
-    assert!(
-        error
-            .to_string()
-            .contains("advanced the graph generation; retry the request"),
-        "lazy admission returned the wrong typed retry: {error}"
+    .expect("lazy admission timed out");
+    let problem = &refusal["structuredContent"]["problem"];
+    assert_eq!(
+        (
+            &refusal["isError"],
+            &problem["code"],
+            &problem["message"],
+            &problem["legal_actions"],
+        ),
+        (
+            &json!(true),
+            &json!("application.symbol-graph.ignored-dependency-generation-advanced"),
+            &json!("ignored dependency indexing advanced the graph generation; retry the request"),
+            &json!(["retry"]),
+        ),
+        "generation-advancing admission must require a retry: {refusal}"
     );
     let advanced = read_active_generation(environment.home(), &project);
     assert_ne!(

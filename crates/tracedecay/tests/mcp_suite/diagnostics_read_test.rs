@@ -170,6 +170,69 @@ async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
     fixture.harness.shutdown().await;
 }
 
+/// Moving the source proof (Git metadata the fence samples) without changing
+/// the sealed source leaves the published finding valid but unverified. Until
+/// the code index renews the proof, the read reports that publication stale;
+/// "the diagnostic authority is unavailable" would tell a caller to give up.
+#[cfg(unix)]
+#[tokio::test]
+async fn moved_source_proof_reads_the_publication_as_stale_until_renewed() {
+    use crate::common::fixture::{TypeScriptFixtureCompiler, write_typescript_diagnostics_fixture};
+    use crate::support::production_composition_fixture_with_sources;
+
+    let fixture = production_composition_fixture_with_sources(|project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Present);
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    wait_for_current_graph(&server).await;
+    let arguments = json!({"scope": "file", "path": "src/index.ts", "maximum_diagnostics": 10});
+    let published = await_published_diagnostics(&server, arguments.clone()).await;
+    assert_eq!(published_records(&published).len(), 1, "{published}");
+
+    let index = std::fs::File::options()
+        .write(true)
+        .open(fixture.project_root.join(".git/index"))
+        .expect("open the git index");
+    index
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+        .expect("move the git index mtime");
+    drop(index);
+
+    let mut codes = Vec::new();
+    let renewed = loop {
+        let result =
+            handle_real_server_tool_call(&server, "tracedecay_diagnostics", arguments.clone())
+                .await;
+        if result["isError"] != json!(true) {
+            break result;
+        }
+        codes.push(result["structuredContent"]["problem"]["code"].clone());
+        assert!(
+            codes.len() < 120,
+            "the code index never renewed the moved proof: {result}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert!(
+        !codes.is_empty()
+            && codes
+                .iter()
+                .all(|code| code == "application.diagnostics.stale"),
+        "a moved proof over a valid publication reads as stale until renewed: {codes:?}"
+    );
+    assert_eq!(
+        published_records(&renewed),
+        published_records(&published),
+        "the renewed proof serves the same finding"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
 /// The same project before `npm install`: the read must carry the exact setup
 /// command and a legal action, never `Legal actions: none`.
 #[cfg(unix)]

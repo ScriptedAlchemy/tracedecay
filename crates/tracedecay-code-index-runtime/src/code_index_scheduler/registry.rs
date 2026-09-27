@@ -3691,7 +3691,10 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1>
     {
         let root = canonical_existing_identity(&project_root).ok()?;
-        let root_generation = self.latest_text_serving_for_root(&root).await?;
+        // Identity, not serving: this reads only the retained generation's
+        // manifest and snapshot. The TypeScript producer publishes at the
+        // seal, so a warming lexical artifact must not hide that publication.
+        let root_generation = self.retained_text_owner_for_root(&root).await?;
         let scope = match scope {
             Some(scope) => scope,
             None => {
@@ -3706,7 +3709,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .ok()?
             }
         };
-        let (current, fresh) = self.latest_text_serving_freshness_for_scope(&scope).await?;
+        let (current, fresh) = self.retained_text_owner_freshness_for_scope(&scope).await?;
         if !fresh
             || root_generation.metadata().manifest().generation_id
                 != current.metadata().manifest().generation_id
