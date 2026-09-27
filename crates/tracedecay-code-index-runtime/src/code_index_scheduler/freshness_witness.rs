@@ -265,7 +265,8 @@ impl StatKeyV1 {
                 .modified()
                 .ok()
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |elapsed| elapsed.as_nanos() as i128),
+                .and_then(|elapsed| i128::try_from(elapsed.as_nanos()).ok())
+                .unwrap_or(0),
             changed_nanos: 0,
         }
     }
@@ -277,7 +278,8 @@ impl StatKeyV1 {
             && sampled_at
                 .checked_sub(RACY_STAT_WINDOW)
                 .and_then(|horizon| horizon.duration_since(UNIX_EPOCH).ok())
-                .is_some_and(|horizon| self.changed_nanos < horizon.as_nanos() as i128)
+                .and_then(|horizon| i128::try_from(horizon.as_nanos()).ok())
+                .is_some_and(|horizon| self.changed_nanos < horizon)
     }
 }
 
