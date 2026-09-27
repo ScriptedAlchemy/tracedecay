@@ -10,8 +10,13 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexReadinessWaitReadV1,
 };
 
-use super::{CodeIndexCadenceTriggerV1, CodeIndexOwnerActivityV1, CodeIndexSchedulerRegistryV1};
-use crate::code_index_scheduler::CodeIndexCadenceTelemetryV1;
+use tracedecay_contracts::ResolvedScope;
+
+use super::{
+    CodeIndexCadenceTriggerV1, CodeIndexOwnerActivityV1, CodeIndexSchedulerRegistryV1,
+    unique_mounted_for_scope,
+};
+use crate::code_index_scheduler::{CodeIndexCadenceTelemetryV1, LatestCodeTextGenerationV1};
 
 /// Why the source could not be proven current before waiting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +197,36 @@ impl CodeIndexSchedulerRegistryV1 {
         })
         .await
         .map_err(|_| CodeIndexFreshSweepRefusedV1::SweepFailed)
+    }
+
+    /// The retained text owner for `scope` once its source proof admits it.
+    ///
+    /// A settled worktree's proof lapses whenever Git metadata moves or a hook
+    /// hint advances the source epoch; the read that notices posts the
+    /// re-verification wake, and the worker renews the proof without a
+    /// rebuild when the digests still match. Waiting on the registry's
+    /// publications for that renewal keeps a read from answering unavailable
+    /// in the window. Returns `None` when the scope has no mounted text owner
+    /// or the registry closed; the caller bounds the wait.
+    pub(crate) async fn current_text_owner_for_scope(
+        &self,
+        scope: &ResolvedScope,
+    ) -> Option<LatestCodeTextGenerationV1> {
+        let root = {
+            let mounted = self.mounted.lock().await;
+            unique_mounted_for_scope(&mounted, scope)
+                .unique()?
+                .0
+                .clone()
+        };
+        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, &root).await;
+        loop {
+            let (latest, current) = self.retained_text_owner_freshness_for_scope(scope).await?;
+            if current {
+                return Some(latest);
+            }
+            signals.changed().await.ok()?;
+        }
     }
 
     /// Wait until `project_root` reaches `target`, re-reading freshness only
