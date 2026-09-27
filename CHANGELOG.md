@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.58](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.57...v1.0.0-beta.58) (2026-09-27)
+
+
+### Bug Fixes
+
+* **code-index:** serve the first index without the whole decode ([#2332](https://github.com/ScriptedAlchemy/tracedecay/issues/2332)) ([60eec1f](https://github.com/ScriptedAlchemy/tracedecay/commit/60eec1f255dcd5aa54ad1ff4bbe442b37175a5e8))
+* **code-index:** sweep source after a publication's text projection ([#2331](https://github.com/ScriptedAlchemy/tracedecay/issues/2331)) ([85affed](https://github.com/ScriptedAlchemy/tracedecay/commit/85affeda8edd8be0f9768f953373669ad3372c9a)), closes [#2322](https://github.com/ScriptedAlchemy/tracedecay/issues/2322)
+* **code-index:** verify fresh waits cheaply and type delivered saves ([#2341](https://github.com/ScriptedAlchemy/tracedecay/issues/2341)) ([f3f7e04](https://github.com/ScriptedAlchemy/tracedecay/commit/f3f7e04ea0213e0d8bae9b13167bec238f7f2f6c))
+* **doctor:** exit 75 for pending operator steps update-plugin reports ([#2326](https://github.com/ScriptedAlchemy/tracedecay/issues/2326)) ([b91ce30](https://github.com/ScriptedAlchemy/tracedecay/commit/b91ce30b5efb0198fd1f93b339bb115bb19ce17a))
+* **mcp-catalog:** keep an unsized project count out of context help ([#2323](https://github.com/ScriptedAlchemy/tracedecay/issues/2323)) ([5f2dfe3](https://github.com/ScriptedAlchemy/tracedecay/commit/5f2dfe30516620ee000f91ea6dbd5b4273cc8559))
+* **mcp:** render parked refusals and graph-tool errors as typed fields ([#2340](https://github.com/ScriptedAlchemy/tracedecay/issues/2340)) ([d0d4d3a](https://github.com/ScriptedAlchemy/tracedecay/commit/d0d4d3a43ab94a3a137e7d65bb7ae5423b3e7f02))
+* **receipts:** report measured elapsed time on read receipts ([#2339](https://github.com/ScriptedAlchemy/tracedecay/issues/2339)) ([db1a928](https://github.com/ScriptedAlchemy/tracedecay/commit/db1a9281d14e7d7450e24c87209807339f63780b))
+* **release:** neutralize markdown-linked closing references ([#2328](https://github.com/ScriptedAlchemy/tracedecay/issues/2328)) ([41fb9be](https://github.com/ScriptedAlchemy/tracedecay/commit/41fb9beba9ae95bbf3123fbdf0b82ba1feea36a6))
+* **update:** classify GitHub release lookup failures ([#2337](https://github.com/ScriptedAlchemy/tracedecay/issues/2337)) ([4c4c54e](https://github.com/ScriptedAlchemy/tracedecay/commit/4c4c54e5795fb95e3dd6dee4186b16a75b202a3c))
+
+
+### Performance Improvements
+
+* **code-index:** cut fixed costs from the one-file index path ([#2338](https://github.com/ScriptedAlchemy/tracedecay/issues/2338)) ([761adc2](https://github.com/ScriptedAlchemy/tracedecay/commit/761adc259724ded81821ac75836518c9463dd00b)), closes [#2281](https://github.com/ScriptedAlchemy/tracedecay/issues/2281)
+* **diagnostics:** check only changed TypeScript projects at the seal ([#2325](https://github.com/ScriptedAlchemy/tracedecay/issues/2325)) ([f58a9f1](https://github.com/ScriptedAlchemy/tracedecay/commit/f58a9f1146671511bc5e7f402e772b37404ec2e3))
+* **hooks:** group-commit hook spool appends ([#2327](https://github.com/ScriptedAlchemy/tracedecay/issues/2327)) ([d868893](https://github.com/ScriptedAlchemy/tracedecay/commit/d868893f3418ecd9b91235a51ca56ee59d869cd2)), closes [#2264](https://github.com/ScriptedAlchemy/tracedecay/issues/2264)
+
 ## [1.0.0-beta.57](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.56...v1.0.0-beta.57) (2026-09-27)
 
 
