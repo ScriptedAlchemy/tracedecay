@@ -36,31 +36,54 @@ pub use tracedecay_configuration::config::RuntimeConfigurationTarget;
 /// Process-local, immutable-after-publication lookup cache. The daemon owns
 /// refreshing it when a configuration revision activates; hook paths only
 /// perform an in-memory lookup.
+///
+/// One process can host several profiles, and one checkout registered in two
+/// profiles has one project id, so every entry is keyed by the owning
+/// profile's data directory as well.
 #[derive(Default)]
 pub struct RuntimeConfigurationCache {
-    by_project: RwLock<BTreeMap<String, PinnedRuntimeConfiguration>>,
-    project_by_root: RwLock<BTreeMap<PathBuf, String>>,
+    by_project: RwLock<BTreeMap<(PathBuf, String), PinnedRuntimeConfiguration>>,
+    project_by_root: RwLock<BTreeMap<(PathBuf, PathBuf), String>>,
 }
 
 impl RuntimeConfigurationCache {
     pub fn insert(&self, configuration: PinnedRuntimeConfiguration) {
-        let project_id = configuration.target().project_id.as_str().to_owned();
-        let project_root = configuration.target().project_root.clone();
+        let target = configuration.target().clone();
         self.by_project
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(project_id.clone(), configuration);
+            .insert(
+                (
+                    target.profile_root.clone(),
+                    target.project_id.as_str().to_owned(),
+                ),
+                configuration,
+            );
+        self.route(&target);
+    }
+
+    /// Records the root a published pin is read under without replacing the
+    /// pin: a retargeted copy of an older read must never overwrite a
+    /// revision published since.
+    fn route(&self, target: &RuntimeConfigurationTarget) {
         self.project_by_root
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(project_root, project_id);
+            .insert(
+                (target.profile_root.clone(), target.project_root.clone()),
+                target.project_id.as_str().to_owned(),
+            );
     }
 
-    pub fn for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration> {
+    pub fn for_project(
+        &self,
+        profile_root: &Path,
+        project_id: &ProjectId,
+    ) -> Result<PinnedRuntimeConfiguration> {
         self.by_project
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(project_id.as_str())
+            .get(&(profile_root.to_path_buf(), project_id.as_str().to_owned()))
             .cloned()
             .ok_or_else(|| {
                 config_error(format!(
@@ -70,12 +93,16 @@ impl RuntimeConfigurationCache {
             })
     }
 
-    pub fn for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
+    pub fn for_root(
+        &self,
+        profile_root: &Path,
+        project_root: &Path,
+    ) -> Result<PinnedRuntimeConfiguration> {
         let project_id = self
             .project_by_root
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(project_root)
+            .get(&(profile_root.to_path_buf(), project_root.to_path_buf()))
             .cloned()
             .ok_or_else(|| {
                 config_error(format!(
@@ -87,7 +114,7 @@ impl RuntimeConfigurationCache {
             .by_project
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&project_id)
+            .get(&(profile_root.to_path_buf(), project_id))
             .cloned()
             .ok_or_else(|| {
                 config_error(
@@ -103,9 +130,10 @@ impl tracedecay_dashboard_api::config::DashboardConfigurationReadPort
 {
     fn cached_runtime_configuration(
         &self,
+        profile_root: &Path,
         project_root: &Path,
     ) -> Result<tracedecay_dashboard_api::config::PinnedRuntimeConfiguration> {
-        self.for_root(project_root)
+        self.for_root(profile_root, project_root)
     }
 }
 
@@ -127,7 +155,8 @@ pub fn install_pinned_runtime_configuration(configuration: PinnedRuntimeConfigur
 }
 
 /// Builds a typed target from a resolved store layout. A missing project ID is
-/// never replaced by a path-derived identity.
+/// never replaced by a path-derived identity; the owning profile is the one
+/// whose shard the layout is.
 pub fn runtime_configuration_target_for_layout(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
@@ -135,16 +164,28 @@ pub fn runtime_configuration_target_for_layout(
     let project_id = layout.identity.project_id.as_deref().ok_or_else(|| {
         config_error("configuration authority unavailable: store layout has no project id")
     })?;
-    runtime_configuration_target_for_project_id(project_root, project_id)
+    let profile_root = tracedecay_runtime_core::storage::profile_root_of_sharded_data_root(
+        &layout.data_root,
+        project_id,
+    )
+    .ok_or_else(|| {
+        config_error(format!(
+            "configuration authority unavailable: store '{}' is not a profile shard",
+            layout.data_root.display()
+        ))
+    })?;
+    runtime_configuration_target_for_project_id(profile_root, project_root, project_id)
 }
 
 /// Builds a typed configuration target from an already-authoritative project
-/// ID. The path remains non-authoritative routing context.
+/// ID in `profile_root`. The path remains non-authoritative routing context.
 pub fn runtime_configuration_target_for_project_id(
+    profile_root: &Path,
     project_root: &Path,
     project_id: &str,
 ) -> Result<RuntimeConfigurationTarget> {
     Ok(RuntimeConfigurationTarget {
+        profile_root: profile_root.to_path_buf(),
         project_id: ProjectId::new(project_id.to_owned()).map_err(|error| {
             config_error(format!("invalid project id for configuration: {error}"))
         })?,
@@ -164,9 +205,9 @@ pub fn runtime_configuration_for_layout(
 ) -> Result<PinnedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     let configuration = runtime_configuration_cache()
-        .for_project(&target.project_id)?
+        .for_project(&target.profile_root, &target.project_id)?
         .with_project_root(&target.project_root);
-    runtime_configuration_cache().insert(configuration.clone());
+    runtime_configuration_cache().route(&target);
     Ok(configuration)
 }
 
@@ -191,13 +232,14 @@ pub async fn resolve_runtime_configuration_for_registered_database(
 ) -> Result<PinnedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     validate_registered_configuration_database(&target, database.as_ref())?;
-    if let Ok(configuration) = runtime_configuration_cache().for_project(&target.project_id) {
+    if let Ok(configuration) =
+        runtime_configuration_cache().for_project(&target.profile_root, &target.project_id)
+    {
         // The cache already holds a daemon-published pin (possibly a migrated
         // durable revision). Retarget it to this operation's non-authoritative
         // route and keep the fast path; do not reopen the store.
-        let configuration = configuration.with_project_root(&target.project_root);
-        runtime_configuration_cache().insert(configuration.clone());
-        return Ok(configuration);
+        runtime_configuration_cache().route(&target);
+        return Ok(configuration.with_project_root(&target.project_root));
     }
     // Cold cache: adopt the durable current revision through the canonical
     // open path and publish it. A fresh store mints the canonical initial
@@ -253,12 +295,12 @@ impl tracedecay_configuration::config::PinnedRuntimeConfigurationCachePort
         Ok(())
     }
 
-    fn cached_for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
-        cached_runtime_configuration(project_root)
-    }
-
-    fn cached_for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration> {
-        runtime_configuration_cache().for_project(project_id)
+    fn cached_for_project(
+        &self,
+        profile_root: &Path,
+        project_id: &ProjectId,
+    ) -> Result<PinnedRuntimeConfiguration> {
+        runtime_configuration_cache().for_project(profile_root, project_id)
     }
 }
 
@@ -587,16 +629,19 @@ fn validate_registered_configuration_database(
     target: &RuntimeConfigurationTarget,
     database: &RegisteredGlobalDb,
 ) -> Result<()> {
-    match &database.binding().shard_id.scope {
-        tracedecay_store::StoreShardScopeV1::ProjectSessions { project_id }
-            if project_id == &target.project_id =>
-        {
-            Ok(())
-        }
-        _ => Err(config_error(
-            "configuration authority unavailable: registered database is not the exact project session shard",
-        )),
+    let is_project_sessions = matches!(
+        database.binding().shard_id.scope,
+        tracedecay_store::StoreShardScopeV1::ProjectSessions { .. }
+    );
+    if is_project_sessions
+        && tracedecay_configuration::config::registered_configuration_owner(database)?
+            == (target.profile_root.clone(), target.project_id.clone())
+    {
+        return Ok(());
     }
+    Err(config_error(
+        "configuration authority unavailable: registered database is not the exact project session shard",
+    ))
 }
 
 fn daemon_project_source_binding(
@@ -639,34 +684,43 @@ fn map_configuration_error(error: ConfigurationError) -> TraceDecayError {
     }
 }
 
-/// Returns a cached configuration without resolving a layout, opening a
-/// database, performing IPC, or reading a file. This is the hook-safe lookup.
-pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
-    runtime_configuration_cache().for_root(project_root)
+/// Returns the configuration `profile_root` published for `project_root`
+/// without resolving a layout, opening a database, performing IPC, or reading
+/// a file. This is the hook-safe lookup.
+pub fn cached_runtime_configuration(
+    profile_root: &Path,
+    project_root: &Path,
+) -> Result<PinnedRuntimeConfiguration> {
+    runtime_configuration_cache().for_root(profile_root, project_root)
 }
 
 /// Looks up a daemon-published snapshot by an already-authoritative project
-/// ID. The supplied root is only used to materialize display metadata;
-/// it never participates in authority resolution.
+/// ID in `profile_root`. The supplied root is only used to materialize
+/// display metadata; it never participates in authority resolution.
 pub fn cached_runtime_configuration_for_project_id(
+    profile_root: &Path,
     project_root: &Path,
     project_id: &str,
 ) -> Result<PinnedRuntimeConfiguration> {
-    let target = runtime_configuration_target_for_project_id(project_root, project_id)?;
+    let target =
+        runtime_configuration_target_for_project_id(profile_root, project_root, project_id)?;
     Ok(runtime_configuration_cache()
-        .for_project(&target.project_id)?
+        .for_project(&target.profile_root, &target.project_id)?
         .with_project_root(&target.project_root))
 }
 
-pub fn cached_sync_config(project_root: &Path) -> Result<SyncConfig> {
-    Ok(cached_runtime_configuration(project_root)?
+pub fn cached_sync_config(profile_root: &Path, project_root: &Path) -> Result<SyncConfig> {
+    Ok(cached_runtime_configuration(profile_root, project_root)?
         .config()
         .sync
         .clone())
 }
 
-pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
-    Ok(cached_runtime_configuration(project_root)?
+pub fn cached_telemetry_config(
+    profile_root: &Path,
+    project_root: &Path,
+) -> Result<TelemetryConfig> {
+    Ok(cached_runtime_configuration(profile_root, project_root)?
         .config()
         .telemetry
         .clone())

@@ -203,6 +203,22 @@ pub fn repository_topology(
     Ok(topology)
 }
 
+/// [`repository_topology`] for callers that need the answer, not a
+/// non-blocking probe. A walk another thread already owns is repeated
+/// uncached instead of being reported as absence, because a caller that reads
+/// absence as "not a repository" mints a path-derived identity for a checkout
+/// that has a repository one.
+pub fn settled_repository_topology(
+    path: &Path,
+) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
+    match repository_topology(path) {
+        Err(GitRepositoryError::DiscoveryBlocked { .. }) => Ok(Arc::new(
+            GitRepositoryAuthority::discover_uncached(path)?.into_topology(),
+        )),
+        resolved => resolved,
+    }
+}
+
 /// A live retained topology, or `None` when the memo is empty, stale, or
 /// another thread owns the walk. Liveness reads the filesystem and must not
 /// run while the slot mutex is held.
@@ -441,6 +457,14 @@ struct RepositoryDiscoveryBlockGate {
 #[cfg(any(test, feature = "test-helpers"))]
 impl RepositoryDiscoveryBlockGate {
     fn enter_and_wait(&self) {
+        // Claim the release before announcing entry, so "entered" names the
+        // one parked walk and a later walk of the same root never takes its
+        // place and waits on the caller that is about to release it.
+        let release = self
+            .release
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let _ = self.entered.send(true);
         if let Some(entered) = self
             .entered_tx
@@ -450,12 +474,7 @@ impl RepositoryDiscoveryBlockGate {
         {
             let _ = entered.send(());
         }
-        if let Some(release) = self
-            .release
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
+        if let Some(release) = release {
             let _ = release.recv();
         }
     }
@@ -800,7 +819,7 @@ impl GitRepositoryAuthority {
     /// reused until the HEAD file's identity changes. Reftable repositories
     /// keep HEAD in the table stack, so their answer is never reused.
     pub fn current_branch(path: &Path) -> Option<String> {
-        let topology = repository_topology(path).ok()?;
+        let topology = settled_repository_topology(path).ok()?;
         let stamp = HeadFileStamp::read(&topology.git_dir.join("HEAD"));
         if let Some(stamp) = &stamp
             && let Some((cached, branch)) = HEAD_BRANCHES

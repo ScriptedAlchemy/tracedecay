@@ -15,15 +15,17 @@ use tracedecay_domain::configuration::{
     LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, LcmSummarizerExecutablesV1, SettingKey,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
 use tracedecay_global_db::configuration::resolver::{ConfigurationLayerV1, resolve_configuration};
 
 use crate::config::{
     PinnedRuntimeConfiguration, PinnedRuntimeConfigurationCachePort, RuntimeConfigurationTarget,
     install_pinned_runtime_configuration_cache, publish_pinned_runtime_configuration,
+    registered_configuration_owner,
 };
 
-/// Minimal in-process pin cache keyed by project id and root.
+/// Minimal in-process pin cache keyed by owning profile and project id.
 #[derive(Default)]
 struct TestPinnedRuntimeConfigurationCache {
     pins: RwLock<Vec<PinnedRuntimeConfiguration>>,
@@ -35,29 +37,26 @@ impl PinnedRuntimeConfigurationCachePort for TestPinnedRuntimeConfigurationCache
             .pins
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pins.retain(|pin| pin.target().project_id != configuration.target().project_id);
+        pins.retain(|pin| {
+            pin.target().profile_root != configuration.target().profile_root
+                || pin.target().project_id != configuration.target().project_id
+        });
         pins.push(configuration);
         Ok(())
     }
 
-    fn cached_for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
+    fn cached_for_project(
+        &self,
+        profile_root: &Path,
+        project_id: &ProjectId,
+    ) -> Result<PinnedRuntimeConfiguration> {
         self.pins
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .find(|pin| pin.target().project_root == project_root)
-            .cloned()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("no test pin published for root {}", project_root.display()),
+            .find(|pin| {
+                pin.target().profile_root == profile_root && &pin.target().project_id == project_id
             })
-    }
-
-    fn cached_for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration> {
-        self.pins
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .find(|pin| &pin.target().project_id == project_id)
             .cloned()
             .ok_or_else(|| TraceDecayError::Config {
                 message: format!("no test pin published for project {}", project_id.as_str()),
@@ -65,18 +64,19 @@ impl PinnedRuntimeConfigurationCachePort for TestPinnedRuntimeConfigurationCache
     }
 }
 
-/// Publishes a pin for `project_id` whose only non-default setting is the
-/// LCM summarizer binding. Installs the in-process test cache on first use;
-/// when the composition root already installed its cache, the pin is
-/// published through that one instead.
+/// Publishes a pin for the project store `database` is whose only non-default
+/// setting is the LCM summarizer binding. Installs the in-process test cache
+/// on first use; when the composition root already installed its cache, the
+/// pin is published through that one instead.
 pub fn pin_lcm_summarizer_executables(
-    project_id: ProjectId,
+    database: &RegisteredGlobalDb,
     project_root: &Path,
     executables: LcmSummarizerExecutablesV1,
 ) -> Result<PinnedRuntimeConfiguration> {
     let _ = install_pinned_runtime_configuration_cache(Arc::new(
         TestPinnedRuntimeConfigurationCache::default(),
     ));
+    let (profile_root, project_id) = registered_configuration_owner(database)?;
     let registry = ConfigurationRegistry::core().map_err(|error| TraceDecayError::Config {
         message: format!("configuration registry unavailable: {error}"),
     })?;
@@ -110,6 +110,7 @@ pub fn pin_lcm_summarizer_executables(
     })?;
     let pinned = PinnedRuntimeConfiguration::new(
         RuntimeConfigurationTarget {
+            profile_root,
             project_id,
             project_root: project_root.to_path_buf(),
         },

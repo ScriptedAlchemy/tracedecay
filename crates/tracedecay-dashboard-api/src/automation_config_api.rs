@@ -158,7 +158,7 @@ pub(crate) fn effective_automation_config(
     AutomationConfig,
     LcmSummarizerExecutableV1,
 )> {
-    let pinned = crate::config::cached_runtime_configuration(&state.project_root)?;
+    let pinned = state.cached_runtime_configuration()?;
     let config = from_configuration_snapshot(pinned.snapshot())?;
     Ok((
         pinned.revision_id().clone(),

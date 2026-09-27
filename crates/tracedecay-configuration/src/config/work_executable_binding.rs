@@ -280,6 +280,7 @@ mod tests {
         .unwrap();
         PinnedRuntimeConfiguration::new(
             RuntimeConfigurationTarget {
+                profile_root: root.join("profile"),
                 project_id,
                 project_root: root.to_path_buf(),
             },

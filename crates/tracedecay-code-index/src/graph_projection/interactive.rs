@@ -1031,15 +1031,15 @@ impl CodeGraphInteractiveReader {
     }
 
     /// Canonical symbol name search: exact simple-name hits from the
-    /// simple-name index first (occurrence order), then every other symbol
-    /// whose simple or qualified name contains `query` (ASCII
-    /// case-insensitive) in canonical occurrence order. Returns the
+    /// simple-name index first, then every other symbol whose simple or
+    /// qualified name contains `query` (ASCII case-insensitive), each group
+    /// in source order (logical path, then start line). Returns the
     /// `[offset, offset + limit)` window of the symbols `admit` accepts (all
-    /// when `None`); the scan stops one match past the window.
+    /// when `None`).
     ///
-    /// ponytail: a query with fewer matches than the window scans every
-    /// catalog name (~150 ms on a 200k-symbol generation); a name n-gram
-    /// index built with the catalog is the upgrade when that bites.
+    /// ponytail: every query scans every catalog name (~150 ms on a
+    /// 200k-symbol generation); a name n-gram index built with the catalog is
+    /// the upgrade when that bites.
     pub fn search_symbols(
         &self,
         query: &str,
@@ -1062,6 +1062,24 @@ impl CodeGraphInteractiveReader {
                 )
             })
         };
+        // Occurrence ids digest the repository identity, so their order differs
+        // between two clones of one checkout; hits are served in source order.
+        let source_position = |occurrence: &SymbolOccurrenceId| {
+            let symbol = catalog.symbols.get(occurrence);
+            (
+                symbol
+                    .and_then(|symbol| symbol.binding.as_ref())
+                    .and_then(|binding| binding.logical_path.as_deref()),
+                symbol
+                    .and_then(|symbol| symbol.metadata.as_ref())
+                    .map(|metadata| metadata.start_line),
+            )
+        };
+        let source_order = |left: &&SymbolOccurrenceId, right: &&SymbolOccurrenceId| {
+            source_position(left)
+                .cmp(&source_position(right))
+                .then_with(|| left.cmp(right))
+        };
         let exact: BTreeSet<&SymbolOccurrenceId> = catalog
             .by_simple_name
             .get(&query.to_lowercase())
@@ -1074,6 +1092,25 @@ impl CodeGraphInteractiveReader {
                     .is_some_and(|symbol| admitted(occurrence, symbol))
             })
             .collect();
+        let mut exact_hits: Vec<&SymbolOccurrenceId> = exact.iter().copied().collect();
+        exact_hits.sort_by(source_order);
+        // ponytail: every named hit is collected and sorted before the window
+        // is cut, so a broad query costs O(hits log hits) per page; a
+        // source-ordered name index built with the catalog is the upgrade.
+        let mut named_hits = Vec::new();
+        for (index, (occurrence, symbol)) in catalog.symbols.iter().enumerate() {
+            if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
+                return Err(CodeGraphProjectionError::Cancelled);
+            }
+            let named = symbol.metadata.as_ref().is_some_and(|metadata| {
+                contains_ignore_ascii_case(&metadata.simple_name, query)
+                    || contains_ignore_ascii_case(&metadata.qualified_name, query)
+            });
+            if named && !exact.contains(occurrence) && admitted(occurrence, symbol) {
+                named_hits.push(occurrence);
+            }
+        }
+        named_hits.sort_by(source_order);
 
         let mut symbols = Vec::new();
         let mut matched = 0_usize;
@@ -1091,27 +1128,9 @@ impl CodeGraphInteractiveReader {
             matched += 1;
             false
         };
-        'scan: {
-            for occurrence in &exact {
-                if accept(occurrence) {
-                    break 'scan;
-                }
-            }
-            for (index, (occurrence, symbol)) in catalog.symbols.iter().enumerate() {
-                if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
-                    return Err(CodeGraphProjectionError::Cancelled);
-                }
-                let named = symbol.metadata.as_ref().is_some_and(|metadata| {
-                    contains_ignore_ascii_case(&metadata.simple_name, query)
-                        || contains_ignore_ascii_case(&metadata.qualified_name, query)
-                });
-                if named
-                    && !exact.contains(occurrence)
-                    && admitted(occurrence, symbol)
-                    && accept(occurrence)
-                {
-                    break 'scan;
-                }
+        for occurrence in exact_hits.into_iter().chain(named_hits) {
+            if accept(occurrence) {
+                break;
             }
         }
         let total = if query.is_empty() && admit.is_none() {
