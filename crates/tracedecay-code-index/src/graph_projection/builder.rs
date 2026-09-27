@@ -10,8 +10,7 @@ use crate::chunks::{
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::{
-    CodeGraphFileBatchV1, CodeGraphResolutionV1, SealedGenerationFileWindowsV1,
-    SealedGenerationSegmentReaderV1,
+    CodeGraphResolutionV1, SealedGenerationFileWindowsV1, SealedGenerationSegmentReaderV1,
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, EdgeAuthorityV1,
@@ -39,15 +38,13 @@ use super::{
 /// Builds a sealed generation's code graph from its on-disk file segments and
 /// spills the rows, never assembling the generation.
 ///
-/// Two passes over the segments, one bounded window of files at a time:
-/// 1. Resolution keeps only what cross-file resolution reads (symbols,
-///    unresolved references, imports, and per-file edges) and derives the
-///    cross-file edges, the bound symbol set, and the unresolved-call
-///    limitations. Everything else a window decoded is dropped with it.
-/// 2. Emission re-reads each window, emits its file, import, symbol, and
-///    edge rows through the same emitter the whole-set build uses, and
-///    pushes them to `spill`. The window's decoded segments are released
-///    before the next is read.
+/// One pass over the segments, one bounded window of files at a time, retains
+/// only what cross-file resolution and graph emission read: symbols, compact
+/// chunk-derived bindings, unresolved references, imports, and per-file
+/// edges. Chunk text and clone streams are dropped with their decode window.
+/// Resolution then derives the cross-file edges, bound symbol set, and
+/// unresolved-call limitations before the retained graph-only batches are
+/// emitted to `spill`.
 ///
 /// The spill sorts and merges the rows on disk into the canonical order the
 /// sealed store and the recovered digest require, so the result is
@@ -72,11 +69,17 @@ pub fn build_sealed_code_graph_rows(
     generation
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-    let resolution: CodeGraphResolutionV1 = hotpath::measure_block!(
+    let resolution: CodeGraphResolutionV1<'_> = hotpath::measure_block!(
         "code_index.graph.build_rows.resolve",
         source.resolve_code_graph(read_segment, check)
     )?;
-    let unresolved_by_source = group_unresolved_calls(&resolution.unresolved_calls, check)?;
+    let CodeGraphResolutionV1 {
+        bound,
+        cross_file_edges,
+        unresolved_calls,
+        batches,
+    } = resolution;
+    let unresolved_by_source = group_unresolved_calls(&unresolved_calls, check)?;
     let snapshot = source.snapshot();
     let files = snapshot
         .files
@@ -87,13 +90,11 @@ pub fn build_sealed_code_graph_rows(
         projection: &projection,
         generation: &generation,
         files: Some(&files),
-        bound: &resolution.bound,
+        bound: &bound,
         unresolved_by_source: &unresolved_by_source,
     };
     hotpath::measure_block!("code_index.graph.build_rows.emit", {
-        source.for_each_code_graph_batch(read_segment, &mut |batch: CodeGraphFileBatchV1<
-            '_,
-        >| {
+        for batch in batches {
             check()?;
             let rows = emit_code_graph_rows(
                 &context,
@@ -103,13 +104,13 @@ pub fn build_sealed_code_graph_rows(
                     chunks: &batch.chunks,
                     symbols: &batch.symbols,
                     edges: &batch.edges,
+                    bindings: Some(&batch.bindings),
                 },
                 check,
             )?;
             drop(batch);
             spill.push_batch(rows.entities, rows.relations, check)?;
-            Ok::<(), SealedCodeGraphRowsError>(())
-        })?;
+        }
         // The rows no window owns: snapshot files sealed without a segment
         // and the cross-file edges resolution derived.
         let unsegmented = snapshot
@@ -124,14 +125,15 @@ pub fn build_sealed_code_graph_rows(
                 imports: &[],
                 chunks: &[],
                 symbols: &[],
-                edges: &resolution.cross_file_edges,
+                edges: &cross_file_edges,
+                bindings: None,
             },
             check,
         )?;
         spill.push_batch(rows.entities, rows.relations, check)?;
         Ok::<(), SealedCodeGraphRowsError>(())
     })?;
-    drop(resolution);
+    drop(cross_file_edges);
     // The generation marker counts every entity, itself included.
     let projection_node_count = spill.distinct_entities().checked_add(1).ok_or_else(|| {
         CodeGraphProjectionError::Contract("code graph projection node count overflowed".to_owned())
@@ -326,6 +328,7 @@ struct CodeGraphRowBatch<'a> {
     chunks: &'a [Arc<CodeSearchChunkV1>],
     symbols: &'a [Arc<LineageSymbolRecordV1>],
     edges: &'a [CanonicalRelationEdgeV1],
+    bindings: Option<&'a BTreeMap<SymbolOccurrenceId, CodeGraphSymbolBindingV1>>,
 }
 
 struct EmittedRows {
@@ -385,6 +388,7 @@ pub(super) fn build_projection(
             chunks,
             symbols,
             edges,
+            bindings: None,
         },
         check,
     )?;
@@ -412,7 +416,19 @@ fn emit_code_graph_rows(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<EmittedRows, CodeGraphProjectionError> {
     let projection = context.projection;
-    let (symbol_metadata, bindings, retained_edges, occurrences) =
+    let owned_bindings = match batch.bindings {
+        Some(_) => None,
+        None => Some(code_graph_symbol_bindings(
+            context.files,
+            context.generation,
+            batch.chunks,
+            check,
+        )?),
+    };
+    let bindings = batch.bindings.or(owned_bindings.as_ref()).ok_or_else(|| {
+        CodeGraphProjectionError::Contract("code graph symbol bindings are unavailable".to_owned())
+    })?;
+    let (symbol_metadata, retained_edges, occurrences) =
         hotpath::measure_block!("code_index.seal.collect.bind", {
             let symbol_metadata = batch
                 .symbols
@@ -440,67 +456,6 @@ fn emit_code_graph_rows(
                     ));
                 }
             }
-            let mut bindings = BTreeMap::<SymbolOccurrenceId, CodeGraphSymbolBindingV1>::new();
-            let symbol_spans = published_symbol_spans(batch.chunks.iter().map(AsRef::as_ref));
-            for chunk in batch.chunks {
-                check()?;
-                chunk
-                    .validate()
-                    .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-                // With production inputs, membership in the immutable snapshot is
-                // the serving binding and file-page generation_id is extraction
-                // provenance. Hermetic publishes without a snapshot still require
-                // the chunk to name the serving generation.
-                let logical_path = match context.files {
-                    Some(files) => {
-                        let Some(file) = files.get(&chunk.anchor.file_occurrence_id) else {
-                            return Err(CodeGraphProjectionError::Contract(
-                                "code graph chunk refers to a file outside its immutable snapshot"
-                                    .to_owned(),
-                            ));
-                        };
-                        Some(file.logical_path.clone())
-                    }
-                    None => {
-                        if chunk.anchor.generation_id != *context.generation {
-                            return Err(CodeGraphProjectionError::GenerationMismatch);
-                        }
-                        None
-                    }
-                };
-                let Some(symbol) = chunk.anchor.symbol_occurrence_id.clone() else {
-                    continue;
-                };
-                let candidate = CodeGraphSymbolBindingV1 {
-                    file: chunk.anchor.file_occurrence_id.clone(),
-                    logical_path,
-                    source_span: symbol_spans.get(&symbol).copied(),
-                    chunk: Some(chunk.id.clone()),
-                    language_descriptor_revision: chunk.language_descriptor_revision.clone(),
-                };
-                match bindings.entry(symbol) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(candidate);
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut entry) => {
-                        let current = entry.get_mut();
-                        if current.file != candidate.file
-                            || current.logical_path != candidate.logical_path
-                            || current.language_descriptor_revision
-                                != candidate.language_descriptor_revision
-                        {
-                            return Err(CodeGraphProjectionError::Contract(
-                                "one symbol occurrence has conflicting graph candidate bindings"
-                                    .to_owned(),
-                            ));
-                        }
-                        if candidate.chunk < current.chunk {
-                            current.chunk = candidate.chunk;
-                        }
-                    }
-                }
-            }
-
             let mut retained_edges = Vec::new();
             for edge in batch.edges {
                 check()?;
@@ -524,12 +479,7 @@ fn emit_code_graph_rows(
             }
             occurrences.sort();
             occurrences.dedup();
-            Ok::<_, CodeGraphProjectionError>((
-                symbol_metadata,
-                bindings,
-                retained_edges,
-                occurrences,
-            ))
+            Ok::<_, CodeGraphProjectionError>((symbol_metadata, retained_edges, occurrences))
         })?;
     // Chunks bind symbols to files and spans above; they are not graph rows.
     // No reader addresses a chunk through the graph and a symbol's binding
@@ -625,6 +575,70 @@ fn emit_code_graph_rows(
             relations,
         })
     })
+}
+
+pub(crate) fn code_graph_symbol_bindings(
+    files: Option<&BTreeMap<&FileOccurrenceId, &SanitizedCodeFileV1>>,
+    generation: &CodeGenerationId,
+    chunks: &[Arc<CodeSearchChunkV1>],
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<BTreeMap<SymbolOccurrenceId, CodeGraphSymbolBindingV1>, CodeGraphProjectionError> {
+    let mut bindings = BTreeMap::new();
+    let symbol_spans = published_symbol_spans(chunks.iter().map(AsRef::as_ref));
+    for chunk in chunks {
+        check()?;
+        chunk
+            .validate()
+            .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+        let logical_path = match files {
+            Some(files) => {
+                let Some(file) = files.get(&chunk.anchor.file_occurrence_id) else {
+                    return Err(CodeGraphProjectionError::Contract(
+                        "code graph chunk refers to a file outside its immutable snapshot"
+                            .to_owned(),
+                    ));
+                };
+                Some(file.logical_path.clone())
+            }
+            None => {
+                if chunk.anchor.generation_id != *generation {
+                    return Err(CodeGraphProjectionError::GenerationMismatch);
+                }
+                None
+            }
+        };
+        let Some(symbol) = chunk.anchor.symbol_occurrence_id.clone() else {
+            continue;
+        };
+        let candidate = CodeGraphSymbolBindingV1 {
+            file: chunk.anchor.file_occurrence_id.clone(),
+            logical_path,
+            source_span: symbol_spans.get(&symbol).copied(),
+            chunk: Some(chunk.id.clone()),
+            language_descriptor_revision: chunk.language_descriptor_revision.clone(),
+        };
+        match bindings.entry(symbol) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(candidate);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let current = entry.get_mut();
+                if current.file != candidate.file
+                    || current.logical_path != candidate.logical_path
+                    || current.language_descriptor_revision
+                        != candidate.language_descriptor_revision
+                {
+                    return Err(CodeGraphProjectionError::Contract(
+                        "one symbol occurrence has conflicting graph candidate bindings".to_owned(),
+                    ));
+                }
+                if candidate.chunk < current.chunk {
+                    current.chunk = candidate.chunk;
+                }
+            }
+        }
+    }
+    Ok(bindings)
 }
 
 fn require_symbol_id<'ids>(
