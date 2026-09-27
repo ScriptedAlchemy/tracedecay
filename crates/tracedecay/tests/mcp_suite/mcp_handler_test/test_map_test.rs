@@ -440,9 +440,9 @@ fn read_cost(response: &JsonRpcResponse) -> (u64, u64, u64) {
 
 /// Mapping M tests over N symbols reads each reached symbol once, however
 /// many sources a test covers: the caller walk is batched across the file's
-/// symbols, and each fan-out row costs exactly one edge read, so point reads
-/// beyond the rows are symbol reads. Walking each source separately reads
-/// every test once per source it calls.
+/// symbols, and a fan-out row carries its edge, so every point read is a
+/// symbol read. Walking each source separately reads every test once per
+/// source it calls.
 #[tokio::test]
 async fn test_map_reads_each_test_once_across_the_symbols_it_covers() {
     let fixture = production_composition_fixture_with_sources(write_fan_in_probe).await;
@@ -472,11 +472,7 @@ async fn test_map_reads_each_test_once_across_the_symbols_it_covers() {
     // markers, once each; a walk per source would read each test three times.
     let (point_reads, adjacency_queries, adjacency_rows) = read_cost(&response);
     assert_eq!(
-        (
-            point_reads - adjacency_rows,
-            adjacency_queries,
-            adjacency_rows
-        ),
+        (point_reads, adjacency_queries, adjacency_rows),
         (8, 3, 32),
         "each reached symbol is read once"
     );

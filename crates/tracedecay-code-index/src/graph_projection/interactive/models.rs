@@ -209,8 +209,8 @@ pub(super) struct CatalogSymbol {
     pub(super) binding: Option<CodeGraphSymbolBindingV1>,
     pub(super) metadata: Option<LineageSymbolRecordV1>,
     pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
-    /// Semantic degree: `CodeRelationSource` relations leaving the symbol
-    /// and `CodeRelationTarget` relations reaching it, the same counts
+    /// Semantic degree: `CodeEdge.<kind>` rows leaving the symbol and rows
+    /// reaching it, the same counts
     /// [`super::CodeGraphInteractiveReader::degrees`] reads from adjacency.
     pub(super) outgoing: u64,
     pub(super) incoming: u64,
