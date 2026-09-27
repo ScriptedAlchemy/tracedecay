@@ -3,7 +3,7 @@
 mod family_report;
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     io::Read,
     num::NonZeroU64,
     path::{Path, PathBuf},
@@ -32,7 +32,7 @@ use tracedecay_contracts::{
     code_index_freshness::{
         CodeCloneIndexBudgetsV1, CodeCloneIndexCoverageV1, CodeCloneIndexObservationV1,
         CodeCloneIndexResourcesV1, CodeCloneIndexStatusV1, CodeIndexBuildBlockedReasonV1,
-        CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
+        CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1, CodeIndexRestoreProgressV1,
     },
     now_micros,
 };
@@ -76,10 +76,11 @@ use crate::{
             CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
             CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
             CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-            CodeLexicalCloneIndexCensusV1, CodeLexicalCloneRouteV1,
-            CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-            LexicalLaneRetriever, PreparedCodeLexicalArtifactPageV1,
-            code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
+            CodeLexicalArtifactRestoreWitnessV1, CodeLexicalCloneIndexCensusV1,
+            CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalLane,
+            LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever,
+            PreparedCodeLexicalArtifactPageV1, code_lexical_artifact_build_memory_budget_for,
+            code_lexical_artifact_content_key,
         },
         ports::{RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError},
     },
@@ -96,6 +97,8 @@ const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
 const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
 const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
+const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_BYTES_V1: usize = 4 * 1024;
+const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_FILES_V1: usize = 64;
 /// One synchronous activation advances only this many page/finalization
 /// operations. Larger caller hints are clamped so work accounting cannot
 /// overflow and every expensive loop retains cancellation checkpoints. The
@@ -431,6 +434,9 @@ pub struct LatestCodeTextGenerationV1 {
     pub(super) text_control: GenerationTextControlV1,
     pub(super) text_progress_state: Arc<ProfiledStdMutex<CodeIndexBuildProgressStateV1>>,
     pub(super) text_progress_slot: CodeIndexBuildProgressSlotV1,
+    /// Bounded authentication work for a cold immutable-artifact open. It is
+    /// intentionally separate from durable build progress.
+    pub(super) restore_progress: Arc<RwLock<Option<CodeIndexRestoreProgressV1>>>,
     pub(super) text_progress_owner_epoch: u64,
     /// Durable daemon-authority epoch, shared by all scheduler owners created
     /// during one daemon invocation.
@@ -728,12 +734,12 @@ pub(super) struct CodeTextArtifactBuildV1 {
 /// Singleflight authority for one generation's durable text projection.
 ///
 /// The slot is the generation-owned partial-state authority; the condvar
-/// wakes arrivals parked behind a `HeadOpening` claim. A corpus-sized
-/// verified open (the published-head reopen or the publication tail's
-/// reopen, two full SHA-256 passes plus `SQLite` verification each) runs
-/// with the slot lock released, so a concurrent wake parks with typed
-/// cancellation instead of blocking on the mutex for the whole open. This
-/// stays a plain `std::sync::Mutex` rather than `hotpath::mutex!` because
+/// wakes arrivals parked behind a `HeadOpening` claim. A bounded authenticated
+/// reopen normally runs with the slot lock released; missing or invalid
+/// rebuildable witness state falls back to corpus-wide verification under the
+/// same claim. Concurrent wakes therefore park with typed cancellation instead
+/// of blocking on the mutex for either path. This stays a plain
+/// `std::sync::Mutex` rather than `hotpath::mutex!` because
 /// `Condvar::wait_timeout` requires the exact std guard type; lock-wait and
 /// parked wait are measured with explicit spans instead.
 pub(super) struct CodeTextProjectionStateV1 {
@@ -742,12 +748,11 @@ pub(super) struct CodeTextProjectionStateV1 {
 }
 
 pub(super) enum CodeTextProjectionSlotV1 {
-    /// No partial build exists and no wake owns a long open: the next wake
-    /// claims the work.
+    /// No partial build exists and no wake owns an authenticated open: the
+    /// next wake claims the work.
     Idle,
-    /// One wake owns a corpus-sized verified open with the slot lock
-    /// released. Concurrent wakes park on the condvar until the claim is
-    /// resolved.
+    /// One wake owns an authenticated open with the slot lock released.
+    /// Concurrent wakes park on the condvar until the claim is resolved.
     HeadOpening,
     /// The resumable staging build; each wake advances one bounded slice
     /// under the slot lock.
@@ -769,7 +774,7 @@ impl CodeTextProjectionStateV1 {
     }
 }
 
-/// One wake's exclusive claim on a corpus-sized verified head open.
+/// One wake's exclusive claim on an authenticated head open.
 ///
 /// Restores the slot to `Idle` and wakes every parked arrival on all exit
 /// paths, success, typed failure, and unwind, so a failed open can never
@@ -1006,6 +1011,161 @@ impl DaemonCodeTextArtifactStoreV1 {
         &self.store_root
     }
 
+    fn restore_witness_path(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+    ) -> Result<PathBuf, RetrievalPortError> {
+        let digest = sha256_hex_suffix(descriptor.artifact_digest.as_str()).ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact descriptor digest is not canonical SHA-256".to_owned(),
+            )
+        })?;
+        Ok(self
+            .store_root
+            .join("code-text-artifact-restore-witnesses-v1")
+            .join(format!("text-artifact-{digest}.json")))
+    }
+
+    fn load_restore_witness(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+    ) -> Result<CodeLexicalArtifactRestoreWitnessV1, CodeLexicalArtifactErrorV1> {
+        let path = self
+            .restore_witness_path(descriptor)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let bytes = tracedecay_private_fs::framed_log::read_bounded(
+            &path,
+            TEXT_ARTIFACT_RESTORE_WITNESS_MAX_BYTES_V1,
+        )
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Corrupt(format!(
+                "lexical artifact restore witness is unavailable: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Missing(
+                "lexical artifact restore witness is absent".to_owned(),
+            )
+        })?;
+        CodeLexicalArtifactRestoreWitnessV1::decode(&bytes)
+    }
+
+    fn publish_restore_witness(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+        witness: &CodeLexicalArtifactRestoreWitnessV1,
+    ) -> Result<(), RetrievalPortError> {
+        let bytes = witness.encode().map_err(map_text_artifact_error)?;
+        let path = self.restore_witness_path(descriptor)?;
+        let parent = path.parent().ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact restore witness path has no parent".to_owned(),
+            )
+        })?;
+        match parent.symlink_metadata() {
+            Ok(_) => tracedecay_private_fs::validate_private_directory(parent)
+                .map_err(text_artifact_unavailable)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tracedecay_private_fs::create_private_directory(parent)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Err(error) => return Err(text_artifact_unavailable(error)),
+        }
+        tracedecay_private_fs::framed_log::atomic_write_accelerator(
+            &path,
+            "artifact-restore-witness",
+            &bytes,
+        )
+        .map_err(text_artifact_unavailable)?;
+        self.collect_unreferenced_restore_witnesses(parent, Some(&path))
+    }
+
+    fn collect_unreferenced_restore_witnesses(
+        &self,
+        witness_root: &Path,
+        pending_publication: Option<&Path>,
+    ) -> Result<(), RetrievalPortError> {
+        let pointer = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?;
+        let retained = pointer
+            .iter()
+            .flat_map(|pointer| pointer.generation_index.iter())
+            .filter_map(|entry| entry.text_artifact())
+            .map(|descriptor| self.restore_witness_path(descriptor))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut retained = retained;
+        retained.extend(pending_publication.map(Path::to_path_buf));
+        let mut entries = std::fs::read_dir(witness_root).map_err(text_artifact_unavailable)?;
+        let mut removed = false;
+        for ordinal in 0..=TEXT_ARTIFACT_RESTORE_WITNESS_MAX_FILES_V1 {
+            let Some(entry) = entries.next() else {
+                break;
+            };
+            if ordinal == TEXT_ARTIFACT_RESTORE_WITNESS_MAX_FILES_V1 {
+                return Err(RetrievalPortError::AuthorityUnavailable(
+                    "text-artifact restore witness inventory exceeds its bounded capacity"
+                        .to_owned(),
+                ));
+            }
+            let entry = entry.map_err(text_artifact_unavailable)?;
+            let path = entry.path();
+            let metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
+            if !metadata.file_type().is_file() {
+                return Err(RetrievalPortError::AuthorityUnavailable(
+                    "text-artifact restore witness inventory contains a non-file".to_owned(),
+                ));
+            }
+            if !retained.contains(&path) {
+                std::fs::remove_file(path).map_err(text_artifact_unavailable)?;
+                removed = true;
+            }
+        }
+        if removed {
+            DaemonCodeIndexPublicationStoreV1::sync_directory(witness_root)
+                .map_err(text_artifact_unavailable)?;
+        }
+        Ok(())
+    }
+
+    fn remove_restore_witness(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+    ) -> Result<(), RetrievalPortError> {
+        let path = self.restore_witness_path(descriptor)?;
+        let pointer = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?;
+        let still_referenced = pointer
+            .iter()
+            .flat_map(|pointer| pointer.generation_index.iter())
+            .filter_map(|entry| entry.text_artifact())
+            .any(|retained| {
+                self.restore_witness_path(retained)
+                    .is_ok_and(|retained_path| retained_path == path)
+            });
+        if still_referenced {
+            return Ok(());
+        }
+        match path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                std::fs::remove_file(&path).map_err(text_artifact_unavailable)?;
+                if let Some(parent) = path.parent() {
+                    DaemonCodeIndexPublicationStoreV1::sync_directory(parent)
+                        .map_err(text_artifact_unavailable)?;
+                }
+                Ok(())
+            }
+            Ok(_) => Err(RetrievalPortError::AuthorityUnavailable(
+                "text-artifact restore witness is not a regular file".to_owned(),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(text_artifact_unavailable(error)),
+        }
+    }
+
     /// Reserve one artifact memory ceiling plus the freshly observed process
     /// live set not already represented by reservations for this admission.
     /// The atomic reserve also includes the process-wide high-watermark
@@ -1238,6 +1398,14 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
         withdraw_verified_text_artifact_under_lock(&lock, &pointer, descriptor)
             .map_err(text_artifact_unavailable)?;
+        if let Err(error) = self.remove_restore_witness(descriptor) {
+            tracing::warn!(
+                event = "code_text_artifact_restore_witness_cleanup_failed",
+                artifact = %descriptor.artifact_file,
+                error = %error,
+                "derived restore witness cleanup failed after descriptor withdrawal"
+            );
+        }
         Ok(())
     }
 
@@ -1577,6 +1745,98 @@ impl LatestCompleteCodeIndexV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
+    fn restore_publisher(&self, artifact_digest: &ManifestDigest) -> impl FnMut(u64, u64) + '_ {
+        let generation_id = self.metadata.manifest().generation_id.as_str().to_owned();
+        let artifact_digest = artifact_digest.as_str().to_owned();
+        move |completed, total| {
+            let completed = completed.min(total);
+            *self
+                .restore_progress
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(CodeIndexRestoreProgressV1 {
+                    generation_id: generation_id.clone(),
+                    artifact_digest: artifact_digest.clone(),
+                    authenticated_completed: completed,
+                    authenticated_total: total,
+                    authenticated_remaining: total.saturating_sub(completed),
+                });
+        }
+    }
+
+    fn clear_restore_progress(&self) {
+        *self
+            .restore_progress
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    fn open_content_addressed_reader(
+        &self,
+        path: impl AsRef<Path>,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+        authority: &CodeLexicalProjectionMetadataV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CodeLexicalArtifactReaderV1, CodeLexicalArtifactErrorV1> {
+        let path = path.as_ref();
+        let restored = self
+            .text_artifact_store
+            .load_restore_witness(descriptor)
+            .and_then(|witness| {
+                CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
+                    path,
+                    &descriptor.artifact_digest,
+                    descriptor.artifact_size_bytes,
+                    &witness,
+                    authority,
+                    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                    control,
+                    self.restore_publisher(&descriptor.artifact_digest),
+                )
+            });
+        let result = match restored {
+            Ok(reader) => Ok(reader),
+            Err(error @ CodeLexicalArtifactErrorV1::Interrupted(_)) => Err(error),
+            Err(_) => {
+                // A rejected witness ends the bounded restore attempt. Do not
+                // keep reporting its fixed authentication steps while the
+                // corpus-wide verification fallback is running.
+                self.clear_restore_progress();
+                CodeLexicalArtifactReaderV1::open_content_addressed_fully_verified_with_witness(
+                    path,
+                    &descriptor.artifact_digest,
+                    descriptor.artifact_size_bytes,
+                    authority,
+                    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                    control,
+                )
+                .map(|(reader, witness)| {
+                    if let Err(error) = self
+                        .text_artifact_store
+                        .publish_restore_witness(descriptor, &witness)
+                    {
+                        tracing::warn!(
+                            event = "code_text_artifact_restore_witness_publish_failed",
+                            artifact = %descriptor.artifact_file,
+                            error = %error,
+                            "fully verified artifact remains servable without its restore accelerator"
+                        );
+                    }
+                    reader
+                })
+            }
+        };
+        self.clear_restore_progress();
+        result
+    }
+
+    pub(super) fn restore_progress(&self) -> Option<CodeIndexRestoreProgressV1> {
+        self.restore_progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
         &self.metadata
     }
@@ -2334,8 +2594,8 @@ impl LatestCodeTextGenerationV1 {
     /// Advance at most `maximum_work` bounded page/finalization operations on
     /// this sealed generation's durable text artifact. The projection slot is
     /// both the generation-owned partial-state authority and the singleflight
-    /// gate for concurrent scheduler wakes; corpus-sized verified opens run
-    /// under a claimed slot with the lock released.
+    /// gate for concurrent scheduler wakes; authenticated opens run under a
+    /// claimed slot with the lock released.
     pub(super) fn advance_text_serving(
         &self,
         maximum_work: usize,
@@ -2459,12 +2719,10 @@ impl LatestCodeTextGenerationV1 {
         )?;
         let path = code_text_artifact_path(store.store_root(), &descriptor)
             .map_err(text_artifact_unavailable)?;
-        let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
+        let reader = self.open_content_addressed_reader(
             path,
-            &descriptor.artifact_digest,
-            descriptor.artifact_size_bytes,
+            &descriptor,
             &self.text_projection_metadata()?,
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
             control,
         );
         match reader {
@@ -2533,14 +2791,8 @@ impl LatestCodeTextGenerationV1 {
             };
             let path = code_text_artifact_path(store.store_root(), &shared)
                 .map_err(text_artifact_unavailable)?;
-            let reader = match CodeLexicalArtifactReaderV1::open_content_addressed(
-                path,
-                &shared.artifact_digest,
-                shared.artifact_size_bytes,
-                &metadata,
-                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-                control,
-            ) {
+            let reader = match self.open_content_addressed_reader(path, &shared, &metadata, control)
+            {
                 Ok(reader) => reader,
                 Err(error @ CodeLexicalArtifactErrorV1::Interrupted(_)) => {
                     return Err(map_text_artifact_error(error));
@@ -2761,10 +3013,9 @@ impl LatestCodeTextGenerationV1 {
                     break guard;
                 }
                 CodeTextProjectionSlotV1::HeadOpening => {
-                    // Another wake owns the corpus-sized verified open. Park
-                    // until the claim resolves; the bounded interval keeps
-                    // this wake's own cancellation typed and prompt even
-                    // while the owner is inside one long read or digest call.
+                    // Another wake owns the authenticated open. Park until the
+                    // claim resolves; the bounded interval keeps this wake's
+                    // own cancellation typed and prompt throughout.
                     let (waited, _timed_out) = hotpath::measure_block!(
                         "query.artifact.head_open.singleflight_wait",
                         self.text_projection_build
@@ -3125,15 +3376,14 @@ impl LatestCodeTextGenerationV1 {
         let reader_reservation = reader_charge_from_held_reservation(build_reservation)?;
         let final_path = code_text_artifact_path(store.store_root(), &descriptor)
             .map_err(text_artifact_unavailable)?;
-        let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
-            final_path,
-            &descriptor.artifact_digest,
-            descriptor.artifact_size_bytes,
-            &self.text_projection_metadata()?,
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-            control,
-        )
-        .map_err(map_text_artifact_error)?;
+        let reader = self
+            .open_content_addressed_reader(
+                final_path,
+                &descriptor,
+                &self.text_projection_metadata()?,
+                control,
+            )
+            .map_err(map_text_artifact_error)?;
         // Match the cold-open path: install owners first, then publish Ready.
         // Publishing Ready before a failed install (admission ceiling / shrink)
         // would leave dashboard/MCP progress claiming a ready generation that

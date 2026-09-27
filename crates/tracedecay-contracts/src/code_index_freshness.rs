@@ -303,6 +303,7 @@ pub enum CodeIndexStalenessStateV1 {
     Stale,
     Indexing,
     Refreshing,
+    Restoring,
     Verifying,
     Parked,
 }
@@ -315,6 +316,7 @@ impl CodeIndexStalenessStateV1 {
             Self::Stale => "stale",
             Self::Indexing => "indexing",
             Self::Refreshing => "refreshing",
+            Self::Restoring => "restoring",
             Self::Verifying => "verifying",
             Self::Parked => "parked",
         }
@@ -327,6 +329,7 @@ impl CodeIndexStalenessStateV1 {
             "stale" => Some(Self::Stale),
             "indexing" => Some(Self::Indexing),
             "refreshing" => Some(Self::Refreshing),
+            "restoring" => Some(Self::Restoring),
             "verifying" => Some(Self::Verifying),
             "parked" => Some(Self::Parked),
             _ => None,
@@ -353,6 +356,7 @@ pub enum CodeIndexFreshnessCoverageV1 {
     Unobserved,
     Complete,
     PartialRefreshInProgress,
+    PartialArtifactRestore,
     PartialSourceVerification,
     PartialUnverifiedRestore,
     PartialHookHintOverflow,
@@ -365,6 +369,7 @@ impl CodeIndexFreshnessCoverageV1 {
             Self::Unobserved => "unobserved",
             Self::Complete => "complete",
             Self::PartialRefreshInProgress => "partial_refresh_in_progress",
+            Self::PartialArtifactRestore => "partial_artifact_restore",
             Self::PartialSourceVerification => "partial_source_verification",
             Self::PartialUnverifiedRestore => "partial_unverified_restore",
             Self::PartialHookHintOverflow => "partial_hook_hint_overflow",
@@ -377,6 +382,7 @@ impl CodeIndexFreshnessCoverageV1 {
             "unobserved" => Some(Self::Unobserved),
             "complete" => Some(Self::Complete),
             "partial_refresh_in_progress" => Some(Self::PartialRefreshInProgress),
+            "partial_artifact_restore" => Some(Self::PartialArtifactRestore),
             "partial_source_verification" => Some(Self::PartialSourceVerification),
             "partial_unverified_restore" => Some(Self::PartialUnverifiedRestore),
             "partial_hook_hint_overflow" => Some(Self::PartialHookHintOverflow),
@@ -401,6 +407,7 @@ impl std::fmt::Display for CodeIndexFreshnessCoverageV1 {
 pub struct CodeIndexFreshnessLadderInputsV1<'a> {
     pub ready: bool,
     pub refresh_in_flight: bool,
+    pub restore_in_flight: bool,
     pub source_change_pending: bool,
     pub parked: Option<&'a CodeIndexConvergenceParkedV1>,
     pub source_verified: Option<bool>,
@@ -421,12 +428,14 @@ impl CodeIndexFreshnessLadderV1 {
         let terminal_park = inputs.parked.is_some_and(|parked| !parked.retries_on_wake);
         let refresh_in_flight = inputs.refresh_in_flight && !terminal_park;
         let verifying = inputs.ready && refresh_in_flight && !inputs.source_change_pending;
-        let refreshing = refresh_in_flight && !verifying;
+        let refreshing = refresh_in_flight && !verifying && !inputs.restore_in_flight;
         let hints_outstanding = inputs.hook_hint_count != Some(0);
         let source_unverified = inputs.source_verified == Some(false);
         let admitted_stale = source_unverified || hints_outstanding;
         let staleness_state = if inputs.parked.is_some() && !inputs.ready {
             CodeIndexStalenessStateV1::Parked
+        } else if inputs.restore_in_flight && !inputs.ready {
+            CodeIndexStalenessStateV1::Restoring
         } else if verifying {
             CodeIndexStalenessStateV1::Verifying
         } else if refreshing {
@@ -442,7 +451,9 @@ impl CodeIndexFreshnessLadderV1 {
         } else {
             CodeIndexStalenessStateV1::Fresh
         };
-        let coverage = if refreshing {
+        let coverage = if inputs.restore_in_flight {
+            CodeIndexFreshnessCoverageV1::PartialArtifactRestore
+        } else if refreshing {
             CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
         } else if verifying {
             CodeIndexFreshnessCoverageV1::PartialSourceVerification
@@ -459,6 +470,27 @@ impl CodeIndexFreshnessLadderV1 {
             coverage,
         }
     }
+}
+
+/// Bounded authentication work required to restore one immutable lexical
+/// artifact as a serving reader.
+///
+/// The unit is a fixed restore check, not bytes or build work. Completed
+/// checks are published only after they pass. `authenticated_remaining` is
+/// always `authenticated_total - authenticated_completed`, so a caller can
+/// distinguish bounded cold restore from an unbounded rebuild.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexRestoreProgressV1 {
+    /// Generation whose lexical serving seat is being restored.
+    pub generation_id: String,
+    /// Whole-file content address from the durable artifact descriptor.
+    pub artifact_digest: String,
+    /// Successfully completed authentication checks.
+    pub authenticated_completed: u64,
+    /// Fixed number of authentication checks for this restore.
+    pub authenticated_total: u64,
+    /// Checks that have not completed yet.
+    pub authenticated_remaining: u64,
 }
 
 /// Freshness/generation state for one mounted worktree.
@@ -509,6 +541,11 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub coverage: CodeIndexFreshnessCoverageV1,
     /// Latest committed progress for the active generation, if one is mounted.
     pub progress: Option<CodeIndexBuildProgressV1>,
+    /// Bounded immutable-artifact restore work currently in flight. This is
+    /// separate from build progress because restore commits no index data.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_progress: Option<CodeIndexRestoreProgressV1>,
     /// Deterministic contract violation currently parking background
     /// convergence, when one is observed. `staleness_state` reads `parked`
     /// while this is set and no generation serves.
@@ -801,6 +838,7 @@ mod tests {
         CodeIndexFreshnessLadderInputsV1 {
             ready: true,
             refresh_in_flight: false,
+            restore_in_flight: false,
             source_change_pending: false,
             parked: None,
             source_verified: Some(true),
@@ -815,6 +853,7 @@ mod tests {
             CodeIndexStalenessStateV1::Stale,
             CodeIndexStalenessStateV1::Indexing,
             CodeIndexStalenessStateV1::Refreshing,
+            CodeIndexStalenessStateV1::Restoring,
             CodeIndexStalenessStateV1::Verifying,
             CodeIndexStalenessStateV1::Parked,
         ] {
@@ -830,6 +869,7 @@ mod tests {
         for coverage in [
             CodeIndexFreshnessCoverageV1::Complete,
             CodeIndexFreshnessCoverageV1::PartialRefreshInProgress,
+            CodeIndexFreshnessCoverageV1::PartialArtifactRestore,
             CodeIndexFreshnessCoverageV1::PartialSourceVerification,
             CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore,
             CodeIndexFreshnessCoverageV1::PartialHookHintOverflow,
@@ -869,6 +909,25 @@ mod tests {
         assert_eq!(
             observed.coverage,
             CodeIndexFreshnessCoverageV1::PartialSourceVerification
+        );
+    }
+
+    #[test]
+    fn bounded_artifact_restore_is_not_a_rebuild() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: false,
+            refresh_in_flight: true,
+            restore_in_flight: true,
+            ..settled()
+        });
+        assert_eq!(
+            observed.staleness_state,
+            CodeIndexStalenessStateV1::Restoring
+        );
+        assert!(!observed.rebuild_in_flight);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialArtifactRestore
         );
     }
 
@@ -936,6 +995,7 @@ mod tests {
         let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
             ready: false,
             refresh_in_flight: true,
+            restore_in_flight: false,
             parked: Some(&parked),
             source_verified: Some(true),
             hook_hint_count: Some(0),
@@ -959,6 +1019,7 @@ mod tests {
         let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
             ready: false,
             refresh_in_flight: true,
+            restore_in_flight: false,
             parked: Some(&parked),
             source_verified: Some(true),
             hook_hint_count: Some(0),

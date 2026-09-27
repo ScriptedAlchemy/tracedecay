@@ -160,6 +160,26 @@ function WorktreeReading({
       {progress ? (
         <BuildProgressReading progress={progress} observedAtMicros={observedAtMicros} />
       ) : null}
+      {worktree.restore_progress ? (
+        <div className="border-b border-edge-subtle pb-1.5 text-3xs leading-snug">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="td-legend">Artifact restore</span>
+            <span className="td-value text-text-primary">
+              {worktree.restore_progress.authenticated_completed} /{' '}
+              {worktree.restore_progress.authenticated_total} checks
+            </span>
+          </div>
+          <progress
+            aria-label="Artifact restore progress"
+            className="h-1.5 w-full accent-accent"
+            max={worktree.restore_progress.authenticated_total}
+            value={worktree.restore_progress.authenticated_completed}
+          />
+          <p className="mt-1 text-text-muted">
+            {worktree.restore_progress.authenticated_remaining} authentication checks remaining
+          </p>
+        </div>
+      ) : null}
       {worktree.parked ? (
         <p className="text-state-warning">
           parked: {worktree.parked.reason}
@@ -300,6 +320,7 @@ function worktreeHasActiveBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean
   if (
     !worktree.rebuild_in_flight &&
     worktree.staleness_state !== 'verifying' &&
+    worktree.staleness_state !== 'restoring' &&
     !initialIndexing
   ) {
     return false;

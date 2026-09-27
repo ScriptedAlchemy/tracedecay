@@ -868,6 +868,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 label = "query.artifact.progress.historical_state"
             )),
             text_progress_slot: Arc::new(RwLock::new(progress_slot)),
+            restore_progress: Arc::new(RwLock::new(None)),
             text_progress_owner_epoch,
             text_progress_daemon_incarnation: self.progress_daemon_incarnation,
             text_progress_producer_incarnation: self.progress_producer_incarnation,
@@ -2486,6 +2487,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 text_control,
                 text_progress_state,
                 text_progress_slot: Arc::clone(&self.build_progress),
+                restore_progress: Arc::new(RwLock::new(None)),
                 text_progress_owner_epoch,
                 text_progress_daemon_incarnation: self.progress_daemon_incarnation,
                 text_progress_producer_incarnation: self.progress_producer_incarnation,
@@ -3504,6 +3506,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 text_control,
                 text_progress_state,
                 text_progress_slot: Arc::clone(&self.build_progress),
+                restore_progress: Arc::new(RwLock::new(None)),
                 text_progress_owner_epoch,
                 text_progress_daemon_incarnation: self.progress_daemon_incarnation,
                 text_progress_producer_incarnation: self.progress_producer_incarnation,

@@ -363,6 +363,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_ready = text
                         .as_ref()
                         .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready);
+                    let restore_progress = text
+                        .as_ref()
+                        .and_then(LatestCodeTextGenerationV1::restore_progress);
+                    let restore_in_flight = restore_progress.is_some();
                     let identity = if text.is_some() {
                         dashboard_text_freshness_identity(text.as_ref())
                     } else {
@@ -397,6 +401,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderInputsV1 {
                             ready,
                             refresh_in_flight,
+                            restore_in_flight,
                             source_change_pending,
                             parked: parked.as_ref(),
                             // The scheduler lock is held by the pass this read
@@ -431,6 +436,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         hook_hint_count,
                         coverage: observation.coverage,
                         progress,
+                        restore_progress,
                         parked,
                         generation_recovery,
                         ..identity
@@ -453,6 +459,10 @@ impl CodeIndexSchedulerRegistryV1 {
             let text_ready = text
                 .as_ref()
                 .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready);
+            let restore_progress = text
+                .as_ref()
+                .and_then(LatestCodeTextGenerationV1::restore_progress);
+            let restore_in_flight = restore_progress.is_some();
             let hook_hint_count = scheduler.pending_hint_count();
             let code_graph_serving = dashboard_code_graph_serving(
                 latest.as_ref(),
@@ -479,6 +489,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderInputsV1 {
                     ready,
                     refresh_in_flight,
+                    restore_in_flight,
                     source_change_pending,
                     parked: parked.as_ref(),
                     source_verified: Some(verified),
@@ -510,6 +521,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 hook_hint_count,
                 coverage: observation.coverage,
                 progress,
+                restore_progress,
                 parked,
                 generation_recovery,
                 ..identity

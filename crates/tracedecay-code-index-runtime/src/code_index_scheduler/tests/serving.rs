@@ -11,7 +11,8 @@ use std::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
-    acquire_code_generation_store_lock, code_text_artifact_staging_root, code_text_artifacts_root,
+    DurablePublicationPointerV1, acquire_code_generation_store_lock,
+    code_text_artifact_staging_root, code_text_artifacts_root,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, CodeRelationRequest,
@@ -40,8 +41,9 @@ use tracedecay_query::retrieval::{
     lexical::{
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-        CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, LexicalLaneRequest,
-        LexicalRouteKindV1, LexicalRoutingV1,
+        CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
+        CodeLexicalArtifactRestoreWitnessV1, LexicalLaneRequest, LexicalRouteKindV1,
+        LexicalRoutingV1,
     },
 };
 use tracedecay_runtime_core::resident_memory::{
@@ -153,7 +155,8 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
 /// lexical artifact in bounded page windows, publish it durably (pointer names
 /// the content-addressed artifact file), then reopen the durable head after a
 /// simulated restart in a single bounded pass, no rebuild, and serve exact
-/// and lexical queries from it.
+/// and lexical queries from it. Missing or corrupt acceleration witnesses fall
+/// back to full verification and are regenerated for the next restart.
 #[test]
 fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     let fixture = GitFixture::new(&[(
@@ -246,6 +249,14 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
             > 0,
         "the published artifact file must exist and be non-empty"
     );
+    let witness_path = store
+        .path()
+        .join("code-text-artifact-restore-witnesses-v1")
+        .join(artifact_file.replace(".bin", ".json"));
+    assert!(
+        witness_path.is_file(),
+        "the fully verified publication open must persist its bounded restart witness"
+    );
 
     // Simulated restart: a fresh scheduler over the same store must reopen
     // the durable head in ONE bounded pass instead of rebuilding.
@@ -260,6 +271,45 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .expect("durable generation remains readable after clone CAS")
         .expect("active generation remains published");
     let latest = scheduler.latest_complete().expect("restored generation");
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("read restart publication pointer"),
+    )
+    .expect("parse restart publication pointer");
+    let descriptor = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == active_generation)
+        .and_then(|entry| entry.text_artifact())
+        .expect("restart artifact descriptor");
+    let witness = CodeLexicalArtifactRestoreWitnessV1::decode(
+        &std::fs::read(&witness_path).expect("read bounded restore witness"),
+    )
+    .expect("decode bounded restore witness");
+    let mut authentication_progress = Vec::new();
+    let directly_restored = CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
+        &artifact_path,
+        &descriptor.artifact_digest,
+        descriptor.artifact_size_bytes,
+        &witness,
+        &latest
+            .text_projection_metadata()
+            .expect("restart projection metadata"),
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &UninterruptibleCodeIndexControlV1,
+        |completed, total| authentication_progress.push((completed, total)),
+    )
+    .expect("bounded content-addressed restore");
+    assert_eq!(
+        authentication_progress,
+        (0..=6).map(|completed| (completed, 6)).collect::<Vec<_>>(),
+        "bounded restore must publish every fixed authentication boundary"
+    );
+    assert_eq!(
+        directly_restored.metadata().generation,
+        latest.metadata().manifest().generation_id
+    );
+    drop(directly_restored);
     assert!(
         latest
             .advance_text_serving(1)
@@ -419,6 +469,40 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         !lexical_batch.candidates.is_empty(),
         "the lexical lane must return results from the reopened artifact"
     );
+
+    drop(owners);
+    drop(latest);
+    drop(scheduler);
+    for damaged_witness in [None, Some(b"not-a-restore-witness".as_slice())] {
+        match damaged_witness {
+            None => std::fs::remove_file(&witness_path).expect("remove restore witness"),
+            Some(bytes) => std::fs::write(&witness_path, bytes).expect("corrupt restore witness"),
+        }
+        let fallback_scheduler = super::scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        let fallback_latest = fallback_scheduler
+            .latest_complete()
+            .expect("generation with an unusable restore witness");
+        assert!(
+            fallback_latest
+                .advance_text_serving(1)
+                .expect("fully verify the artifact after witness refusal"),
+            "witness refusal must not rebuild an intact artifact"
+        );
+        assert!(
+            fallback_latest
+                .production_query_owners()
+                .expect("owners after full-verification fallback")
+                .is_artifact_backed()
+        );
+        CodeLexicalArtifactRestoreWitnessV1::decode(
+            &std::fs::read(&witness_path).expect("read regenerated restore witness"),
+        )
+        .expect("full verification must replace the unusable restore witness");
+    }
 }
 
 #[test]

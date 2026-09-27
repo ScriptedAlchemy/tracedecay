@@ -200,10 +200,96 @@ fn clone_authority_digest(
 
 type ArtifactConnectionMutex<T> = StdMutex<T>;
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct StableArtifactFileStateV1 {
+    len: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    change_seconds: i64,
+    #[cfg(unix)]
+    change_nanoseconds: i64,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(windows)]
+    last_write_time: i64,
+    #[cfg(windows)]
+    change_time: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CodeLexicalArtifactRestoreWitnessBodyV1 {
+    version: u32,
+    file_digest: ManifestDigest,
+    receipt_digest: ManifestDigest,
+    file_state: StableArtifactFileStateV1,
+}
+
+/// Rebuildable proof that one publisher-verified artifact still has the exact
+/// native file state observed by a prior full verification.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodeLexicalArtifactRestoreWitnessV1 {
+    body: CodeLexicalArtifactRestoreWitnessBodyV1,
+    body_digest: ManifestDigest,
+}
+
+impl CodeLexicalArtifactRestoreWitnessV1 {
+    const VERSION: u32 = 1;
+
+    fn digest_body(
+        body: &CodeLexicalArtifactRestoreWitnessBodyV1,
+    ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+        canonical_sha256(&("tracedecay.lexical-artifact-restore-witness.v1", body))
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+    }
+
+    fn from_verified_file_state(
+        file_digest: ManifestDigest,
+        receipt_digest: ManifestDigest,
+        file_state: StableArtifactFileStateV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let body = CodeLexicalArtifactRestoreWitnessBodyV1 {
+            version: Self::VERSION,
+            file_digest,
+            receipt_digest,
+            file_state,
+        };
+        let body_digest = Self::digest_body(&body)?;
+        Ok(Self { body, body_digest })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+        serde_json::to_vec(self)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let witness: Self = serde_json::from_slice(bytes)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        if witness.body.version != Self::VERSION
+            || Self::digest_body(&witness.body)? != witness.body_digest
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact restore witness does not verify".to_owned(),
+            ));
+        }
+        Ok(witness)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ReaderIntegrityAuthorityV1 {
-    /// The immutable artifact was SQLite-verified before publication and both
-    /// whole-file hashes still match that exact published byte identity.
+    /// The immutable artifact was fully verified before publication. Its
+    /// durable descriptor supplies the content address, while this open binds
+    /// SQLite to one unchanged private file and authenticates the finalized
+    /// receipt. Corpus-sized re-verification remains an explicit operation.
     ContentAddressedPublisherProof,
     /// The caller binds only the embedded receipt, so SQLite must verify its
     /// own page structure before any rows are trusted.
@@ -243,6 +329,97 @@ impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
 }
 
 impl CodeLexicalArtifactReaderV1 {
+    /// Explicit corpus-wide verification for diagnostics, repair, and
+    /// publication checks. Unlike the bounded cold-restore path, this streams
+    /// the whole file twice around SQLite's receipt and section verification.
+    #[hotpath::measure(label = "query.artifact.open_content_addressed_full_verify")]
+    pub fn open_content_addressed_fully_verified(
+        path: impl AsRef<Path>,
+        expected_file_digest: &ManifestDigest,
+        expected_file_size_bytes: u64,
+        authority: &super::super::CodeLexicalProjectionMetadataV1,
+        cache_budget_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        Self::open_content_addressed_fully_verified_with_witness(
+            path,
+            expected_file_digest,
+            expected_file_size_bytes,
+            authority,
+            cache_budget_bytes,
+            control,
+        )
+        .map(|(reader, _)| reader)
+    }
+
+    /// Perform the explicit full verification and capture the restore witness
+    /// from the same retained file handle after its final digest. Capturing
+    /// the state by reopening the pathname would create a gap in which changed
+    /// bytes could be incorrectly vouched for by the earlier digest.
+    #[hotpath::measure(label = "query.artifact.open_content_addressed_full_verify_with_witness")]
+    pub fn open_content_addressed_fully_verified_with_witness(
+        path: impl AsRef<Path>,
+        expected_file_digest: &ManifestDigest,
+        expected_file_size_bytes: u64,
+        authority: &super::super::CodeLexicalProjectionMetadataV1,
+        cache_budget_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(Self, CodeLexicalArtifactRestoreWitnessV1), CodeLexicalArtifactErrorV1> {
+        checkpoint(control)?;
+        validate_cache_budget(cache_budget_bytes)?;
+        let path = path.as_ref();
+        let mut file = open_private_file(path).map_err(map_private_artifact_file_error)?;
+        let metadata = file.metadata().map_err(map_artifact_file_error)?;
+        if !metadata.file_type().is_file() || metadata.len() != expected_file_size_bytes {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact file does not match the durable head size".to_owned(),
+            ));
+        }
+        if digest_content_addressed_file(&mut file, control)? != *expected_file_digest {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact file bytes do not match the durable head digest".to_owned(),
+            ));
+        }
+        verify_named_path_identity(path, &file)?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| map_reader_open_error(path, error))?;
+        verify_named_path_identity(path, &file)?;
+        let receipt_bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT receipt FROM artifact_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_corrupt)?;
+        let receipt = decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "content-addressed lexical artifact has no finalized receipt".to_owned(),
+            )
+        })?;
+        let reader = Self::open_connection_with_control(
+            connection,
+            &receipt,
+            authority,
+            cache_budget_bytes,
+            expected_file_size_bytes,
+            control,
+            ReaderIntegrityAuthorityV1::ReceiptOnly,
+        )?;
+        let verified_state = stable_artifact_file_state(&file)?;
+        verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
+        verify_stable_artifact_file_state(&file, &verified_state)?;
+        verify_named_path_identity(path, &file)?;
+        let witness = CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
+            expected_file_digest.clone(),
+            reader.receipt.artifact_digest().clone(),
+            verified_state,
+        )?;
+        Ok((reader, witness))
+    }
+
     /// Open a published artifact whose trust anchor is its content address:
     /// the durable head names the artifact file's size and SHA-256 digest,
     /// the embedded receipt is decoded only after the whole file matches
@@ -258,13 +435,39 @@ impl CodeLexicalArtifactReaderV1 {
         cache_budget_bytes: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        Self::open_content_addressed_fully_verified(
+            path,
+            expected_file_digest,
+            expected_file_size_bytes,
+            authority,
+            cache_budget_bytes,
+            control,
+        )
+    }
+
+    /// Restore a publisher-verified immutable artifact with bounded
+    /// authentication progress. The six checks are fixed-cost with respect to
+    /// corpus size; no artifact bytes or section rows are streamed.
+    #[hotpath::measure(label = "query.artifact.open_content_addressed_bounded")]
+    pub fn restore_content_addressed_with_progress(
+        path: impl AsRef<Path>,
+        expected_file_digest: &ManifestDigest,
+        expected_file_size_bytes: u64,
+        witness: &CodeLexicalArtifactRestoreWitnessV1,
+        authority: &super::super::CodeLexicalProjectionMetadataV1,
+        cache_budget_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        const TOTAL_RESTORE_CHECKS: u64 = 6;
+        progress(0, TOTAL_RESTORE_CHECKS);
         checkpoint(control)?;
         validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
         // A durable content address names only a private, no-follow file made
-        // by the artifact publisher. Keep that exact handle through both
-        // digests; path metadata alone cannot bind the bytes SQLite serves.
-        let mut file = open_private_file(path).map_err(map_private_artifact_file_error)?;
+        // by the artifact publisher. Keep that exact handle through the open;
+        // path metadata alone cannot bind the bytes SQLite serves.
+        let file = open_private_file(path).map_err(map_private_artifact_file_error)?;
         let metadata = file.metadata().map_err(map_artifact_file_error)?;
         if !metadata.file_type().is_file() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -277,14 +480,21 @@ impl CodeLexicalArtifactReaderV1 {
                 "artifact file has {file_size} bytes; the durable head names {expected_file_size_bytes}"
             )));
         }
-        let digest = digest_content_addressed_file(&mut file, control)?;
-        if &digest != expected_file_digest {
+        let opened_state = stable_artifact_file_state(&file)?;
+        if witness.body.version != CodeLexicalArtifactRestoreWitnessV1::VERSION
+            || CodeLexicalArtifactRestoreWitnessV1::digest_body(&witness.body)?
+                != witness.body_digest
+            || witness.body.file_digest != *expected_file_digest
+            || witness.body.file_state != opened_state
+        {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "artifact file bytes do not match the durable head digest".to_owned(),
+                "lexical artifact restore witness does not match the durable artifact".to_owned(),
             ));
         }
+        progress(1, TOTAL_RESTORE_CHECKS);
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
+        progress(2, TOTAL_RESTORE_CHECKS);
         let connection = hotpath::measure_block!("query.artifact.open.sqlite_connect", {
             Connection::open_with_flags(
                 path,
@@ -302,6 +512,7 @@ impl CodeLexicalArtifactReaderV1 {
             verify_artifact_state_revision(&connection, control)?;
             verify_artifact_table_layout(&connection)
         })?;
+        progress(3, TOTAL_RESTORE_CHECKS);
         let receipt = hotpath::measure_block!("query.artifact.open.head_receipt_restore", {
             let receipt_bytes: Vec<u8> = connection
                 .query_row(
@@ -321,6 +532,15 @@ impl CodeLexicalArtifactReaderV1 {
                 "embedded receipt disagrees with the durable head file size".to_owned(),
             ));
         }
+        if receipt_artifact_digest(&receipt, receipt.section_digests())?
+            != *receipt.artifact_digest()
+            || witness.body.receipt_digest != *receipt.artifact_digest()
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "embedded receipt content digest does not verify".to_owned(),
+            ));
+        }
+        progress(4, TOTAL_RESTORE_CHECKS);
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
             Self::open_connection_with_control(
@@ -333,8 +553,10 @@ impl CodeLexicalArtifactReaderV1 {
                 ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
             )
         )?;
-        verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
+        progress(5, TOTAL_RESTORE_CHECKS);
+        verify_stable_artifact_file_state(&file, &opened_state)?;
         verify_named_path_identity(path, &file)?;
+        progress(6, TOTAL_RESTORE_CHECKS);
         crate::hotpath_metrics::Residency::Cold.record("query.artifact.residency");
         hotpath::gauge!("query.artifact.bytes").set(expected_file_size_bytes);
         hotpath::gauge!("query.artifact.pages").set(reader.receipt.page_count());
@@ -508,15 +730,23 @@ impl CodeLexicalArtifactReaderV1 {
                 "lexical artifact metadata digest does not verify".to_owned(),
             ));
         }
-        let sections = hotpath::measure_block!(
-            "query.artifact.open.section_digest_verify",
-            compute_section_digests(&connection, control)
-        )?;
-        if sections != stored.section_digests() {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact section digests do not verify".to_owned(),
-            ));
-        }
+        let sections = if matches!(
+            integrity_authority,
+            ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof
+        ) {
+            stored.section_digests().to_vec()
+        } else {
+            let sections = hotpath::measure_block!(
+                "query.artifact.open.section_digest_verify",
+                compute_section_digests(&connection, control)
+            )?;
+            if &sections != stored.section_digests() {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact section digests do not verify".to_owned(),
+                ));
+            }
+            sections
+        };
         let digest = hotpath::measure_block!(
             "query.artifact.open.artifact_digest_verify",
             receipt_artifact_digest(&stored, &sections)
@@ -2523,6 +2753,51 @@ fn digest_retained_artifact_file(
     })
 }
 
+fn stable_artifact_file_state(
+    file: &File,
+) -> Result<StableArtifactFileStateV1, CodeLexicalArtifactErrorV1> {
+    let metadata = file.metadata().map_err(map_artifact_file_error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        Ok(StableArtifactFileStateV1 {
+            len: metadata.len(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            change_seconds: metadata.ctime(),
+            change_nanoseconds: metadata.ctime_nsec(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        let information = tracedecay_private_fs::windows_file::information(file)
+            .map_err(map_artifact_file_error)?;
+        let change_token = tracedecay_private_fs::windows_file::change_token(file)
+            .map_err(map_artifact_file_error)?;
+        Ok(StableArtifactFileStateV1 {
+            len: metadata.len(),
+            volume_serial_number: information.volume_serial_number,
+            file_index: information.file_index,
+            last_write_time: change_token.last_write_time,
+            change_time: change_token.change_time,
+        })
+    }
+}
+
+fn verify_stable_artifact_file_state(
+    file: &File,
+    expected: &StableArtifactFileStateV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let actual = stable_artifact_file_state(file)?;
+    if actual != *expected {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "artifact file changed while its serving reader opened".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// The content-addressed head is the immutable authority for the bytes served
 /// by SQLite. Rehash the retained file only after the SQLite handle has
 /// completed its full validation, so an in-place mutation cannot retain its
@@ -2760,8 +3035,9 @@ mod tests {
         ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
         ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactQueryMetricsV1,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1,
-        CodeLexicalArtifactReaderV1, LexicalFieldV1, NGRAM_NORMALIZED, RequestTermPostingsV1,
-        TermFieldPostingsV1, charge_ngram_encoded_list_bytes, configure_reader_window,
+        CodeLexicalArtifactReaderV1, CodeLexicalArtifactRestoreWitnessV1, LexicalFieldV1,
+        NGRAM_NORMALIZED, RequestTermPostingsV1, TermFieldPostingsV1,
+        charge_ngram_encoded_list_bytes, configure_reader_window,
         ensure_ngram_candidate_cardinality, ensure_sqlite_bind_capacity,
         ensure_sqlite_bound_value_bytes, map_query_artifact_error, ngram_bitmap_candidates,
         ngram_document_query, query_ngrams, retain_bounded, term_frequency, visit_document_ids,
@@ -3008,6 +3284,132 @@ mod tests {
         .expect_err("an invalid budget wins before the missing path is observed");
 
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Unreserved(_)));
+    }
+
+    #[test]
+    fn restore_witness_decode_refuses_a_body_with_a_foreign_self_digest() {
+        let directory = tempfile::tempdir().expect("witness tempdir");
+        let path = directory.path().join("artifact.bin");
+        std::fs::write(&path, b"artifact identity fixture").expect("write artifact fixture");
+        let file = std::fs::File::open(&path).expect("open artifact fixture");
+        let digest =
+            ManifestDigest::new(format!("sha256:{}", "1".repeat(64))).expect("artifact digest");
+        let receipt =
+            ManifestDigest::new(format!("sha256:{}", "2".repeat(64))).expect("receipt digest");
+        let witness = CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
+            digest,
+            receipt,
+            super::stable_artifact_file_state(&file).expect("stable file state"),
+        )
+        .expect("create restore witness");
+        let mut encoded: serde_json::Value =
+            serde_json::from_slice(&witness.encode().expect("encode witness"))
+                .expect("parse encoded witness");
+        encoded["body"]["receipt_digest"] =
+            serde_json::Value::String(format!("sha256:{}", "3".repeat(64)));
+
+        let error = CodeLexicalArtifactRestoreWitnessV1::decode(
+            &serde_json::to_vec(&encoded).expect("encode corrupt witness"),
+        )
+        .expect_err("the self digest must bind every witness field");
+
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_restore_refuses_a_same_inode_rewrite_witness() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("artifact.sqlite");
+        let connection = Connection::open(&path).expect("create SQLite artifact");
+        connection
+            .pragma_update(None, "user_version", 1i64)
+            .expect("seed artifact");
+        drop(connection);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("make artifact private");
+        let mut file = open_private_file(&path).expect("open private artifact");
+        let digest = super::digest_content_addressed_file(&mut file, &AlwaysActiveControl)
+            .expect("digest artifact");
+        let size = file.metadata().expect("artifact metadata").len();
+        let receipt =
+            ManifestDigest::new(format!("sha256:{}", "2".repeat(64))).expect("receipt digest");
+        let witness = CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
+            digest.clone(),
+            receipt,
+            super::stable_artifact_file_state(&file).expect("stable file state"),
+        )
+        .expect("create restore witness");
+        drop(file);
+        let connection = Connection::open(&path).expect("reopen artifact for mutation");
+        connection
+            .pragma_update(None, "user_version", 2i64)
+            .expect("rewrite the same inode");
+        drop(connection);
+
+        let error = CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
+            &path,
+            &digest,
+            size,
+            &witness,
+            &opener(),
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &AlwaysActiveControl,
+            |_, _| {},
+        )
+        .expect_err("native file state must refuse a same-inode rewrite");
+
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_restore_refuses_path_replacement_even_with_identical_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("artifact.sqlite");
+        let replacement = directory.path().join("replacement.sqlite");
+        let connection = Connection::open(&path).expect("create SQLite artifact");
+        connection
+            .pragma_update(None, "user_version", 1i64)
+            .expect("seed artifact");
+        drop(connection);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("make artifact private");
+        let mut file = open_private_file(&path).expect("open private artifact");
+        let digest = super::digest_content_addressed_file(&mut file, &AlwaysActiveControl)
+            .expect("digest artifact");
+        let size = file.metadata().expect("artifact metadata").len();
+        let receipt =
+            ManifestDigest::new(format!("sha256:{}", "2".repeat(64))).expect("receipt digest");
+        let witness = CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
+            digest.clone(),
+            receipt,
+            super::stable_artifact_file_state(&file).expect("stable file state"),
+        )
+        .expect("create restore witness");
+        drop(file);
+        std::fs::copy(&path, &replacement).expect("copy identical artifact bytes");
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600))
+            .expect("make replacement private");
+        std::fs::rename(&replacement, &path).expect("replace artifact pathname");
+
+        let error = CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
+            &path,
+            &digest,
+            size,
+            &witness,
+            &opener(),
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &AlwaysActiveControl,
+            |_, _| {},
+        )
+        .expect_err("native file identity must refuse path replacement");
+
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)));
     }
 
     #[cfg(unix)]

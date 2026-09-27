@@ -43,8 +43,33 @@ export function CodeIndexPipeline({
     >
       <h2 className="td-legend">Code-index pipeline</h2>
       <CodeIndexReadinessList worktrees={worktrees} />
+      {worktrees.some((worktree) => worktree.restore_progress != null) ? (
+        <div className="mt-2 flex flex-col gap-2">
+          {worktrees.flatMap((worktree) =>
+            worktree.restore_progress ? (
+              <article
+                key={`${worktree.worktree_root}:restore`}
+                className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-2.5"
+              >
+                <p className="font-medium text-text-secondary">restoring lexical artifact</p>
+                <progress
+                  aria-label={`Artifact restore for ${worktree.restore_progress.generation_id}`}
+                  className="mt-1.5 h-1.5 w-full accent-accent"
+                  max={worktree.restore_progress.authenticated_total}
+                  value={worktree.restore_progress.authenticated_completed}
+                />
+                <p className="mt-1 text-sm text-text-muted">
+                  {worktree.restore_progress.authenticated_remaining} authentication checks remaining
+                </p>
+              </article>
+            ) : [],
+          )}
+        </div>
+      ) : null}
       {progress.length === 0 ? (
-        <p className="mt-2 text-body text-text-muted">no active code-index build</p>
+        worktrees.some((worktree) => worktree.restore_progress != null) ? null : (
+          <p className="mt-2 text-body text-text-muted">no active code-index build</p>
+        )
       ) : (
         <div className="mt-2 flex flex-col gap-2">
           {progress.map((build) => (
