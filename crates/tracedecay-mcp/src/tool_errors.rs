@@ -155,6 +155,11 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
             "retryable": retryable,
             "detail": detail,
         });
+        if let (Some(typed_detail), Some(object)) =
+            (error.project_route_typed_detail(), data.as_object_mut())
+        {
+            object.insert("detail".to_string(), json!(typed_detail));
+        }
         if let (Some(kind), Some(object)) = (
             project_route_problem_kind(reason_code),
             data.as_object_mut(),
@@ -277,6 +282,7 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
         reason_code,
         retryable: false,
         detail,
+        ..
     } = error
     {
         return JsonRpcResponse::error_with_data(
@@ -459,6 +465,7 @@ pub fn serialize_response_line(resp: &JsonRpcResponse) -> String {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tracedecay_domain::ApplicationProblemDetailV1;
     use tracedecay_domain::errors::TraceDecayError;
 
     use super::tool_error_response;
@@ -557,6 +564,38 @@ mod tests {
         assert_eq!(
             wire["error"]["data"]["code"],
             "application_surface_invalid_request"
+        );
+    }
+
+    #[test]
+    fn project_route_parked_detail_stays_structured_on_the_wire() {
+        let response = tool_error_response(
+            json!(11),
+            "tracedecay_sync",
+            &TraceDecayError::project_route_with_detail(
+                "code_index_publication_authority_corrupt",
+                false,
+                ApplicationProblemDetailV1::Parked {
+                    cause: "source mode is not owner-private".to_owned(),
+                    remedy: "restore mode 0600".to_owned(),
+                    retries_on_wake: true,
+                },
+            ),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+
+        assert_eq!(
+            wire["error"]["data"]["reason_code"],
+            "code_index_publication_authority_corrupt"
+        );
+        assert_eq!(
+            wire["error"]["data"]["detail"],
+            json!({
+                "kind": "parked",
+                "cause": "source mode is not owner-private",
+                "remedy": "restore mode 0600",
+                "retries_on_wake": true,
+            })
         );
     }
 }

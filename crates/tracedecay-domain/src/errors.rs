@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::ApplicationProblemDetailV1;
+
 #[derive(Error, Debug)]
 #[error("{detail}")]
 struct HookRuntimeErrorContext {
@@ -85,6 +87,7 @@ pub enum TraceDecayError {
         reason_code: String,
         retryable: bool,
         detail: String,
+        typed_detail: Option<ApplicationProblemDetailV1>,
     },
 
     #[error("sync lock: {message}")]
@@ -206,6 +209,20 @@ impl TraceDecayError {
             reason_code: reason_code.into(),
             retryable,
             detail: detail.into(),
+            typed_detail: None,
+        }
+    }
+
+    pub fn project_route_with_detail(
+        reason_code: impl Into<String>,
+        retryable: bool,
+        detail: ApplicationProblemDetailV1,
+    ) -> Self {
+        Self::ProjectRoute {
+            reason_code: reason_code.into(),
+            retryable,
+            detail: detail.message(),
+            typed_detail: Some(detail),
         }
     }
 
@@ -214,11 +231,19 @@ impl TraceDecayError {
             reason_code,
             retryable,
             detail,
+            ..
         } = self
         else {
             return None;
         };
         Some((reason_code, *retryable, detail))
+    }
+
+    pub fn project_route_typed_detail(&self) -> Option<&ApplicationProblemDetailV1> {
+        let Self::ProjectRoute { typed_detail, .. } = self else {
+            return None;
+        };
+        typed_detail.as_ref()
     }
 
     pub fn database_operation(

@@ -474,6 +474,17 @@ fn daemon_tool_call_error(error: JsonRpcError) -> TraceDecayError {
             .get("detail")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(error.message.as_str());
+        if let Some(typed_detail) = data
+            .get("detail")
+            .filter(|detail| detail.is_object())
+            .and_then(|detail| serde_json::from_value(detail.clone()).ok())
+        {
+            return TraceDecayError::project_route_with_detail(
+                reason_code,
+                retryable,
+                typed_detail,
+            );
+        }
         return TraceDecayError::project_route(reason_code, retryable, detail);
     }
     TraceDecayError::Config {
@@ -742,6 +753,39 @@ mod tests {
         assert!(
             unnamed.reset_required_context().is_none(),
             "a reset state without its authority cannot name a reset command and stays untyped"
+        );
+    }
+
+    #[test]
+    fn daemon_tool_call_error_round_trips_a_parked_route_detail() {
+        let refused = daemon_tool_call_error(JsonRpcError {
+            code: -32602,
+            message: "the code index is parked".to_owned(),
+            data: Some(json!({
+                "reason_code": "code_index_publication_authority_corrupt",
+                "retryable": false,
+                "detail": {
+                    "kind": "parked",
+                    "cause": "source mode is not owner-private",
+                    "remedy": "restore mode 0600",
+                    "retries_on_wake": true,
+                },
+            })),
+        });
+
+        assert_eq!(
+            refused
+                .project_route_context()
+                .map(|context| (context.0, context.1)),
+            Some(("code_index_publication_authority_corrupt", false))
+        );
+        assert_eq!(
+            refused.project_route_typed_detail(),
+            Some(&tracedecay_domain::ApplicationProblemDetailV1::Parked {
+                cause: "source mode is not owner-private".to_owned(),
+                remedy: "restore mode 0600".to_owned(),
+                retries_on_wake: true,
+            })
         );
     }
 

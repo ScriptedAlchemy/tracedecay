@@ -37,6 +37,7 @@ fn graph_read_unavailable(detail: &str) -> TraceDecayError {
         reason_code: "verified-code-graph-read-unavailable".to_owned(),
         retryable: false,
         detail: detail.to_owned(),
+        typed_detail: None,
     }
 }
 

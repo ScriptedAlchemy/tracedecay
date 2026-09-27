@@ -41,6 +41,7 @@ pub(super) async fn compute_dead_code(
                     retryable: false,
                     detail: "a dead-code candidate has no generation-pinned file binding"
                         .to_owned(),
+                    typed_detail: None,
                 })?;
             let file = binding
                 .logical_path
@@ -49,6 +50,7 @@ pub(super) async fn compute_dead_code(
                     retryable: false,
                     detail: "a dead-code candidate has no generation-pinned logical path"
                         .to_owned(),
+                    typed_detail: None,
                 })?;
             let metadata = symbol
                 .metadata
@@ -57,6 +59,7 @@ pub(super) async fn compute_dead_code(
                     retryable: false,
                     detail: "a dead-code candidate has no extraction-attested symbol metadata"
                         .to_owned(),
+                    typed_detail: None,
                 })?;
             symbols.push(DeadCodeSymbolV1 {
                 id: symbol.occurrence.as_str().to_owned(),

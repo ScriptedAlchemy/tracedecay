@@ -429,6 +429,7 @@ impl ProjectOpenFailure {
                 reason_code,
                 retryable,
                 detail,
+                ..
             } => (
                 detail.clone(),
                 Some(ProjectOpenTypedFailure::ProjectRoute {

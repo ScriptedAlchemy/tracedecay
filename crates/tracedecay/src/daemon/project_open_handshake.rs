@@ -252,6 +252,7 @@ pub(crate) fn project_open_error_response(
             reason_code,
             retryable,
             detail,
+            ..
         } if project_open_retryable_reason(reason_code)
             || reason_code == PROJECT_NOT_ENROLLED_REASON_CODE =>
         {

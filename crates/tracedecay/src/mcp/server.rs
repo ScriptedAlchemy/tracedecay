@@ -146,10 +146,14 @@ pub(crate) const CODE_INDEX_IDENTITY_UNRESOLVED: &str = "code_index_identity_unr
 pub(crate) fn code_index_publication_corrupt(
     parked: CodeIndexConvergenceParkedV1,
 ) -> TraceDecayError {
-    TraceDecayError::project_route(
+    TraceDecayError::project_route_with_detail(
         CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
         false,
-        format!("{}; {}", parked.reason, parked.remediation),
+        tracedecay_domain::ApplicationProblemDetailV1::Parked {
+            cause: parked.reason,
+            remedy: parked.remediation,
+            retries_on_wake: parked.retries_on_wake,
+        },
     )
 }
 
