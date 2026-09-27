@@ -21,7 +21,7 @@ use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceR
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
+    NativeSymbolRecordV1, PreparedQueryBindingV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
     PreparedQueryRoutingBindingsV1, PreparedQueryV1, QUERY_RANKING_REVISION_V1, QueryAuthorityV1,
     authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
 };
@@ -34,6 +34,17 @@ where
     <T as TryFrom<String>>::Error: fmt::Debug,
 {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))
+}
+
+fn query_binding(projection: &str) -> PreparedQueryBindingV1 {
+    PreparedQueryBindingV1::new(vec![
+        ("node_id", digest::<ManifestDigest>('9')),
+        (
+            "meta.projection",
+            tracedecay_domain::canonical_sha256(&projection).expect("projection digest"),
+        ),
+    ])
+    .expect("query binding")
 }
 
 fn generation() -> CodeGenerationId {
@@ -517,7 +528,7 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
         "code_canonical_query",
         digest::<ManifestDigest>('8'),
         generation(),
-        digest::<ManifestDigest>('9'),
+        query_binding("evidence"),
     )
     .expect("valid prepared-query bindings");
     let items = vec!["first".to_owned(), "second".to_owned(), "third".to_owned()];
@@ -546,10 +557,10 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     let first_cursor = first.next_cursor.expect("first continuation cursor");
     let second_cursor = second.next_cursor.expect("second continuation cursor");
     let first_wire = first_cursor
-        .strip_prefix("ccq2.")
+        .strip_prefix("ccq3.")
         .expect("versioned prepared-query cursor");
     let second_wire = second_cursor
-        .strip_prefix("ccq2.")
+        .strip_prefix("ccq3.")
         .expect("versioned prepared-query cursor");
     assert_eq!(
         hex::decode(first_wire).expect("first cursor bytes"),
@@ -562,7 +573,7 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
         principal: request.principal.clone(),
         root: request.scope.root.clone(),
         temporal_mode: request.temporal_mode,
-        query_binding_digest: digest::<ManifestDigest>('9'),
+        query_binding: query_binding("evidence"),
         page_size: 1,
         authorization_revision: request.snapshot.authorization_revision.clone(),
     };
@@ -651,7 +662,9 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
         PreparedQueryV1::prepare(authority.clone(), request.clone(), Some(&first_cursor))
             .expect("authenticated prepared-query continuation")
             .paginate(&bindings, items.clone(), 2, UtcMicros(100)),
-        Err(tracedecay_query::retrieval::PreparedQueryErrorV1::Invalid)
+        Err(PreparedQueryErrorV1::ParameterChanged {
+            parameter: "meta.page_size"
+        })
     );
     let resumed = PreparedQueryV1::prepare(authority.clone(), request.clone(), Some(&first_cursor))
         .expect("authenticated prepared-query continuation")
@@ -687,7 +700,7 @@ fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
         "code_canonical_query",
         digest::<ManifestDigest>('8'),
         generation(),
-        digest::<ManifestDigest>('9'),
+        query_binding("evidence"),
     )
     .expect("valid prepared-query bindings");
     let cursor = PreparedQueryV1::prepare(authority.clone(), request.clone(), None)
@@ -702,7 +715,7 @@ fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
         principal: request.principal.clone(),
         root: request.scope.root.clone(),
         temporal_mode: request.temporal_mode,
-        query_binding_digest: digest::<ManifestDigest>('9'),
+        query_binding: query_binding("evidence"),
         page_size: 1,
         authorization_revision: request.snapshot.authorization_revision.clone(),
     };
@@ -725,6 +738,20 @@ fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
         route(&authority, &routing, UtcMicros(900_000_010)),
         Err(PreparedQueryErrorV1::Stale)
     );
+    let mut other_projection = routing.clone();
+    other_projection.query_binding = query_binding("summary");
+    assert_eq!(
+        route(&authority, &other_projection, UtcMicros(100)),
+        Err(PreparedQueryErrorV1::ParameterChanged {
+            parameter: "meta.projection"
+        })
+    );
+    let mut other_operation = routing.clone();
+    other_operation.operation = "code_other_query".to_owned();
+    assert_eq!(
+        route(&authority, &other_operation, UtcMicros(100)),
+        Err(PreparedQueryErrorV1::Invalid)
+    );
     let rekeyed = query_authority_with_key("cursor-key.canonical-equivalence.v2", 0x5a);
     assert_eq!(
         route(&rekeyed, &routing, UtcMicros(100)),
@@ -735,7 +762,7 @@ fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
         "code_canonical_query",
         digest::<ManifestDigest>('7'),
         generation(),
-        digest::<ManifestDigest>('9'),
+        query_binding("evidence"),
     )
     .expect("valid prepared-query bindings");
     assert_eq!(

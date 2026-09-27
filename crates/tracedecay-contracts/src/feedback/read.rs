@@ -645,15 +645,9 @@ fn evidence_envelope<T>(
     outcome: RetrievalPortOutcome<T>,
     started_at: UtcMicros,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
-    let (termination, evidence) = match outcome {
-        RetrievalPortOutcome::Completed(evidence) => (OperationTermination::Completed, evidence),
-        RetrievalPortOutcome::Partial(evidence) => (OperationTermination::Partial, evidence),
-        RetrievalPortOutcome::Cancelled(evidence) => (OperationTermination::Cancelled, evidence),
-        RetrievalPortOutcome::TimedOut(evidence) => (OperationTermination::TimedOut, evidence),
-        RetrievalPortOutcome::Failed(evidence) => (OperationTermination::Failed, evidence),
-        RetrievalPortOutcome::Unavailable(evidence) => {
-            (OperationTermination::Unavailable, evidence)
-        }
+    let (termination, evidence) = match outcome.into_termination() {
+        Ok(published) => published,
+        Err(problem) => return problem_envelope(context, operation, problem),
     };
     let execution = OperationReceipt {
         started_at,

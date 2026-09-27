@@ -8,7 +8,7 @@ use tracedecay_domain::CursorManifestLimitKindV1;
 
 use crate::context::RequestContext;
 use crate::handlers::ApplicationOperation;
-use crate::result::RetrievalEvidence;
+use crate::result::{ApplicationProblem, OperationTermination, RetrievalEvidence};
 
 use super::{
     AffectedTestsRequest, AffectedTestsResult, HealthReadRequest, HealthReadResult,
@@ -32,6 +32,10 @@ pub enum RetrievalPortOutcome<T> {
     TimedOut(RetrievalEvidence<T>),
     Failed(RetrievalEvidence<T>),
     Unavailable(RetrievalEvidence<T>),
+    /// The port refused the request itself, such as a continuation cursor
+    /// presented with parameters other than the ones it was minted for. The
+    /// caller receives `problem`; the evidence carries no payload.
+    Refused(RetrievalEvidence<T>, Box<ApplicationProblem>),
 }
 
 impl<T> RetrievalPortOutcome<T> {
@@ -42,7 +46,8 @@ impl<T> RetrievalPortOutcome<T> {
             | Self::Cancelled(evidence)
             | Self::TimedOut(evidence)
             | Self::Failed(evidence)
-            | Self::Unavailable(evidence) => evidence,
+            | Self::Unavailable(evidence)
+            | Self::Refused(evidence, _) => evidence,
         }
     }
 
@@ -53,8 +58,25 @@ impl<T> RetrievalPortOutcome<T> {
             | Self::Cancelled(evidence)
             | Self::TimedOut(evidence)
             | Self::Failed(evidence)
-            | Self::Unavailable(evidence) => evidence,
+            | Self::Unavailable(evidence)
+            | Self::Refused(evidence, _) => evidence,
         }
+    }
+
+    /// The published termination and evidence, or the refusal the caller
+    /// receives instead.
+    pub fn into_termination(
+        self,
+    ) -> Result<(OperationTermination, RetrievalEvidence<T>), ApplicationProblem> {
+        Ok(match self {
+            Self::Completed(evidence) => (OperationTermination::Completed, evidence),
+            Self::Partial(evidence) => (OperationTermination::Partial, evidence),
+            Self::Cancelled(evidence) => (OperationTermination::Cancelled, evidence),
+            Self::TimedOut(evidence) => (OperationTermination::TimedOut, evidence),
+            Self::Failed(evidence) => (OperationTermination::Failed, evidence),
+            Self::Unavailable(evidence) => (OperationTermination::Unavailable, evidence),
+            Self::Refused(_, problem) => return Err(*problem),
+        })
     }
 
     /// This outcome with `cost` recorded on its evidence; the metered read's
