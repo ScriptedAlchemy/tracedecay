@@ -8,6 +8,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
+use std::time::Instant;
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -103,11 +104,13 @@ macro_rules! dispatch_symbol {
 
 macro_rules! dispatch_extended {
     ($runtime:expr, $context:expr, $operation:expr, $observed_at:expr, $request:expr, $method:ident) => {{
+        let started = Instant::now();
         let outcome = $runtime
             .project_runtime
             .extended
             .$method(retrieval_context($context, $operation), &$request)
-            .await;
+            .await
+            .with_port_elapsed(started.elapsed());
         retrieval_outcome(
             &$runtime.access,
             $context,
@@ -1035,11 +1038,13 @@ async fn dispatch_admitted(
             storage_status
         ),
         PrimitiveRequest::DiagnosticsRead(request) => {
+            let started = Instant::now();
             let outcome = runtime
                 .project_runtime
                 .extended
                 .diagnostics(retrieval_context(&context, &operation), &request)
-                .await;
+                .await
+                .with_port_elapsed(started.elapsed());
             let file = match &request.scope {
                 DiagnosticsPrimitiveScope::File(path) => Some(Path::new(path.as_str())),
                 DiagnosticsPrimitiveScope::Workspace | DiagnosticsPrimitiveScope::Package(_) => {
@@ -1221,6 +1226,7 @@ fn retrieval_outcome<T: Serialize>(
             observed_at: evidence.finished_at,
         });
     }
+    let cost = evidence.cost;
     let evidence = value_or_problem!(erase_retrieval_evidence(evidence), context, operation);
     let authority = authority_receipt(access, context, evidence.finished_at)?;
     let execution = OperationReceipt {
@@ -1236,12 +1242,14 @@ fn retrieval_outcome<T: Serialize>(
         context,
         operation
     );
-    Ok(Ok(ApplicationEnvelope::evidence(
+    let mut envelope = ApplicationEnvelope::evidence(
         operation.result_contract().clone(),
         context.request_id().clone(),
         context.scope().clone(),
         packet,
-    )))
+    );
+    envelope.cost = cost;
+    Ok(Ok(envelope))
 }
 
 fn erase_retrieval_evidence<T: Serialize>(

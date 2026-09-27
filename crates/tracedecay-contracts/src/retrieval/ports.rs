@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,16 +46,35 @@ impl<T> RetrievalPortOutcome<T> {
         }
     }
 
-    /// This outcome with `cost` recorded on its evidence.
-    #[must_use]
-    pub fn with_cost(mut self, cost: crate::RequestCostReceiptV1) -> Self {
-        match &mut self {
+    fn evidence_mut(&mut self) -> &mut RetrievalEvidence<T> {
+        match self {
             Self::Completed(evidence)
             | Self::Partial(evidence)
             | Self::Cancelled(evidence)
             | Self::TimedOut(evidence)
             | Self::Failed(evidence)
-            | Self::Unavailable(evidence) => evidence.cost = Some(cost),
+            | Self::Unavailable(evidence) => evidence,
+        }
+    }
+
+    /// This outcome with `cost` recorded on its evidence; the metered read's
+    /// wall time is the budget's elapsed time.
+    #[must_use]
+    pub fn with_cost(mut self, cost: crate::RequestCostReceiptV1) -> Self {
+        let evidence = self.evidence_mut();
+        evidence.budget.elapsed_micros = cost.wall_micros;
+        evidence.cost = Some(cost);
+        self
+    }
+
+    /// This outcome with `elapsed`, the measured wall time of the port call
+    /// that produced it, as the budget's elapsed time. A metered outcome keeps
+    /// its receipt's wall time.
+    #[must_use]
+    pub fn with_port_elapsed(mut self, elapsed: Duration) -> Self {
+        let evidence = self.evidence_mut();
+        if evidence.cost.is_none() {
+            evidence.budget.elapsed_micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         }
         self
     }

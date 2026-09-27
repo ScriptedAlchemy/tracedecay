@@ -1323,19 +1323,24 @@ async fn complete_or_failed<T: Send>(
     };
     page.related_edge_count = related_edge_count;
     page.support_gaps = gaps;
-    let cost = Some(graph.cost.receipt());
+    let receipt = graph.cost.receipt();
+    let budget = OperationBudgetUsage {
+        elapsed_micros: receipt.wall_micros,
+        ..OperationBudgetUsage::default()
+    };
+    let cost = Some(receipt);
     if page.support_gaps.is_empty() {
         SymbolGraphPortOutcome::Completed {
             page,
             finished_at: context.observed_at,
-            budget: OperationBudgetUsage::default(),
+            budget,
             cost,
         }
     } else {
         SymbolGraphPortOutcome::Partial {
             page,
             finished_at: context.observed_at,
-            budget: OperationBudgetUsage::default(),
+            budget,
             cost,
         }
     }

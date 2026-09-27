@@ -406,6 +406,65 @@ async fn typed_callers_carry_their_read_cost() {
             cost["wall_micros"], cost["bytes_hydrated"]
         )
     );
+    assert_eq!(
+        payload["outcome"]["value"]["execution"]["budget"]["elapsed_micros"], cost["wall_micros"],
+        "the receipt's elapsed time is the metered read's wall time: {payload:#}"
+    );
+
+    let markdown = call(
+        &fixture,
+        "tracedecay_callers",
+        json!({"node_id": node_id, "maximum_depth": 1, "format": "markdown"}),
+    )
+    .await;
+    let wall_us = cost_trailer(&markdown)
+        .split_once("wall_us=")
+        .and_then(|(_, rest)| rest.split_once(' '))
+        .map(|(wall, _)| wall.to_owned())
+        .unwrap_or_else(|| panic!("cost trailer names its wall time: {markdown:?}"));
+    assert!(
+        markdown[0].contains(&format!("; elapsed_us={wall_us}`")),
+        "the provenance line prints the trailer's wall time: {markdown:?}"
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
+/// A file-dependents read is metered on its graph lease like callers: the
+/// envelope and trailer carry its cost, and the receipt's elapsed time is
+/// that read's wall time.
+#[tokio::test]
+async fn file_dependents_carry_their_read_cost_and_its_wall_time() {
+    let fixture = trailer_fixture().await;
+    let texts = call(
+        &fixture,
+        "tracedecay_file_dependents",
+        json!({"file": "src/walk.rs", "format": "json"}),
+    )
+    .await;
+    let payload: Value = serde_json::from_str(&texts[0]).unwrap();
+    assert_eq!(
+        payload["outcome"]["value"]["payload"]["dependent_files"],
+        json!(["src/lib.rs"]),
+        "{payload:#}"
+    );
+    let cost = &payload["cost"];
+    assert_eq!(
+        cost_trailer(&texts),
+        format!(
+            "\ntracedecay_cost: wall_us={} graph_sealed_reads={} graph_staging_reads=0 \
+             adjacency_queries={} adjacency_rows={} bytes_hydrated={}",
+            cost["wall_micros"],
+            cost["point_reads"]["graph_sealed"],
+            cost["adjacency_queries"],
+            cost["adjacency_rows"],
+            cost["bytes_hydrated"]
+        ),
+        "{payload:#}"
+    );
+    assert_eq!(
+        payload["outcome"]["value"]["execution"]["budget"]["elapsed_micros"], cost["wall_micros"],
+        "{payload:#}"
+    );
     shutdown_graph_fixture(fixture).await;
 }
 
