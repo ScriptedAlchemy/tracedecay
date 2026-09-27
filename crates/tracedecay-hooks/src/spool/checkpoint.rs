@@ -394,6 +394,13 @@ pub(super) fn records_file_revision(
     Ok(Some(opened_revision))
 }
 
+/// The device/inode identity of an open records file, the same identity a
+/// [`RecordsFileRevisionV1`] names.
+pub(super) fn records_identity(file: &File) -> Result<[u8; 32], HookSpoolError> {
+    let metadata = file.metadata().map_err(|_| HookSpoolError::Io)?;
+    Ok(revision_for_file(file, &metadata)?.identity)
+}
+
 #[cfg(unix)]
 pub(super) fn read_frame_at(
     file: &File,

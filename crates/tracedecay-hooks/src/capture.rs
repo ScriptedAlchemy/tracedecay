@@ -143,9 +143,17 @@ fn capture_native_event_for_replay_inner(
     };
     let envelope = redelivered_envelope(&mut spool, &snapshot.binding, envelope);
     match spool.append(envelope, &snapshot.binding, now) {
-        Ok(_) => NativeHookCaptureOutcomeV1::Captured,
-        Err(HookSpoolError::SpoolFull) => NativeHookCaptureOutcomeV1::Full,
-        Err(HookSpoolError::ResetRequired { .. }) => NativeHookCaptureOutcomeV1::ResetRequired,
+        Ok(_) => {}
+        Err(HookSpoolError::SpoolFull) => return NativeHookCaptureOutcomeV1::Full,
+        Err(HookSpoolError::ResetRequired { .. }) => {
+            return NativeHookCaptureOutcomeV1::ResetRequired;
+        }
+        Err(_) => return NativeHookCaptureOutcomeV1::Unavailable,
+    }
+    // The hook reports capture only once its batch is durable.
+    match spool.commit() {
+        Ok(()) => NativeHookCaptureOutcomeV1::Captured,
+        Err(HookSpoolError::AdmissionTimedOut) => NativeHookCaptureOutcomeV1::AdmissionTimedOut,
         Err(_) => NativeHookCaptureOutcomeV1::Unavailable,
     }
 }

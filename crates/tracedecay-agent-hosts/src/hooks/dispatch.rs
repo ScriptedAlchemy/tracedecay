@@ -880,8 +880,12 @@ fn append_for_replay(
         return SpoolAppendOutcomeV1::Unavailable;
     };
     match spool.append_with_native_lifecycle(envelope.clone(), native_lifecycle, binding, now) {
-        Ok(_) => SpoolAppendOutcomeV1::Accepted,
-        Err(HookSpoolError::SpoolFull) => SpoolAppendOutcomeV1::Full,
+        Ok(_) => {}
+        Err(HookSpoolError::SpoolFull) => return SpoolAppendOutcomeV1::Full,
+        Err(_) => return SpoolAppendOutcomeV1::Unavailable,
+    }
+    match spool.commit() {
+        Ok(()) => SpoolAppendOutcomeV1::Accepted,
         Err(_) => SpoolAppendOutcomeV1::Unavailable,
     }
 }

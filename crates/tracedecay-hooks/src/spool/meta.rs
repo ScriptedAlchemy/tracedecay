@@ -1,21 +1,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use tracedecay_domain::framed_log::checksum as frame_checksum;
-use tracedecay_domain::framed_log::partial_tail_matches_prefix;
 use tracedecay_private_fs::framed_log::atomic_write as shared_atomic_write;
 
 use serde_json::Value;
-use tracedecay_domain::NativeHostIdentityV1;
 
-use super::frame::decode_complete_frame;
-use super::types::{
-    AcknowledgedSequenceV1, AppendIntentV1, HookSpoolLimitsV1, HookSpoolMetaV1, PendingRecordV1,
-};
-use super::{
-    DIRECTORY_POLICY, FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES, HookSpoolError,
-    MAX_META_BYTES, SPOOL_MAGIC, meta_path, read_bounded,
-};
+use super::types::{AcknowledgedSequenceV1, HookSpoolLimitsV1, HookSpoolMetaV1, PendingRecordV1};
+use super::{DIRECTORY_POLICY, HookSpoolError, MAX_META_BYTES, meta_path, read_bounded};
 
 pub(super) fn read_meta(root: &Path) -> Result<Option<HookSpoolMetaV1>, HookSpoolError> {
     read_bounded(&meta_path(root), MAX_META_BYTES)?
@@ -60,50 +51,18 @@ pub(super) fn write_meta(root: &Path, meta: &HookSpoolMetaV1) -> Result<(), Hook
     })
 }
 
-pub(super) fn append_intent(
-    sequence: u64,
-    file_offset: u64,
-    frame: &[u8],
-) -> Result<AppendIntentV1, HookSpoolError> {
-    Ok(AppendIntentV1 {
-        sequence,
-        file_offset,
-        framed_len: u32::try_from(frame.len()).map_err(|_| HookSpoolError::MetadataCorrupted)?,
-        frame: frame.to_vec(),
-    })
-}
-
-pub(super) fn partial_tail_matches_intent(
-    meta: &HookSpoolMetaV1,
-    offset: u64,
-    partial: &[u8],
-) -> bool {
-    let Some(intent) = &meta.append_intent else {
-        return false;
-    };
-    intent.sequence == meta.next_sequence
-        && intent.file_offset == offset
-        && partial_tail_matches_prefix(partial, &intent.frame, intent.framed_len as usize)
-}
-
-pub(super) fn reconcile_append_intent(
+/// Records appended after the last metadata write continue its sequence
+/// contiguously; the next metadata write persists the advanced value.
+pub(super) fn advance_next_sequence(
     meta: &mut HookSpoolMetaV1,
     records: &[PendingRecordV1],
-    host: NativeHostIdentityV1,
 ) -> Result<(), HookSpoolError> {
-    let Some(intent) = meta.append_intent.clone() else {
-        return Ok(());
-    };
-    if intent.sequence != meta.next_sequence || !valid_append_intent(&intent, host) {
-        return Err(HookSpoolError::MetadataCorrupted);
-    }
-    if let Some(record) = records
+    let first_unrecorded = meta.next_sequence;
+    for record in records
         .iter()
-        .find(|record| record.sequence == intent.sequence)
+        .filter(|record| record.sequence >= first_unrecorded)
     {
-        let intent_record = decode_complete_frame(&intent.frame, intent.file_offset, host)
-            .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-        if record.framed_len != intent.framed_len || !record.matches_record(&intent_record) {
+        if record.sequence != meta.next_sequence {
             return Err(HookSpoolError::MetadataCorrupted);
         }
         meta.next_sequence = meta
@@ -111,14 +70,12 @@ pub(super) fn reconcile_append_intent(
             .checked_add(1)
             .ok_or(HookSpoolError::MetadataCorrupted)?;
     }
-    meta.append_intent = None;
     Ok(())
 }
 
 pub(super) fn validate_meta(
     meta: &HookSpoolMetaV1,
     limits: HookSpoolLimitsV1,
-    host: NativeHostIdentityV1,
 ) -> Result<(), HookSpoolError> {
     if meta.next_sequence == 0
         || meta.next_sequence <= meta.committed_through
@@ -127,43 +84,7 @@ pub(super) fn validate_meta(
         return Err(HookSpoolError::MetadataCorrupted);
     }
     let _ = acknowledged_map(meta)?;
-    if let Some(intent) = &meta.append_intent
-        && (intent.sequence != meta.next_sequence
-            || intent.framed_len
-                < (FRAME_LENGTH_BYTES + FRAME_HEADER_BYTES + FRAME_CHECKSUM_BYTES) as u32
-            || !valid_append_intent(intent, host)
-            || intent
-                .file_offset
-                .checked_add(u64::from(intent.framed_len))
-                .is_none())
-    {
-        return Err(HookSpoolError::MetadataCorrupted);
-    }
     Ok(())
-}
-
-pub(super) fn valid_append_intent(intent: &AppendIntentV1, host: NativeHostIdentityV1) -> bool {
-    let minimum = FRAME_LENGTH_BYTES + FRAME_HEADER_BYTES + FRAME_CHECKSUM_BYTES;
-    if intent.sequence == 0
-        || intent.frame.len() < minimum
-        || intent.frame.len() != intent.framed_len as usize
-        || intent.frame.get(4..8) != Some(SPOOL_MAGIC.as_slice())
-    {
-        return false;
-    }
-    let Some(sequence) = intent.frame.get(10..18) else {
-        return false;
-    };
-    let Ok(sequence) = <[u8; 8]>::try_from(sequence) else {
-        return false;
-    };
-    let checksum_at = intent.frame.len() - FRAME_CHECKSUM_BYTES;
-    let Some(checksum) = intent.frame.get(checksum_at..) else {
-        return false;
-    };
-    intent.sequence == u64::from_le_bytes(sequence)
-        && frame_checksum(&intent.frame[..checksum_at]) == checksum
-        && decode_complete_frame(&intent.frame, intent.file_offset, host).is_ok()
 }
 
 pub(super) fn validate_meta_against_records(

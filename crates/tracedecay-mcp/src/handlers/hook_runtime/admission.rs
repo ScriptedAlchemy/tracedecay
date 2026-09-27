@@ -171,7 +171,7 @@ fn retain_hook_v2_pending_work(
     )
     .ok()?;
     let record = spool.append(pending_envelope.clone(), binding, now).ok()?;
-    drop(spool);
+    spool.commit().ok()?;
     drop(_gate);
     let data_root = data_root.to_path_buf();
     let envelope = ledger_envelope.clone();
