@@ -26,9 +26,9 @@ use crate::chunks::{
 use crate::lineage::{LineageSymbolRecordV1, SymbolLineageCandidateV1};
 
 /// An `Arc` allocation: two reference counts before the value.
-const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
+pub(super) const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
 
-fn vec_bytes<T>(values: &[T], capacity: usize, heap: impl Fn(&T) -> usize) -> usize {
+pub(super) fn vec_bytes<T>(values: &[T], capacity: usize, heap: impl Fn(&T) -> usize) -> usize {
     values
         .iter()
         .fold(capacity.saturating_mul(size_of::<T>()), |bytes, value| {
@@ -50,7 +50,7 @@ pub(crate) fn btree_bytes(entries: usize, entry_bytes: usize) -> usize {
         .saturating_add(size_of::<usize>().saturating_mul(4))
 }
 
-fn chunk_bytes(chunk: &CodeSearchChunkV1) -> usize {
+pub(super) fn chunk_bytes(chunk: &CodeSearchChunkV1) -> usize {
     let anchor = &chunk.anchor;
     ARC_HEADER_BYTES
         .saturating_add(size_of::<CodeSearchChunkV1>())
@@ -88,7 +88,7 @@ fn exact_term_bytes(term: &ExactTechnicalTermV1) -> usize {
         .saturating_add(opt(term.symbol_occurrence_id().map(|id| id.as_str())))
 }
 
-fn symbol_bytes(symbol: &LineageSymbolRecordV1) -> usize {
+pub(super) fn symbol_bytes(symbol: &LineageSymbolRecordV1) -> usize {
     ARC_HEADER_BYTES
         .saturating_add(size_of::<LineageSymbolRecordV1>())
         .saturating_add(symbol.occurrence.as_str().len())
@@ -108,7 +108,7 @@ fn symbol_bytes(symbol: &LineageSymbolRecordV1) -> usize {
         .saturating_add(symbol.content_digest.as_str().len())
 }
 
-fn edge_heap_bytes(edge: &CanonicalRelationEdgeV1) -> usize {
+pub(super) fn edge_heap_bytes(edge: &CanonicalRelationEdgeV1) -> usize {
     edge.from_occurrence
         .as_str()
         .len()
@@ -122,7 +122,7 @@ fn abstention_heap_bytes(abstention: &CodeIndexEdgeAbstentionV1) -> usize {
         .saturating_add(abstention.target_node_id.capacity())
 }
 
-fn import_heap_bytes(import: &CodeIndexImportEvidenceV1) -> usize {
+pub(super) fn import_heap_bytes(import: &CodeIndexImportEvidenceV1) -> usize {
     import
         .logical_path
         .capacity()
@@ -132,7 +132,7 @@ fn import_heap_bytes(import: &CodeIndexImportEvidenceV1) -> usize {
         .saturating_add(opt(import.local_name.as_deref()))
 }
 
-fn unresolved_heap_bytes(reference: &CodeIndexUnresolvedReferenceV1) -> usize {
+pub(super) fn unresolved_heap_bytes(reference: &CodeIndexUnresolvedReferenceV1) -> usize {
     reference
         .from_occurrence
         .as_str()
@@ -225,13 +225,12 @@ fn snapshot_file_heap_bytes(file: &SanitizedCodeFileV1) -> usize {
         .saturating_add(file.content_digest.as_str().len())
 }
 
-/// One file page, excluding the chunk and symbol records it shares with the
-/// generation-wide index.
-fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
+/// A page's authority, extraction record, and document header: what every
+/// page keeps, reduced or not.
+pub(super) fn page_identity_bytes(file: &FileGenerationArtifactsV1) -> usize {
     let authority = &file.authority;
     let extraction = &file.extraction;
-    let artifacts = &file.artifacts;
-    let document = &artifacts.chunks.document;
+    let document = &file.artifacts.chunks.document;
     let authority_bytes = authority
         .project_id
         .as_str()
@@ -270,12 +269,22 @@ fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
             CodeSearchEligibilityV1::Eligible => 0,
             CodeSearchEligibilityV1::Excluded { reason }
             | CodeSearchEligibilityV1::Partial { reason } => reason.capacity(),
-        })
-        .saturating_add(vec_bytes(
-            &document.chunk_ids,
-            document.chunk_ids.capacity(),
-            |id| id.as_str().len(),
-        ));
+        });
+    authority_bytes
+        .saturating_add(extraction_bytes)
+        .saturating_add(document_bytes)
+}
+
+/// One file page, excluding the chunk and symbol records it shares with the
+/// generation-wide index.
+pub(super) fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
+    let artifacts = &file.artifacts;
+    let document = &artifacts.chunks.document;
+    let identity_bytes = page_identity_bytes(file).saturating_add(vec_bytes(
+        &document.chunk_ids,
+        document.chunk_ids.capacity(),
+        |id| id.as_str().len(),
+    ));
     let shared_handles = size_of::<Arc<CodeSearchChunkV1>>().saturating_mul(
         artifacts
             .chunks
@@ -306,9 +315,7 @@ fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
     let exact_authority_bytes = file.exact_authority.retained_bytes();
     ARC_HEADER_BYTES
         .saturating_add(size_of::<FileGenerationArtifactsV1>())
-        .saturating_add(authority_bytes)
-        .saturating_add(extraction_bytes)
-        .saturating_add(document_bytes)
+        .saturating_add(identity_bytes)
         .saturating_add(shared_handles)
         .saturating_add(vec_bytes(
             &artifacts.edges,

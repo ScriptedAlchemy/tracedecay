@@ -32,12 +32,12 @@ pub use error::{
     classify_graph_store_error,
 };
 pub use generation::{
-    GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,
+    GRAPH_ROW_SPILL_RUN_BYTES, GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationManifestProvider, GraphGenerationRelation,
     GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphGenerationRowSpill,
     GraphGenerationRows, GraphProjectionIdentity, GraphProjectorRevision, GraphRelationRef,
-    GraphReplayCollectionOutcome, SealedCodeGenerationReplay, SealedGraphStateDigest,
-    SpilledGraphGeneration, SupersededReplayRetirement,
+    GraphReplayCollectionOutcome, GraphSpillRowFootprint, SealedCodeGenerationReplay,
+    SealedGraphStateDigest, SpilledGraphGeneration, SupersededReplayRetirement,
 };
 pub use generation_runtime::{SealedStagingRelease, SealedStagingRetentionReason};
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
-    CgroupMemoryCeilingV1, ProcessResidentMemoryV1,
+    CgroupMemoryCeilingV1, ProcessResidentMemoryV1, ProcessResidentPeakV1,
     RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
     ResidentMemoryPressureV1, cgroup_service_ceiling_bytes, cgroup_v2_memory_ceiling_v1,
@@ -1077,5 +1077,22 @@ fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
         super::process_resident_sample_from_status_v1("VmRSS:\t 1024 kB\n"),
         None,
         "a kernel without split RSS counters is unobserved, not zero"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_peak_reports_growth_a_pass_touched_and_released() {
+    const TOUCHED_BYTES: usize = 128 * 1024 * 1024;
+    let peak = ProcessResidentPeakV1::start()
+        .expect("sampler starts")
+        .expect("linux reports a resident set");
+    let touched = vec![1_u8; TOUCHED_BYTES];
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    drop(std::hint::black_box(touched));
+    let growth = peak.finish().expect("sampler joins");
+    assert!(
+        growth >= (TOUCHED_BYTES / 2) as u64,
+        "a pass that touched {TOUCHED_BYTES} bytes reported {growth} bytes of growth"
     );
 }

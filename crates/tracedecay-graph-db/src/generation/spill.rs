@@ -48,7 +48,7 @@ use super::{
 ///
 /// Bounds the producer-side working set independently of the corpus: a run
 /// is written as soon as a batch pushes the buffer past it.
-const SPILL_RUN_BYTES: usize = 32 * 1024 * 1024;
+pub const GRAPH_ROW_SPILL_RUN_BYTES: usize = 32 * 1024 * 1024;
 /// Read and write buffer per open run or merged file.
 const SPILL_IO_BUFFER_BYTES: usize = 256 * 1024;
 const ENTITIES_FILE: &str = "entities.rows";
@@ -176,7 +176,7 @@ impl RowRuns {
         self.buffered_bytes = self.buffered_bytes.saturating_add(row.bytes());
         self.buffer.push(row);
         self.pushed += 1;
-        if self.buffered_bytes >= SPILL_RUN_BYTES {
+        if self.buffered_bytes >= GRAPH_ROW_SPILL_RUN_BYTES {
             self.flush(directory)?;
         }
         Ok(())
@@ -221,6 +221,41 @@ pub struct GraphGenerationRowSpill {
     entities: RowRuns,
     relations: RowRuns,
     entity_identities: Vec<GraphEntityId>,
+}
+
+/// Bytes one row adds to a spill buffer: `buffered` counts toward
+/// [`GRAPH_ROW_SPILL_RUN_BYTES`], `resident` adds the row slot the buffer
+/// holds it in.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphSpillRowFootprint {
+    pub buffered: usize,
+    pub resident: usize,
+}
+
+impl GraphSpillRowFootprint {
+    pub fn of_entity(entity: &GraphEntity) -> Result<Self, GraphDbError> {
+        let canonical = canonical_row(entity, "recovered generation entity", &|| Ok(()))?;
+        Ok(Self::of_row(
+            entity.identity.as_str().len() + canonical.len(),
+        ))
+    }
+
+    pub fn of_relation(relation: &GraphGenerationRelation) -> Result<Self, GraphDbError> {
+        let canonical = canonical_row(relation, "recovered generation relation", &|| Ok(()))?;
+        Ok(Self::of_row(
+            relation.identity.as_str().len()
+                + relation.from.identity.as_str().len()
+                + relation.to.identity.as_str().len()
+                + canonical.len(),
+        ))
+    }
+
+    fn of_row(buffered: usize) -> Self {
+        Self {
+            buffered,
+            resident: buffered.saturating_add(size_of::<SpillRow>()),
+        }
+    }
 }
 
 impl GraphGenerationRowSpill {
@@ -402,12 +437,18 @@ impl GraphGenerationRowSpill {
     }
 }
 
+/// A row's canonical bytes, trimmed to their length: a buffered row holds
+/// its allocation until its run is written, and the encoder grows by
+/// doubling.
 fn canonical_row<T: serde::Serialize>(
     value: &T,
     subject: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<u8>, GraphDbError> {
-    checked_canonical_bytes(value, check, subject, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)
+    let mut canonical =
+        checked_canonical_bytes(value, check, subject, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    canonical.shrink_to_fit();
+    Ok(canonical)
 }
 
 /// K-way merges sorted runs into `output`, visiting each distinct row once in
