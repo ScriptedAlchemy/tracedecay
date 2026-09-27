@@ -1,5 +1,8 @@
+use std::collections::BTreeSet;
+
 use serde_json::json;
 use tracedecay_api::is_http_application_operation_exposed;
+use tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID;
 use tracedecay_contracts::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
 };
@@ -10,9 +13,12 @@ use tracedecay_contracts::{
 use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_daemon_protocol::{ApplicationSurfaceRequest, parse_application_surface_request};
 use tracedecay_daemon_service::application_surface::{
-    resolve_application_surface_dispatch, resolve_catalog_tool_binding,
+    application_surface_catalog_ref, resolve_application_surface_dispatch,
 };
-use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface, CatalogContributionV1};
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, BindingSurface, CatalogContributionV1, ProfileId,
+    SurfaceOperationName,
+};
 
 /// The transaction journey, restated here as the reverse authority. Deriving
 /// it from the module under test would let a dropped operation pass vacuously.
@@ -132,15 +138,25 @@ fn only_the_status_read_carries_a_dashboard_binding() {
             "{name} dashboard exposure must match the read-only status contract"
         );
     }
-    let resolved = resolve_catalog_tool_binding(
-        BindingSurface::Dashboard,
-        "tracedecay_native_integration_status",
-    )
-    .expect("dashboard binding resolution");
     assert!(
-        resolved.is_some(),
+        production_catalog_resolves(BindingSurface::Dashboard, "native_integration_status"),
         "the status dashboard binding is declared but the production resolver answers nothing"
     );
+}
+
+/// Whether the daemon's composed catalog resolves `operation` on `surface`
+/// for the default profile at the production protocol revision.
+fn production_catalog_resolves(surface: BindingSurface, operation: &str) -> bool {
+    application_surface_catalog_ref()
+        .expect("application catalog")
+        .resolve_binding(
+            &ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("default profile"),
+            surface,
+            &SurfaceOperationName::new(operation).expect("operation name"),
+            1,
+            &BTreeSet::new(),
+        )
+        .is_some()
 }
 
 fn assert_cli_and_mcp_bindings(contribution: &CatalogContributionV1, name: &str) {
@@ -151,10 +167,8 @@ fn assert_cli_and_mcp_bindings(contribution: &CatalogContributionV1, name: &str)
             }),
             "{name} declares no {surface:?} binding"
         );
-        let resolved = resolve_catalog_tool_binding(surface, &format!("tracedecay_{name}"))
-            .expect("binding resolution");
         assert!(
-            resolved.is_some(),
+            production_catalog_resolves(surface, name),
             "{name} is declared for {surface:?} but the production resolver answers nothing"
         );
     }

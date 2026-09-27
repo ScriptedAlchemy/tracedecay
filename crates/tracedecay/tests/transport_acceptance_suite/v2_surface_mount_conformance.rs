@@ -55,7 +55,6 @@ use tracedecay_api::{
     is_http_application_operation_exposed,
 };
 use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
-use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_session_memory::event_lane::ActivityFamilyV1;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityManifestV1, CatalogSnapshotV1,
@@ -465,10 +464,9 @@ const NEGOTIATED_PROTOCOL_REVISION: u32 = 1;
 
 /// Whether some sanctioned production negotiation resolves this spelling.
 ///
-/// Default-profile surfaces are probed exactly as their adapters probe them.
-/// A binding the default probe cannot see is then probed under each profile
-/// that declares it with exactly its declared required features, the shape
-/// of an initialize-time negotiation (today: the LSP context family). A
+/// The binding is probed under each profile with exactly its declared
+/// required features, the shape of an initialize-time negotiation (none for
+/// most surfaces; today the LSP context family declares some). A
 /// catalog entry that no profile includes, whose features can never be
 /// negotiated, or whose revision range excludes the production protocol still
 /// resolves to `None`, which is exactly the "declared but not reachable"
@@ -478,14 +476,6 @@ fn binding_resolves(
     surface: BindingSurface,
     operation: &str,
 ) -> bool {
-    if resolve_catalog_tool_binding(surface, operation)
-        .unwrap_or_else(|error| {
-            panic!("the application catalog could not resolve {operation} on {surface:?}: {error}")
-        })
-        .is_some()
-    {
-        return true;
-    }
     let Ok(operation_name) = SurfaceOperationName::new(operation) else {
         return false;
     };
