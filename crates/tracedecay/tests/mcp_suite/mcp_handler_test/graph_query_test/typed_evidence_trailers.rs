@@ -256,9 +256,9 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
     );
     // Three point reads: the seed `known`; the container of its one callee,
     // which the dispatch check finds in one batched step and reads to learn
-    // it is no trait; and the callee's summary for the page. Four fan-outs:
-    // `known`'s call relations and their targets (one row each), then the
-    // callee's incoming edges (two rows) and their `Contains` source (one).
+    // it is no trait; and the callee's summary for the page. Two fan-outs:
+    // `known`'s call edges (one row), then the callee's incoming edges (two
+    // rows, the call and its `Contains`).
     let cost = &payload["cost"];
     assert_eq!(
         (
@@ -268,8 +268,8 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
         ),
         (
             &json!({"graph_sealed": 3, "graph_staging": 0}),
-            &json!(4),
-            &json!(5),
+            &json!(2),
+            &json!(3),
         ),
         "{payload:#}"
     );
@@ -277,7 +277,7 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
         cost_trailer(&texts),
         format!(
             "\ntracedecay_cost: wall_us={} graph_sealed_reads=3 graph_staging_reads=0 \
-             adjacency_queries=4 adjacency_rows=5 bytes_hydrated={}",
+             adjacency_queries=2 adjacency_rows=3 bytes_hydrated={}",
             cost["wall_micros"], cost["bytes_hydrated"]
         ),
         "the trailer renders the envelope's receipt"
@@ -298,8 +298,8 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
 
 /// A callers read is metered on the same lease as every other graph read:
 /// one incoming fan-out over `Walk::read` (the call from `known` and the impl
-/// that contains it), both edges read to learn their kind, and the one
-/// caller they reach.
+/// that contains it), whose rows carry each edge's kind, and the one caller
+/// they reach.
 #[tokio::test]
 async fn typed_callers_carry_their_read_cost() {
     let fixture = trailer_fixture().await;
@@ -330,7 +330,7 @@ async fn typed_callers_carry_their_read_cost() {
             &cost["adjacency_rows"],
         ),
         (
-            &json!({"graph_sealed": 3, "graph_staging": 0}),
+            &json!({"graph_sealed": 1, "graph_staging": 0}),
             &json!(1),
             &json!(2),
         ),
@@ -339,7 +339,7 @@ async fn typed_callers_carry_their_read_cost() {
     assert_eq!(
         cost_trailer(&texts),
         format!(
-            "\ntracedecay_cost: wall_us={} graph_sealed_reads=3 graph_staging_reads=0 \
+            "\ntracedecay_cost: wall_us={} graph_sealed_reads=1 graph_staging_reads=0 \
              adjacency_queries=1 adjacency_rows=2 bytes_hydrated={}",
             cost["wall_micros"], cost["bytes_hydrated"]
         )

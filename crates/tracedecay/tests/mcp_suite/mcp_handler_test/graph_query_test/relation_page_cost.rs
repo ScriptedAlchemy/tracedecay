@@ -97,9 +97,9 @@ async fn a_callees_page_reads_its_own_rows_not_every_relation() {
         "{first:#}"
     );
     // Eleven reads: the seed, then the ten callees the page returns. The
-    // 105 relations are enumerated from two batched fan-outs (the calls, then
-    // each call's target) that decode no entity.
-    assert_eq!(page_cost(&first), (11, 2, 210), "{first:#}");
+    // 105 relations are enumerated from one fan-out whose rows name each
+    // call's target, decoding no entity.
+    assert_eq!(page_cost(&first), (11, 1, 105), "{first:#}");
 
     let second = callees_page(&fixture, &node_id, false, Some(&payload["next_cursor"])).await;
     assert_eq!(
@@ -109,7 +109,7 @@ async fn a_callees_page_reads_its_own_rows_not_every_relation() {
         Some(10),
         "{second:#}"
     );
-    assert_eq!(page_cost(&second), (11, 2, 210), "{second:#}");
+    assert_eq!(page_cost(&second), (11, 1, 105), "{second:#}");
     shutdown_graph_fixture(fixture).await;
 }
 
@@ -147,10 +147,10 @@ async fn a_default_callees_page_resolves_dispatch_without_reading_every_callee()
     );
     // Eleven reads, as with dispatch off: the dispatch check finds every
     // callee's container in one batched step (the 105 incoming calls, none a
-    // `Contains`), so no callee is read. Five fan-outs: the two walk hops, the
-    // empty second level, and the two container hops.
-    assert_eq!(page_cost(&first), (11, 5, 315), "{first:#}");
+    // `Contains`), so no callee is read. Three fan-outs: the walk, the empty
+    // second level, and the container hop.
+    assert_eq!(page_cost(&first), (11, 3, 210), "{first:#}");
     let second = callees_page(&fixture, &node_id, true, Some(&payload["next_cursor"])).await;
-    assert_eq!(page_cost(&second), (11, 5, 315), "{second:#}");
+    assert_eq!(page_cost(&second), (11, 3, 210), "{second:#}");
     shutdown_graph_fixture(fixture).await;
 }
