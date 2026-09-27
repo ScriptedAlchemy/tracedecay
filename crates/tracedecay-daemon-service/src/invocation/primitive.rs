@@ -69,8 +69,8 @@ pub(super) async fn execute_primitive(
         return concealed_application_problem(wire_request_id);
     }
     let access = match registered.authorization.current(observed_at).await {
-        Ok(access) if access.scope == registered.scope => access,
-        Ok(_) | Err(_) => return concealed_application_problem(wire_request_id),
+        Ok(access) => access,
+        Err(problem) => return application_problem(wire_request_id, problem),
     };
     let Ok(Some(operation)) =
         tracedecay_contracts::feedback::feedback_surface_operation(surface_operation.as_str())
