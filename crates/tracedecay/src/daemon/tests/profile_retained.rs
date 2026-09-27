@@ -36,7 +36,6 @@ async fn invoke(
         .outcome
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn profile_target_writes_and_reads_the_profile_memory_without_a_project() {
     let home = TempDir::new().expect("isolated home");
@@ -117,7 +116,6 @@ async fn profile_target_writes_and_reads_the_profile_memory_without_a_project() 
     );
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn projectless_mcp_memory_calls_answer_from_the_profile_owner() {
     let home = TempDir::new().expect("isolated home");

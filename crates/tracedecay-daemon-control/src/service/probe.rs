@@ -352,7 +352,7 @@ pub(super) fn daemon_readiness_probe(
     expected_version: &str,
     timeout: std::time::Duration,
 ) -> (DaemonSocketState, DaemonProtocolState) {
-    let (address, auth_token, _) = match current_loopback_authority(profile, transport_hint) {
+    let (address, auth_token, _) = match current_loopback_authority(transport_hint) {
         Ok(Some(authority)) => authority,
         Ok(None) => {
             return (
@@ -524,8 +524,8 @@ pub(super) fn request_daemon_shutdown(
 ) -> Result<DaemonShutdownRequest> {
     const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let deadline = std::time::Instant::now() + SHUTDOWN_TIMEOUT;
-    let (address, auth_token, _) = current_loopback_authority(profile, transport_hint)?
-        .ok_or_else(missing_loopback_authority)?;
+    let (address, auth_token, _) =
+        current_loopback_authority(transport_hint)?.ok_or_else(missing_loopback_authority)?;
     let remaining = remaining_probe_time(deadline, "daemon shutdown request")?;
     let stream = StdTcpStream::connect_timeout(&address, remaining)?;
     request_daemon_shutdown_stream(profile, stream, &auth_token, client_version, deadline)
@@ -715,15 +715,18 @@ pub(super) fn daemon_transport_display(transport_hint: &Path) -> String {
 
 #[cfg(not(unix))]
 fn current_loopback_authority(
-    profile: &ProfileRoot,
     transport_hint: &Path,
 ) -> Result<Option<(std::net::SocketAddr, String, String)>> {
     let profile_root = transport_hint
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(profile.data_dir())
-        .to_path_buf();
-    let profile_root = authority::canonical_identity_path(&profile_root)?;
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "daemon transport hint '{}' names no profile directory",
+                transport_hint.display()
+            ),
+        })?;
+    let profile_root = authority::canonical_identity_path(profile_root)?;
     let Some(record) = authority::current_record(&profile_root)? else {
         return Ok(None);
     };
