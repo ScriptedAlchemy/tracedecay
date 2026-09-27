@@ -504,7 +504,8 @@ pub struct FusionStageInput {
 /// final scalar utility.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FusionComparatorRecordV1 {
-    /// Distinct caller anchors the candidate carries; the leading key.
+    /// The candidate's caller-anchor tier
+    /// (`LexicalRouteReceiptV1::anchor_tiers`); the leading key.
     pub anchor_tier: u32,
     pub exact_class: ExactClass,
     pub utility_micros: u64,
@@ -574,10 +575,9 @@ impl CompositionKernel {
         self.compose_with_anchor_tiers(input, policy, &BTreeMap::new())
     }
 
-    /// Compose with caller-anchor tiers: a fused candidate carrying more
-    /// caller anchors ranks ahead of every candidate carrying fewer, exact
-    /// class included, before dedupe, diversity caps, and pagination see the
-    /// order. Anchors are the caller's statement of what the answer is about;
+    /// Compose with caller-anchor tiers: a fused candidate in a higher tier
+    /// ranks ahead of every candidate in a lower one, exact class included,
+    /// before dedupe, diversity caps, and pagination see the order. Anchors are the caller's statement of what the answer is about;
     /// a lane score cannot carry that through calibration.
     pub fn compose_with_anchor_tiers(
         &self,

@@ -56,7 +56,8 @@ pub struct ContextSurfaceRequestV1 {
     /// result reports each anchor's outcome: the sites this result returns
     /// and, by reason, the admitted sites it could not carry. Bounded and
     /// validated by the retrieval kernel; a
-    /// violation is a typed request rejection.
+    /// violation is a typed request rejection. Identifiers the task names
+    /// (`snake_case`, `camelCase`, `a::b`) are anchored after these.
     pub lexical_anchors: Option<Vec<String>>,
     /// Add a symbol-name lexical route for the identifier-shaped words of the
     /// task text.
@@ -399,8 +400,8 @@ pub struct ContextResultV1 {
     pub code_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub search_matches: Vec<ContextSearchMatchV1>,
-    /// Outcome of every caller `lexical_anchors` entry; empty when none
-    /// were supplied.
+    /// Outcome of every caller `lexical_anchors` entry, then of each
+    /// identifier the task names; empty when there are neither.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lexical_anchors: Vec<ContextLexicalAnchorV1>,
     pub symbols: Vec<PrimitiveSymbolLocationV1>,

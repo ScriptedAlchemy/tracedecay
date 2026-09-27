@@ -282,11 +282,16 @@ where
     let max_code_blocks = request
         .max_code_blocks
         .map_or(5, |value| value.clamp(1, 20) as usize);
-    let requested_anchors = request.lexical_anchors.clone().unwrap_or_default();
     let lexical_routing = lexical_routing::routing_from_parts(
-        requested_anchors.clone(),
+        request.lexical_anchors.clone().unwrap_or_default(),
         request.prefer_symbol.unwrap_or(false),
-    )?;
+    )?
+    .with_task_identifiers(task);
+    let requested_anchors: Vec<String> = lexical_routing
+        .anchors
+        .iter()
+        .map(|anchor| anchor.as_str().to_owned())
+        .collect();
     let memory_options = context_memory_options(&args);
     let memory_read_control =
         context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
