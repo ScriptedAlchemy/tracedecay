@@ -63,9 +63,9 @@ use super::{
     progress_snapshot_for_generation, published, query_authority, query_meta,
     quiesced_background_reconcile_admission, ranked_symbol_names, ranks_symbol,
     rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
-    settle_text_projection, test_project_id, wait_for_live_complete_generation,
-    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
-    wait_for_settled_owner,
+    settle_text_projection, settled_owner_with_idle_admission, test_project_id,
+    wait_for_live_complete_generation, wait_for_queryable_text_generation,
+    wait_for_queryable_text_generation_change, wait_for_settled_owner,
 };
 use crate::{
     code_index::production::{
@@ -5455,6 +5455,111 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
         other => panic!("expected completed scoped query, got {other:?}"),
     };
     assert_eq!(served, target_generation);
+    registry.shutdown().await;
+}
+
+/// A hook hint on unchanged source lapses a settled worktree's source proof
+/// until the worker re-verifies it. An unpinned graph read in that window
+/// waits for the renewal instead of answering unavailable with no generation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unpinned_callees_wait_for_the_source_proof_a_hook_hint_lapsed() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    install_verified_graph_store_on_text(&text, &latest);
+    {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted
+            .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
+            .expect("mounted worktree");
+        *worktree
+            .text_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
+    }
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let generation = latest.generation.manifest().generation_id.clone();
+    let caller = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("caller"))
+        .expect("caller symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let operation = callable_code_operation(CallableCodeOperationKind::Callees).expect("operation");
+    let context = application_context(
+        &operation,
+        latest.generation.snapshot().repository.clone(),
+        latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree identity"),
+    );
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let request = CodeRelationRequest {
+        node_id: caller,
+        maximum_depth: 1,
+        resolve_trait_dispatch: false,
+        scope: CodeQueryScope::new(super::super::queries::unpinned_latest_generation(), None)
+            .expect("scope"),
+        meta: query_meta(),
+    };
+    let served = async || match registry
+        .callees(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await
+    {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("page").generation,
+        other => panic!("expected completed callees, got {other:?}"),
+    };
+    assert_eq!(served().await, generation);
+
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the worker before the hint");
+    assert!(matches!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(admission);
+    });
+    assert_eq!(served().await, generation);
+    release.await.expect("admission release joins");
     registry.shutdown().await;
 }
 
