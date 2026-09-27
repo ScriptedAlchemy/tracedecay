@@ -40,11 +40,12 @@ use tracedecay_runtime_core::resident_memory::{
 use crate::code_index::{
     chunks::content_digest,
     production::{
-        CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1,
-        CodeIndexInterruptionV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-        CodeIndexPublishedGenerationV1, SealedGenerationSegmentPublicationV1,
-        SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
-        SharedPhysicalCodeArtifactPoolV1, VerifiedSealedTextGenerationMetadataV1,
+        CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
+        CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
+        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+        SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
+        VerifiedSealedTextGenerationMetadataV1,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -480,6 +481,33 @@ pub(super) struct GenerationDecodeBudgetV1 {
     pub(super) worktree_id: WorktreeId,
 }
 
+fn publish_graph_build_bound_gauges(bound: &CodeGraphBuildBoundV1) {
+    hotpath::gauge!("daemon.code_index.graph_build.bound.decode_window_bytes")
+        .set(bound.decode_window_bytes);
+    hotpath::gauge!("daemon.code_index.graph_build.bound.resolution_file_bytes")
+        .set(bound.resolution_file_bytes);
+    hotpath::gauge!("daemon.code_index.graph_build.bound.binding_bytes").set(bound.binding_bytes);
+    hotpath::gauge!("daemon.code_index.graph_build.bound.bound_set_bytes")
+        .set(bound.bound_set_bytes);
+    hotpath::gauge!("daemon.code_index.graph_build.bound.derived_bytes").set(bound.derived_bytes);
+    hotpath::gauge!("daemon.code_index.graph_build.bound.emit_batch_bytes")
+        .set(bound.emit_batch_bytes);
+    hotpath::gauge!("daemon.code_index.graph_build.bound.emit_spill_bytes")
+        .set(bound.emit_spill_bytes);
+    hotpath::gauge!("daemon.code_index.graph_build.bound.emit_window_bytes")
+        .set(bound.emit_window_bytes);
+    hotpath::gauge!("daemon.code_index.graph_build.bound.store_bytes").set(bound.store_bytes);
+    hotpath::gauge!("daemon.code_index.graph_build.bound.peak_bytes").set(bound.peak_bytes());
+    tracing::info!(
+        event = "code_index_graph_build_bound",
+        resolve_bytes = bound.resolve_bytes(),
+        emit_bytes = bound.emit_bytes(),
+        store_bytes = bound.store_bytes,
+        bound = ?bound,
+        "sized the sealed graph build of the active generation"
+    );
+}
+
 const GENERATION_DECODE_RESIDENT_COMPONENT_V1: &str = "code-index-generation-decode-v1";
 const SEALED_GRAPH_BUILD_RESIDENT_COMPONENT_V1: &str = "code-graph-sealed-build-v1";
 
@@ -492,13 +520,29 @@ pub(super) enum ActiveGenerationWorkV1 {
     SealedGraphBuild,
 }
 
-/// What each pass over one generation costs, measured on a copy this process
+/// What each pass over one generation costs, sized on a copy this process
 /// held.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ActiveGenerationChargesV1 {
     generation_id: CodeGenerationId,
+    content_identity: ContentDigest,
     decode_bytes: u64,
-    graph_build_bytes: u64,
+    /// The sealed graph build's structural peak, or why it could not be sized.
+    graph_build_bound: Result<u64, String>,
+    /// What the last graph build of this content grew the resident set by.
+    graph_build_measured: Option<u64>,
+}
+
+impl ActiveGenerationChargesV1 {
+    /// The larger of the structural bound and the last measured build: the
+    /// bound covers a first build, the measurement what the bound missed.
+    fn graph_build_bytes(&self) -> Result<u64, String> {
+        match (&self.graph_build_bound, self.graph_build_measured) {
+            (Ok(bound), measured) => Ok(measured.map_or(*bound, |measured| measured.max(*bound))),
+            (Err(_), Some(measured)) => Ok(measured),
+            (Err(error), None) => Err(error.clone()),
+        }
+    }
 }
 
 /// The resident cost of materializing the active generation.
@@ -2212,10 +2256,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let decoded = self.decode_active_generation();
         drop(charge);
         if let Ok(Some(generation)) = decoded.as_ref() {
+            let charges = self.active_generation_charges(generation);
             let mut state = self.cache.lock_state()?;
             if state.active_epoch == lease.epoch {
                 state.forget(&generation.manifest().generation_id);
-                self.record_active_decode_charge(generation);
+                self.record_active_generation_charges(charges);
                 state.active = Some(Arc::clone(generation));
             } else if let Some(active) = state.active.as_ref() {
                 // A publication landed while this decode ran. The newer active
@@ -2345,9 +2390,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     /// Charge building the active generation's code graph from its sealed
-    /// segments the way a decode is charged, with the generation's retained
-    /// bytes: the build holds its cross-file resolution inputs and then its
-    /// compact graph store, both bounded by the generation it projects. The
+    /// segments the way a decode is charged: with the build's structural
+    /// peak, raised to what the last build of the same content measured. The
     /// caller holds the reservation for the build.
     pub(super) fn admit_sealed_graph_build(
         &self,
@@ -2447,19 +2491,79 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     /// A decoded copy charges its next decode what this decode measured at
     /// its peak, which covers the pass transients above what it retains; a
-    /// generation built in memory has only its retained bytes to go on.
-    fn record_active_decode_charge(&self, generation: &CodeIndexPublishedGenerationV1) {
+    /// generation built in memory has only its retained bytes to go on. Its
+    /// graph build is charged the structural bound of the build, raised to
+    /// what the last build of the same content measured.
+    fn active_generation_charges(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> ActiveGenerationChargesV1 {
         let retained = generation.retained_bytes();
-        *self
+        let graph_build_bound = generation
+            .graph_build_bound()
+            .map(|bound| {
+                publish_graph_build_bound_gauges(&bound);
+                bound.peak_bytes()
+            })
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "code_index_graph_build_bound_failed",
+                    error = %error,
+                    "the sealed graph build of the active generation could not be sized"
+                );
+                error.to_string()
+            });
+        let content_identity = generation.snapshot().content_identity.clone();
+        let graph_build_measured = self
             .active_decode_charge
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(ActiveGenerationChargesV1 {
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|charges| charges.content_identity == content_identity)
+            .and_then(|charges| charges.graph_build_measured);
+        ActiveGenerationChargesV1 {
             generation_id: generation.manifest().generation_id.clone(),
+            content_identity,
             decode_bytes: generation
                 .decode_peak_growth_bytes()
                 .map_or(retained, |peak| peak.max(retained)),
-            graph_build_bytes: retained,
-        });
+            graph_build_bound,
+            graph_build_measured,
+        }
+    }
+
+    fn record_active_generation_charges(&self, charges: ActiveGenerationChargesV1) {
+        *self
+            .active_decode_charge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(charges);
+    }
+
+    /// Records what building `generation_id`'s code graph grew the resident
+    /// set by, so the next build of the same content is charged at least that.
+    pub(super) fn record_sealed_graph_build_growth(
+        &self,
+        generation_id: &CodeGenerationId,
+        growth_bytes: u64,
+    ) {
+        hotpath::gauge!("daemon.code_index.graph_build.measured_growth_bytes").set(growth_bytes);
+        let mut charges = self
+            .active_decode_charge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(charges) = charges
+            .as_mut()
+            .filter(|charges| &charges.generation_id == generation_id)
+        {
+            tracing::info!(
+                event = "code_index_graph_build_measured",
+                generation_id = %generation_id,
+                growth_bytes,
+                bound_bytes = ?charges.graph_build_bound,
+                "sealed graph build resident growth measured"
+            );
+            charges.graph_build_measured = Some(growth_bytes);
+        }
     }
 
     /// What reading the whole active generation into memory costs now:
@@ -2482,19 +2586,18 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .as_ref()
             .filter(|charges| charges.generation_id.as_str() == pointer.generation_id)
             .map(|charges| {
-                (
-                    charges.generation_id.clone(),
-                    match work {
-                        ActiveGenerationWorkV1::Decode => charges.decode_bytes,
-                        ActiveGenerationWorkV1::SealedGraphBuild => charges.graph_build_bytes,
-                    },
-                )
+                let bytes = match work {
+                    ActiveGenerationWorkV1::Decode => Ok(charges.decode_bytes),
+                    ActiveGenerationWorkV1::SealedGraphBuild => charges.graph_build_bytes(),
+                };
+                (charges.generation_id.clone(), bytes)
             });
         Ok(match charge {
-            Some((generation_id, bytes)) => ActiveGenerationDecodeChargeV1::Measured {
+            Some((generation_id, Ok(bytes))) => ActiveGenerationDecodeChargeV1::Measured {
                 generation_id,
                 bytes,
             },
+            Some((_, Err(error))) => return Err(Self::unavailable(error)),
             None => ActiveGenerationDecodeChargeV1::Unmeasured,
         })
     }
@@ -3069,6 +3172,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             self.commit_observed_pointer(&_store_lock, prior_bytes.as_deref(), &pointer, &bytes)
         })?;
         drop(source_fence);
+        let charges = matches!(self.disposition, CodeIndexPublicationDispositionV1::Active)
+            .then(|| self.active_generation_charges(&generation));
         let mut state = self.cache.lock_state()?;
         if undecoded_expectation.is_none() {
             let cached_active = state
@@ -3094,7 +3199,9 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 // deadline. Install the built generation in both dispositions.
                 self.active_encoded_bytes
                     .store(generation_size, Ordering::Release);
-                self.record_active_decode_charge(&generation);
+                if let Some(charges) = charges {
+                    self.record_active_generation_charges(charges);
+                }
                 state.active = Some(generation);
             }
             CodeIndexPublicationDispositionV1::RetainedHistory => {

@@ -799,7 +799,9 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
     );
 
     // A request outside the typed contract is the owner's refusal, flagged as
-    // a tool error rather than served as a listing.
+    // a tool error rather than served as a listing. Its record travels as MCP
+    // structured content, as on a project connection, never as a result
+    // member MCP clients drop.
     let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
         .await
         .expect("refused project list should not time out")
@@ -807,17 +809,20 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
         .expect("projectless refusal");
     let refused: Value = serde_json::from_str(&line).expect("refusal json");
     let result = &refused["result"];
+    let problem = &result["structuredContent"]["problem"];
     assert_eq!(
         (
             &refused["id"],
             &result["isError"],
-            &result["problem"]["kind"],
-            &result["problem"]["code"],
-            &result["problem"]["message"],
+            result.get("problem"),
+            &problem["kind"],
+            &problem["code"],
+            &problem["message"],
         ),
         (
             &json!(9),
             &json!(true),
+            None,
             &json!("invalid_request"),
             &json!("application.surface.invalid_request"),
             &json!(

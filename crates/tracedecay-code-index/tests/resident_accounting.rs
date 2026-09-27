@@ -282,6 +282,10 @@ fn decode(manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> CodeIndexPub
 /// leaves live. Decoding the whole generation and projecting it in one piece
 /// peaked at 38,827,295 bytes when the generation projected 4,201 entities and
 /// 5,100 relations, an edge entity plus two relations per code edge.
+///
+/// Admission charges the build its bound before it runs, so the bound must
+/// track the build's real peak: charging the decoded generation instead
+/// over-states it by more than half and parks whatever runs beside it.
 #[test]
 fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
     const PEAK_BUDGET_BYTES: usize = 19_000_000;
@@ -291,6 +295,11 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
         .build_and_publish(request(300), &Active)
         .expect("build");
     let (manifest, segments) = seal(&built);
+    // One worker reads four files per window, so the 300-file fixture spans
+    // 75 windows the way a production corpus spans its windows.
+    tracedecay_code_index::parallelism::force_indexing_workers_for_test(1);
+    let bound = built.graph_build_bound().expect("graph build bound");
+    let retained = usize::try_from(built.retained_bytes()).expect("retained");
     drop(built);
     let scratch = tempfile::tempdir().expect("scratch");
     let projection =
@@ -301,9 +310,6 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
     let spill = GraphGenerationRowSpill::create(scratch.path().join("rows"), projection.clone())
         .expect("spill");
 
-    // One worker reads four files per window, so the 300-file fixture spans
-    // 75 windows the way a production corpus spans its windows.
-    tracedecay_code_index::parallelism::force_indexing_workers_for_test(1);
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
     let source = SealedGenerationFileWindowsV1::open(&manifest).expect("sealed manifest");
@@ -318,13 +324,21 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
     .expect("sealed graph builds");
     let peak = PEAK.load(Ordering::Relaxed) - before;
     tracedecay_code_index::parallelism::clear_forced_indexing_workers_for_test();
-    eprintln!("GRAPH ROWS peak {peak}");
 
     // Each of the fixture's 1,200 code edges is one relation row.
     assert_eq!(spilled.row_counts(), (3_001, 3_900));
     assert!(
         peak <= PEAK_BUDGET_BYTES,
         "the graph build held {peak} bytes at peak, over its {PEAK_BUDGET_BYTES}-byte budget"
+    );
+    let charge = usize::try_from(bound.peak_bytes()).expect("charge");
+    assert!(
+        charge * 100 >= peak * 85 && charge * 100 <= peak * 115,
+        "the graph build held {peak} bytes at peak but its bound is {charge}: {bound:?}"
+    );
+    assert!(
+        retained * 100 > peak * 115,
+        "the decoded generation ({retained} bytes) no longer over-states the build ({peak})"
     );
 }
 

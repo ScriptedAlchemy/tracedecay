@@ -768,16 +768,13 @@ where
                         let direct = match crate_qualified {
                             None => {
                                 (has_rust_glob
-                                    && hotpath::measure_block!(
-                                        "code_index.seal.glob_expansion",
-                                        rust_parent_glob_import_matches(
-                                            files,
-                                            rust,
-                                            index,
-                                            &reference.reference_name,
-                                            reference.kind,
-                                            target,
-                                        )
+                                    && rust_parent_glob_import_matches(
+                                        files,
+                                        rust,
+                                        index,
+                                        &reference.reference_name,
+                                        reference.kind,
+                                        target,
                                     ))
                                     // Rust `::` paths bind only through the
                                     // hop-by-hop walk below; a bare file-stem
@@ -801,12 +798,9 @@ where
                             ),
                         };
                         direct
-                            || walk.as_ref().is_some_and(|walk| {
-                                hotpath::measure_block!(
-                                    "code_index.seal.qualified_path_walk",
-                                    walk.matches(files, rust, target)
-                                )
-                            })
+                            || walk
+                                .as_ref()
+                                .is_some_and(|walk| walk.matches(files, rust, target))
                     }
                     Some(binding) => match binding.module_kind {
                         ImportModuleKindV1::ProjectRelative => project_import_matches(
@@ -818,10 +812,7 @@ where
                         ImportModuleKindV1::BareModule
                             if file.extraction.language.as_str() == "rust" =>
                         {
-                            hotpath::measure_block!(
-                                "code_index.seal.reexport_walk",
-                                rust_bare_import_matches(files, rust, index, binding, target, "")
-                            )
+                            rust_bare_import_matches(files, rust, index, binding, target, "")
                         }
                         ImportModuleKindV1::BareModule => false,
                     },
