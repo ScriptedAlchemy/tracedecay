@@ -250,9 +250,7 @@ async fn automation_run_artifact_view_refuses_an_unknown_kind() {
             json!({"run_id": run_id, "kind": "traces"})
         )
         .await,
-        format!(
-            "tool execution failed: config error: automation run artifact not found: {run_id}/traces"
-        )
+        format!("automation run artifact not found: {run_id}/traces")
     );
 
     fixture.shutdown().await;

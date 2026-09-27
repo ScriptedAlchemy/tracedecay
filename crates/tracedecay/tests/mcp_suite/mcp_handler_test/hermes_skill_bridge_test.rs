@@ -370,14 +370,12 @@ async fn hermes_skill_bridge_mcp_returns_standard_install_inventory() {
         )
         .await,
     );
-    let non_bool = json_payload(
-        &call_bridge(
-            &server,
-            3,
-            json!({"format": "json", "include_skill_bodies": "true", "include_pending_payloads": 1}),
-        )
-        .await,
-    );
+    let non_bool = call_bridge(
+        &server,
+        3,
+        json!({"format": "json", "include_skill_bodies": "true", "include_pending_payloads": 1}),
+    )
+    .await;
     let included = json_payload(
         &call_bridge(
             &server,
@@ -388,7 +386,10 @@ async fn hermes_skill_bridge_mcp_returns_standard_install_inventory() {
     );
 
     assert_eq!(omitted, populated_inventory(&isolated.home, false, false));
-    assert_eq!(non_bool, populated_inventory(&isolated.home, false, false));
+    assert_eq!(
+        non_bool["error"]["message"],
+        "tool execution failed: config error: invalid arguments for tracedecay_hermes_skill_bridge: invalid type: string \"true\", expected a boolean"
+    );
     assert_eq!(included, populated_inventory(&isolated.home, true, true));
     assert_eq!(
         included["bridge"]["skills"][1]["body_markdown"],

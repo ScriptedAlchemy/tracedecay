@@ -19,6 +19,9 @@ use crate::mcp_server_test::support::{
 };
 use crate::support::{TestTraceDecay, open_active_project_scoped_runtime};
 
+const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool skill_view ...` \
+(`tracedecay tool skill_view --help` for parameters). If MCP calls keep failing or timing out, fall \
+back to that CLI instead of querying .tracedecay databases directly.";
 const PROBE_ID: &str = "probe-skill";
 const OTHER_ID: &str = "other-skill";
 const PROBE_BODY: &str = "Read the checklist, then stop.";
@@ -362,13 +365,11 @@ async fn skill_view_denies_missing_id_and_unknown_skill() {
     assert_eq!(
         missing["error"],
         json!({
-            "code": -32602,
-            "message": "missing required parameter: id",
+            "code": -32603,
+            "message": "tool execution failed: config error: invalid arguments for tracedecay_skill_view: missing field `id`",
             "data": {
                 "tool": "tracedecay_skill_view",
-                "reason_code": "missing_required_parameter",
-                "retryable": false,
-                "detail": "missing required parameter: id"
+                "cli_fallback": CLI_FALLBACK,
             }
         })
     );

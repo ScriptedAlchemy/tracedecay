@@ -121,7 +121,7 @@ async fn skill_list_returns_stored_skills_for_the_requested_state() {
             "id": 1,
             "error": {
                 "code": -32603,
-                "message": "tool execution failed: config error: unknown managed skill state: retired",
+                "message": "tool execution failed: config error: invalid arguments for tracedecay_skill_list: unknown variant `retired`, expected one of `active`, `disabled`, `archived`",
                 "data": {
                     "tool": "tracedecay_skill_list",
                     "cli_fallback": CLI_FALLBACK,
