@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.56](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.55...v1.0.0-beta.56) (2026-09-27)
+
+
+### Features
+
+* **contracts:** carry problem detail through edit, graph, diagnostics ([#2289](https://github.com/ScriptedAlchemy/tracedecay/issues/2289)) ([0bbebcb](https://github.com/ScriptedAlchemy/tracedecay/commit/0bbebcbd7bb9dce9136af50ad8380a8152d1cb72))
+* **index:** bound durable artifact restore ([d054014](https://github.com/ScriptedAlchemy/tracedecay/commit/d0540149fe89e6dafeff2b94a8ed7740ff4707d0))
+* **mcp:** rank context related symbols before the cut ([#2292](https://github.com/ScriptedAlchemy/tracedecay/issues/2292)) ([cdc1a2a](https://github.com/ScriptedAlchemy/tracedecay/commit/cdc1a2a64dd46f62954d20ad278d8882b1b9d3dd))
+* **runtime:** bound durable restore and memory ownership ([969c65f](https://github.com/ScriptedAlchemy/tracedecay/commit/969c65fb66af81fdffe8723256a427387489a395))
+
+
+### Bug Fixes
+
+* **code-index:** bind scoped glob and inline-mod use calls ([#2294](https://github.com/ScriptedAlchemy/tracedecay/issues/2294)) ([02d91e5](https://github.com/ScriptedAlchemy/tracedecay/commit/02d91e533a1370cbec5add138a18e6d3caaabf69))
+* **daemon-control:** compile Windows callers; gate the Windows target ([#2290](https://github.com/ScriptedAlchemy/tracedecay/issues/2290)) ([d9ef7b1](https://github.com/ScriptedAlchemy/tracedecay/commit/d9ef7b1f3067d32276acb3851a45cb8c3ce5a21c)), closes [#2286](https://github.com/ScriptedAlchemy/tracedecay/issues/2286)
+* **mcp_suite:** seed stores without config.json ([0adc022](https://github.com/ScriptedAlchemy/tracedecay/commit/0adc022075dab60cfc73fcb69ebae270244e8103)), closes [#2215](https://github.com/ScriptedAlchemy/tracedecay/issues/2215)
+* **mcp:** bound plan context reads and derive lane freshness once ([#2297](https://github.com/ScriptedAlchemy/tracedecay/issues/2297)) ([e891e6c](https://github.com/ScriptedAlchemy/tracedecay/commit/e891e6c41588eb3b0740971ca13ad21d0f967be0))
+* **mcp:** preserve parked route details ([21552e3](https://github.com/ScriptedAlchemy/tracedecay/commit/21552e37643f52f4fc993642f14db4c819416e8a))
+
+
+### Performance Improvements
+
+* **code-index:** decode sealed graph inputs once ([0d1f06f](https://github.com/ScriptedAlchemy/tracedecay/commit/0d1f06f02cca52b24fc764f42d4977d7f5344abb))
+* **code-index:** share one decode across linked worktrees ([#2301](https://github.com/ScriptedAlchemy/tracedecay/issues/2301)) ([3428779](https://github.com/ScriptedAlchemy/tracedecay/commit/3428779820ac323aacb2f88dca4a4945eab91cc6)), closes [#2106](https://github.com/ScriptedAlchemy/tracedecay/issues/2106)
+* **daemon:** reuse worker threads and release mimalloc heaps ([#2295](https://github.com/ScriptedAlchemy/tracedecay/issues/2295)) ([450a55f](https://github.com/ScriptedAlchemy/tracedecay/commit/450a55fb4dd9ea142180a3a5321a67c9f3d1e243))
+* **store:** compact lexical postings, symbol entries, and graph keys ([#2287](https://github.com/ScriptedAlchemy/tracedecay/issues/2287)) ([8feb940](https://github.com/ScriptedAlchemy/tracedecay/commit/8feb940c6e4ccd1c1db3d5ea0b70f99b507a2abe))
+
 ## [1.0.0-beta.55](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.54...v1.0.0-beta.55) (2026-09-27)
 
 
