@@ -17,6 +17,7 @@
 use std::collections::BTreeSet;
 
 use gix::bstr::ByteSlice;
+use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
 /// Failure to classify worktree changes through gix.
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +108,9 @@ impl WorktreeChangeClassificationV1 {
             // Submodule content belongs to its own repository identity and is
             // never indexed as part of this worktree.
             .index_worktree_submodules(None)
+            .index_worktree_options_mut(|options| {
+                options.thread_limit = Some(GIT_STATUS_MODIFICATION_CHECK_THREADS);
+            })
             .into_iter(Vec::<gix::bstr::BString>::new())
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
         for item in status {

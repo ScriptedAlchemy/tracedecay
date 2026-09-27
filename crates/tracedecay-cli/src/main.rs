@@ -53,6 +53,7 @@ mod hook_cmd;
 mod lsp_cmd;
 mod macos_codesign;
 mod monitor_cmd;
+mod process_allocator;
 mod product_runtime;
 mod project_cmd;
 mod remote_command;
@@ -696,6 +697,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     tracedecay_daemon_service::logging::install_stderr_tracing(stderr_tracing_default(
         cli.command.as_ref(),
     ));
+    process_allocator::configure_process_allocator();
     // Bound only Rayon's global pool for daemon workloads that actually use
     // it. Code indexing owns a separately planned pool shared by semantic
     // projection, so changing this ceiling cannot silently narrow that budget.

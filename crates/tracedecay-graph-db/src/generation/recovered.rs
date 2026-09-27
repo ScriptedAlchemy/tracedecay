@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::sync_channel;
 
 use grafeo_common::types::{ArcStr, NodeId};
 use grafeo_core::graph::GraphStore;
@@ -112,7 +114,11 @@ pub(crate) fn recovered_generation_digest_chunked(
     )?;
     let namespace_projection = physical_namespace_projection_map(identity)?;
 
-    if entities.len().saturating_add(relations.len()) <= chunk_rows {
+    // A caller already on a Rayon worker would block that worker on chunks
+    // queued behind it on the same pool, so it proves serially.
+    if entities.len().saturating_add(relations.len()) <= chunk_rows
+        || rayon::current_thread_index().is_some()
+    {
         digest_rows_serial(
             store.as_ref(),
             &entities,
@@ -249,12 +255,13 @@ fn digest_rows_parallel(
         .min(PROOF_MAX_WORKERS)
         .min(chunks.len())
         .max(1);
-    // One scoped thread per worker keeps the runtime ceiling truthful while
-    // the consumer hashes the oldest chunk. Each join opens one slot for the
-    // next sorted chunk, so at most `PROOF_MAX_WORKERS` chunk buffers exist.
+    // Chunks encode as tasks on the persistent Rayon pool, never on threads
+    // created per chunk, while this thread hashes the oldest chunk in order.
+    // Each result opens one slot for the next sorted chunk, so at most
+    // `PROOF_MAX_WORKERS` chunk buffers exist.
     let in_flight = workers;
     let abort = AtomicBool::new(false);
-    std::thread::scope(|scope| {
+    rayon::in_place_scope(|scope| {
         let mut pending = VecDeque::with_capacity(in_flight);
         let mut next_chunk = 0usize;
         let result = (|| -> Result<(), GraphDbError> {
@@ -264,15 +271,22 @@ fn digest_rows_parallel(
                     let store = Arc::clone(&store);
                     let abort = &abort;
                     let namespace_projection = &*namespace_projection;
-                    pending.push_back(scope.spawn(move || {
-                        encode_proof_chunk(store.as_ref(), chunk, namespace_projection, abort)
-                    }));
+                    let (sender, receiver) = sync_channel(1);
+                    scope.spawn(move |_| {
+                        let encoded = catch_unwind(AssertUnwindSafe(|| {
+                            encode_proof_chunk(store.as_ref(), chunk, namespace_projection, abort)
+                        }));
+                        // The consumer stops listening only after it failed;
+                        // its error is the one reported.
+                        let _ = sender.send(encoded);
+                    });
+                    pending.push_back(receiver);
                     next_chunk += 1;
                 }
-                let Some(handle) = pending.pop_front() else {
+                let Some(receiver) = pending.pop_front() else {
                     return Ok(());
                 };
-                let encoded = handle.join().map_err(|_| {
+                let encoded = receiver.recv().ok().and_then(Result::ok).ok_or_else(|| {
                     GraphDbError::unavailable("recovered generation verification worker panicked")
                 })??;
                 let mut start = 0usize;
@@ -284,12 +298,9 @@ fn digest_rows_parallel(
             }
         })();
         if result.is_err() {
+            // Outstanding tasks see the flag between rows and stop; the scope
+            // waits for them before returning.
             abort.store(true, Ordering::Release);
-        }
-        // Drain outstanding workers so the scope closes without blocking on
-        // encoders that no longer have a consumer.
-        for handle in pending {
-            let _ = handle.join();
         }
         result
     })

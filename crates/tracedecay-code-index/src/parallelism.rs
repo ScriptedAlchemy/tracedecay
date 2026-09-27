@@ -555,6 +555,16 @@ pub fn install_worker_plan(
     Ok(installed)
 }
 
+/// Run `operation` once on every thread of the process's installed indexing
+/// pool and wait for all of them, so per-thread state (the thread's allocator
+/// heap) is released on the thread that owns it before the caller measures.
+/// A process without an installed plan has no pool and runs nothing.
+pub fn run_on_every_installed_worker(operation: fn()) {
+    if let Some(runtime) = WORKER_RUNTIME.get() {
+        runtime.0.pool.broadcast(|_| operation());
+    }
+}
+
 /// Canonical runtime status for configuration/dashboard projection.
 #[must_use]
 pub fn installed_worker_status() -> Option<CodeIndexWorkerStatusV1> {

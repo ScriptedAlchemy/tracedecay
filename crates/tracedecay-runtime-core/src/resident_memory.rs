@@ -718,42 +718,58 @@ impl ProcessAllocatorTrimV1 {
     }
 }
 
+/// The process allocator's release call, installed once by the composition
+/// root that chose the allocator. Without one, a glibc build trims its arenas.
+static PROCESS_ALLOCATOR_RELEASE_V1: OnceLock<fn()> = OnceLock::new();
+
+/// Install `release` as the call that returns the process allocator's freed
+/// pages to the kernel. The binary that selects a global allocator installs
+/// its release at startup; a second installation is refused.
+pub fn install_process_allocator_release_v1(release: fn()) -> Result<(), String> {
+    PROCESS_ALLOCATOR_RELEASE_V1
+        .set(release)
+        .map_err(|_| "the process allocator release is already installed".to_owned())
+}
+
 /// Return freed-but-retained allocator pages to the kernel.
 ///
-/// glibc keeps freed chunks inside its per-thread arenas and only unmaps a
-/// heap from its top, so a fan-out that allocates and frees on dozens of
-/// worker threads leaves most of that memory resident forever: indexing a
-/// 68 MB source tree on four cores measured 8.5 GB of arena system memory
-/// with 3.5 GB live and 4.9 GB free, and one `malloc_trim(0)` returned 3.9 GB
-/// of RSS at once. Measured RSS is what admission trusts, so those pages
-/// refuse real work. Other allocators return zero here; the reclaimer is a
-/// no-op for them.
+/// Allocators keep freed pages for reuse: glibc inside its per-thread arenas
+/// (indexing a 68 MB source tree on four cores measured 8.5 GB of arena
+/// system memory with 3.5 GB live, and one `malloc_trim(0)` returned 3.9 GB),
+/// mimalloc in pages it purges only after a delay or on collection. Measured
+/// RSS is what admission trusts, so those pages refuse real work until the
+/// allocator is asked for them.
 #[must_use]
 pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
+    let before_bytes = sampled_process_resident_bytes_v1();
+    let trimmed = if let Some(release) = PROCESS_ALLOCATOR_RELEASE_V1.get() {
+        release();
+        true
+    } else {
+        glibc_trim()
+    };
+    let after_bytes = sampled_process_resident_bytes_v1();
+    let trim = ProcessAllocatorTrimV1 {
+        trimmed,
+        before_bytes,
+        after_bytes,
+    };
+    hotpath::gauge!("daemon.memory.allocator_trim_released_bytes").set(trim.released_bytes());
+    trim
+}
+
+fn glibc_trim() -> bool {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
-        let before_bytes = sampled_process_resident_bytes_v1();
         // SAFETY: `malloc_trim` is a process-wide, thread-safe glibc
         // maintenance call that takes no pointers and invalidates no live
         // allocation; it only advises the kernel about pages the allocator
         // no longer uses.
-        let trimmed = unsafe { libc::malloc_trim(0) } == 1;
-        let after_bytes = sampled_process_resident_bytes_v1();
-        let trim = ProcessAllocatorTrimV1 {
-            trimmed,
-            before_bytes,
-            after_bytes,
-        };
-        hotpath::gauge!("daemon.memory.allocator_trim_released_bytes").set(trim.released_bytes());
-        trim
+        unsafe { libc::malloc_trim(0) == 1 }
     }
     #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
     {
-        ProcessAllocatorTrimV1 {
-            trimmed: false,
-            before_bytes: None,
-            after_bytes: None,
-        }
+        false
     }
 }
 
