@@ -758,6 +758,23 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
         .await
         .expect("write tools/call");
     writer.write_all(b"\n").await.expect("newline");
+    writer
+        .write_all(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_project_list",
+                    "arguments": {"format": "json", "limt": 5}
+                }
+            }))
+            .expect("tools/call json")
+            .as_bytes(),
+        )
+        .await
+        .expect("write refused tools/call");
+    writer.write_all(b"\n").await.expect("newline");
     writer.shutdown().await.expect("shutdown writer");
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
@@ -779,6 +796,35 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
             .as_str()
             .is_some_and(|path| path.ends_with("global.db")),
         "listing must name the registry it read: {payload}"
+    );
+
+    // A request outside the typed contract is the owner's refusal, flagged as
+    // a tool error rather than served as a listing.
+    let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
+        .await
+        .expect("refused project list should not time out")
+        .expect("read refusal")
+        .expect("projectless refusal");
+    let refused: Value = serde_json::from_str(&line).expect("refusal json");
+    let result = &refused["result"];
+    assert_eq!(
+        (
+            &refused["id"],
+            &result["isError"],
+            &result["problem"]["kind"],
+            &result["problem"]["code"],
+            &result["problem"]["message"],
+        ),
+        (
+            &json!(9),
+            &json!(true),
+            &json!("invalid_request"),
+            &json!("application.surface.invalid_request"),
+            &json!(
+                "invalid arguments for tracedecay_project_list: unknown field `limt`, expected `limit`"
+            ),
+        ),
+        "{refused}"
     );
 
     server_task

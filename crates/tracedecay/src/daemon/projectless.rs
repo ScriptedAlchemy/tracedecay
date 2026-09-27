@@ -429,7 +429,10 @@ async fn projectless_registry_response(
         Err(error) => Err(error),
     };
     match result {
-        Ok(result) => JsonRpcResponse::success(id, result.value),
+        Ok(mut result) => {
+            tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+            JsonRpcResponse::success(id, result.value)
+        }
         Err(error) => tool_error_response(id, tool_name, &error),
     }
 }

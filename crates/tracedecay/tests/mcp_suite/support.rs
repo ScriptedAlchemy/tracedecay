@@ -624,11 +624,12 @@ pub(crate) async fn handle_tool_call(
     //
     // Every retained-surface tool (LCM, message search, fact store, session
     // and workflow reads) executes through the daemon retained owner in
-    // production, and every graph-tool and profile registry read through its
-    // graph-tool or profile owner, so dispatch them through the registered
-    // test server, which mounts those owners in process, rather than the bare
-    // registry path whose missing executor truthfully reports the transport as
-    // unavailable.
+    // production, and the project-info and profile registry reads through the
+    // serving server's graph-tool or profile owner, which alone holds the
+    // request counters and scope prefix `tracedecay_status` reports, so
+    // dispatch them through the registered test server, which mounts those
+    // owners in process, rather than the bare registry path whose missing
+    // executor truthfully reports the transport as unavailable.
     #[cfg(feature = "test-transport")]
     let retained =
         tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some();
@@ -636,7 +637,14 @@ pub(crate) async fn handle_tool_call(
     let owner_answered =
         tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(tool_name)
             .is_some_and(|operation| {
-                operation.is_graph_tool() || operation.is_profile_registry_read()
+                operation.is_profile_registry_read()
+                    || matches!(
+                        operation,
+                        tracedecay_tool_catalog::ApplicationSurfaceOperation::Status
+                            | tracedecay_tool_catalog::ApplicationSurfaceOperation::ActiveProject
+                            | tracedecay_tool_catalog::ApplicationSurfaceOperation::RemoteStatus
+                            | tracedecay_tool_catalog::ApplicationSurfaceOperation::Runtime
+                    )
             });
     #[cfg(feature = "test-transport")]
     if retained || owner_answered {

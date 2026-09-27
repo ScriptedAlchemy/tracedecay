@@ -1,6 +1,6 @@
 //! Project registry, runtime, and automation admin tool definitions.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{def, def_always_load, def_rw};
 use crate::ToolDefinition;

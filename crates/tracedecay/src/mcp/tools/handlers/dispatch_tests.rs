@@ -579,12 +579,10 @@ async fn status_wait_outcome_rides_beside_the_body_and_the_budget_refusal_names_
             })
         });
     let status = |args: Value| {
-        handle_tool_call_with_registry_options(
+        dispatch_on_graph_authority(
             &cg,
             "tracedecay_status",
             args,
-            None,
-            None,
             ToolCallRegistryOptions {
                 code_index_readiness_waiter: Some(std::sync::Arc::clone(&waiter)),
                 ..Default::default()

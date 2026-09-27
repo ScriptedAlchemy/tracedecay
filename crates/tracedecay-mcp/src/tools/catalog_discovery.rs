@@ -467,7 +467,7 @@ mod tests {
         assert!(
             definitions
                 .iter()
-                .any(|definition| definition.name == "tracedecay_status"),
+                .any(|definition| definition.name == "tracedecay_multi_root_execute"),
             "legacy production tools remain discoverable until cataloged"
         );
         assert!(
@@ -475,6 +475,7 @@ mod tests {
                 definition.name != "tracedecay_search"
                     && definition.name != "tracedecay_run_affected_tests"
                     && definition.name != "tracedecay_dashboard"
+                    && definition.name != "tracedecay_status"
                     && definition.name != "tracedecay_context"
                     && definition.name != "tracedecay_git_preview"
             }),

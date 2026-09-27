@@ -59,8 +59,6 @@ impl McpServer {
                 self.profile_session_db.as_ref(),
             ),
             server_stats,
-            doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
-            remote_operational_status: self.remote_operational_status.clone(),
             code_index_readiness_waiter: self.code_index_readiness_waiter.clone(),
             generation_census_reader: self.generation_census_reader(),
             registered_project_session_db: self.project_session_db.clone(),
