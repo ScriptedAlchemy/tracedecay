@@ -242,8 +242,8 @@ fn resolve_hook_scope(
         .map_err(|error| error.to_string())
 }
 
-fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
-    crate::config::cached_telemetry_config(project_root)
+fn hook_timings_enabled(profile: &ProfileRoot, project_root: &Path) -> Option<bool> {
+    crate::config::cached_telemetry_config(profile.data_dir(), project_root)
         .ok()
         .map(|telemetry| telemetry.timings)
 }
@@ -306,7 +306,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            (runtime.timing_gate)(&checkout).is_none(),
+            (runtime.timing_gate)(&profile, &checkout).is_none(),
             "an unregistered checkout has no published telemetry override"
         );
         let layout = (runtime.store_layout_resolver)(&profile, &checkout)

@@ -371,6 +371,35 @@ async fn callable_code_reads_carry_their_files_and_the_accounting_footer() {
         json!(["src/lib.rs", "src/walk.rs"]),
         "{payload:#}"
     );
+    // Exact name hits, then the other name matches, each in source order;
+    // the order must not depend on the fixture's repository identity.
+    let served = payload["outcome"]["value"]["payload"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("symbol search items: {payload:#}"))
+        .iter()
+        .map(|item| {
+            format!(
+                "{}:{} {}",
+                item["file"].as_str().unwrap_or_default(),
+                item["line"],
+                item["qualified_name"].as_str().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        served,
+        [
+            "src/lib.rs:1 src/lib.rs::walk",
+            "src/walk.rs:1 src/walk.rs::Walk",
+            "src/walk.rs:2 src/walk.rs::Walk",
+            "src/walk.rs:10 src/walk.rs::Walk",
+            "src/walk.rs:3 src/walk.rs::Walk::read",
+            "src/walk.rs:6 src/walk.rs::Step",
+            "src/walk.rs:7 src/walk.rs::Step::step",
+            "src/walk.rs:11 src/walk.rs::<Walk as Step>::step",
+        ],
+        "{payload:#}"
+    );
 
     let target = call_production_tool(
         &fixture,

@@ -11,6 +11,7 @@ pub use tracedecay_configuration::config::*;
 pub trait DashboardConfigurationReadPort: Send + Sync {
     fn cached_runtime_configuration(
         &self,
+        profile_root: &Path,
         project_root: &Path,
     ) -> Result<PinnedRuntimeConfiguration>;
 }
@@ -25,8 +26,13 @@ pub fn install_dashboard_configuration_read_port(
         .map_err(|_| config_error("dashboard configuration read port is already installed"))
 }
 
-pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
-    configuration_read_port()?.cached_runtime_configuration(project_root)
+/// The configuration the profile at `profile_root` published for
+/// `project_root`.
+pub fn cached_runtime_configuration(
+    profile_root: &Path,
+    project_root: &Path,
+) -> Result<PinnedRuntimeConfiguration> {
+    configuration_read_port()?.cached_runtime_configuration(profile_root, project_root)
 }
 
 fn configuration_read_port() -> Result<&'static dyn DashboardConfigurationReadPort> {

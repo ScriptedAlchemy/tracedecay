@@ -15,8 +15,8 @@ use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
 use super::{
-    SnapshotReadControl, backup_live_sqlite_database_with, family_state, first_backup_step, open,
-    open_foreign_in, with_suffix,
+    SnapshotReadControl, backup_live_sqlite_database_with, durable_family_state, family_state,
+    first_backup_step, open, open_foreign_in, with_suffix,
 };
 use crate::db::sqlite_generation_identity;
 
@@ -115,7 +115,10 @@ async fn live_backup_includes_wal_resident_rows_and_does_not_checkpoint_the_sour
             .all(|suffix| !with_suffix(&destination, suffix).exists()),
         "backup must publish one standalone file"
     );
-    assert_eq!(family_state(&source).unwrap(), before);
+    assert_eq!(
+        durable_family_state(&source, &family_state(&source).unwrap()),
+        durable_family_state(&source, &before)
+    );
     assert!(
         with_suffix(&source, "-wal").metadata().unwrap().len() > 0,
         "read-only backup must not fold the live source WAL"
@@ -216,7 +219,10 @@ fn live_backup_cancellation_retires_partial_scratch_and_never_publishes_destinat
         "incomplete backup must not be published onto a new destination"
     );
     assert_no_attempt_scratch(&destination);
-    assert_eq!(family_state(&source).unwrap(), before);
+    assert_eq!(
+        durable_family_state(&source, &family_state(&source).unwrap()),
+        durable_family_state(&source, &before)
+    );
 
     writer
         .execute_batch(
@@ -446,7 +452,10 @@ async fn live_backup_of_wal_without_shm_does_not_write_the_source_directory() {
 
     assert_eq!(integrity_ok(&destination), "ok");
     assert_eq!(snapshot_ids(&destination), [0, 1]);
-    assert_eq!(family_state(&source).unwrap(), before);
+    assert_eq!(
+        durable_family_state(&source, &family_state(&source).unwrap()),
+        durable_family_state(&source, &before)
+    );
     assert!(!shm.exists());
 }
 
@@ -692,7 +701,10 @@ async fn live_backup_of_a_checkpointed_family_does_not_require_sidecars() {
 
     assert_eq!(integrity_ok(&destination), "ok");
     assert_eq!(snapshot_ids_text(&destination), ["checkpointed"]);
-    assert_eq!(family_state(&source).unwrap(), before);
+    assert_eq!(
+        durable_family_state(&source, &family_state(&source).unwrap()),
+        durable_family_state(&source, &before)
+    );
 }
 
 fn snapshot_ids_text(path: &std::path::Path) -> Vec<String> {

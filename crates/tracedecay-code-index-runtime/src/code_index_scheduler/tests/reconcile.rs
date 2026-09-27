@@ -9630,6 +9630,7 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
             .snapshot;
     let config = tracedecay_configuration::PinnedRuntimeConfiguration::new(
         tracedecay_configuration::RuntimeConfigurationTarget {
+            profile_root: fixture.path().join("profile"),
             project_id: test_project_id(),
             project_root: fixture.path().to_path_buf(),
         },

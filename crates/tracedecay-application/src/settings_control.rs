@@ -318,6 +318,7 @@ mod tests {
             .snapshot;
         PinnedRuntimeConfiguration::new(
             tracedecay_configuration::config::RuntimeConfigurationTarget {
+                profile_root: PathBuf::from("/profile"),
                 project_id: project_id.clone(),
                 project_root: PathBuf::from("/project"),
             },

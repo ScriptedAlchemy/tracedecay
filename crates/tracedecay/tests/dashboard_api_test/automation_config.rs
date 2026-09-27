@@ -97,6 +97,69 @@ fn automation_config_uses_revisioned_current_contract() {
     });
 }
 
+/// One checkout registered in two profiles has one repository-marker project
+/// id. Each profile owns its own configuration store, so each dashboard must
+/// read and settle against its own revision, never the other owner's.
+#[test]
+fn two_profiles_sharing_a_project_id_settle_their_own_configuration() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let first = start_dashboard_configuration_fixture().await;
+        let second = start_dashboard_configuration_fixture().await;
+        assert_eq!(first.project_id, second.project_id);
+        let agent = http_agent();
+        let config_url = |fixture: &DashboardFixture| {
+            format!(
+                "{}/api/plugins/holographic/curation/config",
+                fixture.base_url
+            )
+        };
+
+        let (status, first_initial) = get_json(&agent, &config_url(&first));
+        assert_eq!(status, 200, "{first_initial}");
+        let (status, first_saved) = patch_json_body(
+            &agent,
+            &config_url(&first),
+            &serde_json::json!({
+                "expected_revision_id": first_initial["configuration_revision_id"],
+                "idempotency_key": "dashboard-shared-project-id-first",
+                "enabled": true,
+                "backend": "codex_app_server",
+                "timeout_secs": 90
+            }),
+        );
+        assert_eq!(status, 200, "{first_saved}");
+
+        let (status, second_initial) = get_json(&agent, &config_url(&second));
+        assert_eq!(status, 200, "{second_initial}");
+        let (status, second_saved) = patch_json_body(
+            &agent,
+            &config_url(&second),
+            &serde_json::json!({
+                "expected_revision_id": second_initial["configuration_revision_id"],
+                "idempotency_key": "dashboard-shared-project-id-second",
+                "enabled": true,
+                "backend": "codex_app_server",
+                "timeout_secs": 120
+            }),
+        );
+        assert_eq!(status, 200, "{second_saved}");
+        assert_eq!(
+            second_initial["effective"], first_initial["effective"],
+            "the second profile must read its own untouched configuration"
+        );
+        assert_eq!(second_saved["effective"]["timeout_secs"], 120);
+
+        let (status, first_reread) = get_json(&agent, &config_url(&first));
+        assert_eq!(status, 200, "{first_reread}");
+        assert_eq!(
+            first_reread["configuration_revision_id"],
+            first_saved["configuration_revision_id"]
+        );
+        assert_eq!(first_reread["effective"]["timeout_secs"], 90);
+    });
+}
+
 #[test]
 fn automation_config_rejects_retired_policy_fields() {
     let runtime = create_runtime();

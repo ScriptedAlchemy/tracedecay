@@ -139,10 +139,10 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
             store_layout_resolver: layout,
         }
     }
-    fn timings_on(_: &Path) -> Option<bool> {
+    fn timings_on(_: &ProfileRoot, _: &Path) -> Option<bool> {
         Some(true)
     }
-    fn timings_off(_: &Path) -> Option<bool> {
+    fn timings_off(_: &ProfileRoot, _: &Path) -> Option<bool> {
         Some(false)
     }
     fn tool_first<'a>(
@@ -182,8 +182,8 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
     );
     let root = Path::new("/workspace/project");
 
-    assert_eq!((first.timing_gate)(root), Some(true));
-    assert_eq!((second.timing_gate)(root), Some(false));
+    assert_eq!((first.timing_gate)(&first.profile, root), Some(true));
+    assert_eq!((second.timing_gate)(&second.profile, root), Some(false));
     assert_eq!(
         (first.daemon_tool)(&first.profile, None, "tracedecay_status", json!({}), false)
             .await

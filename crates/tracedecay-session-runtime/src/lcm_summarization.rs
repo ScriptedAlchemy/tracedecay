@@ -94,7 +94,7 @@ fn summarizer_executables(
         StoreShardScopeV1::Project { project_id }
         | StoreShardScopeV1::ProjectSessions { project_id }
         | StoreShardScopeV1::Code { project_id, .. } => {
-            tracedecay_configuration::lcm_summarizer_executables_for_project(project_id).map_err(
+            tracedecay_configuration::lcm_summarizer_executables_for_database(database).map_err(
                 |error| {
                     tracing::debug!(
                         project_id = project_id.as_str(),

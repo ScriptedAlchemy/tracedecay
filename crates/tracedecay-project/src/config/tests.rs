@@ -259,6 +259,7 @@ mod runtime_configuration_cutover {
     #[test]
     fn cached_runtime_reads_ignore_legacy_input_after_publication() {
         let project_id = project_id("project.runtime-cache-only");
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         // Publish with an explicit auto-watch=true settings layer so the
         // published-snapshot-wins assertion below stays valid regardless of
@@ -280,6 +281,7 @@ mod runtime_configuration_cutover {
         .snapshot;
         let pinned = PinnedRuntimeConfiguration::new(
             RuntimeConfigurationTarget {
+                profile_root: profile.path().to_path_buf(),
                 project_id,
                 project_root: root.path().to_path_buf(),
             },
@@ -298,19 +300,19 @@ mod runtime_configuration_cutover {
         .expect("write conflicting legacy input");
 
         assert!(
-            cached_telemetry_config(root.path())
+            cached_telemetry_config(profile.path(), root.path())
                 .expect("cache lookup")
                 .timings,
             "hook-safe telemetry lookup must use the published snapshot"
         );
         assert!(
-            cached_sync_config(root.path())
+            cached_sync_config(profile.path(), root.path())
                 .expect("cache lookup")
                 .auto_watch,
             "hook-safe sync lookup must use the published snapshot"
         );
         assert_eq!(
-            cached_runtime_configuration(root.path())
+            cached_runtime_configuration(profile.path(), root.path())
                 .expect("cache lookup")
                 .target()
                 .project_root,
@@ -322,6 +324,7 @@ mod runtime_configuration_cutover {
     #[test]
     fn runtime_cache_retargets_the_route_per_cached_root() {
         let project_id = project_id("project.runtime-cache-retarget");
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         let first_root = root.path().join("first-worktree");
         let second_root = root.path().join("second-worktree");
@@ -335,35 +338,92 @@ mod runtime_configuration_cutover {
         .snapshot;
         let revision_id = revision_id("revision.runtime-cache-retarget");
         let cache = RuntimeConfigurationCache::default();
-        cache.insert(
-            PinnedRuntimeConfiguration::new(
-                RuntimeConfigurationTarget {
-                    project_id: project_id.clone(),
-                    project_root: first_root.clone(),
-                },
-                revision_id.clone(),
-                snapshot.clone(),
-            )
-            .expect("first snapshot materializes"),
-        );
-        cache.insert(
-            PinnedRuntimeConfiguration::new(
-                RuntimeConfigurationTarget {
-                    project_id: project_id.clone(),
-                    project_root: second_root.clone(),
-                },
-                revision_id,
-                snapshot,
-            )
-            .expect("second snapshot materializes"),
-        );
+        for project_root in [&first_root, &second_root] {
+            cache.insert(
+                PinnedRuntimeConfiguration::new(
+                    RuntimeConfigurationTarget {
+                        profile_root: profile.path().to_path_buf(),
+                        project_id: project_id.clone(),
+                        project_root: project_root.clone(),
+                    },
+                    revision_id.clone(),
+                    snapshot.clone(),
+                )
+                .expect("snapshot materializes"),
+            );
+        }
 
-        let first = cache.for_root(&first_root).expect("first root lookup");
-        let second = cache.for_root(&second_root).expect("second root lookup");
+        let first = cache
+            .for_root(profile.path(), &first_root)
+            .expect("first root lookup");
+        let second = cache
+            .for_root(profile.path(), &second_root)
+            .expect("second root lookup");
         assert_eq!(first.target().project_id, project_id);
         assert_eq!(second.target().project_id, project_id);
         assert_eq!(first.target().project_root, first_root);
         assert_eq!(second.target().project_root, second_root);
+    }
+
+    /// One checkout registered in two profiles shares a project id and a
+    /// root; each profile must read the revision it published.
+    #[test]
+    fn runtime_cache_keeps_profiles_sharing_a_project_id_apart() {
+        let project_id = project_id("project.runtime-cache-shared-id");
+        let first_profile = TempDir::new().expect("first profile root");
+        let second_profile = TempDir::new().expect("second profile root");
+        let unpublished_profile = TempDir::new().expect("unpublished profile root");
+        let root = TempDir::new().expect("temporary project root");
+        let snapshot = resolve_configuration(
+            &ConfigurationRegistry::core().expect("registry is available"),
+            &[],
+        )
+        .expect("defaults resolve")
+        .snapshot;
+        let cache = RuntimeConfigurationCache::default();
+        for (profile, revision) in [
+            (&first_profile, "revision.shared-id.first"),
+            (&second_profile, "revision.shared-id.second"),
+        ] {
+            cache.insert(
+                PinnedRuntimeConfiguration::new(
+                    RuntimeConfigurationTarget {
+                        profile_root: profile.path().to_path_buf(),
+                        project_id: project_id.clone(),
+                        project_root: root.path().to_path_buf(),
+                    },
+                    revision_id(revision),
+                    snapshot.clone(),
+                )
+                .expect("snapshot materializes"),
+            );
+        }
+
+        let revision = |profile: &TempDir| {
+            cache
+                .for_root(profile.path(), root.path())
+                .map(|pin| pin.revision_id().as_str().to_owned())
+        };
+        assert_eq!(
+            revision(&first_profile).expect("first profile lookup"),
+            "revision.shared-id.first"
+        );
+        assert_eq!(
+            revision(&second_profile).expect("second profile lookup"),
+            "revision.shared-id.second"
+        );
+        assert_eq!(
+            cache
+                .for_project(second_profile.path(), &project_id)
+                .expect("second profile project lookup")
+                .revision_id()
+                .as_str(),
+            "revision.shared-id.second"
+        );
+        assert!(
+            revision(&unpublished_profile).is_err(),
+            "a profile that published nothing must not borrow another owner's pin"
+        );
     }
 
     #[tokio::test]
@@ -492,21 +552,22 @@ mod runtime_configuration_cutover {
         assert_eq!(config.max_file_size, startup.config().max_file_size);
 
         let cached_reads = || {
-            let root_pin = cached_runtime_configuration(root.path()).expect("root cached read");
-            let lower_pin =
-                tracedecay_configuration::config::cached_pinned_runtime_configuration(root.path())
-                    .expect("lower cached read");
-            let dashboard_pin =
-                tracedecay_dashboard_api::config::cached_runtime_configuration(root.path())
-                    .expect("dashboard cached read");
-            (root_pin, lower_pin, dashboard_pin)
+            let root_pin = cached_runtime_configuration(profile.path(), root.path())
+                .expect("root cached read");
+            let dashboard_pin = tracedecay_dashboard_api::config::cached_runtime_configuration(
+                profile.path(),
+                root.path(),
+            )
+            .expect("dashboard cached read");
+            (root_pin, dashboard_pin)
         };
-        let (root_pin, lower_pin, dashboard_pin) = cached_reads();
-        for pin in [&lower_pin, &dashboard_pin] {
-            assert_eq!(pin.revision_id(), startup.revision_id());
-            assert_eq!(pin.snapshot().snapshot_id, startup.snapshot().snapshot_id);
-            assert_eq!(pin.config(), startup.config());
-        }
+        let (root_pin, dashboard_pin) = cached_reads();
+        assert_eq!(dashboard_pin.revision_id(), startup.revision_id());
+        assert_eq!(
+            dashboard_pin.snapshot().snapshot_id,
+            startup.snapshot().snapshot_id
+        );
+        assert_eq!(dashboard_pin.config(), startup.config());
         assert_eq!(root_pin.revision_id(), startup.revision_id());
         assert!(!root_pin.config().diagnostics_prewarm);
         assert_eq!(
@@ -562,11 +623,9 @@ mod runtime_configuration_cutover {
         tracedecay_configuration::config::publish_pinned_runtime_configuration(current)
             .expect("publish the committed revision to the runtime cache");
 
-        let (root_pin, lower_pin, dashboard_pin) = cached_reads();
-        for pin in [&lower_pin, &dashboard_pin] {
-            assert_eq!(pin.revision_id(), &receipt.result_revision_id);
-            assert!(pin.config().diagnostics_prewarm);
-        }
+        let (root_pin, dashboard_pin) = cached_reads();
+        assert_eq!(dashboard_pin.revision_id(), &receipt.result_revision_id);
+        assert!(dashboard_pin.config().diagnostics_prewarm);
         assert_eq!(root_pin.revision_id(), &receipt.result_revision_id);
         assert!(root_pin.config().diagnostics_prewarm);
         assert_eq!(

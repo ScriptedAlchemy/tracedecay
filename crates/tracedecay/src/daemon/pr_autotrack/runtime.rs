@@ -105,13 +105,14 @@ async fn tick(
     let window = 14 * 86_400;
     let cap = 64;
     let cutoff = tracedecay_runtime_core::tracedecay::current_timestamp().saturating_sub(window);
-    let owner_home = match administration.owner_profile() {
-        Ok(owner) => owner.home().map(std::path::Path::to_path_buf),
+    let owner = match administration.owner_profile() {
+        Ok(owner) => owner.clone(),
         Err(error) => {
             tracing::warn!(%error, "PR auto-track tick skipped: daemon owner profile unavailable");
             return;
         }
     };
+    let owner_home = owner.home().map(std::path::Path::to_path_buf);
     let Ok(records) = database.list_code_projects(cap).await else {
         return;
     };
@@ -135,6 +136,7 @@ async fn tick(
         // configuration authority. Missing/pending daemon snapshot means no
         // poll and, critically, no destructive disabled-state teardown.
         let Ok(cfg) = tracedecay_project::config::cached_runtime_configuration_for_project_id(
+            owner.data_dir(),
             &root,
             &record.project_id,
         )

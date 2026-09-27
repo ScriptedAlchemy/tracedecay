@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, config::DbConfig};
 use tempfile::TempDir;
 
-use super::{SnapshotReadControl, family_state, open_foreign_in};
+use super::{SnapshotReadControl, durable_family_state, family_state, open_foreign_in};
 
 #[tokio::test]
 async fn foreign_snapshot_cancellation_interrupts_mid_capture() {
@@ -42,7 +42,10 @@ async fn foreign_snapshot_cancellation_interrupts_mid_capture() {
 
     assert_eq!(error.kind(), io::ErrorKind::Interrupted);
     assert!(checkpoints.load(Ordering::Relaxed) >= 8);
-    assert_eq!(family_state(&path).unwrap(), before);
+    assert_eq!(
+        durable_family_state(&path, &family_state(&path).unwrap()),
+        durable_family_state(&path, &before)
+    );
     drop(writer);
 }
 

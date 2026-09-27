@@ -161,7 +161,7 @@ impl ProjectSummarizerFixture {
 
     fn pin(&self, executables: LcmSummarizerExecutablesV1) {
         tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
-            self.project_id.clone(),
+            &self.db(),
             &self.root.path().join("project"),
             executables,
         )
@@ -1452,7 +1452,7 @@ fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restar
         let runtime = RegisteredGlobalDbTestRuntime::project(
             root.path().join("profile"),
             &project_root,
-            project_id.clone(),
+            project_id,
         )
         .await
         .unwrap();
@@ -1504,7 +1504,7 @@ fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restar
         // Publishing a pin is a binding change: the parked session is retried
         // and parks again under the provider's own unconfigured reason.
         tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
-            project_id.clone(),
+            &db,
             &project_root,
             LcmSummarizerExecutablesV1::unconfigured(),
         )
@@ -1541,7 +1541,7 @@ fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restar
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
-            project_id,
+            &db,
             &project_root,
             LcmSummarizerExecutablesV1 {
                 cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, Some(5))

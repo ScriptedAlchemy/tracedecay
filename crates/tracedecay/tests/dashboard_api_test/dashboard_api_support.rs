@@ -1028,13 +1028,10 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         .with_global_db_override(&requested_global_db_path);
     std::fs::create_dir_all(&project_root)
         .unwrap_or_else(|err| panic!("failed to create fixture project root: {err}"));
-    // Fixtures run concurrently in one process; each owns its project
-    // identity so process-wide project registries never alias two fixtures.
-    static FIXTURE_ORDINAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let project_id = format!(
-        "dashboard_fixture_project_{}",
-        FIXTURE_ORDINAL.fetch_add(1, Ordering::Relaxed)
-    );
+    // Every fixture pins the same project id in its own profile, as one
+    // checkout registered in two profiles does; concurrent fixtures prove
+    // that owners sharing a project id never alias.
+    let project_id = "dashboard_fixture_project".to_owned();
     if let Err(err) = tracedecay_runtime_core::storage::pin_fixture_repository_identity(
         &project_root,
         &project_id,

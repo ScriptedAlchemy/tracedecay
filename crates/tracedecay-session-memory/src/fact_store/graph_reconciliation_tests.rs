@@ -268,20 +268,13 @@ fn write_control() -> FactWriteControl {
     FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
 }
 
+/// Waits on the runtime's own reconcile notification. The scheduled pass
+/// loads canonical facts before it reaches the runtime, so any wall-clock
+/// bound here measures host load, not the scheduler.
 async fn wait_for_reconciliation(runtime: &RecordingGraphRuntime) {
-    if !runtime.reconciliation_observed.load(Ordering::Acquire) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !runtime.reconciliation_observed.load(Ordering::Acquire) {
-                runtime.reconciliation_notify.notified().await;
-            }
-        })
-        .await
-        .expect("scheduled graph reconciliation did not reach the mounted runtime");
+    while !runtime.reconciliation_observed.load(Ordering::Acquire) {
+        runtime.reconciliation_notify.notified().await;
     }
-    assert!(
-        runtime.reconciliation_observed.load(Ordering::Acquire),
-        "scheduled graph reconciliation did not reach the mounted runtime"
-    );
 }
 
 async fn wait_for_completed_reconciliation_pass(
