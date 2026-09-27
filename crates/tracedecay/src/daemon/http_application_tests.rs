@@ -1043,15 +1043,51 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
 async fn daemon_http_shutdown_releases_loopback_listener() {
     let (service, _) = service_with_probe().await;
     let endpoint = service.endpoint();
+    #[cfg(target_os = "linux")]
+    let listener = match listening_socket_inodes(endpoint).as_slice() {
+        [inode] => *inode,
+        inodes => panic!("the service must hold one listener at {endpoint}: {inodes:?}"),
+    };
     service.shutdown().await.expect("shutdown HTTP service");
 
-    // Rebinding the exact address proves the listener was released. A raw
-    // connect probe can false-positive on a freed ephemeral port when the
-    // kernel self-connects (source port == destination port) or when a
-    // parallel test rebinds the port first.
+    // A freed ephemeral port goes back to the kernel pool, where any process
+    // may bind it, so neither rebinding nor connecting to it proves release.
+    // The listener's socket inode does: no other socket can take it over.
+    #[cfg(target_os = "linux")]
+    assert!(
+        !listening_socket_inodes(endpoint).contains(&listener),
+        "the daemon HTTP listener at {endpoint} must be closed on shutdown"
+    );
+    #[cfg(not(target_os = "linux"))]
     tokio::net::TcpListener::bind(endpoint)
         .await
         .expect("released daemon HTTP loopback address must be rebindable");
+}
+
+/// Inodes of the IPv4 sockets listening at `endpoint`, read from the kernel
+/// socket table of this network namespace.
+#[cfg(target_os = "linux")]
+fn listening_socket_inodes(endpoint: SocketAddr) -> Vec<u64> {
+    const TCP_LISTEN: &str = "0A";
+    let SocketAddr::V4(endpoint) = endpoint else {
+        panic!("the daemon HTTP listener binds IPv4 loopback, not {endpoint}");
+    };
+    // The kernel prints the network-order address as a native-endian word.
+    let local = format!(
+        "{:08X}:{:04X}",
+        u32::from_ne_bytes(endpoint.ip().octets()),
+        endpoint.port()
+    );
+    std::fs::read_to_string("/proc/net/tcp")
+        .expect("kernel TCP socket table")
+        .lines()
+        .skip(1)
+        .filter_map(|row| {
+            let fields = row.split_whitespace().collect::<Vec<_>>();
+            (fields[1] == local && fields[3] == TCP_LISTEN)
+                .then(|| fields[9].parse().expect("socket inode"))
+        })
+        .collect()
 }
 
 #[tokio::test]
