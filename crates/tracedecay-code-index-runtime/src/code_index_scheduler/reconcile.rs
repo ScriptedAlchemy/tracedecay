@@ -3374,6 +3374,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.request_reconcile_for_verdict(verdict)
     }
 
+    /// [`Self::request_fresh_for_query_background`] against the source as it
+    /// is now: the source witness is swept even inside the staleness window.
+    pub fn request_fresh_now_background(&mut self) -> bool {
+        let verdict =
+            self.freshness_fence
+                .ladder_verdict(&self.project_root, &self.shutting_down, None);
+        self.request_reconcile_for_verdict(verdict)
+    }
+
     fn request_reconcile_for_verdict(&mut self, verdict: FreshnessProbeVerdictV1) -> bool {
         match verdict {
             FreshnessProbeVerdictV1::Current => false,
