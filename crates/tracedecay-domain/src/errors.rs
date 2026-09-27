@@ -87,7 +87,7 @@ pub enum TraceDecayError {
         reason_code: String,
         retryable: bool,
         detail: String,
-        typed_detail: Option<ApplicationProblemDetailV1>,
+        typed_detail: Option<Box<ApplicationProblemDetailV1>>,
     },
 
     #[error("sync lock: {message}")]
@@ -222,7 +222,7 @@ impl TraceDecayError {
             reason_code: reason_code.into(),
             retryable,
             detail: detail.message(),
-            typed_detail: Some(detail),
+            typed_detail: Some(Box::new(detail)),
         }
     }
 
@@ -243,7 +243,7 @@ impl TraceDecayError {
         let Self::ProjectRoute { typed_detail, .. } = self else {
             return None;
         };
-        typed_detail.as_ref()
+        typed_detail.as_deref()
     }
 
     pub fn database_operation(
@@ -320,6 +320,18 @@ impl TraceDecayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every fallible workspace call returns this error by value; clippy's
+    /// `result_large_err` rejects an `Err` variant of 128 bytes or more, so
+    /// large payloads are boxed rather than stored inline.
+    #[test]
+    fn error_stays_small_enough_to_return_by_value() {
+        assert!(
+            std::mem::size_of::<TraceDecayError>() <= 64,
+            "TraceDecayError grew to {} bytes; box the new payload",
+            std::mem::size_of::<TraceDecayError>()
+        );
+    }
 
     #[test]
     fn database_operation_does_not_double_self_displaying_chain() {
