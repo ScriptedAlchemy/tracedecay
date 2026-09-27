@@ -3,7 +3,7 @@
 //! MCP owns selector parsing and rendering; the daemon owns the registry
 //! database. Handlers therefore name a [`ProjectRegistryReadPort`] instead of a
 //! concrete registry store, and receive presentation views plus the typed
-//! missing-registry and unresolved states.
+//! unresolved state.
 //!
 //! Genuine read failures keep [`tracedecay_domain::errors::TraceDecayError`] so an
 //! unreadable registry stays a failure instead of collapsing into a
@@ -19,14 +19,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::errors::Result;
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectRegistrySummary {
     pub project_count: usize,
     pub repo_count: usize,
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectRepoGroup {
     pub label: String,
     pub git_common_dir: Option<String>,
@@ -35,7 +35,7 @@ pub struct ProjectRepoGroup {
     pub projects: Vec<ProjectRegistryEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectRegistryEntry {
     pub project_id: String,
     pub label: String,
@@ -56,7 +56,7 @@ pub struct ProjectRegistryEntry {
     pub is_active: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PublicCodeProject {
     pub project_id: String,
     pub label: String,
@@ -75,7 +75,7 @@ pub struct PublicCodeProject {
     pub is_active: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectRegistryView {
     pub summary: ProjectRegistrySummary,
     pub project_tree: Vec<ProjectRepoGroup>,
@@ -198,15 +198,6 @@ pub struct ProjectRegistryContextView {
     pub stores: Vec<Value>,
 }
 
-/// Closed set of listing results.
-#[derive(Clone, Debug)]
-pub enum ProjectRegistryListingOutcome {
-    Listing(ProjectRegistryListingView),
-    /// No registry authority is mounted for this profile. This is a state, not
-    /// an empty listing: callers must report it as such.
-    RegistryUnavailable,
-}
-
 /// Closed set of single-project context results.
 #[derive(Clone, Debug)]
 pub enum ProjectRegistryContextOutcome {
@@ -215,86 +206,16 @@ pub enum ProjectRegistryContextOutcome {
     NotFound {
         registry_path: PathBuf,
     },
-    RegistryUnavailable,
 }
 
 pub type ProjectRegistryListingFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<ProjectRegistryListingOutcome>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<ProjectRegistryListingView>> + Send + 'a>>;
 pub type ProjectRegistryContextFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ProjectRegistryContextOutcome>> + Send + 'a>>;
 
-/// The one path MCP handlers use to read the project registry.
+/// The one path the registry reads take through the daemon's profile registry.
 pub trait ProjectRegistryReadPort: Send + Sync {
     fn list(&self, command: ProjectRegistryListingCommand) -> ProjectRegistryListingFuture<'_>;
 
     fn context(&self, command: ProjectRegistryContextCommand) -> ProjectRegistryContextFuture<'_>;
-}
-
-/// Reads the registry through `port`, reporting the typed missing-registry
-/// state when no port is mounted.
-#[hotpath::measure(future = true, label = "mcp.project.registry.list")]
-pub async fn list_registered_projects(
-    port: Option<&dyn ProjectRegistryReadPort>,
-    command: ProjectRegistryListingCommand,
-) -> Result<ProjectRegistryListingOutcome> {
-    match port {
-        Some(port) => port.list(command).await,
-        None => Ok(ProjectRegistryListingOutcome::RegistryUnavailable),
-    }
-}
-
-/// Resolves one registered project through `port`, reporting the typed
-/// missing-registry state when no port is mounted.
-#[hotpath::measure(future = true, label = "mcp.project.registry.context")]
-pub async fn read_registered_project_context(
-    port: Option<&dyn ProjectRegistryReadPort>,
-    command: ProjectRegistryContextCommand,
-) -> Result<ProjectRegistryContextOutcome> {
-    match port {
-        Some(port) => port.context(command).await,
-        None => Ok(ProjectRegistryContextOutcome::RegistryUnavailable),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn listing_command() -> ProjectRegistryListingCommand {
-        ProjectRegistryListingCommand {
-            active_project_root: Some(PathBuf::from("/srv/checkout")),
-            scope: ProjectRegistryListingScope::Matching {
-                query: "checkout".to_string(),
-            },
-            limit: 7,
-        }
-    }
-
-    fn context_command() -> ProjectRegistryContextCommand {
-        ProjectRegistryContextCommand {
-            active_project_root: Some(PathBuf::from("/srv/checkout")),
-            selector: ProjectRegistrySelector::ProjectId("project.checkout".to_string()),
-        }
-    }
-
-    /// An unmounted registry is a state. It must not answer as a registry that
-    /// exists and happens to hold nothing.
-    #[tokio::test]
-    async fn absent_port_reports_unavailable_rather_than_an_empty_listing() {
-        let outcome = list_registered_projects(None, listing_command())
-            .await
-            .expect("listing");
-        assert!(matches!(
-            outcome,
-            ProjectRegistryListingOutcome::RegistryUnavailable
-        ));
-
-        let outcome = read_registered_project_context(None, context_command())
-            .await
-            .expect("context");
-        assert!(matches!(
-            outcome,
-            ProjectRegistryContextOutcome::RegistryUnavailable
-        ));
-    }
 }

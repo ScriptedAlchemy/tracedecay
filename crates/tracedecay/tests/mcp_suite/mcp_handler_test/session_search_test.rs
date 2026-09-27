@@ -219,7 +219,6 @@ async fn message_search_rejects_invalid_scope() {
                 "tracedecay_message_search",
                 json!({"query": "anything", "scope": invalid}),
                 None,
-                None,
             )
             .await,
         );
@@ -236,7 +235,6 @@ async fn message_search_rejects_invalid_scope() {
             "tracedecay_message_search",
             json!({"query": "anything", "provider": "unknown-agent"}),
             None,
-            None,
         )
         .await,
     );
@@ -250,7 +248,6 @@ async fn message_search_rejects_invalid_scope() {
             &cg,
             "tracedecay_message_search",
             json!({"query": "anything", "message_type": "promptish"}),
-            None,
             None,
         )
         .await,
@@ -282,7 +279,6 @@ async fn message_search_rejects_removed_request_spellings() {
                 "tracedecay_message_search",
                 json!({"query": "anything", field: value}),
                 None,
-                None,
             )
             .await,
         );
@@ -296,7 +292,6 @@ async fn message_search_rejects_removed_request_spellings() {
         &cg,
         "tracedecay_message_search",
         json!({"query": "anything", "since": 0, "until": 1, "require_fresh": false}),
-        None,
         None,
     )
     .await
@@ -322,7 +317,6 @@ async fn message_search_rejects_foreign_project_selectors() {
                 "tracedecay_message_search",
                 json!({"query": "anything", alias: value}),
                 None,
-                None,
             )
             .await,
         );
@@ -342,7 +336,6 @@ async fn message_search_rejects_foreign_project_selectors() {
                 "project_selector": {"project_id": "proj_0123456789abcdef"}
             }),
             None,
-            None,
         )
         .await,
     );
@@ -356,7 +349,6 @@ async fn message_search_rejects_foreign_project_selectors() {
             &cg,
             "tracedecay_message_search",
             json!({"query": "anything", "project_selector": {"path": "/some/path"}}),
-            None,
             None,
         )
         .await,
@@ -417,7 +409,6 @@ async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
             "limit": 1,
         }),
         None,
-        None,
     )
     .await
     .expect("a limit-one retained search must fit the admitted budget");
@@ -453,7 +444,6 @@ async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
             "limit": 1,
         }),
         None,
-        None,
     )
     .await
     .expect("the bounded record read must resolve duplicate candidate lanes once");
@@ -480,7 +470,6 @@ async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
             "query": "🚨 :: --",
             "limit": 1,
         }),
-        None,
         None,
     )
     .await
@@ -1133,7 +1122,6 @@ async fn message_search_returns_literal_seeded_messages() {
             "tracedecay_message_search",
             json!({"format": "json"}),
             None,
-            None,
         )
         .await,
     ));
@@ -1166,7 +1154,6 @@ async fn message_search_returns_literal_seeded_messages() {
                 "provider": "unknown-agent",
                 "format": "json",
             }),
-            None,
             None,
         )
         .await,
@@ -1208,7 +1195,7 @@ async fn materialize_proof_session(cg: &TraceDecay, session_id: &str) {
 
 #[cfg(feature = "test-transport")]
 async fn message_search_payload(cg: &TraceDecay, arguments: Value) -> Value {
-    let result = handle_tool_call(cg, "tracedecay_message_search", arguments, None, None)
+    let result = handle_tool_call(cg, "tracedecay_message_search", arguments, None)
         .await
         .expect("tracedecay_message_search MCP call");
     let envelope = extract_json(&result.value);

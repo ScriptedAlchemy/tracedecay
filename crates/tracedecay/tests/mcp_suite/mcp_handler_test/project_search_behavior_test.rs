@@ -538,53 +538,32 @@ async fn project_search_bounds_pages_and_does_not_expand_wildcards() {
 }
 
 #[tokio::test]
-async fn project_search_rejects_a_non_string_query_and_an_unmounted_registry() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let server = McpServer::new(
-        TraceDecay::open_with_options(cg.project_root(), crate::support::graph_open_options(&cg))
-            .await
-            .expect("open calling project"),
-        None,
-    )
-    .await;
+async fn project_search_refuses_arguments_outside_its_typed_request() {
+    let fixture = open_search_fixture().await;
 
-    for arguments in [json!({}), json!({"query": 12}), json!({"query": null})] {
-        let response = handle_real_server_tool_call_raw(&server, TOOL, arguments).await;
-        assert_eq!(response["jsonrpc"], "2.0");
-        assert!(response["result"].is_null(), "{response}");
+    for (arguments, detail) in [
+        (json!({}), "missing field `query`"),
+        (
+            json!({"query": 12}),
+            "invalid type: integer `12`, expected a string",
+        ),
+        (
+            json!({"query": null}),
+            "invalid type: null, expected a string",
+        ),
+        (
+            json!({"query": "search-alpha", "limt": 3}),
+            "unknown field `limt`, expected `query` or `limit`",
+        ),
+    ] {
+        let response = handle_real_server_tool_call_raw(&fixture.server, TOOL, arguments).await;
         assert_eq!(
-            response["error"],
+            crate::support::tool_refusal(&response),
             json!({
-                "code": -32602,
-                "message": "missing required parameter: query",
-                "data": {
-                    "tool": TOOL,
-                    "reason_code": "missing_required_parameter",
-                    "retryable": false,
-                    "detail": "missing required parameter: query"
-                }
-            })
+                "kind": "invalid_request",
+                "code": "application.surface.invalid_request",
+                "message": format!("invalid arguments for {TOOL}: {detail}"),
+            }),
         );
     }
-
-    let unavailable =
-        search_json(&server, json!({"query": "search-alpha", "format": "json"})).await;
-    assert_eq!(
-        unavailable,
-        json!({
-            "status": "unavailable",
-            "message": "project registry is not present for this profile",
-            "projects": [],
-            "title": "projects matching \"search-alpha\"",
-            "summary": {
-                "project_count": 0,
-                "repo_count": 0,
-                "truncated": false
-            },
-            "project_tree": [],
-            "query": "search-alpha",
-            "limit": 10,
-            "truncated": false
-        })
-    );
 }

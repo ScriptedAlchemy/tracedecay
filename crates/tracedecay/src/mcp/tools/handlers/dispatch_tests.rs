@@ -97,8 +97,6 @@ async fn retired_file_metadata_is_absent_and_refused_by_public_dispatch() {
         &cg,
         retired,
         json!({"files": ["../outside"]}),
-        None,
-        None,
         ToolCallRegistryOptions::default(),
     )
     .await
@@ -156,8 +154,6 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
             &cg,
             tool_name,
             args,
-            None,
-            None,
             ToolCallRegistryOptions {
                 application_invocation_executor: Some(&executor),
                 ..Default::default()
@@ -368,15 +364,9 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
             None,
             "{tool_name} must fail closed"
         );
-        let rejected = handle_tool_call_with_registry_options(
-            &cg,
-            tool_name,
-            json!({}),
-            None,
-            None,
-            options.clone(),
-        )
-        .await;
+        let rejected =
+            handle_tool_call_with_registry_options(&cg, tool_name, json!({}), options.clone())
+                .await;
         assert!(
             rejected.is_err(),
             "{tool_name} must reject handler dispatch"
@@ -502,7 +492,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         .admit_opened_project(&cg)
         .expect("opened fixture admits")
     };
-    let status = handle_tool_call_with_registry_options(
+    let status = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({
@@ -514,21 +504,17 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
             "include_storage_health": false,
             "include_staleness": false,
         }),
-        None,
-        None,
         options(),
     )
     .await
     .unwrap();
-    let runtime_result = handle_tool_call_with_registry_options(
+    let runtime_result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_runtime",
         json!({
             "format": "json",
             "session_ingest_health": true,
         }),
-        None,
-        None,
         options(),
     )
     .await
@@ -723,12 +709,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     };
 
     // Fresh daemon: the census answers, nothing has sealed yet.
-    let rebuilding = handle_tool_call_with_registry_options(
+    let rebuilding = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(None, Some("indexing"), true)),
             ..Default::default()
@@ -750,12 +734,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     );
 
     // A sealed complete generation exists: the branch claim is truthful again.
-    let serving = handle_tool_call_with_registry_options(
+    let serving = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(
                 Some("generation.status-serving-truth.1"),
@@ -812,14 +794,12 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
             });
         reader
     };
-    let stale_public = handle_tool_call_with_registry_options(
+    let stale_public = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         // Full branch claim fields (branch_resolution, diagnostics) are opt-in
         // after compact-by-default status; serving truth still uses the freshness path.
         json!({"format": "json", "include_branch_diagnostics": true}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(public_freshness_reader(
                 Some("0".repeat(40)),
@@ -837,12 +817,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     assert_ne!(stale_public["branch_resolution"], json!("exact"));
 
     let committed_public_reader = public_freshness_reader(Some(public_revision), "fresh");
-    let current_public = handle_tool_call_with_registry_options(
+    let current_public = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json", "include_branch_diagnostics": true}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(committed_public_reader),
             ..Default::default()
@@ -870,12 +848,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     // A dirty worktree snapshot has an exact content identity but no Git OID.
     // Its complete, fresh, ready source witness still identifies the current
     // public branch without inventing a revision.
-    let active_public = handle_tool_call_with_registry_options(
+    let active_public = dispatch_on_graph_authority(
         &cg,
         "tracedecay_active_project",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(public_freshness_reader(None, "fresh")),
             ..Default::default()
@@ -945,12 +921,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
             };
             Box::pin(async move { Ok(Some(freshness)) })
         });
-    let published_feature = handle_tool_call_with_registry_options(
+    let published_feature = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json", "include_branch_diagnostics": true}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(feature_reader.clone()),
             ..Default::default()
@@ -986,12 +960,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     assert_eq!(feature_row["is_ready"], json!(true));
     assert!(published_feature.get("branch_warnings").is_none());
 
-    let compact_feature = handle_tool_call_with_registry_options(
+    let compact_feature = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json", "include_branch_diagnostics": false}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(feature_reader),
             ..Default::default()
@@ -1005,12 +977,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     assert_eq!(compact_feature["active_branch"], json!("feature"));
     assert_eq!(compact_feature["serving_branch"], json!("feature"));
 
-    let rebuilding = handle_tool_call_with_registry_options(
+    let rebuilding = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(
                 Some("generation.status-serving-truth.1"),
@@ -1057,12 +1027,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 };
             Box::pin(async move { Ok(Some(freshness)) })
         });
-    let aged = handle_tool_call_with_registry_options(
+    let aged = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(aged_reader),
             ..Default::default()
@@ -1118,8 +1086,6 @@ async fn unsupported_selector_tool_rejects_explicit_project_selector() {
                 "project_id": "explicit-selector-should-not-fall-open"
             },
         }),
-        None,
-        None,
     )
     .await
     .expect_err("unsupported selector tools must reject explicit selectors");
@@ -1157,8 +1123,6 @@ async fn query_search_rejects_cross_project_selector() {
             },
             "query": "target",
         }),
-        None,
-        None,
     )
     .await
     .expect_err("single-root search must reject project selectors");
@@ -2071,8 +2035,6 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
             "provider": "codex",
             "session_id": "retired",
         }),
-        None,
-        None,
         ToolCallRegistryOptions {
             profile: Some(&lcm_profile),
             ..Default::default()
@@ -2132,8 +2094,6 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
         &cg,
         "tracedecay_admin_sync",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_reconcile_sink: Some(reconcile_sink),
             ..Default::default()

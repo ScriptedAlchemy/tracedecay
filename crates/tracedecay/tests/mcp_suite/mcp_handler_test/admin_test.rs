@@ -16,13 +16,21 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let registry_path = registry_dir.path().join("global.db");
     let seeded_project_root = registry_dir.path().join("registered-alpha-project");
     fs::create_dir_all(&seeded_project_root).unwrap();
-    let registry_runtime = seed_project_registry(&registry_path, &seeded_project_root).await;
+    drop(seed_project_registry(&registry_path, &seeded_project_root).await);
     let active_project_id = cg
         .store_layout()
         .identity
         .project_id
         .clone()
         .expect("active project identity");
+    let registry_runtime = HostAdmissionTestRuntimeV1::project_scoped(
+        registry_dir.path(),
+        cg.project_root(),
+        tracedecay_domain::ProjectId::new(active_project_id.clone())
+            .expect("test project identity"),
+    )
+    .await
+    .unwrap();
     registry_runtime
         .upsert_code_project(
             &active_project_id,
@@ -33,18 +41,26 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         )
         .await
         .unwrap();
-
-    let list = handle_tool_call_with_runtime(
-        &cg,
-        &registry_runtime,
-        "tracedecay_project_list",
-        json!({"limit": 1, "format": "json"}),
+    let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options(
+            cg.project_root(),
+            crate::support::graph_open_options(&cg),
+        )
+        .await
+        .unwrap(),
         None,
-        None,
+        registry_runtime,
     )
     .await
-    .unwrap();
-    let list_payload: Value = serde_json::from_str(extract_text(&list.value)).unwrap();
+    .expect("registered test server");
+
+    let list = handle_real_server_tool_call(
+        &server,
+        "tracedecay_project_list",
+        json!({"limit": 1, "format": "json"}),
+    )
+    .await;
+    let list_payload: Value = serde_json::from_str(extract_real_server_text(&list)).unwrap();
     assert_eq!(list_payload["projects"].as_array().unwrap().len(), 1);
     assert_eq!(list_payload["limit"], 1);
     assert_eq!(list_payload["truncated"], true);
@@ -57,39 +73,31 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         ) || list_payload["projects"][0]["project_id"] == active_project_id,
         "the bounded list must return one registered project: {list_payload}"
     );
-    let list_text = extract_text(&list.value);
+    let list_text = extract_real_server_text(&list);
     assert!(
         !list_text.contains("secret") && !list_text.contains("git_remote_url"),
         "project list must not expose credential-bearing remotes: {list_text}"
     );
-    let list_markdown = handle_tool_call_with_runtime(
-        &cg,
-        &registry_runtime,
+    let list_markdown = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_list",
         json!({"limit": 2, "format": "markdown"}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let list_markdown_text = extract_text(&list_markdown.value);
+    .await;
+    let list_markdown_text = extract_real_server_text(&list_markdown);
     assert!(
         list_markdown_text.contains("Repositories")
             && list_markdown_text.contains("branches: main"),
         "project list should render compact grouped markdown: {list_markdown_text}"
     );
 
-    let search = handle_tool_call_with_runtime(
-        &cg,
-        &registry_runtime,
+    let search = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_search",
         json!({"query": "alpha", "limit": 10, "format": "json"}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let search_payload: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
+    .await;
+    let search_payload: Value = serde_json::from_str(extract_real_server_text(&search)).unwrap();
     let search_projects = search_payload["projects"].as_array().unwrap();
     assert_eq!(search_projects.len(), 1);
     assert_eq!(search_projects[0]["project_id"], "proj_alpha");
@@ -98,24 +106,20 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         "a separately registered project must not be marked active: {search_payload}"
     );
     assert_eq!(search_payload["project_tree"].as_array().unwrap().len(), 1);
-    let search_text = extract_text(&search.value);
+    let search_text = extract_real_server_text(&search);
     assert!(
         !search_text.contains("secret") && !search_text.contains("git_remote_url"),
         "project search must not expose credential-bearing remotes: {search_text}"
     );
 
-    let multi_term_search = handle_tool_call_with_runtime(
-        &cg,
-        &registry_runtime,
+    let multi_term_search = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_search",
         json!({"query": "alpha beta", "limit": 10, "format": "json"}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let multi_term_payload: Value =
-        serde_json::from_str(extract_text(&multi_term_search.value)).unwrap();
+        serde_json::from_str(extract_real_server_text(&multi_term_search)).unwrap();
     let multi_term_ids: Vec<&str> = multi_term_payload["projects"]
         .as_array()
         .unwrap()
@@ -127,35 +131,27 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         "multi-term project search should match either term: {multi_term_payload}"
     );
 
-    let remote_secret_search = handle_tool_call_with_runtime(
-        &cg,
-        &registry_runtime,
+    let remote_secret_search = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_search",
         json!({"query": "secret", "limit": 10, "format": "json"}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let remote_secret_payload: Value =
-        serde_json::from_str(extract_text(&remote_secret_search.value)).unwrap();
+        serde_json::from_str(extract_real_server_text(&remote_secret_search)).unwrap();
     assert_eq!(
         remote_secret_payload["projects"].as_array().unwrap().len(),
         0,
         "project search must not match credential-bearing remote URL text: {remote_secret_payload}"
     );
 
-    let context = handle_tool_call_with_runtime(
-        &cg,
-        &registry_runtime,
+    let context = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_context",
         json!({"project_selector": {"project_id": active_project_id}, "format": "json"}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let context_payload: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
+    .await;
+    let context_payload: Value = serde_json::from_str(extract_real_server_text(&context)).unwrap();
     assert_eq!(context_payload["project"]["project_id"], active_project_id);
     assert_eq!(
         context_payload["is_active"], true,
@@ -165,23 +161,19 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         context_payload["project"]["is_active"], true,
         "the nested project record must also carry is_active: {context_payload}"
     );
-    let context_text = extract_text(&context.value);
+    let context_text = extract_real_server_text(&context);
     assert!(
         !context_text.contains("secret") && !context_text.contains("git_remote_url"),
         "project context must not expose credential-bearing remotes: {context_text}"
     );
-    let seeded_context = handle_tool_call_with_runtime(
-        &cg,
-        &registry_runtime,
+    let seeded_context = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_context",
         json!({"project_selector": {"project_id": "proj_alpha"}, "format": "json"}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let seeded_context_payload: Value =
-        serde_json::from_str(extract_text(&seeded_context.value)).unwrap();
+        serde_json::from_str(extract_real_server_text(&seeded_context)).unwrap();
     assert_eq!(
         seeded_context_payload["stores"].as_array().unwrap().len(),
         1
@@ -195,17 +187,14 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         "graph_db"
     );
 
-    let alias_context = handle_tool_call_with_runtime(
-        &cg,
-        &registry_runtime,
+    let alias_context = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_context",
         json!({"path": "registered-alias", "format": "json"}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let alias_payload: Value = serde_json::from_str(extract_text(&alias_context.value)).unwrap();
+    .await;
+    let alias_payload: Value =
+        serde_json::from_str(extract_real_server_text(&alias_context)).unwrap();
     assert_eq!(alias_payload["status"], "ok");
     assert_eq!(alias_payload["project"]["project_id"], "proj_alpha");
     assert_eq!(
@@ -213,80 +202,16 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         seeded_project_root.to_string_lossy().as_ref()
     );
 
-    let unknown_alias = handle_tool_call_with_runtime(
-        &cg,
-        &registry_runtime,
+    let unknown_alias = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_context",
         json!({"path": "unknown-alias", "format": "json"}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let unknown_payload: Value = serde_json::from_str(extract_text(&unknown_alias.value)).unwrap();
+    .await;
+    let unknown_payload: Value =
+        serde_json::from_str(extract_real_server_text(&unknown_alias)).unwrap();
     assert_eq!(unknown_payload["status"], "not_found");
     assert!(unknown_payload["project"].is_null());
-}
-
-/// When no project registry authority is mounted for the profile, all three
-/// registry tools report `unavailable`. List and search still return the same
-/// top-level keys as the ok-shape (`title`, `summary`, `project_tree`) with
-/// zeroed/empty values, so callers can rely on a stable payload shape without
-/// mistaking the unavailable authority for an authoritative empty result.
-#[tokio::test]
-async fn project_registry_tools_missing_registry_carries_stable_shape() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-
-    let list = handle_tool_call(
-        &cg,
-        "tracedecay_project_list",
-        json!({"format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let list_payload: Value = serde_json::from_str(extract_text(&list.value)).unwrap();
-    assert_eq!(list_payload["status"], "unavailable");
-    assert_eq!(list_payload["title"], "registered projects");
-    assert_eq!(list_payload["summary"]["project_count"], 0);
-    assert_eq!(list_payload["summary"]["repo_count"], 0);
-    assert_eq!(list_payload["summary"]["truncated"], false);
-    assert_eq!(list_payload["project_tree"].as_array().unwrap().len(), 0);
-    assert_eq!(list_payload["projects"].as_array().unwrap().len(), 0);
-
-    let search = handle_tool_call(
-        &cg,
-        "tracedecay_project_search",
-        json!({"query": "alpha", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let search_payload: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
-    assert_eq!(search_payload["status"], "unavailable");
-    assert_eq!(search_payload["title"], "projects matching \"alpha\"");
-    assert_eq!(search_payload["summary"]["project_count"], 0);
-    assert_eq!(search_payload["summary"]["repo_count"], 0);
-    assert_eq!(search_payload["summary"]["truncated"], false);
-    assert_eq!(search_payload["project_tree"].as_array().unwrap().len(), 0);
-    assert_eq!(search_payload["projects"].as_array().unwrap().len(), 0);
-
-    let context = handle_tool_call(
-        &cg,
-        "tracedecay_project_context",
-        json!({"project_selector": {"project_id": "project.missing"}, "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let context_payload: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
-    assert_eq!(
-        context_payload["status"], "unavailable",
-        "an unmounted profile registry is not an authoritative not-found answer"
-    );
 }
 
 #[cfg(feature = "test-transport")]
@@ -344,12 +269,13 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
     )
     .await;
 
-    let message = response["error"]["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("registry read failure should surface as an error: {response}"));
-    assert!(
-        message.contains("resolve project identity alias") || message.contains("project_aliases"),
-        "{message}"
+    assert_eq!(
+        crate::support::tool_refusal(&response),
+        json!({
+            "kind": "unavailable",
+            "code": "graph_tool.failed",
+            "message": "database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
+        })
     );
 }
 
@@ -404,12 +330,14 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
     )
     .await;
 
-    let message = response["error"]["message"].as_str().unwrap_or_else(|| {
-        panic!("registry read failure must not become a successful empty search: {response}")
-    });
-    assert!(
-        message.contains("search code projects") || message.contains("project_aliases"),
-        "{message}"
+    // A registry read failure never becomes a successful empty search.
+    assert_eq!(
+        crate::support::tool_refusal(&response),
+        json!({
+            "kind": "unavailable",
+            "code": "graph_tool.failed",
+            "message": "database error: SQLite prepare query failed: no such table: project_aliases (operation: search registered code projects)",
+        })
     );
 }
 

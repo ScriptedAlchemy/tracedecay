@@ -415,6 +415,7 @@ pub enum DaemonInvocationOperation {
     ObservatoryRead,
     RetainedApplication,
     ProfileRetainedApplication,
+    ProfileGraphTool,
     MultiRootScopeSetRead,
     MultiRootScopeSetCompareAndSwap,
     MultiRootExecute,
@@ -482,6 +483,7 @@ impl DaemonInvocationOperation {
             Self::ObservatoryRead => "observatory_read",
             Self::RetainedApplication => "retained_application",
             Self::ProfileRetainedApplication => "profile_retained_application",
+            Self::ProfileGraphTool => "profile_graph_tool",
             Self::MultiRootScopeSetRead => "multi_root_scope_set_read",
             Self::MultiRootScopeSetCompareAndSwap => "multi_root_scope_set_compare_and_swap",
             Self::MultiRootExecute => "multi_root_execute",
@@ -689,6 +691,15 @@ pub enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
+    /// A read of the authenticated profile's project registry. It names no
+    /// project: the daemon composition root owns the profile registry.
+    ProfileGraphTool {
+        surface_operation: ApplicationSurfaceOperation,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
     MultiRootScopeSetRead {
         request: MultiRootScopeSetReadRequestV1,
         observed_at: UtcMicros,
@@ -786,6 +797,29 @@ pub enum DaemonInvocationPayload {
 }
 
 impl DaemonInvocationRequest {
+    pub fn profile_graph_tool(
+        request_id: impl Into<String>,
+        surface_operation: ApplicationSurfaceOperation,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::ProfileGraphTool {
+                surface_operation,
+                arguments,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub fn graph_tool(
         request_id: impl Into<String>,
         surface_operation: ApplicationSurfaceOperation,
@@ -1042,7 +1076,14 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::Analytics
             | ApplicationSurfaceOperation::Search
             | ApplicationSurfaceOperation::RunAffectedTests
-            | ApplicationSurfaceOperation::Dashboard => {
+            | ApplicationSurfaceOperation::Dashboard
+            | ApplicationSurfaceOperation::Status
+            | ApplicationSurfaceOperation::ActiveProject
+            | ApplicationSurfaceOperation::RemoteStatus
+            | ApplicationSurfaceOperation::Runtime
+            | ApplicationSurfaceOperation::ProjectList
+            | ApplicationSurfaceOperation::ProjectSearch
+            | ApplicationSurfaceOperation::ProjectContext => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate
@@ -1884,6 +1925,9 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::ProfileRetainedApplication { .. } => {
                 DaemonInvocationOperation::ProfileRetainedApplication
             }
+            DaemonInvocationPayload::ProfileGraphTool { .. } => {
+                DaemonInvocationOperation::ProfileGraphTool
+            }
             DaemonInvocationPayload::MultiRootScopeSetRead { .. } => {
                 DaemonInvocationOperation::MultiRootScopeSetRead
             }
@@ -2221,6 +2265,19 @@ impl DaemonInvocationRequest {
             } => {
                 if !valid_observation_window(observed_at, deadline, cancellation)
                     || !surface_operation.is_graph_tool()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::ProfileGraphTool {
+                surface_operation,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || !surface_operation.is_profile_registry_read()
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }

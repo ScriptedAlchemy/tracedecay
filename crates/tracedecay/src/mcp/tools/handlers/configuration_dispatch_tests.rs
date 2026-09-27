@@ -137,8 +137,6 @@ async fn available_configuration_effect_reaches_canonical_executor() {
         &cg,
         "tracedecay_configuration_set",
         request,
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_cancellation: Some(cancellation.clone()),
@@ -247,8 +245,6 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
             &cg,
             tool_name,
             request.clone(),
-            None,
-            None,
             ToolCallRegistryOptions {
                 application_invocation_executor: Some(&executor),
                 application_cancellation: Some(cancellation.clone()),
@@ -358,8 +354,6 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
             &cg,
             tool_name,
             request.clone(),
-            None,
-            None,
             ToolCallRegistryOptions {
                 application_invocation_executor: Some(&executor),
                 ..Default::default()

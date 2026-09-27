@@ -29,6 +29,7 @@ impl DaemonInvocationState {
                 | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
                 | DaemonInvocationPayload::MultiRootExecute { .. }
                 | DaemonInvocationPayload::ProfileRetainedApplication { .. }
+                | DaemonInvocationPayload::ProfileGraphTool { .. }
         ) && request_cancellation.is_none()
         {
             let Some(lease) = self
@@ -59,6 +60,28 @@ impl DaemonInvocationState {
                 store_administration,
                 request.request_id,
                 retained_request,
+                deadline,
+                cancellation,
+                direct_request_cancellation,
+            )
+            .await;
+        }
+        // The caller's project, when it names one, only marks that project
+        // active in the profile's registry; the read never opens it.
+        if let DaemonInvocationPayload::ProfileGraphTool {
+            surface_operation,
+            arguments,
+            deadline,
+            cancellation,
+            ..
+        } = request.payload
+        {
+            return super::super::profile_registry::invoke_profile_registry_read(
+                store_administration,
+                project_path,
+                request.request_id,
+                surface_operation,
+                arguments,
                 deadline,
                 cancellation,
                 direct_request_cancellation,

@@ -195,8 +195,6 @@ async fn call_execute(
         graph,
         "tracedecay_multi_root_execute",
         arguments,
-        None,
-        None,
         options,
     )
     .await

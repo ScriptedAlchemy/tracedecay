@@ -209,7 +209,18 @@ digest_id!(
 
 /// Monotonic epoch of the writer authority for a shard.
 #[derive(
-    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
 )]
 #[serde(transparent)]
 pub struct AuthorityEpoch(pub u64);

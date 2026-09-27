@@ -167,7 +167,14 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::Analytics
         | ApplicationSurfaceOperation::Search
         | ApplicationSurfaceOperation::RunAffectedTests
-        | ApplicationSurfaceOperation::Dashboard) => {
+        | ApplicationSurfaceOperation::Dashboard
+        | ApplicationSurfaceOperation::Status
+        | ApplicationSurfaceOperation::ActiveProject
+        | ApplicationSurfaceOperation::RemoteStatus
+        | ApplicationSurfaceOperation::Runtime
+        | ApplicationSurfaceOperation::ProjectList
+        | ApplicationSurfaceOperation::ProjectSearch
+        | ApplicationSurfaceOperation::ProjectContext) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList

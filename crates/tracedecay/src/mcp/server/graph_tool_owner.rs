@@ -11,6 +11,7 @@ use tracedecay_daemon_service::{
     RegisteredGraphToolOwnerV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::McpServer;
 use crate::mcp::tools::{
@@ -45,6 +46,10 @@ impl McpServer {
         invocation: GraphToolInvocationV1,
     ) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
         let (cg, _live_branch) = self.reopen_if_branch_drifted_memoized().await;
+        let server_stats = match invocation.operation {
+            ApplicationSurfaceOperation::Status => Some(self.server_stats_json().await),
+            _ => None,
+        };
         let options = ToolCallRegistryOptions {
             global_db: self.registry_db.as_ref(),
             accounting_db: self.accounting_db.as_deref(),
@@ -53,6 +58,11 @@ impl McpServer {
                 self.project_session_db.as_ref(),
                 self.profile_session_db.as_ref(),
             ),
+            server_stats,
+            doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
+            remote_operational_status: self.remote_operational_status.clone(),
+            code_index_readiness_waiter: self.code_index_readiness_waiter.clone(),
+            generation_census_reader: self.generation_census_reader(),
             registered_project_session_db: self.project_session_db.clone(),
             application_request_id: Some(invocation.request_id),
             application_deadline: Some(invocation.deadline),

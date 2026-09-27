@@ -159,7 +159,14 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::Analytics
         | ApplicationSurfaceOperation::Search
         | ApplicationSurfaceOperation::RunAffectedTests
-        | ApplicationSurfaceOperation::Dashboard => return None,
+        | ApplicationSurfaceOperation::Dashboard
+        | ApplicationSurfaceOperation::Status
+        | ApplicationSurfaceOperation::ActiveProject
+        | ApplicationSurfaceOperation::RemoteStatus
+        | ApplicationSurfaceOperation::Runtime
+        | ApplicationSurfaceOperation::ProjectList
+        | ApplicationSurfaceOperation::ProjectSearch
+        | ApplicationSurfaceOperation::ProjectContext => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

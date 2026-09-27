@@ -864,12 +864,14 @@ impl DaemonInvocationService {
                 ))
                 .await
             }
-            // Multi-root routes and the profile's retained stores belong to the
-            // daemon composition root, which serves them before this service.
+            // Multi-root routes and the profile's retained stores and project
+            // registry belong to the daemon composition root, which serves them
+            // before this service.
             DaemonInvocationPayload::MultiRootScopeSetRead { .. }
             | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
             | DaemonInvocationPayload::MultiRootExecute { .. }
-            | DaemonInvocationPayload::ProfileRetainedApplication { .. } => {
+            | DaemonInvocationPayload::ProfileRetainedApplication { .. }
+            | DaemonInvocationPayload::ProfileGraphTool { .. } => {
                 DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,

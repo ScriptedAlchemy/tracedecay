@@ -246,6 +246,25 @@ pub(crate) fn extract_real_server_text(result: &Value) -> &str {
         .expect("MCP text result")
 }
 
+/// The owner's refusal a JSON-RPC `tools/call` response carries, as its
+/// problem kind, code, and message, after asserting the call refused through
+/// that record rather than a protocol error.
+#[cfg(feature = "test-transport")]
+pub(crate) fn tool_refusal(response: &Value) -> Value {
+    assert!(
+        response["error"].is_null(),
+        "the owner refuses through its problem record: {response}"
+    );
+    let result = &response["result"];
+    assert_eq!(result["isError"], true, "the call must refuse: {response}");
+    let problem = &result["structuredContent"]["problem"];
+    json!({
+        "kind": problem["kind"],
+        "code": problem["code"],
+        "message": problem["message"],
+    })
+}
+
 /// Polls the daemon-owned code-index search authority until an exact
 /// generation is bound and its native code graph is serving.
 ///
@@ -588,7 +607,6 @@ pub(crate) async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
     mut args: serde_json::Value,
-    server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
 ) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
@@ -606,11 +624,22 @@ pub(crate) async fn handle_tool_call(
     //
     // Every retained-surface tool (LCM, message search, fact store, session
     // and workflow reads) executes through the daemon retained owner in
-    // production, so dispatch it through the registered test server, which
-    // mounts that owner in process, rather than the bare registry path whose
-    // missing executor truthfully reports the transport as unavailable.
+    // production, and every graph-tool and profile registry read through its
+    // graph-tool or profile owner, so dispatch them through the registered
+    // test server, which mounts those owners in process, rather than the bare
+    // registry path whose missing executor truthfully reports the transport as
+    // unavailable.
     #[cfg(feature = "test-transport")]
-    if tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
+    let retained =
+        tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some();
+    #[cfg(feature = "test-transport")]
+    let owner_answered =
+        tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .is_some_and(|operation| {
+                operation.is_graph_tool() || operation.is_profile_registry_read()
+            });
+    #[cfg(feature = "test-transport")]
+    if retained || owner_answered {
         let runtime = open_active_project_scoped_runtime(cg).await;
         // The daemon serves retained tools only for registered projects, so
         // mirror `real_mcp_server` and register this graph's identity in the
@@ -630,7 +659,9 @@ pub(crate) async fn handle_tool_call(
         ))
         .await?;
         let server = Box::pin(McpServer::new_with_host_admission_test_runtime_for_test(
-            graph, None, runtime,
+            graph,
+            scope_prefix.map(str::to_owned),
+            runtime,
         ))
         .await?;
         if !server.has_project_application_retrieval_for_test() {
@@ -677,18 +708,17 @@ pub(crate) async fn handle_tool_call(
                 Ok(response["result"].clone())
             }
         };
-        let outcome = handle_retained_dispatch(tool_name, args, dispatch).await;
+        let outcome = if retained {
+            handle_retained_dispatch(tool_name, args, dispatch).await
+        } else {
+            dispatch(tool_name.to_owned(), args)
+                .await
+                .map(|result| ToolResult::new(result, Vec::new()))
+        };
         server.shutdown().await;
         return outcome;
     }
-    Box::pin(tracedecay::mcp::handle_tool_call(
-        cg,
-        tool_name,
-        args,
-        server_stats,
-        scope_prefix,
-    ))
-    .await
+    Box::pin(tracedecay::mcp::handle_tool_call(cg, tool_name, args)).await
 }
 
 /// Dispatches `tool_name` through `dispatch`, recovers truncated responses
@@ -756,33 +786,6 @@ where
         { "type": "text", "text": payload.to_string() }
     ]);
     Ok(ToolResult::new(unwrapped, Vec::new()))
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) async fn handle_tool_call_with_runtime(
-    cg: &TraceDecay,
-    runtime: &HostAdmissionTestRuntimeV1,
-    tool_name: &str,
-    mut args: serde_json::Value,
-    server_stats: Option<serde_json::Value>,
-    scope_prefix: Option<&str>,
-) -> tracedecay_domain::errors::Result<ToolResult> {
-    let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
-    if !owns_format && let Some(obj) = args.as_object_mut() {
-        obj.entry("format".to_string())
-            .or_insert_with(|| serde_json::json!("json"));
-    }
-    Box::pin(
-        tracedecay::test_support::host_admission::call_mcp_tool_for_test(
-            runtime,
-            cg,
-            tool_name,
-            args,
-            server_stats,
-            scope_prefix,
-        ),
-    )
-    .await
 }
 
 #[cfg(feature = "test-transport")]
@@ -856,7 +859,6 @@ pub(crate) async fn handle_production_source_edit_tool_call(
     fixture: &ProductionSourceEditFixture,
     tool_name: &str,
     mut args: Value,
-    _server_stats: Option<Value>,
     _scope_prefix: Option<&str>,
 ) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);

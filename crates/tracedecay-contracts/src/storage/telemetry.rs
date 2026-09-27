@@ -299,7 +299,7 @@ pub fn is_significant_table_growth(sample: &TableGrowthSampleV1) -> bool {
 
 /// Contract-independent evidence ready to wrap in a future `TableGrowth`
 /// Storage finding once that generated-contract variant is available.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum TableGrowthDoctorEvidenceV1 {
     SignificantGrowth {

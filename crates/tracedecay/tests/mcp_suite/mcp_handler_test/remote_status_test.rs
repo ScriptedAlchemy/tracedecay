@@ -1,9 +1,9 @@
 //! Real `tools/call` coverage for `tracedecay_remote_status`.
 //!
 //! The production daemon mounts the Remote Brain reader. With no listener and
-//! no registered node, that reader is `unconfigured`. A direct server never
-//! installs the reader, so the same call is `unavailable`. Neither outcome is
-//! an empty success or a semantic tool error.
+//! no registered node, that reader is `unconfigured`. A registered test server
+//! that never installs the reader answers the same call `unavailable`. Neither
+//! outcome is an empty success or a semantic tool error.
 //!
 //! The configured (`observed`) plane is proved at the two seams that can mount
 //! one cheaply: `daemon::remote_protocol_tests` provisions a real node and
@@ -21,7 +21,8 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use crate::common;
 use crate::fixture;
 use crate::mcp_server_test::support::{
-    jsonrpc_request, response_with_id, run_server_with_messages, setup_server, successful_tool_text,
+    jsonrpc_request, response_with_id, run_server_with_messages, setup_accounted_server,
+    successful_tool_text,
 };
 use crate::support::{TestTempDir, test_temp_dir};
 
@@ -122,10 +123,10 @@ async fn production_daemon_reports_unconfigured_remote_plane() {
 }
 
 #[tokio::test]
-async fn direct_server_reports_unmounted_remote_authority() {
-    let (server, _dir) = setup_server().await;
+async fn a_server_without_the_remote_reader_reports_unmounted_remote_authority() {
+    let fixture = setup_accounted_server().await;
     let responses = run_server_with_messages(
-        server,
+        std::sync::Arc::clone(&fixture.server),
         vec![
             jsonrpc_request(
                 json!(1),

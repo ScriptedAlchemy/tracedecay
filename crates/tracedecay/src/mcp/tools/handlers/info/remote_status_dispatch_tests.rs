@@ -14,9 +14,9 @@ use tracedecay_contracts::remote::status::{
 use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
 use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
-use crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile;
-use crate::mcp::tools::handlers::{
-    ToolCallRegistryOptions, handle_tool_call_with_registry_options,
+use crate::mcp::tools::handlers::ToolCallRegistryOptions;
+use crate::mcp::tools::handlers::dispatch_test_support::{
+    SelectorProfile, dispatch_on_graph_authority,
 };
 use tracedecay_mcp::ToolResult;
 use tracedecay_project::project::TraceDecay;
@@ -102,12 +102,10 @@ async fn dispatch_returns_provider_json_or_typed_unavailable() {
         let expected = expected.clone();
         Arc::new(move || expected.clone())
     };
-    let observed = handle_tool_call_with_registry_options(
+    let observed = dispatch_on_graph_authority(
         &cg,
         "tracedecay_remote_status",
         json!({ "format": "json" }),
-        None,
-        None,
         ToolCallRegistryOptions {
             remote_operational_status: Some(provider),
             ..Default::default()
@@ -120,12 +118,10 @@ async fn dispatch_returns_provider_json_or_typed_unavailable() {
         serde_json::to_value(&expected).unwrap()
     );
 
-    let absent = handle_tool_call_with_registry_options(
+    let absent = dispatch_on_graph_authority(
         &cg,
         "tracedecay_remote_status",
         json!({ "format": "json" }),
-        None,
-        None,
         ToolCallRegistryOptions::default(),
     )
     .await

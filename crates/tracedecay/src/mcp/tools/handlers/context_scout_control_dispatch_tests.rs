@@ -136,8 +136,6 @@ async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
                 "expected_revision": "revision.mcp-context-scout-control-dispatch",
                 "idempotency_key": idempotency_key
             }),
-            None,
-            None,
             ToolCallRegistryOptions {
                 application_invocation_executor: Some(&executor),
                 application_cancellation: Some(cancellation.clone()),

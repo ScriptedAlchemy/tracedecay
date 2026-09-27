@@ -7,9 +7,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use crate::mcp::tools::handlers::{
-    ToolCallRegistryOptions, handle_tool_call_with_registry_options,
-};
+use crate::mcp::tools::handlers::{ToolCallRegistryOptions, dispatch_on_graph_authority};
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::project_reads::project_code_index_generation_census_reader;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
@@ -66,12 +64,10 @@ async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() 
         .expect("sealed generation must publish for the mounted root");
     }
 
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_runtime",
         json!({ "format": "json" }),
-        None,
-        None,
         ToolCallRegistryOptions {
             generation_census_reader: Some(generation_census_reader),
             ..Default::default()

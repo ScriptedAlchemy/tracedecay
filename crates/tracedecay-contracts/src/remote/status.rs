@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
@@ -11,7 +12,7 @@ use crate::doctor::{
 };
 use crate::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteOperationalReadinessV1 {
     Unconfigured,
@@ -20,7 +21,7 @@ pub enum RemoteOperationalReadinessV1 {
     RecoveryRequired,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteSpoolOperationalStatusV1 {
     pub pending_count: u64,
@@ -28,7 +29,7 @@ pub struct RemoteSpoolOperationalStatusV1 {
     pub has_sequence_gap: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteOperationalStatusV1 {
     pub readiness: RemoteOperationalReadinessV1,
@@ -108,7 +109,7 @@ impl RemoteOperationalStatusV1 {
 /// mounted daemon authorities. Every operator surface (Doctor, CLI, MCP,
 /// dashboard) reads this one shape; `Unavailable` is reserved for a genuinely
 /// unmounted or unreadable authority, never a rendering shortcut.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum RemoteOperationalStatusReadV1 {
     Observed {

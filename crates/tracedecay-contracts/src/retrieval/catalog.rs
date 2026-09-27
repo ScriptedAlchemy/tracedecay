@@ -22,6 +22,7 @@ use crate::capability_manifest::{
 };
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::remote::status::RemoteOperationalStatusReadV1;
 use crate::result::ResultContractRef;
 use crate::retrieval::DependencyDepthResultV1;
 use crate::retrieval::analysis_report_surface::{
@@ -64,6 +65,12 @@ use crate::retrieval::primitive_surface::{
 };
 use crate::retrieval::project_file_surface::{
     ConfigResultV1, ConfigSurfaceRequestV1, FilesResultV1, FilesSurfaceRequestV1,
+};
+use crate::retrieval::project_info_surface::{
+    ActiveProjectResultV1, ActiveProjectSurfaceRequestV1, ProjectContextResultV1,
+    ProjectContextSurfaceRequestV1, ProjectListSurfaceRequestV1, ProjectRegistryListingResultV1,
+    ProjectSearchSurfaceRequestV1, RemoteStatusSurfaceRequestV1, RuntimeResultV1,
+    RuntimeSurfaceRequestV1, StatusResultV1, StatusSurfaceRequestV1,
 };
 use crate::retrieval::requests::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
@@ -264,6 +271,13 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("search"),
     owner_side_effect_spec(ApplicationSurfaceOperation::RunAffectedTests),
     owner_side_effect_spec(ApplicationSurfaceOperation::Dashboard),
+    graph_report_spec("status"),
+    graph_report_spec("active_project"),
+    graph_report_spec("remote_status"),
+    graph_report_spec("runtime"),
+    graph_report_spec("project_list"),
+    graph_report_spec("project_search"),
+    graph_report_spec("project_context"),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
     git_context_spec("changelog"),
@@ -363,7 +377,14 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "analytics"
         | "search"
         | "run_affected_tests"
-        | "dashboard" => &CLI_MCP_PRIMITIVE_SURFACES,
+        | "dashboard"
+        | "status"
+        | "active_project"
+        | "remote_status"
+        | "runtime"
+        | "project_list"
+        | "project_search"
+        | "project_context" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -590,6 +611,25 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "dashboard" => {
             "Start or stop this project's loopback dashboard server and report its bound address."
+        }
+        "status" => {
+            "Report the served project's graph census, code-index freshness, retrieval serving, and resident memory, with opt-in branch, storage, and session diagnostics."
+        }
+        "active_project" => {
+            "Report the active project's identity, store paths, and branch identity for this session."
+        }
+        "remote_status" => {
+            "Read the Remote Brain operational plane: listener, enrollment, spool, replay coverage, and failover/recovery state."
+        }
+        "runtime" => {
+            "Capture the daemon's process and database telemetry, with the opt-in authority audit, session health, and Doctor report."
+        }
+        "project_list" => "List a bounded page of the profile's registered projects.",
+        "project_search" => {
+            "Search the profile's registered projects by id, root path, alias, or default branch."
+        }
+        "project_context" => {
+            "Read one registered project's metadata, aliases, and store instances."
         }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
@@ -1121,6 +1161,33 @@ fn primitive_executable_schemas(
         RunAffectedTestsResultV1
     );
     add!("dashboard", DashboardSurfaceRequestV1, DashboardResultV1);
+    add!("status", StatusSurfaceRequestV1, StatusResultV1);
+    add!(
+        "active_project",
+        ActiveProjectSurfaceRequestV1,
+        ActiveProjectResultV1
+    );
+    add!(
+        "remote_status",
+        RemoteStatusSurfaceRequestV1,
+        RemoteOperationalStatusReadV1
+    );
+    add!("runtime", RuntimeSurfaceRequestV1, RuntimeResultV1);
+    add!(
+        "project_list",
+        ProjectListSurfaceRequestV1,
+        ProjectRegistryListingResultV1
+    );
+    add!(
+        "project_search",
+        ProjectSearchSurfaceRequestV1,
+        ProjectRegistryListingResultV1
+    );
+    add!(
+        "project_context",
+        ProjectContextSurfaceRequestV1,
+        ProjectContextResultV1
+    );
     Ok(schemas)
 }
 

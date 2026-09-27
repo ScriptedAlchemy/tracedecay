@@ -240,7 +240,7 @@ impl ApplicationSurfaceRequest {
             return request.operation().as_str() == operation.as_str();
         }
         if let Self::GraphTool(_) = self {
-            return operation.is_graph_tool();
+            return operation.is_graph_tool() || operation.is_profile_registry_read();
         }
         matches!(
             (self, operation),
@@ -943,7 +943,14 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::Analytics
         | ApplicationSurfaceOperation::Search
         | ApplicationSurfaceOperation::RunAffectedTests
-        | ApplicationSurfaceOperation::Dashboard => match value {
+        | ApplicationSurfaceOperation::Dashboard
+        | ApplicationSurfaceOperation::Status
+        | ApplicationSurfaceOperation::ActiveProject
+        | ApplicationSurfaceOperation::RemoteStatus
+        | ApplicationSurfaceOperation::Runtime
+        | ApplicationSurfaceOperation::ProjectList
+        | ApplicationSurfaceOperation::ProjectSearch
+        | ApplicationSurfaceOperation::ProjectContext => match value {
             Value::Object(arguments) => Ok(ApplicationSurfaceRequest::GraphTool(arguments)),
             _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(
                 "invalid arguments: {} expects a JSON object",

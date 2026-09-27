@@ -1,16 +1,19 @@
-//! Observed `tracedecay_runtime` responses.
+//! Observed `tracedecay_runtime` results from the project's graph-tool owner.
 //!
-//! Calls go through the production MCP dispatch (`handle_tool_call`), the
-//! same entry the server uses for `tools/call`. Assertions are the JSON a
-//! caller reads, not which helpers ran.
+//! The owner computes the runtime read from the authorities its server holds;
+//! these fixtures hold none beyond the opened project, so every opt-in section
+//! reports its typed unattached state. Assertions are the JSON a caller reads,
+//! not which helpers ran.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay_project::project::TraceDecay;
+use tempfile::TempDir;
 
-use crate::support::{extract_json, handle_tool_call, setup_empty_project};
+use super::dispatch_test_support::{SelectorProfile, dispatch_on_graph_authority};
+use super::*;
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
@@ -27,11 +30,38 @@ fn observed_file_len(path: &Path) -> u64 {
 }
 
 async fn runtime_payload(cg: &TraceDecay, args: Value) -> Value {
-    let result = handle_tool_call(cg, "tracedecay_runtime", args, None, None)
-        .await
-        .expect("tracedecay_runtime call");
+    let result = dispatch_on_graph_authority(
+        cg,
+        "tracedecay_runtime",
+        args,
+        ToolCallRegistryOptions::default()
+            .admit_opened_project(cg)
+            .expect("opened fixture admits"),
+    )
+    .await
+    .expect("tracedecay_runtime call");
     assert_eq!(result.value["content"][0]["type"], "text");
-    extract_json(&result.value)
+    serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("runtime JSON text"),
+    )
+    .expect("parse runtime JSON")
+}
+
+async fn runtime_fixture(dir: &TempDir, name: &str) -> TraceDecay {
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join(name);
+    fs::create_dir_all(project.join("src")).expect("create fixture source root");
+    fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").expect("write fixture source");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        &format!("project.{name}"),
+    )
+    .await
+    .expect("open mounted runtime fixture");
+    cg
 }
 
 fn assert_unavailable_census(database: &Value) {
@@ -49,7 +79,8 @@ fn assert_unavailable_census(database: &Value) {
 /// not invent doctor, session, or audit sections.
 #[tokio::test]
 async fn runtime_reports_this_process_and_the_admitted_store_files() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let dir = TempDir::new().expect("fixture root");
+    let cg = runtime_fixture(&dir, "mcp-runtime-store-files").await;
     let graph_db = cg.store_layout().graph_db_path.clone();
     let dirty = with_suffix(&graph_db, ".dirty");
     assert!(
@@ -143,7 +174,8 @@ async fn runtime_reports_this_process_and_the_admitted_store_files() {
 /// Opt-in arguments add one typed section and leave the others off.
 #[tokio::test]
 async fn runtime_opt_in_sections_are_exact_typed_payloads() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let dir = TempDir::new().expect("fixture root");
+    let cg = runtime_fixture(&dir, "mcp-runtime-opt-in-sections").await;
 
     let baseline = runtime_payload(&cg, json!({ "format": "json" })).await;
     assert!(baseline.get("doctor_report").is_none());

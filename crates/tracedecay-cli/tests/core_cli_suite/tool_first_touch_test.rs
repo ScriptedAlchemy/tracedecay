@@ -276,11 +276,20 @@ fn code_graph_tools_do_not_first_touch_project_store() {
         !output.status.success(),
         "code-graph tools must not first-touch create project stores"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("project route error (project_not_enrolled)")
-            && stderr.contains("run 'tracedecay init' in that directory"),
-        "expected init guidance, got:\n{stderr}"
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("status --json prints its refusal: {error}\n{stdout}"));
+    let problem = &result["problem"];
+    assert_eq!(
+        (&problem["kind"], &problem["code"], &problem["message"]),
+        (
+            &serde_json::json!("invalid_request"),
+            &serde_json::json!("project_not_enrolled"),
+            &serde_json::json!(format!(
+                "no TraceDecay index found at '{target_arg}': project is not enrolled in the authenticated profile; run 'tracedecay init' in that directory, or start the MCP server with 'tracedecay serve --path <project>'"
+            )),
+        ),
+        "expected init guidance in the owner's refusal, got:\n{stdout}"
     );
     assert!(!target_path.join(".tracedecay").exists());
 }

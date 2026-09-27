@@ -50,7 +50,6 @@ pub enum McpToolDispatchGroup {
     Info,
     Admin,
     Git,
-    Health,
     Work,
     Workflow,
 }
@@ -83,7 +82,6 @@ pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
             McpToolDispatchGroup::Info
             | McpToolDispatchGroup::Admin
             | McpToolDispatchGroup::Git
-            | McpToolDispatchGroup::Health
             | McpToolDispatchGroup::MultiRoot
             | McpToolDispatchGroup::ApplicationSurface,
         ) => BranchSensitivity::Sensitive,
@@ -296,6 +294,13 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::Search
         | ApplicationSurfaceOperation::RunAffectedTests
         | ApplicationSurfaceOperation::Dashboard
+        | ApplicationSurfaceOperation::Status
+        | ApplicationSurfaceOperation::ActiveProject
+        | ApplicationSurfaceOperation::RemoteStatus
+        | ApplicationSurfaceOperation::Runtime
+        | ApplicationSurfaceOperation::ProjectList
+        | ApplicationSurfaceOperation::ProjectSearch
+        | ApplicationSurfaceOperation::ProjectContext
         | HealthRead
         | HealthDelta
         | DiagnosticsRead
@@ -346,23 +351,17 @@ macro_rules! binding_groups {
 #[rustfmt::skip]
 const BINDING_GROUPS: &[BindingGroup] = binding_groups![
     [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_status", "tracedecay_remote_status", "tracedecay_active_project",
-        "tracedecay_project_list", "tracedecay_project_search"],
-    [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::SelectorOnly,
-        "tracedecay_project_context"],
-    [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_admin_sync", "tracedecay_port_status", "tracedecay_port_order",
         "tracedecay_todos"],
     [Some(McpToolDispatchGroup::Admin), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_hook_runtime", "tracedecay_admin_cli", "tracedecay_admin_project"],
     [Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_admin_branch_add"],
-    [Some(McpToolDispatchGroup::Health), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_runtime"],
     [Some(McpToolDispatchGroup::MultiRoot), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_multi_root_scope_set_read", "tracedecay_multi_root_scope_set_compare_and_swap",
         "tracedecay_multi_root_execute"],
     [None, RegisteredProjectAccess::SelectorOnly, "tracedecay_fact_feedback"],
+    [None, RegisteredProjectAccess::SelectorOnly, "tracedecay_project_context"],
     [None, RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_lcm_describe", "tracedecay_lcm_doctor", "tracedecay_lcm_expand", "tracedecay_lcm_expand_query",
         "tracedecay_lcm_grep", "tracedecay_lcm_load_session", "tracedecay_lcm_status",

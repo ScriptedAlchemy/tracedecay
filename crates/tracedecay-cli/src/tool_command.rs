@@ -120,17 +120,6 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_expand_query",
 ];
 
-/// Tools that read the profile's project registry. They need no mounted
-/// project: a project, when one is connected, only marks the active listing
-/// entry. An explicit `--project` that is not an initialised project therefore
-/// routes projectless instead of being refused for a project the read never
-/// depended on.
-const PROFILE_REGISTRY_TOOLS: &[&str] = &[
-    "tracedecay_project_list",
-    "tracedecay_project_search",
-    "tracedecay_project_context",
-];
-
 fn tool_deadline_range_error() -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -223,6 +212,19 @@ fn run_inner(
                     &mut tool_args,
                 );
                 return dispatch_cli_retained(
+                    profile, operation, tool_args, dispatch, raw_json, deadline,
+                )
+                .await;
+            }
+            if operation.is_profile_registry_read() {
+                let mut tool_args = tool_args;
+                let dispatch = DaemonToolDispatch::for_tool(
+                    profile,
+                    explicit_project,
+                    tool_name,
+                    &mut tool_args,
+                );
+                return dispatch_cli_profile_registry(
                     profile, operation, tool_args, dispatch, raw_json, deadline,
                 )
                 .await;
@@ -340,6 +342,16 @@ fn run_inner(
             let dispatch =
                 DaemonToolDispatch::for_tool(profile, explicit_project, &def.name, &mut tool_args);
             return dispatch_cli_retained(
+                profile, operation, tool_args, dispatch, raw_json, deadline,
+            )
+            .await;
+        }
+        if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
+            && operation.is_profile_registry_read()
+        {
+            let dispatch =
+                DaemonToolDispatch::for_tool(profile, explicit_project, &def.name, &mut tool_args);
+            return dispatch_cli_profile_registry(
                 profile, operation, tool_args, dispatch, raw_json, deadline,
             )
             .await;
@@ -847,6 +859,51 @@ async fn dispatch_cli_graph_tool(
     tool_result_process_outcome(&result.value, tool_name)
 }
 
+/// Run one profile registry read through the daemon's profile owner and print
+/// the same tool result its MCP call returns. The handshake's project, when
+/// the dispatch names one, only marks that project active.
+#[hotpath::measure(label = "cli.tool.profile_registry", future = true)]
+async fn dispatch_cli_profile_registry(
+    profile: &ProfileRoot,
+    operation: ApplicationSurfaceOperation,
+    tool_args: Value,
+    dispatch: DaemonToolDispatch,
+    raw_json: bool,
+    deadline: Instant,
+) -> Result<()> {
+    let tool_name = operation.mcp_tool_name();
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate an application surface request id".to_owned(),
+        })?;
+    let client =
+        tracedecay_daemon_identity::invocation_client_for_current(dispatch.handshake(profile)?)?;
+    let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
+    let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
+        tracedecay_tool_catalog::BindingSurface::Cli,
+        operation,
+        tool_args.clone(),
+        Some(&client),
+        Some(request_id),
+        Some(request_deadline),
+        Some(cancellation),
+    )
+    .await?;
+    let response_handle_root = cli_response_handle_root(profile, dispatch.project_path.as_deref())?;
+    let mut result = match outcome {
+        Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+            response_handle_root.as_deref(),
+            &tool_args,
+            completion,
+        )?,
+        Err(refusal) => refusal.render(response_handle_root.as_deref(), &tool_args)?,
+    };
+    account_tool_result(dispatch.project_path.as_deref(), &mut result);
+    tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+    print_tool_output(&result.value, raw_json);
+    tool_result_process_outcome(&result.value, tool_name)
+}
+
 /// Enrolled project's handle root, or none when that path has no store.
 fn cli_response_handle_root(
     profile: &ProfileRoot,
@@ -921,7 +978,14 @@ impl DaemonToolDispatch {
                 allow_init: false,
             };
         }
-        if PROFILE_REGISTRY_TOOLS.contains(&tool_name) {
+        // Registry reads need no mounted project: a project, when one is
+        // connected, only marks the active listing entry. An explicit
+        // `--project` that is not an initialised project therefore routes
+        // projectless instead of being refused for a project the read never
+        // depended on.
+        if ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .is_some_and(ApplicationSurfaceOperation::is_profile_registry_read)
+        {
             return Self::registry_scoped(profile, explicit_project, tool_name, tool_args);
         }
         Self::project_scoped(profile, explicit_project, tool_name)

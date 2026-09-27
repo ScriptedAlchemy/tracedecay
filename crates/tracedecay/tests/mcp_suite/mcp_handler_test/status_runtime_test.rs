@@ -34,15 +34,9 @@ fn assert_sealed_graph_statistics_are_unavailable(text: &str) {
 #[tokio::test]
 async fn test_status() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_status",
-        json!({}),
-        Some(json!({"uptime": 100})),
-        None,
-    )
-    .await
-    .unwrap();
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None)
+        .await
+        .unwrap();
     let text = extract_text(&result.value);
     assert_sealed_graph_statistics_are_unavailable(text);
     assert!(
@@ -75,7 +69,6 @@ async fn status_includes_verbose_sections_only_when_requested() {
             "include_session_ingest": true,
             "include_staleness": true,
         }),
-        Some(json!({"uptime": 100})),
         None,
     )
     .await
@@ -96,7 +89,6 @@ async fn status_can_omit_verbose_branch_diagnostics() {
         &cg,
         "tracedecay_status",
         json!({"include_branch_diagnostics": false}),
-        Some(json!({"uptime": 100})),
         None,
     )
     .await
@@ -143,17 +135,11 @@ async fn status_reports_daemon_owned_partial_history_catch_up() {
             .unwrap()
     );
 
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_options(
+    let result = handle_tool_call(
         &cg,
         "tracedecay_status",
         json!({"format": "json", "include_session_ingest": true}),
         None,
-        None,
-        tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
-            tracedecay_mcp::handlers::mcp_session_authorities(&runtime),
-        )
-        .admit_opened_project(&cg)
-        .unwrap(),
     )
     .await
     .unwrap();
@@ -202,17 +188,11 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
         );
     }
 
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_options(
+    let result = handle_tool_call(
         &cg,
         "tracedecay_runtime",
         json!({ "format": "json", "session_ingest_health": true }),
         None,
-        None,
-        tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
-            tracedecay_mcp::handlers::mcp_session_authorities(&runtime),
-        )
-        .admit_opened_project(&cg)
-        .unwrap(),
     )
     .await
     .unwrap();
@@ -226,51 +206,10 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
     );
 }
 
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn status_without_retained_session_authority_fails_closed() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    drop(open_active_project_session_db(&cg).await);
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_status",
-        json!({ "format": "json", "include_session_ingest": true }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-
-    assert_eq!(payload["session_ingest"]["status"], "unavailable");
-    assert_eq!(payload["session_ingest"]["reason"], "session_store_denied");
-    assert_eq!(
-        payload["session_ingest"]["message"],
-        "this request is not authorized to read the admitted project session store"
-    );
-    assert!(payload.get("cursor_session_ingest").is_none());
-}
-
-#[tokio::test]
-async fn test_status_without_server_stats() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert_sealed_graph_statistics_are_unavailable(text);
-    // Should NOT contain "server" key when None is passed
-    assert!(
-        !text.contains("\"server\""),
-        "status without server_stats should not include 'server' key"
-    );
-}
-
 #[tokio::test]
 async fn test_status_reports_scope_prefix() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, Some("src/mcp"))
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), Some("src/mcp"))
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -294,7 +233,7 @@ async fn test_status_reports_scope_prefix() {
 #[tokio::test]
 async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -330,7 +269,7 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     // stale rather than falsely label the retained observation as current.
     let proc = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None, None)
+            let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None)
                 .await
                 .unwrap();
             let parsed: serde_json::Value =

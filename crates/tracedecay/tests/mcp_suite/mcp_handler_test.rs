@@ -82,6 +82,7 @@ mod hermes_skill_bridge_test;
 mod impact_behavior_test;
 mod implementations_test;
 mod info_file_request_test;
+mod info_health_request_test;
 mod inheritance_depth_test;
 #[cfg(feature = "test-transport")]
 mod insert_at_test;
@@ -134,7 +135,6 @@ mod rename_symbol_test;
 #[cfg(feature = "test-transport")]
 mod replace_symbol_test;
 mod retrieve_truncation_test;
-mod runtime_behavior_test;
 mod schema_test;
 mod search_behavior_test;
 mod session_refresh_begin_test;

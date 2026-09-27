@@ -459,9 +459,10 @@ pub type GraphToolOutcome = std::result::Result<
     ApplicationRefusal,
 >;
 
-/// Invoke one graph-tool operation through the project's graph-tool owner and
-/// return its typed result. Every refusal keeps the owner's whole problem
-/// record for the surface to render.
+/// Invoke one graph-tool operation through the project's graph-tool owner, or
+/// one profile registry read through the daemon's profile owner, and return
+/// its typed result. Every refusal keeps the owner's whole problem record for
+/// the surface to render.
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure(future = true, label = "mcp.graph_tool.total")]
 pub async fn execute_graph_tool_surface(
@@ -497,7 +498,7 @@ pub async fn execute_graph_tool_surface(
                 )
             },
         )?;
-    let dispatched = tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
+    let mut dispatched = tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
         surface,
         operation,
         request_id,
@@ -510,6 +511,11 @@ pub async fn execute_graph_tool_surface(
         RequestedOutputFormat::Json,
     )
     .map_err(application_surface_dispatch_error)?;
+    // The profile registry names no project, so the daemon's profile owner
+    // answers it whatever project this caller's executor serves.
+    if operation.is_profile_registry_read() {
+        dispatched.invocation.invocation.scope = InvocationTarget::Profile;
+    }
     let binding_id = dispatched.invocation.binding_id.clone();
     let result = tracedecay_daemon_service::application_surface::execute_application_surface(
         operation, dispatched, executor,

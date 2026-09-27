@@ -6,12 +6,13 @@
 
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_contracts::retrieval::{
     DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1,
+    StatusResultV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -35,7 +36,7 @@ use crate::handlers::health::{
 };
 use crate::handlers::info::{
     compute_config, compute_files, compute_port_order, compute_port_status, compute_todos,
-    render_files_md,
+    render_files_md, render_registry_listing_md, render_status_md,
 };
 use crate::handlers::retrieve::{compute_retrieve, render_retrieved_page};
 use crate::handlers::support::{
@@ -333,6 +334,29 @@ pub fn render_graph_tool(
         )?,
         GraphToolResultV1::Analytics(_) => {
             render_value_markdown(response_handle_root, args, &result, renderers::analytics_md)?
+        }
+        GraphToolResultV1::Status(status) => {
+            let value = result.result_value()?;
+            let mut rendered =
+                rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+                    render_status_md(&value)
+                });
+            // Structured content beside the rendered body in every format,
+            // like a typed `problem`, so a caller such as `tracedecay tool`
+            // can type its exit status on the readiness wait's outcome.
+            if let StatusResultV1::Project(project) = status
+                && let Some(wait) = &project.wait
+                && let Some(object) = rendered.value.as_object_mut()
+            {
+                object.insert("structuredContent".to_owned(), json!({ "wait": wait }));
+            }
+            rendered
+        }
+        // A listing renders inline: it is bounded by its own page limit.
+        GraphToolResultV1::ProjectList(listing) | GraphToolResultV1::ProjectSearch(listing) => {
+            rendered_tool_result(None, args, &result.result_value()?, Vec::new(), || {
+                render_registry_listing_md(listing)
+            })
         }
         _ => generic_tool_result(
             response_handle_root,

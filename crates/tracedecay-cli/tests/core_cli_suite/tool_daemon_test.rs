@@ -458,10 +458,34 @@ fn daemon_first_init_enrolls_a_clean_profile_from_a_linked_worktree() {
     );
 }
 
+/// Sends one MCP tool call through the daemon's project server, then reads
+/// that server's tool-call counter from its typed status. Until the full
+/// project server takes over from the core, the call and the status can land
+/// on different servers, so the pair is re-sent until the status server has
+/// counted a call.
 fn wait_for_tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
     let project_arg = project.to_string_lossy().to_string();
     let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
     loop {
+        let counted = tracedecay_command_with_home(home)
+            .current_dir(project)
+            .args([
+                "tool",
+                "--project",
+                &project_arg,
+                "dashboard",
+                "--action",
+                "stop",
+                "--json",
+            ])
+            .output()
+            .expect("tracedecay tool dashboard should run");
+        assert!(
+            counted.status.success(),
+            "dashboard stop should succeed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&counted.stdout),
+            String::from_utf8_lossy(&counted.stderr)
+        );
         let output = tracedecay_command_with_home(home)
             .current_dir(project)
             .args([
@@ -486,23 +510,17 @@ fn wait_for_tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
             .as_str()
             .expect("status result text");
         let payload: Value = serde_json::from_str(text).expect("status payload json");
-        if let Some(tool_calls) = payload["server"]["tool_calls"].as_u64() {
+        let tool_calls = payload["server"]["tool_calls"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("typed status must carry its server counters: {payload}"));
+        if tool_calls >= 1 {
             return tool_calls;
         }
-        assert_eq!(
-            payload["project_open"]["state"], "converging",
-            "status without server stats must report typed project convergence: {payload}"
-        );
-        let retry_after = Duration::from_millis(
-            payload["project_open"]["retry_after_ms"]
-                .as_u64()
-                .unwrap_or_else(|| panic!("converging status omitted retry delay: {payload}")),
-        );
         assert!(
-            Instant::now() + retry_after <= deadline,
-            "project server did not converge before the CLI roundtrip deadline: {payload}"
+            Instant::now() < deadline,
+            "the status server never counted a tool call before the CLI roundtrip deadline: {payload}"
         );
-        std::thread::sleep(retry_after);
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -1192,7 +1210,7 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
     let socket_path = socket_dir.path().join("tracedecay.sock");
     let observed_request = spawn_sentinel_daemon_with_notification(
         socket_path.clone(),
-        "tracedecay_status",
+        "tracedecay_dashboard",
         true,
         false,
         sentinel,
@@ -1202,7 +1220,15 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
     let output = tracedecay_command_with_home(&home_path)
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "dashboard",
+            "--action",
+            "stop",
+            "--json",
+        ])
         .output()
         .expect("tracedecay tool should run");
 
@@ -1543,17 +1569,18 @@ fn daemon_reuses_project_engine_across_tool_clients() {
 
     // `init` is brokered through the daemon now (`tracedecay_status` then
     // `tracedecay_admin_sync`), so the fixture has already spent tool calls on
-    // this engine and the first status here is no longer call number one. What
-    // this test is about survives that: the counter is the engine's, so the
-    // first call sees itself and a second client sees exactly one more.
+    // this engine and the first counted call here is no longer call number one.
+    // What this test is about survives that: the counter is the engine's, so
+    // the first client's call is counted and a second client's call is exactly
+    // one more on the same engine.
     assert!(
         first_tool_calls >= 1,
-        "first status call should see itself counted, got {first_tool_calls}"
+        "the first client's tool call should be counted, got {first_tool_calls}"
     );
     assert_eq!(
         second_tool_calls,
         first_tool_calls + 1,
-        "second status call should reuse the daemon engine and see exactly one more tool call"
+        "the second client should reuse the daemon engine and see exactly one more tool call"
     );
 }
 
@@ -1668,7 +1695,15 @@ fn daemon_project_handshake_uses_client_profile_identity() {
             "TRACEDECAY_DAEMON_SOCKET",
             common::daemon_socket_path(&daemon_home_path),
         )
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "dashboard",
+            "--action",
+            "stop",
+            "--json",
+        ])
         .output()
         .expect("tracedecay tool status should run");
 
@@ -1736,10 +1771,8 @@ fn daemon_first_touch_uses_registered_runtime_without_rewriting_legacy_config() 
 
 #[test]
 fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() {
-    let daemon_home = TempDir::new().unwrap();
     let client_home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let daemon_home_path = canonical_existing_path(daemon_home.path());
     let client_home_path = canonical_existing_path(client_home.path());
     let project_path = canonical_existing_path(project.path());
 
@@ -1758,12 +1791,10 @@ fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() 
     // state rather than a setup failure.
     crate::cli_non_interactive_test::remove_repo_local_marker_dir_if_present(&project_path);
 
-    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
-    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let _daemon = spawn_tracedecay_daemon(&client_home_path);
     let project_arg = project_path.to_string_lossy().to_string();
     let output = tracedecay_command_with_home(&client_home_path)
         .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args(["tool", "--project", &project_arg, "active_project"])
         .output()
         .expect("tracedecay tool active_project should run");
@@ -1783,10 +1814,8 @@ fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() 
 
 #[test]
 fn daemon_project_handshake_uses_registered_remote_store_after_rename() {
-    let daemon_home = TempDir::new().unwrap();
     let client_home = TempDir::new().unwrap();
     let workspace = TempDir::new().unwrap();
-    let daemon_home_path = canonical_existing_path(daemon_home.path());
     let client_home_path = canonical_existing_path(client_home.path());
     let original_path = workspace.path().join("repo-before-rename");
     let renamed_path = workspace.path().join("repo-after-rename");
@@ -1807,12 +1836,10 @@ fn daemon_project_handshake_uses_registered_remote_store_after_rename() {
     std::fs::rename(&original_path, &renamed_path).unwrap();
     let renamed_path = canonical_existing_path(&renamed_path);
 
-    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
-    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let _daemon = spawn_tracedecay_daemon(&client_home_path);
     let project_arg = renamed_path.to_string_lossy().to_string();
     let output = tracedecay_command_with_home(&client_home_path)
         .current_dir(&renamed_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args(["tool", "--project", &project_arg, "active_project"])
         .output()
         .expect("tracedecay tool active_project should run");
@@ -1863,7 +1890,15 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
     let client_a_output = tracedecay_command_with_home(&client_a_home_path)
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "dashboard",
+            "--action",
+            "stop",
+            "--json",
+        ])
         .output()
         .expect("client A tool status should run");
     assert!(
@@ -1876,7 +1911,15 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
     let client_b_output = tracedecay_command_with_home(&client_b_home_path)
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "dashboard",
+            "--action",
+            "stop",
+            "--json",
+        ])
         .output()
         .expect("client B tool status should run");
     assert!(
@@ -1910,7 +1953,15 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
     let output = tracedecay_command_with_home(&home_path)
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
-        .args(["tool", "--project", &project_arg, "status", "--json"])
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "dashboard",
+            "--action",
+            "stop",
+            "--json",
+        ])
         .output()
         .expect("tracedecay tool should run");
 

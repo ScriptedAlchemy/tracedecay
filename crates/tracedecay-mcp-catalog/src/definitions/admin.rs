@@ -2,150 +2,60 @@
 
 use serde_json::{Value, json};
 
-use super::{def, def_always_load, def_rw, project_selector_object};
+use super::{def, def_always_load, def_rw};
 use crate::ToolDefinition;
 
-pub(super) fn def_status() -> ToolDefinition {
+pub(super) fn def_status(input_schema: Value) -> ToolDefinition {
     def_always_load(
         "tracedecay_status",
         "Graph Status",
         "Return a compact summary of the code graph (counts and freshness). Full branch diagnostics are opt-in.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "include_branch_diagnostics": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Full tracked-branch diagnostic list. Default false."
-                },
-                "include_storage_health": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Storage-health snapshot. Default false."
-                },
-                "include_session_ingest": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Session-ingest health. Default false."
-                },
-                "include_staleness": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Git staleness object. Default false."
-                },
-                "wait_for": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["state", "timeout_ms"],
-                    "description": "Hold the status read until the code index reaches `state` (`fresh`: status `current`; `ready`: also native graph serving; `graph_ready`: a published generation's native graph serves, whatever the freshness), for at most `timeout_ms`. The payload's `wait` reports `reached`, `timed_out` with `last_state`, or `unavailable` with `reason`.",
-                    "properties": {
-                        "state": { "type": "string", "enum": ["fresh", "ready", "graph_ready"] },
-                        "timeout_ms": { "type": "integer", "minimum": 0 }
-                    }
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_active_project() -> ToolDefinition {
+pub(super) fn def_active_project(input_schema: Value) -> ToolDefinition {
     def_always_load(
         "tracedecay_active_project",
         "Active Project",
         "Return the resolved active project context for this MCP session, including project ID, project root, scope prefix, branch identity, and the active project store paths. Use this instead of guessing from repo-local marker files or hardcoded DB paths.",
-        json!({
-            "type": "object",
-            "properties": {}
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_project_list() -> ToolDefinition {
+pub(super) fn def_project_list(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_project_list",
         "Project List",
         "List projects from the profile/global registry without opening or mutating their stores. Results are bounded and include only registry metadata. Output is grouped into a `project_tree` by repository alongside a `summary`, and the calling project is marked with `is_active` when it is registered.",
-        json!({
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum projects to return (default: 25, max: 100)"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_project_search() -> ToolDefinition {
+pub(super) fn def_project_search(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_project_search",
         "Project Search",
         "Search registered projects by project id, root path, aliases, or default branch. This is read-only and bounded; output omits credential-bearing remotes. Output is grouped into a `project_tree` by repository alongside a `summary`, and the calling project is marked with `is_active` when it is registered.",
-        json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Case-insensitive substring query over registry project metadata"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum projects to return (default: 10, max: 50)"
-                }
-            },
-            "required": ["query"]
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_project_context() -> ToolDefinition {
+pub(super) fn def_project_context(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_project_context",
         "Project Context",
         "Return registry context for one project: project metadata, aliases, store instances, graph scopes, and artifacts. Defaults to the active project alias when neither project_selector nor path is provided.",
-        json!({
-            "type": "object",
-            "properties": {
-                "project_selector": project_selector_object(
-                    "Optional registered project id to inspect. Omit to use path or the active project."
-                ),
-                "path": {
-                    "type": "string",
-                    "description": "Project path or registered alias to resolve"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_runtime() -> ToolDefinition {
+pub(super) fn def_runtime(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_runtime",
         "Runtime Snapshot",
         "Capture a process + database telemetry snapshot for the running tracedecay MCP server: PID, resident memory, virtual size, sustained CPU% (sampled over ~200ms), thread count, system memory, DB / WAL / SHM file sizes, journal mode, and the DB-to-source byte ratio. Use this when triaging unexpected CPU or RAM consumption (issue #80). Set authority_audit=true only for exhaustive Doctor-style observation-authority validation. Single call, output is a JSON object.",
-        json!({
-            "type": "object",
-            "properties": {
-                "authority_audit": {
-                    "type": "boolean",
-                    "description": "Run the exhaustive observation-authority audit and include authority_audit_ok (true = audit ran and passed, false = audit ran and failed, null = audit did not run), authority_audit_reason (typed: authority_invariant_failed, authority_store_unavailable, authority_store_missing, authority_audit_not_run), and authority_audit_error (observed detail) in database telemetry (default: false)"
-                },
-                "doctor_report": {
-                    "type": "boolean",
-                    "description": "Include the daemon-owned canonical Doctor report and typed per-table growth evidence (default: false)"
-                },
-                "session_ingest_health": {
-                    "type": "boolean",
-                    "description": "Include Cursor transcript-ingest health from the daemon-retained project session authority (default: false)"
-                },
-                "startup_health": {
-                    "type": "boolean",
-                    "description": "Return only daemon-mounted database integrity telemetry for post-update startup validation (default: false)"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 

@@ -197,6 +197,7 @@ impl McpTransport for ReadErrorTransport {
 pub(crate) struct AccountedServer {
     pub(crate) server: Arc<McpServer>,
     pub(crate) global_db_path: PathBuf,
+    pub(crate) project_root: PathBuf,
     _project: TempDir,
     _profile: TempDir,
 }
@@ -258,6 +259,7 @@ async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
     AccountedServer {
         server,
         global_db_path,
+        project_root: dir.path().to_path_buf(),
         _project: dir,
         _profile: profile_dir,
     }

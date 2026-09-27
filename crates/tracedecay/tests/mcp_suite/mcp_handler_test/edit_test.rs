@@ -47,7 +47,6 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
             "dry_run": true
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -62,15 +61,9 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
         "idempotency_key": "mcp-test.source-edit.exact-retry",
         "expected_state": expected_state
     });
-    let first = handle_tool_call(
-        &cg,
-        "tracedecay_str_replace",
-        apply_args.clone(),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let first = handle_tool_call(&cg, "tracedecay_str_replace", apply_args.clone(), None)
+        .await
+        .unwrap();
     let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
     assert_eq!(first["success"], true);
     assert_eq!(first["replayed"], false);
@@ -85,7 +78,7 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     assert!(first["effect"]["receipt"]["committed_state"].is_string());
     assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), applied);
 
-    let retry = handle_tool_call(&cg, "tracedecay_str_replace", apply_args, None, None)
+    let retry = handle_tool_call(&cg, "tracedecay_str_replace", apply_args, None)
         .await
         .unwrap();
     let retry: Value = serde_json::from_str(extract_text(&retry.value)).unwrap();
@@ -105,7 +98,6 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
             "dry_run": true
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -123,7 +115,6 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
             "idempotency_key": "mcp-test.source-edit.stale-cas",
             "expected_state": stale_expected_state
         }),
-        None,
         None,
     )
     .await
@@ -159,7 +150,6 @@ async fn path_containment_config_rejects_parent_traversal_before_serving_config(
         &cg,
         "tracedecay_config",
         json!({"path": "../outside.toml", "key": "token"}),
-        None,
         None,
     )
     .await;
@@ -197,7 +187,6 @@ async fn path_containment_config_rejects_symlink_escape_before_serving_config() 
         "tracedecay_config",
         json!({"path": "escape/secret.toml", "key": "token"}),
         None,
-        None,
     )
     .await;
 
@@ -219,7 +208,6 @@ async fn project_selector_is_rejected_before_write_tool_parsing() {
         &cg,
         "tracedecay_str_replace",
         json!({"project_selector": {"include_all_registered": true}}),
-        None,
         None,
     )
     .await;
@@ -251,7 +239,6 @@ async fn test_str_replace_not_found() {
             "new_str": "fn replaced() {}"
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -281,7 +268,6 @@ async fn test_str_replace_multiple_matches_fails() {
             "old_str": "fn foo() {}",
             "new_str": "fn bar() {}"
         }),
-        None,
         None,
     )
     .await
@@ -319,7 +305,6 @@ async fn test_multi_str_replace_atomic_failure() {
                 ["fn baz() {}", "fn baz_replaced() {}"]
             ]
         }),
-        None,
         None,
     )
     .await
@@ -363,7 +348,6 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
                 [missing_old, "replacement"]
             ]
         }),
-        None,
         None,
     )
     .await
@@ -413,7 +397,6 @@ async fn test_multi_str_replace_earlier_insertion_collision_lands_correctly() {
             ]
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -456,7 +439,6 @@ async fn test_multi_str_replace_overlapping_ranges_error() {
                 ["cdef", "QRST"]
             ]
         }),
-        None,
         None,
     )
     .await
@@ -505,7 +487,6 @@ async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
             "symbol": "foo",
             "new_source": "/// Doc for foo.\nfn foo() {\n    let _ = 2;\n}"
         }),
-        None,
         None,
     )
     .await
@@ -557,7 +538,6 @@ async fn test_insert_at_symbol_before_lands_above_attribute() {
             "position": "before"
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -608,7 +588,6 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
             "new_str": "\tfont-size: 0.85rem;"
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -646,7 +625,6 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
         "tracedecay_ast_grep_rewrite",
         json!({"path": "src/lib.rs", "pattern": "old_name", "rewrite": "new_name"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -681,7 +659,6 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
         &cg,
         "tracedecay_ast_grep_rewrite",
         json!({"path": "src/lib.rs", "pattern": "old_name()", "rewrite": "new_name()"}),
-        None,
         None,
     )
     .await
@@ -728,7 +705,6 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
             "pattern": "__NONEXISTENT_PATTERN__",
             "rewrite": "whatever"
         }),
-        None,
         None,
     )
     .await
@@ -785,7 +761,6 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
             ]
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -836,7 +811,6 @@ async fn test_insert_at_string_anchor_before() {
             "dry_run": true
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -855,7 +829,6 @@ async fn test_insert_at_string_anchor_before() {
             "idempotency_key": "mcp-test.insert-at.trailing-newline",
             "expected_state": expected_state
         }),
-        None,
         None,
     )
     .await
@@ -889,7 +862,6 @@ async fn test_insert_at_line_number() {
             "content": "inserted at line 2",
             "before": false
         }),
-        None,
         None,
     )
     .await
@@ -933,7 +905,6 @@ async fn test_insert_at_anchor_not_found() {
             "before": true
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -966,7 +937,6 @@ async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
             "content": "should not be inserted",
             "before": true
         }),
-        None,
         None,
     )
     .await
@@ -1005,7 +975,6 @@ async fn test_insert_at_ambiguous_anchor() {
             "content": "should not be inserted",
             "before": true
         }),
-        None,
         None,
     )
     .await

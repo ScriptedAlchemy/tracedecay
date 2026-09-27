@@ -219,6 +219,13 @@ application_surface_operations! {
     Search => "search";
     RunAffectedTests => "run_affected_tests";
     Dashboard => "dashboard";
+    Status => "status";
+    ActiveProject => "active_project";
+    RemoteStatus => "remote_status";
+    Runtime => "runtime";
+    ProjectList => "project_list";
+    ProjectSearch => "project_search";
+    ProjectContext => "project_context";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -348,10 +355,24 @@ impl ApplicationSurfaceOperation {
         Self::Search,
         Self::RunAffectedTests,
         Self::Dashboard,
+        Self::Status,
+        Self::ActiveProject,
+        Self::RemoteStatus,
+        Self::Runtime,
     ];
+
+    /// Reads of the authenticated profile's project registry. They name no
+    /// project, so the daemon's profile owner answers them with their typed
+    /// catalog result for every connection, with or without a project.
+    pub const PROFILE_REGISTRY_OPERATIONS: &[Self] =
+        &[Self::ProjectList, Self::ProjectSearch, Self::ProjectContext];
 
     pub fn is_graph_tool(self) -> bool {
         Self::GRAPH_TOOL_OPERATIONS.contains(&self)
+    }
+
+    pub fn is_profile_registry_read(self) -> bool {
+        Self::PROFILE_REGISTRY_OPERATIONS.contains(&self)
     }
 }
 
