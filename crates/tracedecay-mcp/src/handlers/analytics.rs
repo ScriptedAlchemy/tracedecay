@@ -44,6 +44,7 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_store_runtime::retained_memory::MemoryTargetAccessV1;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::handlers::graph::graph_tool_completion;
 use crate::handlers::support::decode_primitive_request;
@@ -221,9 +222,10 @@ fn public_name_to_canonical(definitions: &[String]) -> BTreeMap<String, String> 
 
 /// Bound routes which are intentionally absent from the maximal public MCP catalog.
 ///
-/// Dispatch binding is the authority for whether a persisted event name was a
-/// real daemon route. Subtracting advertised definitions leaves the private
-/// host/runtime routes without duplicating a route inventory here.
+/// Dispatch binding and the catalog's internal operations, which are served by
+/// name and never advertised, are the authority for whether a persisted event
+/// name was a real daemon route. Subtracting advertised definitions leaves the
+/// private host/runtime routes without duplicating a route inventory here.
 fn bound_but_unadvertised_tool_names(maximal_defined: &[String]) -> BTreeSet<&'static str> {
     let maximal_public_names: BTreeSet<String> = maximal_defined
         .iter()
@@ -232,6 +234,11 @@ fn bound_but_unadvertised_tool_names(maximal_defined: &[String]) -> BTreeSet<&'s
     crate::tools::binding::MCP_TOOL_BINDINGS
         .iter()
         .map(|binding| binding.name)
+        .chain(
+            ApplicationSurfaceOperation::INTERNAL_OPERATIONS
+                .iter()
+                .map(|operation| operation.mcp_tool_name()),
+        )
         .filter(|name| {
             !maximal_public_names
                 .contains(&tracedecay_automation::analytics::normalize_tool_name(name))
@@ -253,8 +260,10 @@ mod tests {
 
         let bound_unadvertised = bound_but_unadvertised_tool_names(&maximal_defined);
 
+        // Served by name as an internal owner operation, with no dispatch
+        // binding row and no advertised definition.
         assert!(
-            crate::tools::binding::MCP_TOOL_BINDINGS
+            !crate::tools::binding::MCP_TOOL_BINDINGS
                 .iter()
                 .any(|binding| binding.name == "tracedecay_admin_cli")
         );
@@ -264,6 +273,7 @@ mod tests {
                 .any(|name| name == "tracedecay_admin_cli")
         );
         assert!(bound_unadvertised.contains("tracedecay_admin_cli"));
+        assert!(bound_unadvertised.contains("tracedecay_admin_sync"));
         assert!(
             maximal_defined
                 .iter()

@@ -69,6 +69,9 @@ mod workflow_cli;
 mod workflow_command;
 
 use cli::*;
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
 use tracedecay_contracts::retrieval::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use tracedecay_daemon_service::logging::StderrTracingDefault;
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -948,24 +951,20 @@ async fn resolve_registered_project_root(
         (None, Some(project_path)) => registered_project_path_selector(&project_path)?,
         (None, None) => return Ok(None),
     };
-    let context = commands::daemon_tool_json(
-        profile,
-        None,
-        "tracedecay_admin_cli",
-        serde_json::json!({
-            "action": "registry_context",
-            "project_arg": selector,
-        }),
-    )
-    .await?;
-    let display_root = context
-        .get("project")
-        .and_then(|project| project.get("display_root"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: "registered project not found for selector".to_string(),
-        })?;
-    Ok(Some(PathBuf::from(display_root)))
+    let request = AdminCliSurfaceRequestV1::RegistryContext {
+        project_arg: Some(PathBuf::from(selector)),
+    };
+    match commands::admin_cli_result(profile, None, request).await? {
+        AdminCliResultV1::RegistryContext(AdminCliRegistryContextV1::Ok { project, .. }) => {
+            Ok(Some(PathBuf::from(project.display_root)))
+        }
+        AdminCliResultV1::RegistryContext(_) => {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "registered project not found for selector".to_string(),
+            })
+        }
+        _ => Err(commands::admin_cli_result_mismatch("registry_context")),
+    }
 }
 
 /// A `--project-path` selector as the registry must see it. The daemon

@@ -316,6 +316,7 @@ mod tests {
                     "capability.application.primitive.active-project",
                     "available",
                 ),
+                ("capability.application.primitive.admin-cli", "available"),
                 (
                     "capability.application.primitive.admin-project",
                     "available",

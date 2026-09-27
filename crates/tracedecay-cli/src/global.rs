@@ -1,7 +1,14 @@
 use std::path::Path;
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use crate::{commands::daemon_tool_json, current_unix_timestamp};
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryListV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
+
+use crate::{
+    commands::{admin_cli_result, admin_cli_result_mismatch},
+    current_unix_timestamp,
+};
 
 pub(crate) use tracedecay_runtime_core::storage::{ProjectStorageLocation, ProjectStorageStatus};
 
@@ -197,47 +204,25 @@ pub(crate) async fn gather_target_projects(
     all: bool,
 ) -> tracedecay_domain::errors::Result<Vec<std::path::PathBuf>> {
     if all {
-        let payload = daemon_tool_json(
-            profile,
-            None,
-            "tracedecay_admin_cli",
-            serde_json::json!({
-                "action": "registry_list",
-                "limit": 100_000,
-                "query": null,
-            }),
-        )
-        .await?;
-        registry_project_roots(&payload)
+        let request = AdminCliSurfaceRequestV1::RegistryList {
+            limit: 100_000,
+            query: None,
+            project_arg: None,
+        };
+        match admin_cli_result(profile, None, request).await? {
+            AdminCliResultV1::RegistryList(listing) => Ok(registry_project_roots(listing)),
+            _ => Err(admin_cli_result_mismatch("registry_list")),
+        }
     } else {
         Ok(gather_local_projects(profile))
     }
 }
 
-fn registry_project_roots(
-    payload: &serde_json::Value,
-) -> tracedecay_domain::errors::Result<Vec<std::path::PathBuf>> {
-    let projects = payload
-        .get("projects")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: "daemon registry list response omitted projects array".to_string(),
-        })?;
-
+fn registry_project_roots(listing: AdminCliRegistryListV1) -> Vec<std::path::PathBuf> {
+    let AdminCliRegistryListV1::Ok { projects, .. } = listing;
     projects
-        .iter()
-        .enumerate()
-        .map(|(index, project)| {
-            project
-                .get("project_root")
-                .and_then(serde_json::Value::as_str)
-                .map(std::path::PathBuf::from)
-                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!(
-                        "daemon registry list response has no project_root for project at index {index}"
-                    ),
-                })
-        })
+        .into_iter()
+        .map(|project| std::path::PathBuf::from(project.project_root))
         .collect()
 }
 
@@ -604,22 +589,50 @@ mod gather_tests {
         );
     }
 
-    #[test]
-    fn registry_target_parser_rejects_malformed_rows() {
-        let error = registry_project_roots(&serde_json::json!({
-            "projects": [{ "project_id": "missing-root" }]
+    fn listing(projects: serde_json::Value) -> serde_json::Result<AdminCliRegistryListV1> {
+        serde_json::from_value(serde_json::json!({
+            "status": "ok",
+            "limit": 100_000,
+            "query": null,
+            "truncated": false,
+            "summary": {"project_count": 0, "repo_count": 0, "truncated": false},
+            "project_tree": [],
+            "projects": projects,
         }))
-        .expect_err("malformed registry data must not become an empty target list");
-
-        assert!(error.to_string().contains("project_root"));
     }
 
+    /// `wipe --all` acts on every registry row: a malformed row is a refused
+    /// answer, never a shorter or empty target list.
     #[test]
-    fn registry_target_parser_preserves_an_explicitly_empty_registry() {
-        let paths = registry_project_roots(&serde_json::json!({ "projects": [] }))
-            .expect("an explicit empty registry is valid");
-
-        assert!(paths.is_empty());
+    fn registry_targets_refuse_malformed_rows_and_keep_an_explicit_empty_registry() {
+        assert_eq!(
+            listing(serde_json::json!([{ "project_id": "missing-root" }]))
+                .unwrap_err()
+                .to_string(),
+            "missing field `label`"
+        );
+        assert_eq!(
+            registry_project_roots(listing(serde_json::json!([])).unwrap()),
+            Vec::<std::path::PathBuf>::new()
+        );
+        assert_eq!(
+            registry_project_roots(
+                listing(serde_json::json!([{
+                    "project_id": "project.a",
+                    "label": "a",
+                    "project_root": "/repos/a",
+                    "display_root": "/repos/a",
+                    "canonical_root": "/repos/a",
+                    "git_common_dir": null,
+                    "default_branch": null,
+                    "head_branch": null,
+                    "created_at": 1,
+                    "last_seen_at": 2,
+                }]))
+                .unwrap()
+            ),
+            vec![std::path::PathBuf::from("/repos/a")]
+        );
     }
 
     #[test]

@@ -147,6 +147,11 @@ pub enum EffectClass {
     /// reconciles automation schedulers with the saved configuration. Each
     /// write settles within the call and answers its new state.
     MaintainsOwnerState,
+    /// Reads and rewrites the daemon profile's own state: its project
+    /// registry, accounting ledgers, and session stores. Unlike bookkeeping,
+    /// it includes long work, a registry collection or a transcript import,
+    /// that a cancelled call stops.
+    MaintainsProfileState,
 }
 
 impl EffectClass {
@@ -163,6 +168,7 @@ impl EffectClass {
                 | Self::BindsServer
                 | Self::SchedulesWork
                 | Self::MaintainsOwnerState
+                | Self::MaintainsProfileState
         )
     }
 

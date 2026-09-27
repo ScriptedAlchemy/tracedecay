@@ -214,7 +214,6 @@ fn projectless_tool_is_discoverable(tool_name: &str) -> bool {
     matches!(
         tool_name,
         "tracedecay_hook_runtime"
-            | "tracedecay_admin_cli"
             | "tracedecay_project_list"
             | "tracedecay_project_search"
             | "tracedecay_project_context"
@@ -360,12 +359,6 @@ async fn projectless_tools_call_response_with_connection(
             "tracedecay_hook_runtime" => boxed_projectless_phase(
                 projectless_hook_runtime_response(id, arguments, connection, store_administration),
             ),
-            "tracedecay_admin_cli" => boxed_projectless_phase(projectless_admin_cli_response(
-                id,
-                arguments,
-                connection,
-                store_administration,
-            )),
             _ => {
                 // `projectless_tool_is_discoverable` admitted the name above,
                 // so any remaining tool is a retained profile operation.
@@ -544,41 +537,6 @@ async fn projectless_hook_runtime_response(
             }
             Err(error) => tool_error_response(id, "tracedecay_hook_runtime", &error),
         },
-        Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
-    }
-}
-
-async fn projectless_admin_cli_response(
-    id: serde_json::Value,
-    arguments: serde_json::Value,
-    connection: &ProjectlessConnectionStateV1,
-    store_administration: &StoreAdministration,
-) -> tracedecay_mcp::JsonRpcResponse {
-    let global_db =
-        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
-            Ok(global_db) => global_db,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-    let accounting_db =
-        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
-            Ok(database) => database,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-    match boxed_projectless_phase(
-        tracedecay_mcp::handlers::admin_cli::handle_projectless_admin_cli(
-            arguments,
-            &global_db,
-            tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
-            &connection.client_identity.profile_root,
-        ),
-    )
-    .await
-    {
-        Ok(result) => JsonRpcResponse::success(id, result.value),
         Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
 }

@@ -15,7 +15,8 @@ pub(crate) use admin_project::{
 pub(crate) use bench::handle_bench;
 pub(crate) use branch::handle_branch_action;
 pub(crate) use daemon::{
-    client_handshake, daemon_tool_json, daemon_tool_json_until, recover_truncated_mcp_result,
+    admin_cli_result, admin_cli_result_mismatch, admin_cli_scope, client_handshake,
+    daemon_tool_json, daemon_tool_json_until, recover_truncated_mcp_result,
     reject_truncation_envelope, retained_effect_payload, retained_tool_payload,
 };
 pub use gain::handle_gain;

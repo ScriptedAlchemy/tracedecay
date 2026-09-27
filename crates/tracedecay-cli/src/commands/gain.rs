@@ -1,19 +1,8 @@
-use super::daemon::daemon_tool_json;
-use serde::Deserialize;
+use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
+use tracedecay_contracts::retrieval::{
+    AdminCliGainHistoryV1, AdminCliGainTotalV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
 use tracedecay_runtime_core::config::ProfileRoot;
-
-#[derive(Deserialize)]
-struct SavingsDayPayload {
-    day: i64,
-    saved_tokens: u64,
-    calls: u64,
-}
-
-#[derive(Deserialize)]
-struct SavingsTotalPayload {
-    saved_tokens: u64,
-    calls: u64,
-}
 
 /// Convert raw tokens-saved into a USD estimate using Sonnet input pricing.
 /// Sonnet is the default agent target; output-token savings are not relevant
@@ -70,30 +59,22 @@ fn handle_gain_inner<'a>(
                 .map(|p| p.to_string_lossy().into_owned())
         };
 
-        let result = daemon_tool_json(
+        let result = admin_cli_result(
             profile,
             None,
-            "tracedecay_admin_cli",
-            serde_json::json!({
-                "action": "gain_query",
-                "project_arg": project_filter,
-                "since": since,
-                "history": history,
-            }),
+            AdminCliSurfaceRequestV1::GainQuery {
+                project_arg: project_filter.as_ref().map(std::path::PathBuf::from),
+                since,
+                history,
+            },
         )
         .await?;
         if history {
-            let rows = result
-                .get("history")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon gain history response is missing history rows".to_owned(),
-                })?;
+            let AdminCliResultV1::GainHistory(AdminCliGainHistoryV1 { history: rows }) = result
+            else {
+                return Err(admin_cli_result_mismatch("gain_query history"));
+            };
             let rows = rows
-                .iter()
-                .cloned()
-                .map(serde_json::from_value::<SavingsDayPayload>)
-                .collect::<std::result::Result<Vec<_>, _>>()?
                 .into_iter()
                 .map(|row| tracedecay_global_db::SavingsDay {
                     day: row.day,
@@ -120,9 +101,13 @@ fn handle_gain_inner<'a>(
             return Ok(());
         }
 
-        let total: SavingsTotalPayload = serde_json::from_value(result)?;
-        let saved_tokens = total.saved_tokens;
-        let calls = total.calls;
+        let AdminCliResultV1::GainTotal(AdminCliGainTotalV1 {
+            saved_tokens,
+            calls,
+        }) = result
+        else {
+            return Err(admin_cli_result_mismatch("gain_query"));
+        };
         let usd = estimate_dollars_saved(saved_tokens);
 
         if json_output {

@@ -2,8 +2,11 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use serde_json::{Value, json};
-use tracedecay_contracts::{ProjectRegistryView, render_project_registry_view};
+use serde_json::Value;
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryContextV1, AdminCliRegistryListV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
+use tracedecay_contracts::{ProjectRegistryView, PublicCodeProject, render_project_registry_view};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
@@ -11,8 +14,8 @@ use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::cli::ProjectsAction;
 use crate::commands::{
-    ProfileOfflineAuthority, daemon_tool_json, join_outcome_and_restore, take_profile_offline,
-    try_admit_profile_registry,
+    ProfileOfflineAuthority, admin_cli_result, admin_cli_result_mismatch, join_outcome_and_restore,
+    take_profile_offline, try_admit_profile_registry,
 };
 
 const MAX_LIMIT: usize = 1_000;
@@ -26,51 +29,36 @@ pub(crate) async fn handle_projects_action(
 ) -> Result<()> {
     match action {
         ProjectsAction::List { limit, json } => {
-            let limit = bounded_limit(limit);
-            let payload = call_registry_admin(
-                profile,
-                json!({
-                    "action": "registry_list",
-                    "limit": limit,
-                    "query": null,
-                }),
-            )
-            .await?;
-            print_registry_list(&payload, "registered projects", json)?;
+            let listing = registry_list(profile, bounded_limit(limit), None).await?;
+            print_registry_list(listing, "registered projects", json)?;
         }
         ProjectsAction::Search { query, limit, json } => {
-            let limit = bounded_limit(limit);
-            let payload = call_registry_admin(
-                profile,
-                json!({
-                    "action": "registry_list",
-                    "limit": limit,
-                    "query": query,
-                }),
-            )
-            .await?;
-            print_registry_list(&payload, &format!("projects matching \"{query}\""), json)?;
+            let label = format!("projects matching \"{query}\"");
+            let listing = registry_list(profile, bounded_limit(limit), Some(query)).await?;
+            print_registry_list(listing, &label, json)?;
         }
         ProjectsAction::Context { selector, json } => {
-            let payload = call_registry_admin(
-                profile,
-                json!({
-                    "action": "registry_context",
-                    "project_arg": selector,
-                }),
-            )
-            .await?;
-            if payload["status"] != "ok" {
+            let context = registry_context(profile, PathBuf::from(&selector)).await?;
+            let AdminCliRegistryContextV1::Ok {
+                project,
+                aliases,
+                stores,
+                ..
+            } = &context
+            else {
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "registered project not found for '{selector}'; try `tracedecay projects search {selector}`"
                     ),
                 });
-            }
+            };
             if json {
-                println!("{}", serde_json::to_string_pretty(&payload)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::to_value(&context)?)?
+                );
             } else {
-                print!("{}", render_project_context_payload(&payload));
+                print!("{}", render_project_context(project, aliases, stores));
             }
         }
         ProjectsAction::Forget {
@@ -183,26 +171,21 @@ async fn preview_projects_forget(
     selector_arg: &Path,
     keep_store: bool,
 ) -> Result<()> {
-    let payload = call_registry_admin(
-        profile,
-        json!({
-            "action": "registry_context",
-            "project_arg": selector_arg,
-        }),
-    )
-    .await?;
-    if payload["status"] != "ok" {
+    let AdminCliRegistryContextV1::Ok {
+        project,
+        aliases,
+        stores,
+        ..
+    } = registry_context(profile, selector_arg.to_path_buf()).await?
+    else {
         return Err(forget_selector_not_found(selector));
-    }
+    };
     let profile_root = profile.data_dir().to_path_buf();
-    let project = &payload["project"];
     println!(
         "Would forget project {} ({}).",
-        project["project_id"].as_str().unwrap_or("-"),
-        project["display_root"].as_str().unwrap_or("-")
+        project.project_id, project.display_root
     );
-    let alias_count = payload["aliases"].as_array().map_or(0, Vec::len);
-    let stores = payload["stores"].as_array().cloned().unwrap_or_default();
+    let alias_count = aliases.len();
     println!(
         "  would retire the registry identity row, {alias_count} alias(es), and {} store \
          instance(s)",
@@ -256,57 +239,58 @@ fn bounded_limit(limit: usize) -> usize {
 }
 
 #[hotpath::measure(label = "cli.projects.render")]
-fn print_registry_list(payload: &Value, label: &str, json_output: bool) -> Result<()> {
+fn print_registry_list(
+    listing: AdminCliRegistryListV1,
+    label: &str,
+    json_output: bool,
+) -> Result<()> {
     if json_output {
-        println!("{}", serde_json::to_string_pretty(payload)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::to_value(&listing)?)?
+        );
         return Ok(());
     }
-    let view: ProjectRegistryView = serde_json::from_value(json!({
-        "summary": payload["summary"],
-        "project_tree": payload["project_tree"],
-    }))?;
+    let AdminCliRegistryListV1::Ok {
+        summary,
+        project_tree,
+        ..
+    } = listing;
+    let view = ProjectRegistryView {
+        summary,
+        project_tree,
+    };
     print!("{}", render_project_registry_view(label, &view));
     Ok(())
 }
 
-fn render_project_context_payload(payload: &Value) -> String {
+fn render_project_context(
+    project: &PublicCodeProject,
+    aliases: &[Value],
+    stores: &[Value],
+) -> String {
     let mut out = String::new();
-    let project = &payload["project"];
-    let _ = writeln!(
-        out,
-        "Project: {}",
-        project["project_id"].as_str().unwrap_or("-")
-    );
-    let _ = writeln!(
-        out,
-        "root: {}",
-        project["display_root"].as_str().unwrap_or("-")
-    );
-    if let Some(branch) = project["default_branch"].as_str() {
+    let _ = writeln!(out, "Project: {}", project.project_id);
+    let _ = writeln!(out, "root: {}", project.display_root);
+    if let Some(branch) = &project.default_branch {
         let _ = writeln!(out, "default branch: {branch}");
     }
-    if let Some(branch) = project["head_branch"].as_str() {
+    if let Some(branch) = &project.head_branch {
         let _ = writeln!(out, "head branch: {branch}");
     }
-    if let Some(git_common_dir) = project["git_common_dir"].as_str() {
+    if let Some(git_common_dir) = &project.git_common_dir {
         let _ = writeln!(out, "git common dir: {git_common_dir}");
     }
-    let _ = writeln!(out, "last seen: {}", project["last_seen_at"]);
+    let _ = writeln!(out, "last seen: {}", project.last_seen_at);
 
-    if let Some(aliases) = payload["aliases"]
-        .as_array()
-        .filter(|aliases| !aliases.is_empty())
-    {
+    if !aliases.is_empty() {
         out.push_str("\nAliases:\n");
         for alias in aliases {
             let _ = writeln!(out, "  {}", alias["alias_path"].as_str().unwrap_or("-"));
         }
     }
 
-    if let Some(stores) = payload["stores"]
-        .as_array()
-        .filter(|stores| !stores.is_empty())
-    {
+    if !stores.is_empty() {
         out.push_str("\nStores:\n");
         for store_context in stores {
             let store = &store_context["store"];
@@ -349,23 +333,38 @@ fn render_project_context_payload(payload: &Value) -> String {
     out
 }
 
+/// One page of the profile registry; the cwd's project, when there is one,
+/// is marked active.
 #[hotpath::measure(label = "cli.projects.request", future = true)]
-async fn call_registry_admin(profile: &ProfileRoot, arguments: Value) -> Result<Value> {
+async fn registry_list(
+    profile: &ProfileRoot,
+    limit: usize,
+    query: Option<String>,
+) -> Result<AdminCliRegistryListV1> {
     let cwd = std::env::current_dir()?;
-    let project_root = profile.discover_project_root(&cwd);
-    let arguments = registry_admin_arguments(project_root, arguments);
-    daemon_tool_json(profile, None, "tracedecay_admin_cli", arguments).await
+    let request = AdminCliSurfaceRequestV1::RegistryList {
+        limit,
+        query,
+        project_arg: profile.discover_project_root(&cwd),
+    };
+    match admin_cli_result(profile, None, request).await? {
+        AdminCliResultV1::RegistryList(listing) => Ok(listing),
+        _ => Err(admin_cli_result_mismatch("registry_list")),
+    }
 }
 
-fn registry_admin_arguments(project_root: Option<PathBuf>, mut arguments: Value) -> Value {
-    if let Some(project_root) = project_root
-        && let Some(arguments) = arguments.as_object_mut()
-    {
-        arguments
-            .entry("project_arg")
-            .or_insert_with(|| json!(project_root));
+#[hotpath::measure(label = "cli.projects.request", future = true)]
+async fn registry_context(
+    profile: &ProfileRoot,
+    selector: PathBuf,
+) -> Result<AdminCliRegistryContextV1> {
+    let request = AdminCliSurfaceRequestV1::RegistryContext {
+        project_arg: Some(selector),
+    };
+    match admin_cli_result(profile, None, request).await? {
+        AdminCliResultV1::RegistryContext(context) => Ok(context),
+        _ => Err(admin_cli_result_mismatch("registry_context")),
     }
-    arguments
 }
 
 /// Renders the plain-text `projects context` view. Deliberately omits
@@ -437,18 +436,6 @@ mod tests {
 
     const CREDENTIAL_REMOTE_URL: &str =
         "https://user:sekret-token@github.com/example/private-repo.git";
-
-    #[test]
-    fn registry_admin_arguments_carries_cwd_project() {
-        crate::product_runtime::register_for_tests();
-        let project_root = PathBuf::from("/repo");
-        let arguments = registry_admin_arguments(
-            Some(project_root.clone()),
-            json!({ "action": "registry_list", "limit": 10, "query": null }),
-        );
-
-        assert_eq!(arguments["project_arg"], json!(project_root));
-    }
 
     fn context_with_credential_remote() -> ProjectRegistryContext {
         ProjectRegistryContext {
@@ -551,13 +538,10 @@ mod tests {
     fn daemon_context_payload_preserves_registry_details() {
         let context = context_with_credential_remote();
         let public = PublicProjectRegistryContext::new(&context, None);
-        let payload = serde_json::json!({
-            "project": public.project,
-            "aliases": context.aliases,
-            "stores": context.stores,
-        });
+        let aliases = vec![serde_json::to_value(&context.aliases[0]).unwrap()];
+        let stores = vec![serde_json::to_value(&context.stores[0]).unwrap()];
 
-        let text = render_project_context_payload(&payload);
+        let text = render_project_context(&public.project, &aliases, &stores);
 
         assert!(text.contains("Aliases:\n  /repo"));
         assert!(text.contains("Stores:\n  store:test [code_project / profile_sharded]"));
@@ -568,17 +552,21 @@ mod tests {
 
     #[test]
     fn daemon_context_payload_names_default_and_head_branches_apart() {
-        let payload = serde_json::json!({
-            "project": {
-                "project_id": "proj_test",
-                "display_root": "/repo",
-                "default_branch": "main",
-                "head_branch": "served-head",
-                "last_seen_at": 200,
-            },
-        });
+        let project = PublicCodeProject {
+            project_id: "proj_test".to_owned(),
+            label: "repo".to_owned(),
+            project_root: "/repo".to_owned(),
+            display_root: "/repo".to_owned(),
+            canonical_root: "/repo".to_owned(),
+            git_common_dir: None,
+            default_branch: Some("main".to_owned()),
+            head_branch: Some("served-head".to_owned()),
+            created_at: 100,
+            last_seen_at: 200,
+            is_active: None,
+        };
 
-        let text = render_project_context_payload(&payload);
+        let text = render_project_context(&project, &[], &[]);
 
         assert!(
             text.contains("default branch: main\nhead branch: served-head\n"),
