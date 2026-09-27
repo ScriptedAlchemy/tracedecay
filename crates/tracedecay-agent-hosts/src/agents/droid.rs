@@ -250,6 +250,10 @@ impl AgentIntegration for DroidIntegration {
         false
     }
 
+    fn require_lifecycle_host_cli(&self) -> Result<()> {
+        require_droid_cli().map(drop)
+    }
+
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mFactory Droid integration\x1b[0m");
         let config_path = droid_mcp_config_path(&ctx.home);

@@ -351,6 +351,13 @@ pub trait AgentIntegration {
         false
     }
 
+    /// Resolve the host's own lifecycle CLI when its lifecycle is driven
+    /// through one, failing with `HostCliUnavailable` when it is not on
+    /// `PATH`. Hosts TraceDecay configures without a host CLI need none.
+    fn require_lifecycle_host_cli(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Evidence that the host application itself is present on this machine
     /// (its own config/profile surface exists), independent of whether
     /// tracedecay is integrated into it. Doctor uses this to warn uniformly
@@ -770,6 +777,15 @@ pub fn inspect_receipt_backed_host_components(
     )
 }
 
+/// The operator step for a tracked host whose lifecycle CLI is not installed,
+/// worded once for the lifecycle summaries and Doctor.
+pub fn tracked_host_cli_missing_action(agent_id: &str) -> String {
+    format!(
+        "install the {agent_id} CLI, or run `tracedecay uninstall --agent {agent_id}` to stop \
+         tracking it"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // DoctorCounters
 // ---------------------------------------------------------------------------
@@ -779,6 +795,9 @@ pub fn inspect_receipt_backed_host_components(
 pub struct DoctorCounters {
     pub issues: u32,
     pub warnings: u32,
+    /// Steps only the operator can take; nothing failed, but the
+    /// installation is not converged until they are done.
+    pub pending_actions: u32,
 }
 
 impl DoctorCounters {
@@ -795,6 +814,10 @@ impl DoctorCounters {
     pub fn warn(&mut self, msg: &str) {
         eprintln!("  \x1b[33m!\x1b[0m {msg}");
         self.warnings += 1;
+    }
+    pub fn pending(&mut self, msg: &str) {
+        eprintln!("  \x1b[33m…\x1b[0m {msg}");
+        self.pending_actions += 1;
     }
     pub fn info(&self, msg: &str) {
         eprintln!("    {msg}");

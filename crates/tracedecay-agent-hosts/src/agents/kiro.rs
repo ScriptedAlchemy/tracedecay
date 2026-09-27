@@ -333,6 +333,10 @@ impl AgentIntegration for KiroIntegration {
         Ok(())
     }
 
+    fn require_lifecycle_host_cli(&self) -> Result<()> {
+        require_kiro_cli().map(drop)
+    }
+
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKiro integration\x1b[0m");
         let host_home = kiro_home(&ctx.home);

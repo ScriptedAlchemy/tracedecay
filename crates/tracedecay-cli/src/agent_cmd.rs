@@ -239,8 +239,8 @@ impl HostLifecycleSummary {
                 remediation,
             } => format!("pending operator action: `{command}`\n      {remediation}"),
             HostLifecycleResult::PendingHostCli { detail } => format!(
-                "pending operator action: install the {agent_id} CLI, or run \
-                 `tracedecay uninstall --agent {agent_id}` to stop tracking it\n      {detail}"
+                "pending operator action: {}\n      {detail}",
+                tracedecay_agent_hosts::agents::tracked_host_cli_missing_action(agent_id)
             ),
             HostLifecycleResult::Untracked { detail } => format!(
                 "{}; the host CLI is not installed, so its host-owned registration was left \

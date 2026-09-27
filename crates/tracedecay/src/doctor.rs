@@ -97,8 +97,9 @@ pub struct AdmittedDoctorNetworkProbes {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoctorCompletion {
     Healthy,
-    /// The daemon serves a store in its typed reset-required state; the
-    /// operator owes the reset Doctor named.
+    /// The operator owes a step Doctor named: the reset of a store the daemon
+    /// serves in its typed reset-required state, a host's interactive
+    /// activation, or a tracked host's missing CLI.
     PendingOperatorAction,
 }
 
@@ -209,6 +210,7 @@ pub async fn run_doctor(
     } else {
         dc.fail("Could not determine home directory");
     }
+    check_tracked_host_clis(&mut dc, profile.data_dir());
 
     check_network(&mut dc, upload_enabled.as_ref(), network);
     print_summary(&dc);
@@ -452,7 +454,8 @@ fn database_health_from_storage_runtime_findings<'a>(
 /// Only an observed storage *failure* is fatal. `DatabaseHealth::Unknown`, a
 /// diagnostic that could not run, is reported to the user but never laundered
 /// into a healthy verdict nor turned into a hard failure. With no issue, a
-/// pending reset is the operator's action, not health.
+/// pending reset or any other operator step is the operator's action, not
+/// health.
 fn doctor_result(
     dc: &DoctorCounters,
     storage_health: &DatabaseHealth,
@@ -469,7 +472,9 @@ fn doctor_result(
                 message: format!("doctor found {} issue(s)", dc.issues),
             })
         }
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } if pending_reset => {
+        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. }
+            if pending_reset || dc.pending_actions > 0 =>
+        {
             Ok(DoctorCompletion::PendingOperatorAction)
         }
         DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } => Ok(DoctorCompletion::Healthy),
@@ -1109,6 +1114,41 @@ fn check_user_config(
     }
 }
 
+/// A tracked host whose lifecycle CLI is not installed waits on the operator,
+/// as `update-plugin` reports it: install the CLI or stop tracking the host.
+fn check_tracked_host_clis(dc: &mut DoctorCounters, profile_root: &Path) {
+    eprintln!("\n\x1b[1mTracked host CLIs\x1b[0m");
+    let config = match tracedecay_session_memory::user_config::UserConfig::load_strict(profile_root)
+    {
+        Ok(config) => config,
+        Err(error) => {
+            dc.warn(&format!("Tracked hosts are unknown: {error}"));
+            return;
+        }
+    };
+    for agent_id in &config.installed_agents {
+        let agent = match agents::get_integration(agent_id) {
+            Ok(agent) => agent,
+            Err(error) => {
+                dc.warn(&format!(
+                    "{agent_id}: tracked but not a supported host ({error})"
+                ));
+                continue;
+            }
+        };
+        match agent.require_lifecycle_host_cli() {
+            Ok(()) => {}
+            Err(error @ tracedecay_domain::errors::TraceDecayError::HostCliUnavailable { .. }) => {
+                dc.pending(&format!(
+                    "{agent_id}: pending operator action: {} ({error})",
+                    agents::tracked_host_cli_missing_action(agent_id)
+                ));
+            }
+            Err(error) => dc.fail(&format!("{agent_id}: host CLI is unusable: {error}")),
+        }
+    }
+}
+
 /// Check optional external tools that gate optional MCP capabilities.
 #[hotpath::measure(label = "doctor.check.external_tools")]
 fn check_external_tools(dc: &mut DoctorCounters) {
@@ -1182,8 +1222,13 @@ fn check_network(
 /// Print final summary.
 fn print_summary(dc: &DoctorCounters) {
     eprintln!();
-    if dc.issues == 0 && dc.warnings == 0 {
+    if dc.issues == 0 && dc.warnings == 0 && dc.pending_actions == 0 {
         eprintln!("\x1b[32mAll checks passed.\x1b[0m");
+    } else if dc.issues == 0 && dc.pending_actions > 0 {
+        eprintln!(
+            "\x1b[33m{} pending operator action(s), {} warning(s), no issues.\x1b[0m",
+            dc.pending_actions, dc.warnings
+        );
     } else if dc.issues == 0 {
         eprintln!("\x1b[33m{} warning(s), no issues.\x1b[0m", dc.warnings);
     } else {

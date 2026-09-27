@@ -113,6 +113,10 @@ impl AgentIntegration for ClaudeIntegration {
         claude_plugin_deactivate_with(&claude, &ctx.home)
     }
 
+    fn require_lifecycle_host_cli(&self) -> Result<()> {
+        require_claude_cli().map(drop)
+    }
+
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mClaude Code integration\x1b[0m");
         doctor_check_plugin(dc, &ctx.home);

@@ -123,6 +123,10 @@ impl AgentIntegration for GeminiIntegration {
         }
     }
 
+    fn require_lifecycle_host_cli(&self) -> Result<()> {
+        require_gemini_cli().map(drop)
+    }
+
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mGemini CLI integration\x1b[0m");
         doctor_check_staged_extension(dc, &ctx.home);

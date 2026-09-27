@@ -465,8 +465,11 @@ Examples:
 Exit status:
   0   no issue found (warnings may still be printed)
   1   an issue was found
-  75  no issue, but the daemon serves a store in its reset-required state;
-      Doctor names the store and the exact reset command to run
+  75  no issue, but an operator step is pending: the daemon serves a store
+      in its reset-required state (Doctor names the exact reset command), a
+      host waits on its interactive activation (Kimi Code's `/plugins
+      install`), or a tracked host's CLI is not installed (install it, or
+      `tracedecay uninstall --agent <host>` to stop tracking it)
 
 Related: tracedecay install (fix missing integration), tracedecay daemon
 status, tracedecay status (index health).";

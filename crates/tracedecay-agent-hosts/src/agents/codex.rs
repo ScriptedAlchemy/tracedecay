@@ -166,6 +166,10 @@ impl AgentIntegration for CodexIntegration {
         ])
     }
 
+    fn require_lifecycle_host_cli(&self) -> Result<()> {
+        mcp_registry::require_codex_cli().map(drop)
+    }
+
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
