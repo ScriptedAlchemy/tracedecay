@@ -206,26 +206,36 @@ fn update_plugin_reports_registrations_already_in_place_as_unchanged() {
 
     let refresh_stderr = stderr(&refresh);
     assert_eq!(refresh.status.code(), Some(0), "{refresh_stderr}");
-    for (path, bytes, inode) in installed {
-        assert!(
-            refresh_stderr.contains(&format!(
-                "  tracedecay MCP server unchanged in {}\n",
-                path.display()
-            )),
-            "{refresh_stderr}"
-        );
-        assert!(
-            !refresh_stderr.contains(&format!("tracedecay MCP server to {}", path.display())),
-            "{refresh_stderr}"
-        );
-        assert_eq!(fs::read(&path).unwrap(), bytes, "{}", path.display());
-        assert_eq!(
-            fs::metadata(&path).unwrap().ino(),
-            inode,
-            "{} was republished",
-            path.display()
-        );
-    }
+    // Per config: what the refresh reported, whether its bytes and its inode
+    // survived.
+    let observed = installed
+        .iter()
+        .map(|(path, bytes, inode)| {
+            let path_text = path.display().to_string();
+            let reported = if refresh_stderr.contains(&format!(
+                "  tracedecay MCP server unchanged in {path_text}\n"
+            )) {
+                "unchanged"
+            } else if refresh_stderr
+                .contains(&format!("Added tracedecay MCP server to {path_text}\n"))
+            {
+                "added"
+            } else {
+                "unreported"
+            };
+            (
+                path_text,
+                reported,
+                fs::read(path).unwrap() == *bytes,
+                fs::metadata(path).unwrap().ino() == *inode,
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = installed
+        .iter()
+        .map(|(path, _, _)| (path.display().to_string(), "unchanged", true, true))
+        .collect::<Vec<_>>();
+    assert_eq!(observed, expected, "{refresh_stderr}");
 }
 
 #[test]
