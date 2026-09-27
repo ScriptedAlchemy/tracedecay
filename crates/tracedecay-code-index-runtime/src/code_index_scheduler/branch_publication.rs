@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::time::Instant;
-use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexWorktreeFreshnessV1,
 };
@@ -45,11 +44,9 @@ pub(super) fn branch_refresh_admission_error(
 ) -> Option<TraceDecayError> {
     match admission {
         CodeIndexDemandAdmissionV1::Queued | CodeIndexDemandAdmissionV1::NotApplicable => None,
-        CodeIndexDemandAdmissionV1::Terminal(parked) => Some(TraceDecayError::project_route(
-            CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
-            false,
-            format!("{}; {}", parked.reason, parked.remediation),
-        )),
+        CodeIndexDemandAdmissionV1::Terminal(parked) => {
+            Some(parked.clone().publication_authority_corrupt_error())
+        }
         CodeIndexDemandAdmissionV1::RefusedByPolicy
         | CodeIndexDemandAdmissionV1::Unavailable(_) => Some(TraceDecayError::project_route(
             CODE_INDEX_SCHEDULER_UNAVAILABLE,
@@ -491,11 +488,7 @@ impl BranchPublicationContextV1 {
                 .publication_authority_corruption(canonical_worktree_root)
                 .await
             {
-                return Err(TraceDecayError::project_route(
-                    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
-                    false,
-                    format!("{}; {}", parked.reason, parked.remediation),
-                ));
+                return Err(parked.publication_authority_corrupt_error());
             }
             let scope = schedulers
                 .serving_code_scope(canonical_worktree_root)

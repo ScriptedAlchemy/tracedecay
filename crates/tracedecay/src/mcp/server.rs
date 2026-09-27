@@ -15,9 +15,7 @@ use crate::mcp::project_route::{
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
 };
-use tracedecay_contracts::code_index_freshness::{
-    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT, CodeIndexConvergenceParkedV1,
-};
+use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
 use tracedecay_contracts::request_identity::{
     McpConnectionIdentityAuthority, mcp_connection_request_key as application_surface_request_id,
 };
@@ -141,20 +139,6 @@ pub(crate) const CODE_INDEX_FOREIGN_ROOT: &str = "code_index_foreign_root";
 pub(crate) const CODE_INDEX_NO_PROVEN_CHANGE: &str = "code_index_no_proven_change";
 pub(crate) const CODE_INDEX_NOT_APPLICABLE: &str = "code_index_not_applicable";
 pub(crate) const CODE_INDEX_IDENTITY_UNRESOLVED: &str = "code_index_identity_unresolved";
-
-pub(crate) fn code_index_publication_corrupt(
-    parked: CodeIndexConvergenceParkedV1,
-) -> TraceDecayError {
-    TraceDecayError::project_route_with_detail(
-        CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
-        false,
-        tracedecay_domain::ApplicationProblemDetailV1::Parked {
-            cause: parked.reason,
-            remedy: parked.remediation,
-            retries_on_wake: parked.retries_on_wake,
-        },
-    )
-}
 
 pub(crate) fn code_index_linked_worktree_disabled() -> TraceDecayError {
     TraceDecayError::project_route(

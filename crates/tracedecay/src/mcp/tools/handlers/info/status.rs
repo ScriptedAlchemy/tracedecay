@@ -32,7 +32,7 @@ pub(crate) async fn handle_admin_sync(
         CodeIndexDemandAdmissionV1::Queued => "queued",
         CodeIndexDemandAdmissionV1::NotApplicable => "not_applicable",
         CodeIndexDemandAdmissionV1::Terminal(parked) => {
-            return Err(crate::mcp::server::code_index_publication_corrupt(parked));
+            return Err(parked.publication_authority_corrupt_error());
         }
         CodeIndexDemandAdmissionV1::RefusedByPolicy => {
             return Err(crate::mcp::server::code_index_linked_worktree_disabled());

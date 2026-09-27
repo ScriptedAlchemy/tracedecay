@@ -272,7 +272,7 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
     assert_eq!(
         crate::support::tool_refusal(&response),
         json!({
-            "kind": "unavailable",
+            "kind": "execution_failed",
             "code": "graph_tool.failed",
             "message": "database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
         })
@@ -334,7 +334,7 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
     assert_eq!(
         crate::support::tool_refusal(&response),
         json!({
-            "kind": "unavailable",
+            "kind": "execution_failed",
             "code": "graph_tool.failed",
             "message": "database error: SQLite prepare query failed: no such table: project_aliases (operation: search registered code projects)",
         })

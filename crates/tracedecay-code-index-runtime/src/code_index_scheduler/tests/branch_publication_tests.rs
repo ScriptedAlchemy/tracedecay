@@ -312,12 +312,17 @@ async fn mid_wait_branch_publication_surfaces_terminal_publication_park() {
         tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT
     );
     assert!(!context.1, "terminal corruption is non-retryable");
-    assert!(
-        context
-            .2
-            .contains("mid-wait injected publication corruption"),
-        "detail must retain the parked reason: {}",
-        context.2
+    assert_eq!(
+        error.project_route_typed_detail(),
+        Some(&tracedecay_domain::ApplicationProblemDetailV1::Parked {
+            cause: "mid-wait injected publication corruption".to_owned(),
+            remedy: "the derived code-index publication was deleted and rebuilt once in this \
+                     daemon and is corrupt again; run `tracedecay daemon restart` for one more \
+                     automatic rebuild, and report the daemon log's \
+                     code_index_publication_authority_* events if it recurs"
+                .to_owned(),
+            retries_on_wake: false,
+        })
     );
     drop(held);
     registry.shutdown().await;

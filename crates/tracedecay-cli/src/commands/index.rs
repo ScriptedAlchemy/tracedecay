@@ -425,38 +425,34 @@ mod init_bootstrap_tests {
 
     use super::daemon_precondition_tests::SocketEnvGuard;
 
-    /// Init's "daemon code-index reconciliation requested" must describe a
-    /// request that actually crossed the wire: admission first, then the
-    /// explicit `tracedecay_admin_sync` reconcile. Without the second call the
-    /// first index only starts if the background full-server upgrade survives
-    /// long enough to demand it, which a daemon restart silently discards.
-    #[tokio::test]
-    async fn brokered_init_requests_a_real_code_index_reconciliation() {
+    static SOCKET_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    type RecordedRequests = std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+
+    /// A daemon on `socket` that authenticates `connections` requests and
+    /// answers each with `respond(tool_name, request_id)`.
+    fn spawn_fixture_daemon(
+        temp: &Path,
+        socket: &Path,
+        connections: usize,
+        respond: fn(&str, serde_json::Value) -> serde_json::Value,
+    ) -> (tokio::task::JoinHandle<()>, RecordedRequests) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-        static SOCKET_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-        let _serialize = SOCKET_ENV_TEST_LOCK.lock().await;
-        let temp = tempfile::TempDir::new().unwrap();
-        let project = temp.path().join("project");
-        let profile = temp.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        let socket = temp.path().join("daemon.sock");
         let authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
-            temp.path(),
-            &tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.clone()),
+            temp,
+            &tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.to_path_buf()),
             env!("CARGO_PKG_VERSION"),
         )
         .expect("publish the fixture daemon's authority record");
         let auth_token = authority.auth_token().to_owned();
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let _socket_env = SocketEnvGuard::set(&socket);
-
-        let recorded: std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let recorded = RecordedRequests::default();
         let responder = {
             let recorded = std::sync::Arc::clone(&recorded);
             tokio::spawn(async move {
-                for _ in 0..2 {
+                let _authority = authority;
+                for _ in 0..connections {
                     let (stream, _addr) = listener.accept().await.unwrap();
                     let (reader, mut writer) = stream.into_split();
                     let mut lines = tokio::io::BufReader::new(reader).lines();
@@ -470,18 +466,15 @@ mod init_bootstrap_tests {
                     let _handshake_line = lines.next_line().await.unwrap().unwrap();
                     let request_line = lines.next_line().await.unwrap().unwrap();
                     let request: serde_json::Value = serde_json::from_str(&request_line).unwrap();
-                    recorded.lock().unwrap().push((
-                        request["params"]["name"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_owned(),
-                        request["params"]["arguments"].clone(),
-                    ));
-                    let response = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": request["id"],
-                        "result": { "content": [] },
-                    });
+                    let name = request["params"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push((name.clone(), request["params"]["arguments"].clone()));
+                    let response = respond(&name, request["id"].clone());
                     writer
                         .write_all(serde_json::to_string(&response).unwrap().as_bytes())
                         .await
@@ -491,6 +484,33 @@ mod init_bootstrap_tests {
                 }
             })
         };
+        (responder, recorded)
+    }
+
+    fn empty_tool_result(_tool: &str, id: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [] },
+        })
+    }
+
+    /// Init's "daemon code-index reconciliation requested" must describe a
+    /// request that actually crossed the wire: admission first, then the
+    /// explicit `tracedecay_admin_sync` reconcile. Without the second call the
+    /// first index only starts if the background full-server upgrade survives
+    /// long enough to demand it, which a daemon restart silently discards.
+    #[tokio::test]
+    async fn brokered_init_requests_a_real_code_index_reconciliation() {
+        let _serialize = SOCKET_ENV_TEST_LOCK.lock().await;
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        let socket = temp.path().join("daemon.sock");
+        let (responder, recorded) =
+            spawn_fixture_daemon(temp.path(), &socket, 2, empty_tool_result);
+        let _socket_env = SocketEnvGuard::set(&socket);
 
         let handshake = test_handshake(&project, &profile);
         brokered_init(&project, &[], &[], &handshake)
@@ -512,6 +532,57 @@ mod init_bootstrap_tests {
             recorded[0].1["admission_only"],
             serde_json::json!(true),
             "the bootstrap status call stays admission-only"
+        );
+    }
+
+    /// A worktree parked on a corrupt publication authority refuses the
+    /// reconcile; the operator reads its cause and remedy as whole fields,
+    /// not folded into one sentence cut at the diagnostic bound.
+    #[tokio::test]
+    async fn brokered_init_prints_a_parked_refusal_as_fields() {
+        fn refuse_sync(tool: &str, id: serde_json::Value) -> serde_json::Value {
+            if tool != "tracedecay_admin_sync" {
+                return empty_tool_result(tool, id);
+            }
+            let parked = tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+                reason: format!("the publication authority is corrupt: {}", "x".repeat(600)),
+                blocked_reason: None,
+                remediation: "run `tracedecay daemon restart`".to_owned(),
+                parked_at_micros: 1,
+                observed_passes: 1,
+                retries_on_wake: false,
+            };
+            serde_json::to_value(tracedecay_mcp::tool_error_response(
+                id,
+                tool,
+                &parked.publication_authority_corrupt_error(),
+            ))
+            .unwrap()
+        }
+
+        let _serialize = SOCKET_ENV_TEST_LOCK.lock().await;
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        let socket = temp.path().join("daemon.sock");
+        let (responder, _recorded) = spawn_fixture_daemon(temp.path(), &socket, 2, refuse_sync);
+        let _socket_env = SocketEnvGuard::set(&socket);
+
+        let error = brokered_init(&project, &[], &[], &test_handshake(&project, &profile))
+            .await
+            .expect_err("a parked worktree refuses the reconcile");
+        responder.await.expect("fixture daemon task");
+
+        assert_eq!(
+            crate::commands::process_error_text(error),
+            format!(
+                "project route error (code_index_publication_authority_corrupt)\n\
+                 Parked cause: the publication authority is corrupt: {}\n\
+                 Parked remedy: run `tracedecay daemon restart`\n\
+                 Retries on wake: false",
+                "x".repeat(600)
+            )
         );
     }
 

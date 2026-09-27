@@ -1,6 +1,7 @@
 //! Semantic tool-failure classification and JSON-RPC error-response mapping.
 
 use serde_json::{Value, json};
+use tracedecay_contracts::ApplicationProblem;
 use tracedecay_domain::errors::{PROFILE_RESET_COMMAND, TraceDecayError};
 use tracedecay_sessions::admission::HostAdmissionStatus;
 
@@ -153,15 +154,16 @@ pub fn project_route_problem(tool_name: &str, error: &TraceDecayError) -> Option
         "retryable": retryable,
         "detail": detail,
     });
+    let mut kind = project_route_problem_kind(reason_code).map(|kind| json!(kind));
     if let (Some(typed_detail), Some(object)) =
         (error.project_route_typed_detail(), data.as_object_mut())
     {
         object.insert("detail".to_string(), json!(typed_detail));
+        kind = Some(json!(
+            ApplicationProblem::from_detail(typed_detail.clone()).kind()
+        ));
     }
-    if let (Some(kind), Some(object)) = (
-        project_route_problem_kind(reason_code),
-        data.as_object_mut(),
-    ) {
+    if let (Some(kind), Some(object)) = (kind, data.as_object_mut()) {
         object.insert("kind".to_string(), json!(kind));
         object.insert("code".to_string(), json!(reason_code));
     }
@@ -596,16 +598,19 @@ mod tests {
         let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
 
         assert_eq!(
-            wire["error"]["data"]["reason_code"],
-            "code_index_publication_authority_corrupt"
-        );
-        assert_eq!(
-            wire["error"]["data"]["detail"],
+            wire["error"]["data"],
             json!({
-                "kind": "parked",
-                "cause": "source mode is not owner-private",
-                "remedy": "restore mode 0600",
-                "retries_on_wake": true,
+                "tool": "tracedecay_sync",
+                "kind": "unavailable",
+                "code": "code_index_publication_authority_corrupt",
+                "reason_code": "code_index_publication_authority_corrupt",
+                "retryable": false,
+                "detail": {
+                    "kind": "parked",
+                    "cause": "source mode is not owner-private",
+                    "remedy": "restore mode 0600",
+                    "retries_on_wake": true,
+                },
             })
         );
     }

@@ -25,5 +25,5 @@ pub(crate) use settings::{
 };
 pub(crate) use storage::{
     ProfileOfflineAuthority, annotate_reset_required, handle_list, handle_wipe,
-    join_outcome_and_restore, take_profile_offline, try_admit_profile_registry,
+    join_outcome_and_restore, process_error_text, take_profile_offline, try_admit_profile_registry,
 };
