@@ -1,11 +1,9 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use serde::Serialize;
-use tracedecay_code_index::chunks::CodeIndexUnresolvedReferenceV1;
 use tracedecay_code_index::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionStore, CodeGraphSymbolBindingV1,
-    build_code_graph_manifest, code_graph_projection_identity,
+    build_code_graph_manifest, code_graph_projection_identity, code_graph_symbol_record_property,
 };
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_contracts::CancellationSignal;
@@ -19,8 +17,8 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::graph_stable_identity as stable_identity;
 use tracedecay_graph_db::{
-    GraphEntityId, GraphNamespace, GraphProjectorRevision, GraphProperty, GraphPropertyName,
-    NeverCancelled, VerifiedGraphSnapshot,
+    GraphEntityId, GraphNamespace, GraphProjectorRevision, GraphPropertyName, NeverCancelled,
+    VerifiedGraphSnapshot,
 };
 
 use super::symbol_graph::trait_implementations;
@@ -170,28 +168,26 @@ fn store(with_scope_pressure: bool) -> CodeGraphProjectionStore {
             .expect("projected symbol entity");
         entity.properties.insert(
             GraphPropertyName::new("symbol-record").expect("symbol record property"),
-            GraphProperty::Bytes(
-                serde_json::to_vec(&SymbolRecordFixture {
-                    occurrence: symbol.occurrence.clone(),
-                    binding: Some(CodeGraphSymbolBindingV1 {
-                        file: id("file.implementation.fixture"),
-                        logical_path: Some(if symbol.qualified_name.starts_with("vendor/") {
-                            "vendor/generated.rs".to_owned()
-                        } else {
-                            "src/storage.rs".to_owned()
-                        }),
-                        source_span: Some(SourceSpan {
-                            start_byte: ordinal as u64,
-                            end_byte: ordinal as u64 + 1,
-                        }),
-                        chunk: Some(id(&format!("chunk.implementation.{ordinal}"))),
-                        language_descriptor_revision: id("language.rust.v1"),
+            code_graph_symbol_record_property(
+                symbol.occurrence.clone(),
+                Some(CodeGraphSymbolBindingV1 {
+                    file: id("file.implementation.fixture"),
+                    logical_path: Some(if symbol.qualified_name.starts_with("vendor/") {
+                        "vendor/generated.rs".to_owned()
+                    } else {
+                        "src/storage.rs".to_owned()
                     }),
-                    metadata: Some(symbol.clone()),
-                    unresolved_calls: Vec::new(),
-                })
-                .expect("symbol record"),
-            ),
+                    source_span: Some(SourceSpan {
+                        start_byte: ordinal as u64,
+                        end_byte: ordinal as u64 + 1,
+                    }),
+                    chunk: Some(id(&format!("chunk.implementation.{ordinal}"))),
+                    language_descriptor_revision: id("language.rust.v1"),
+                }),
+                Some(symbol.clone()),
+                Vec::new(),
+            )
+            .expect("symbol record"),
         );
     }
     let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled))
@@ -288,12 +284,4 @@ where
     <T as TryFrom<String>>::Error: Debug,
 {
     T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
-}
-
-#[derive(Serialize)]
-struct SymbolRecordFixture {
-    occurrence: SymbolOccurrenceId,
-    binding: Option<CodeGraphSymbolBindingV1>,
-    metadata: Option<LineageSymbolRecordV1>,
-    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }

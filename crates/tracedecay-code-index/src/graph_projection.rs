@@ -941,6 +941,34 @@ pub fn build_code_graph_manifest(
     )
 }
 
+/// A file or import record in the stored form the projector writes, for
+/// fixtures that place hand-chosen rows in a manifest.
+#[cfg(feature = "test-helpers")]
+pub fn code_graph_record_property(
+    record: &impl Serialize,
+) -> Result<GraphProperty, CodeGraphProjectionError> {
+    record_property(serialize(record)?)
+}
+
+/// A symbol record in the stored form the projector writes, for fixtures
+/// that place hand-chosen symbol rows in a manifest.
+#[cfg(feature = "test-helpers")]
+pub fn code_graph_symbol_record_property(
+    occurrence: SymbolOccurrenceId,
+    binding: Option<CodeGraphSymbolBindingV1>,
+    metadata: Option<LineageSymbolRecordV1>,
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+) -> Result<GraphProperty, CodeGraphProjectionError> {
+    let record = SymbolRecordV1 {
+        occurrence,
+        binding,
+        metadata,
+        unresolved_calls,
+    };
+    validate_symbol_record(&record)?;
+    record_property(serialize(&record)?)
+}
+
 pub fn build_code_graph_manifest_checked(
     projection: GraphProjectionIdentity,
     generation: &CodeGenerationId,
