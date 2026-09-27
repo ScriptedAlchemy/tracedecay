@@ -33,6 +33,32 @@ fn shipped_binary_stops_quietly_when_a_pipeline_reader_exits() {
     );
 }
 
+/// Help runs without a project graph, so it describes the tool without a
+/// node count or call budget it cannot compute.
+#[test]
+fn context_help_describes_the_tool_without_a_project_size() {
+    let home = tempfile::tempdir().expect("isolated home");
+    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .args(["tool", "context", "--help"])
+        .env("HOME", home.path())
+        .env("TRACEDECAY_HOME", home.path().join(".tracedecay"))
+        .env("HOTPATH_METRICS_SERVER_OFF", "true")
+        .output()
+        .expect("run tool help");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let description = stdout.lines().nth(2).expect("description line");
+    assert_eq!(
+        description,
+        "Build an AI-ready context for a task description. Returns relevant symbols, \
+         relationships, up to three untracked project memory matches when available, and \
+         optionally code snippets. Use it for broad questions that need relationship synthesis \
+         across the code graph.",
+        "{stdout}"
+    );
+}
+
 #[cfg(not(feature = "hotpath"))]
 #[test]
 fn production_feature_profile_ignores_hotpath_environment() {

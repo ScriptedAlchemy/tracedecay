@@ -172,14 +172,18 @@ pub fn explore_call_budget(total_nodes: u64) -> u8 {
     }
 }
 
+/// The `tracedecay_context` description for surfaces that have no project
+/// graph to size, such as `tracedecay tool context --help`.
+const CONTEXT_DESCRIPTION: &str = "Build an AI-ready context for a task description. Returns \
+     relevant symbols, relationships, up to three untracked project memory matches when \
+     available, and optionally code snippets. Use it for broad questions that need \
+     relationship synthesis across the code graph.";
+
 /// Generates the `tracedecay_context` description with a dynamic call budget.
 pub fn context_description(node_count: u64, budget: u8) -> String {
     format!(
-        "Build an AI-ready context for a task description. Returns relevant symbols, \
-         relationships, up to three untracked project memory matches when available, \
-         and optionally code snippets. Use it for broad questions that need \
-         relationship synthesis across the code graph. This project ({node_count} nodes) \
-         allows {budget} broad context calls."
+        "{CONTEXT_DESCRIPTION} This project ({node_count} nodes) allows {budget} broad \
+         context calls."
     )
 }
 
@@ -248,11 +252,8 @@ pub fn get_tool_definitions_with_warming_budget(
 /// The `tracedecay_context` description while the project graph is still warming.
 pub fn context_warming_description(budget: u8) -> String {
     format!(
-        "Build an AI-ready context for a task description. Returns relevant symbols, \
-         relationships, up to three untracked project memory matches when available, \
-         and optionally code snippets. Use it for broad questions that need \
-         relationship synthesis across the code graph. The graph is still warming, and \
-         {budget} broad context calls are available."
+        "{CONTEXT_DESCRIPTION} The graph is still warming, and {budget} broad context calls \
+         are available."
     )
 }
 
