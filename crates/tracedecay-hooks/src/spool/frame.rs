@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use tracedecay_domain::{UtcMicros, framed_log::checksum as frame_checksum};
-use tracedecay_private_fs::framed_log::{append_durable, truncate_file as shared_truncate_file};
+use tracedecay_private_fs::framed_log::{append_unsynced, truncate_file as shared_truncate_file};
 
 use crate::{
     HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, MAX_HOOK_PAYLOAD_BYTES,
@@ -47,13 +47,13 @@ pub(super) fn encode_spool_payload(
     .map_err(|_| HookSpoolError::RecordTooLarge)
 }
 
+/// Writes one frame without syncing it; [`super::HookSpoolV1::commit`] makes
+/// it durable.
 pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolError> {
     hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame.len());
-    hotpath::measure_block!("hooks.spool.fsync.frame", {
-        append_durable(path, frame, DIRECTORY_POLICY)
-            .map(|_| ())
-            .map_err(|_| HookSpoolError::Io)
-    })
+    append_unsynced(path, frame, DIRECTORY_POLICY)
+        .map(|_| ())
+        .map_err(|_| HookSpoolError::Io)
 }
 
 pub(super) fn truncate_records(root: &Path, length: u64) -> Result<(), HookSpoolError> {

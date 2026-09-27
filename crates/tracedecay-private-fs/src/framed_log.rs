@@ -818,6 +818,28 @@ pub fn append_durable(
     Ok(offset)
 }
 
+/// Appends `frame` without syncing it. Only a newly created file and its
+/// directory entry are made durable here; the caller owns the frame's
+/// durability, typically one group commit that syncs every frame appended
+/// before it.
+#[hotpath::measure(label = "private_fs.framed_log.append_unsynced")]
+pub fn append_unsynced(
+    path: &Path,
+    frame: &[u8],
+    directory_policy: DirectorySyncPolicy,
+) -> io::Result<u64> {
+    hotpath::gauge!("private_fs.framed_log.write_bytes").set(frame.len());
+    tighten_existing_file(path)?;
+    let (mut output, created) = open_append_target(path)?;
+    let offset = output.seek(SeekFrom::End(0))?;
+    output.write_all(frame)?;
+    if created {
+        sync_owned_file(&output)?;
+        sync_parent_directory(path, directory_policy)?;
+    }
+    Ok(offset)
+}
+
 fn open_append_target(path: &Path) -> io::Result<(File, bool)> {
     let mut existing = OpenOptions::new();
     existing.append(true);

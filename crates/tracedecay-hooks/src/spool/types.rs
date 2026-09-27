@@ -1,3 +1,4 @@
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::UtcMicros;
@@ -94,8 +95,8 @@ pub struct HookSpoolRecordV1 {
 }
 
 /// The opened spool's bounded recovery report. Corrupt bytes are never
-/// discarded unless a matching append intent proves they are an unpublished
-/// partial tail.
+/// discarded; only an incomplete trailing frame beyond every committed sync,
+/// which no commit acknowledged, is truncated.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookSpoolOpenReportV1 {
@@ -215,7 +216,7 @@ pub enum HookSpoolError {
     ReplayBatchExceeded,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct HookSpoolMetaV1 {
     pub(super) version: u16,
@@ -223,7 +224,11 @@ pub(super) struct HookSpoolMetaV1 {
     pub(super) next_sequence: u64,
     pub(super) acknowledged: Vec<AcknowledgedSequenceV1>,
     pub(super) integrity: SpoolIntegrityV1,
-    pub(super) append_intent: Option<AppendIntentV1>,
+    /// Released metadata persisted a per-append intent here. The torn-tail and
+    /// sequence-continuation rules recover that state exactly from the records
+    /// file, so it is accepted and never written back.
+    #[serde(default, rename = "append_intent", skip_serializing)]
+    pub(super) retired_append_intent: Option<IgnoredAny>,
 }
 
 impl HookSpoolMetaV1 {
@@ -234,7 +239,7 @@ impl HookSpoolMetaV1 {
             next_sequence: 1,
             acknowledged: Vec::new(),
             integrity: SpoolIntegrityV1::Healthy,
-            append_intent: None,
+            retired_append_intent: None,
         }
     }
 }
@@ -244,70 +249,6 @@ impl HookSpoolMetaV1 {
 pub(super) enum SpoolIntegrityV1 {
     Healthy,
     Corrupted { at_offset: u64 },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AppendIntentV1 {
-    pub(super) sequence: u64,
-    pub(super) file_offset: u64,
-    pub(super) framed_len: u32,
-    /// Raw frame bytes, base64-encoded in the JSON meta. A serde byte array
-    /// renders as one JSON integer per byte (~4x the frame size), and the
-    /// intent is rewritten and fsynced twice per appended event, so the
-    /// encoding directly bounds append write amplification. The released
-    /// metadata wrote the byte array under this same `SPOOL_META_VERSION`, so
-    /// decoding still accepts it and rewrites it as base64 on the next append.
-    #[serde(with = "frame_base64")]
-    pub(super) frame: Vec<u8>,
-}
-
-mod frame_base64 {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    use serde::de::{Error as DeError, SeqAccess, Visitor};
-    use serde::{Deserializer, Serializer};
-    use std::fmt;
-
-    pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&STANDARD.encode(bytes))
-    }
-
-    /// Accepts the base64 string this build writes and the byte array the
-    /// released build wrote. Both yield the exact same frame bytes, which the
-    /// caller still validates against the magic, length, sequence, checksum,
-    /// and full envelope decode before any recovery decision.
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Vec<u8>, D::Error> {
-        deserializer.deserialize_any(FrameVisitor)
-    }
-
-    struct FrameVisitor;
-
-    impl<'de> Visitor<'de> for FrameVisitor {
-        type Value = Vec<u8>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("a base64 frame string or a released frame byte array")
-        }
-
-        fn visit_str<E: DeError>(self, encoded: &str) -> Result<Self::Value, E> {
-            STANDARD.decode(encoded.as_bytes()).map_err(E::custom)
-        }
-
-        fn visit_bytes<E: DeError>(self, bytes: &[u8]) -> Result<Self::Value, E> {
-            Ok(bytes.to_vec())
-        }
-
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-            let mut bytes = Vec::new();
-            while let Some(byte) = seq.next_element::<u8>()? {
-                bytes.push(byte);
-            }
-            Ok(bytes)
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

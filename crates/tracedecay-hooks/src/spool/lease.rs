@@ -6,7 +6,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_private_fs::{FileLease, LockAdmissionError, lock_until};
 
 use super::types::HookSpoolWriterLeaseV1;
-use super::{HookSpoolError, HookSpoolV1, lease_path, next_token, validate_regular_or_missing};
+use super::{HookSpoolError, HookSpoolV1, LEASE_FILE, next_token, validate_regular_or_missing};
 
 impl HookSpoolV1 {
     /// Reject a mutation once the acquired lease deadline has passed.
@@ -64,7 +64,25 @@ pub(super) fn acquire_lease_bounded(
         token: next_token(),
         expires_at,
     };
-    let path = lease_path(root);
+    // The open file description and its OS lock are the sole cross-process
+    // ownership authority. The token and deadline remain in memory only to
+    // reject a stale live handle; no process reads lease-file bytes. Therefore
+    // persisting advisory ownership would add a durability barrier without
+    // strengthening exclusion.
+    let file = lock_member(root, LEASE_FILE, "hooks.spool.writer", wait_budget)?;
+    Ok((candidate, file))
+}
+
+/// Opens the private member `name` of the spool root and takes its OS lock,
+/// failing fast without `wait_budget` or waiting at most `wait_budget` from
+/// the lock attempt.
+pub(super) fn lock_member(
+    root: &Path,
+    name: &str,
+    label: &'static str,
+    wait_budget: Option<Duration>,
+) -> Result<FileLease, HookSpoolError> {
+    let path = root.join(name);
     validate_regular_or_missing(&path)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
@@ -86,13 +104,7 @@ pub(super) fn acquire_lease_bounded(
         }
         None => file.try_lock().map_err(map_try_lock_error)?,
     }
-    // The open file description and its OS lock are the sole cross-process
-    // ownership authority. The token and deadline remain in memory only to
-    // reject a stale live handle; no process reads lease-file bytes. Therefore
-    // persisting advisory ownership would add a durability barrier without
-    // strengthening exclusion, while records, metadata and replay cursors keep
-    // their independent fsync-before-return contracts.
-    Ok((candidate, FileLease::held(file, "hooks.spool.writer")))
+    Ok(FileLease::held(file, label))
 }
 
 pub(super) fn map_try_lock_error(error: std::fs::TryLockError) -> HookSpoolError {

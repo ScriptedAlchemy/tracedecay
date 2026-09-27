@@ -24,10 +24,10 @@ pub const HOOK_SYNCHRONOUS_BUDGET_MICROS: u64 = 100_000;
 /// macOS waits three budgets. There `File::sync_all` is `F_FULLFSYNC`, which
 /// flushes the drive cache: about 5 ms per barrier on Apple silicon, against
 /// tens of microseconds for a Linux `fsync`. A native capture holds the writer
-/// lease across roughly six barriers (append intent, frame, checkpoint and
-/// their directory syncs), about 30-45 ms, so four concurrent hooks for one
-/// host serialize past 100 ms and the last would be refused with
-/// `AdmissionTimedOut` although every writer was making progress.
+/// lease for no barrier, but its group commit waits for the batch sync ahead
+/// of it, and the delivery-receipt spool still syncs under its own lock, so
+/// four concurrent hooks for one host can wait past 100 ms although every
+/// writer is making progress.
 pub const HOOK_SYNCHRONOUS_BUDGET: std::time::Duration = if cfg!(target_os = "macos") {
     std::time::Duration::from_micros(HOOK_MACOS_LOCK_WAIT_BUDGETS * HOOK_SYNCHRONOUS_BUDGET_MICROS)
 } else {

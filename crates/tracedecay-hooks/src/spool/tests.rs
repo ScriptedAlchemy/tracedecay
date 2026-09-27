@@ -366,16 +366,16 @@ fn append_ack_compact_and_reopen_are_exact() {
 }
 
 #[test]
-fn replay_probe_is_false_until_a_record_is_durable() {
+fn replay_probe_is_false_until_a_record_is_appended() {
     let root = TestDir::new("replay-probe");
-    assert!(!HookSpoolV1::has_durable_records(&root.0).unwrap());
+    assert!(!HookSpoolV1::has_records(&root.0).unwrap());
 
     let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
     spool
         .append(envelope(1, 9), &binding(), UtcMicros(10))
         .unwrap();
 
-    assert!(HookSpoolV1::has_durable_records(&root.0).unwrap());
+    assert!(HookSpoolV1::has_records(&root.0).unwrap());
 }
 
 #[test]
@@ -427,24 +427,32 @@ fn reused_event_id_with_different_envelope_is_rejected_after_reopen() {
     assert_eq!(spool.meta.next_sequence, 2);
 }
 
+/// Under the writer lease an append writes only its frame (and the
+/// rebuildable checkpoint transition): the metadata file is not rewritten, so
+/// a contended hook holds the lease for no metadata barrier, and reopening
+/// still continues the sequence from the committed frame.
 #[test]
-fn a_durable_frame_reconciles_its_retained_append_intent_on_reopen() {
-    let root = TestDir::new("durable-frame-intent");
+fn an_append_writes_only_its_frame_and_reopen_continues_the_sequence() {
+    let root = TestDir::new("append-writes-frame");
+    let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    drop(spool);
+    let meta_before = fs::read(meta_path(&root.0)).unwrap();
+
     let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
-    spool
+    let record = spool
         .append(envelope(1, 9), &binding(), UtcMicros(10))
         .unwrap();
-    drop(spool);
+    spool.commit().unwrap();
 
-    let durable_meta = read_meta(&root.0).unwrap().unwrap();
-    assert_eq!(durable_meta.next_sequence, 1);
-    assert_eq!(durable_meta.append_intent.unwrap().sequence, 1);
-
+    assert_eq!(fs::read(meta_path(&root.0)).unwrap(), meta_before);
+    assert_eq!(
+        fs::metadata(records_path(&root.0)).unwrap().len(),
+        u64::from(record.framed_len)
+    );
     let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap();
     assert_eq!(report.next_sequence, 2);
     assert_eq!(spool.pending.len(), 1);
-    assert_eq!(spool.meta.next_sequence, 2);
-    assert!(spool.meta.append_intent.is_none());
+    assert_eq!(spool.pending[0].to_record(), Some(record));
 }
 
 #[test]
@@ -1056,28 +1064,31 @@ fn control_event_capacity_survives_regular_event_saturation() {
     assert_eq!(spool.pending.len(), 3);
 }
 
+/// Appends `frame[..torn_len]` the way a writer killed mid-write leaves it.
+fn write_torn_frame(root: &Path, frame: &[u8], torn_len: usize) {
+    let mut output = std::fs::OpenOptions::new()
+        .append(true)
+        .open(records_path(root))
+        .unwrap();
+    output.write_all(&frame[..torn_len]).unwrap();
+    output.sync_all().unwrap();
+}
+
 #[test]
-fn matching_torn_append_tail_is_truncated_and_sequence_is_reused() {
+fn a_torn_append_past_the_committed_extent_is_truncated_and_its_sequence_reused() {
     let root = TestDir::new("recovery");
     let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
     spool
         .append(envelope(1, 9), &binding(), UtcMicros(10))
         .unwrap();
+    spool.commit().unwrap();
     let payload = canonical_json_bytes(&envelope(2, 9)).unwrap();
     let frame = encode_frame(2, UtcMicros(10), [9; 32], &payload).unwrap();
-    let mut meta = spool.meta.clone();
-    meta.append_intent = Some(append_intent(2, spool.physical_len, &frame).unwrap());
-    write_meta(&root.0, &meta).unwrap();
-    let mut output = std::fs::OpenOptions::new()
-        .append(true)
-        .open(records_path(&root.0))
-        .unwrap();
     let torn_len = 100.min(frame.len() - 1);
-    output.write_all(&frame[..torn_len]).unwrap();
-    output.sync_all().unwrap();
-    drop(output);
-    drop(spool);
+    write_torn_frame(&root.0, &frame, torn_len);
+
     let (mut spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap();
+    assert_eq!(report.corrupted_at_offset, None);
     assert_eq!(report.scanned_records, 1);
     assert_eq!(report.truncated_partial_tail_bytes, torn_len as u64);
     assert_eq!(spool.meta.next_sequence, 2);
@@ -1088,55 +1099,220 @@ fn matching_torn_append_tail_is_truncated_and_sequence_is_reused() {
             .sequence,
         2
     );
+    spool.commit().unwrap();
 }
 
-/// The released build persisted `append_intent.frame` as a JSON byte array and
-/// `SPOOL_META_VERSION` is still 1, so an upgraded binary must still decode and
-/// reconcile a crash-era intent. Refusing it would strand the spool behind a
-/// reset that discards the pending hook event.
+/// A commit acknowledged every byte through its published extent, so a
+/// records file cut short inside that extent lost acknowledged data: it is
+/// corruption, never a torn append to truncate.
 #[test]
-fn released_byte_array_append_intent_recovers_after_upgrade() {
-    let root = TestDir::new("recovery-byte-array-intent");
+fn a_tail_cut_inside_the_committed_extent_is_corruption() {
+    let root = TestDir::new("recovery-committed-cut");
     let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
-    spool
+    let first = spool
         .append(envelope(1, 9), &binding(), UtcMicros(10))
         .unwrap();
-    let payload = canonical_json_bytes(&envelope(2, 9)).unwrap();
-    let frame = encode_frame(2, UtcMicros(10), [9; 32], &payload).unwrap();
-    let mut meta = spool.meta.clone();
-    meta.append_intent = Some(append_intent(2, spool.physical_len, &frame).unwrap());
-    write_meta(&root.0, &meta).unwrap();
-    // Rewrite the persisted intent in the exact released encoding: one JSON
-    // integer per frame byte instead of the base64 string this build writes.
-    let mut persisted: serde_json::Value =
-        serde_json::from_slice(&fs::read(meta_path(&root.0)).unwrap()).unwrap();
-    persisted["append_intent"]["frame"] = serde_json::json!(frame);
-    assert!(
-        persisted["append_intent"]["frame"].is_array(),
-        "the fixture must persist the released byte-array form"
-    );
-    fs::write(meta_path(&root.0), serde_json::to_vec(&persisted).unwrap()).unwrap();
-    let mut output = std::fs::OpenOptions::new()
-        .append(true)
+    spool
+        .append(envelope(2, 9), &binding(), UtcMicros(10))
+        .unwrap();
+    spool.commit().unwrap();
+    let records = std::fs::OpenOptions::new()
+        .write(true)
         .open(records_path(&root.0))
         .unwrap();
+    records.set_len(u64::from(first.framed_len) + 100).unwrap();
+    drop(records);
+
+    let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap();
+    assert_eq!(report.truncated_partial_tail_bytes, 0);
+    assert_eq!(
+        report.corrupted_at_offset,
+        Some(u64::from(first.framed_len))
+    );
+    assert_eq!(
+        spool.ensure_healthy(),
+        Err(HookSpoolError::Corrupted {
+            at_offset: u64::from(first.framed_len)
+        })
+    );
+}
+
+/// Released builds persisted a per-append intent in metadata (its frame as a
+/// JSON byte array) under the same metadata version. That metadata still
+/// opens: the torn tail it described is recovered from the records file, and
+/// the next metadata write drops the retired field.
+#[test]
+fn released_metadata_with_an_append_intent_opens_and_drops_it() {
+    let root = TestDir::new("recovery-released-intent");
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    let first = spool
+        .append(envelope(1, 9), &binding(), UtcMicros(10))
+        .unwrap();
+    spool.commit().unwrap();
+    let payload = canonical_json_bytes(&envelope(2, 9)).unwrap();
+    let frame = encode_frame(2, UtcMicros(10), [9; 32], &payload).unwrap();
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&fs::read(meta_path(&root.0)).unwrap()).unwrap();
+    persisted["append_intent"] = serde_json::json!({
+        "sequence": 2,
+        "file_offset": first.framed_len,
+        "framed_len": frame.len(),
+        "frame": frame,
+    });
+    fs::write(meta_path(&root.0), serde_json::to_vec(&persisted).unwrap()).unwrap();
     let torn_len = 100.min(frame.len() - 1);
-    output.write_all(&frame[..torn_len]).unwrap();
-    output.sync_all().unwrap();
-    drop(output);
-    drop(spool);
+    write_torn_frame(&root.0, &frame, torn_len);
 
     let (mut spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap();
-
+    assert_eq!(report.corrupted_at_offset, None);
     assert_eq!(report.truncated_partial_tail_bytes, torn_len as u64);
-    assert_eq!(spool.meta.next_sequence, 2);
-    assert_eq!(
+    assert_eq!(report.next_sequence, 2);
+    assert!(
         spool
-            .append(envelope(2, 9), &binding(), UtcMicros(20))
+            .acknowledge(
+                HookSpoolAckV1 {
+                    sequence: first.sequence,
+                    receipt_id: [21; 16],
+                    disposition: HookSpoolAckDispositionV1::Committed,
+                },
+                UtcMicros(20),
+            )
             .unwrap()
-            .sequence,
-        2
     );
+    let rewritten: serde_json::Value =
+        serde_json::from_slice(&fs::read(meta_path(&root.0)).unwrap()).unwrap();
+    assert_eq!(rewritten.get("append_intent"), None);
+    assert_eq!(rewritten["committed_through"], 1);
+    assert_eq!(rewritten["next_sequence"], 2);
+}
+
+/// Writer processes loop the hook sequence (bounded open, append, commit)
+/// and print each event only after its commit returns, the point a hook
+/// acknowledges its host. Killing them all mid-stream lands inside appends,
+/// lease waits, and shared syncs; the reopened spool must be healthy, hold
+/// every acknowledged event exactly once, and continue its sequence.
+#[test]
+fn killing_writers_mid_batch_keeps_every_acknowledged_record_and_no_torn_one() {
+    const WRITER_ENV: &str = "TRACEDECAY_HOOK_SPOOL_KILLED_WRITER";
+    const ROOT_ENV: &str = "TRACEDECAY_HOOK_SPOOL_KILLED_ROOT";
+    const WRITERS: u32 = 4;
+    const ACKNOWLEDGED_BEFORE_KILL: usize = 48;
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
+    if let Ok(writer) = std::env::var(WRITER_ENV) {
+        let writer: u32 = writer.parse().expect("writer ordinal");
+        let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("writer spool root"));
+        let mut stdout = std::io::stdout();
+        for index in 0..crate::MAX_SPOOL_RECORDS_PER_SESSION - 1 {
+            let event = writer * 100_000 + index + 1;
+            let (mut spool, _) = match HookSpoolV1::open_within(
+                &root,
+                config,
+                UtcMicros(10),
+                Duration::from_secs(5),
+            ) {
+                Ok(opened) => opened,
+                Err(HookSpoolError::AdmissionTimedOut) => continue,
+                Err(error) => panic!("writer open failed: {error:?}"),
+            };
+            spool
+                .append(
+                    numbered_envelope(event, writer as u8 + 1),
+                    &binding(),
+                    UtcMicros(10),
+                )
+                .expect("writer append");
+            spool.commit().expect("writer commit");
+            writeln!(stdout, "{event}").expect("acknowledge");
+            stdout.flush().expect("acknowledge");
+        }
+        return;
+    }
+
+    let root = TestDir::new("killed-writers");
+    let spool_root = root.0.join("spool");
+    drop(HookSpoolV1::open(&spool_root, config, UtcMicros(10)).unwrap());
+    let test_name =
+        "spool::tests::killing_writers_mid_batch_keeps_every_acknowledged_record_and_no_torn_one";
+    let mut children = (0..WRITERS)
+        .map(|writer| {
+            Command::new(std::env::current_exe().expect("current test binary"))
+                .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+                .env(WRITER_ENV, writer.to_string())
+                .env(ROOT_ENV, &spool_root)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn writer")
+        })
+        .collect::<Vec<_>>();
+    let (acknowledged_tx, acknowledged_rx) = std::sync::mpsc::channel::<u32>();
+    let readers = children
+        .iter_mut()
+        .map(|child| {
+            let stdout = child.stdout.take().expect("writer stdout");
+            let acknowledged_tx = acknowledged_tx.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)) {
+                    let Ok(line) = line else { break };
+                    if let Ok(event) = line.trim().parse::<u32>() {
+                        let _ = acknowledged_tx.send(event);
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    drop(acknowledged_tx);
+    let mut acknowledged = std::collections::BTreeSet::new();
+    while acknowledged.len() < ACKNOWLEDGED_BEFORE_KILL {
+        let event = acknowledged_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("writers acknowledge before the kill");
+        acknowledged.insert(event);
+    }
+    for child in &mut children {
+        child.kill().expect("SIGKILL writer");
+    }
+    for child in &mut children {
+        child.wait().expect("reap writer");
+    }
+    for reader in readers {
+        reader.join().expect("writer stdout reader");
+    }
+    acknowledged.extend(acknowledged_rx.try_iter());
+
+    let (mut spool, report) = HookSpoolV1::open(&spool_root, config, UtcMicros(20)).unwrap();
+    assert_eq!(report.corrupted_at_offset, None);
+    let records = spool
+        .expired_records(UtcMicros(10 + MAX_SPOOL_AGE_MICROS + 1))
+        .unwrap();
+    let sequences = records
+        .iter()
+        .map(|record| record.sequence)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sequences,
+        (1..report.next_sequence).collect::<Vec<_>>(),
+        "reopen continues one contiguous sequence"
+    );
+    let spooled = records
+        .iter()
+        .map(|record| u32::from_le_bytes(record.envelope.event_id[..4].try_into().unwrap()))
+        .collect::<Vec<_>>();
+    let unique = spooled
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), spooled.len(), "no event is spooled twice");
+    assert_eq!(
+        acknowledged.difference(&unique).collect::<Vec<_>>(),
+        Vec::<&u32>::new(),
+        "every acknowledged event survives the kill"
+    );
+    let next_event = 900_001;
+    spool
+        .append(numbered_envelope(next_event, 9), &binding(), UtcMicros(20))
+        .unwrap();
+    spool.commit().unwrap();
 }
 
 #[test]
