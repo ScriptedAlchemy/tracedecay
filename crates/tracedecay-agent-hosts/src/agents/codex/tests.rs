@@ -1130,6 +1130,7 @@ trusted_hash = "sha256:foreign"
     // With no foreign records the emptied hooks tables disappear entirely and
     // the hook-trust residue is gone.
     std::fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
     sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
     CodexIntegration
         .deactivate_deployed_host_registration(&install_ctx(home.path()))
