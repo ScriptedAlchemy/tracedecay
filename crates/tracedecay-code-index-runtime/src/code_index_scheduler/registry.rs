@@ -3725,9 +3725,15 @@ impl CodeIndexSchedulerRegistryV1 {
     /// as soon as the seal moves the durable pointer, while the text
     /// projection and serving swap that follow are still running, and only
     /// while the fence's last source proof still describes that snapshot.
+    ///
+    /// A caller that already handled `known` gets `None` from one pointer
+    /// read while no newer seal exists; only a new seal pays for decoding
+    /// the generation's manifest.
+    #[hotpath::measure(label = "daemon.code_index.sealed_publication_identity", future = true)]
     pub async fn sealed_publication_identity(
         &self,
         project_root: &Path,
+        known: Option<&CodeGenerationId>,
     ) -> Result<
         Option<tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1>,
         CodeIndexSchedulerErrorV1,
@@ -3746,14 +3752,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.shutting_down),
             )
         };
-        let metadata =
-            tokio::task::spawn_blocking(move || owner.active_publication_text_metadata())
-                .await
-                .map_err(|error| {
-                    CodeIndexSchedulerErrorV1::Identity(format!(
-                        "sealed publication identity read task failed: {error}"
-                    ))
-                })??;
+        let known = known.cloned();
+        let metadata = tokio::task::spawn_blocking(move || {
+            owner.active_publication_text_metadata(known.as_ref())
+        })
+        .await
+        .map_err(|error| {
+            CodeIndexSchedulerErrorV1::Identity(format!(
+                "sealed publication identity read task failed: {error}"
+            ))
+        })??;
         Ok(metadata
             .filter(|metadata| {
                 source_freshness.serves_verified_source(

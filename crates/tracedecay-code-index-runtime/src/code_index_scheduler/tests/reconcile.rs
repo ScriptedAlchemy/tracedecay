@@ -3040,7 +3040,7 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
         "no generation serves while its text projection is held"
     );
     let sealed = registry
-        .sealed_publication_identity(fixture.path())
+        .sealed_publication_identity(fixture.path(), None)
         .await
         .expect("sealed identity read")
         .expect("the seal names its generation before it serves");
@@ -3050,6 +3050,14 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
             .map(|(path, _)| path.to_owned())
             .collect::<Vec<_>>(),
         ["src/lib.rs"]
+    );
+    assert!(
+        registry
+            .sealed_publication_identity(fixture.path(), Some(sealed.generation_id()))
+            .await
+            .expect("sealed identity read")
+            .is_none(),
+        "a caller that handled the sealed generation learns of no newer seal"
     );
 
     release_projection

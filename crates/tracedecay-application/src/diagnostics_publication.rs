@@ -921,7 +921,7 @@ pub async fn publish_compiler_diagnostics_for_identity_v1(
     let (resolved, unresolved) = if parsed.is_empty() {
         (Vec::new(), Vec::new())
     } else {
-        resolve_compiler_diagnostics_v1(project_root, &identity, parsed).await
+        resolve_compiler_diagnostics_v1(project_root, identity, parsed).await
     };
     if !parsed.is_empty() && resolved.is_empty() {
         return CompilerDiagnosticPublicationOutcomeV1::NoResolvableDiagnostics { unresolved };

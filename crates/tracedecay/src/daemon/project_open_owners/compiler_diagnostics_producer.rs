@@ -94,10 +94,11 @@ pub(super) fn spawn_typescript_diagnostics_producer(
                 // the source the seal proved, so the check starts at the seal
                 // rather than after the text projection and serving swap. A
                 // generation sealed mid-run is caught by the next wake.
-                match schedulers.sealed_publication_identity(&project_root).await {
-                    Ok(Some(identity))
-                        if attempted_for.as_ref() != Some(identity.generation_id()) =>
-                    {
+                match schedulers
+                    .sealed_publication_identity(&project_root, attempted_for.as_ref())
+                    .await
+                {
+                    Ok(Some(identity)) => {
                         attempted_for = Some(identity.generation_id().clone());
                         // A generation can add, drop, or retarget tsconfigs.
                         let Some(projects) = discover_projects(&project_root).await else {
