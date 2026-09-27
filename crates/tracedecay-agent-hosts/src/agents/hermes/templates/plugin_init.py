@@ -2420,12 +2420,15 @@ class TracedecayMemoryProvider(MemoryProvider):
         # so one turn can be searched from every repository it actually touched
         # without binding the long-lived host session to any one project.
         for project_root in [None, *project_roots]:
+            # The internal hook tool is not format-capable, so the JSON
+            # result this reads back is requested explicitly.
             args = {
                 "action": "ingest_transcript",
                 "provider": STANDARD_HERMES_LCM_PROVIDER,
                 "session_id": sid,
                 "messages": turn_messages,
                 "user_scope": project_root is None,
+                "format": "json",
             }
             try:
                 result = call_tracedecay_json(
