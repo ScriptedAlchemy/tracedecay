@@ -2434,6 +2434,16 @@ fn newer_feedback_receipt_refuses_before_restore_effects() {
     assert_eq!(fs::read(&state).unwrap(), state_before);
 }
 
+/// Points the installed OpenCode LSP registration at another binary, so the
+/// next registration activation has a real rewrite to publish.
+fn stale_opencode_lsp_registration(cli: &IsolatedCli) {
+    let path = cli.home.path().join(".config/opencode/opencode.json");
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["lsp"]["tracedecay"]["command"] =
+        serde_json::json!(["stale-tracedecay", "lsp", "bridge", "--stdio"]);
+    fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+}
+
 #[test]
 fn killed_feedback_registration_recovers_without_applied_marker() {
     let cli = IsolatedCli::new();
@@ -2444,6 +2454,7 @@ fn killed_feedback_registration_recovers_without_applied_marker() {
         "initial install",
         cli.run(&["install", "--agent", case.id]),
     );
+    stale_opencode_lsp_registration(&cli);
     let receipt = latest_receipt(&cli, case.host);
     let before = owned_bytes(&cli, &receipt, &originals);
     let state = cli.home.path().join("killed-registration-feedback.json");
@@ -2494,6 +2505,7 @@ fn killed_feedback_registration_rejects_later_operator_edit() {
         "initial install",
         cli.run(&["install", "--agent", case.id]),
     );
+    stale_opencode_lsp_registration(&cli);
     let state = cli.home.path().join("killed-registration-stale.json");
     let mut command = cli.command(&[
         "feedback-rollback",
@@ -2548,6 +2560,7 @@ fn killed_feedback_registration_rejects_metadata_only_drift() {
         "initial install",
         cli.run(&["install", "--agent", case.id]),
     );
+    stale_opencode_lsp_registration(&cli);
     let state = cli.home.path().join("killed-registration-metadata.json");
     let mut command = cli.command(&[
         "feedback-rollback",
