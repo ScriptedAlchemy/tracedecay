@@ -216,6 +216,7 @@ jobs:
           python3 scripts/test-package-release-archive.py
           python3 scripts/test-plan-release-recovery.py
           python3 scripts/test-check-release-artifacts.py
+          python3 scripts/test-neutralize-release-pr-closing-keywords.py
           bash scripts/test-check-distribution-clean-source.sh
           bash scripts/test-check-distribution-snapshot.sh
           bash scripts/test-check-distribution-reuse.sh
