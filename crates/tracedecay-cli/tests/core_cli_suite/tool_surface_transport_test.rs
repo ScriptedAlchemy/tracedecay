@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use crate::common::fixture::{
     TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_FIXTURE_TSC_RELEASE,
-    TYPESCRIPT_MONOREPO_APP_FILE, TypeScriptFixtureCompiler, write_typescript_diagnostics_fixture,
-    write_typescript_monorepo_diagnostics_fixture,
+    TYPESCRIPT_MONOREPO_APP_FILE, TypeScriptFixtureCompiler, typescript_fixture_build_info,
+    write_typescript_diagnostics_fixture, write_typescript_monorepo_diagnostics_fixture,
 };
 use crate::common::{
     canonical_existing_path, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
@@ -448,13 +448,18 @@ fn tool_diagnostics_reads_the_typescript_producer_publication() {
     let invocations =
         std::fs::read_to_string(project_path.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS))
             .expect("the fixture compiler records every invocation");
-    let root = project_path.display();
-    assert!(
-        invocations
-            .lines()
-            .all(|line| line == format!("{root} -p {root}/tsconfig.json --noEmit --pretty false")),
-        "the producer runs the project's own tsc from the project root: {invocations}"
-    );
+    for invocation in invocations.lines() {
+        let build_info = typescript_fixture_build_info(invocation, &project_path, "tsconfig.json")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the producer runs the project's own tsc from the project root: {invocations}"
+                )
+            });
+        assert!(
+            build_info.starts_with(&home_path),
+            "incremental state lives in the isolated profile's project store: {invocations}"
+        );
+    }
 }
 
 /// Before `npm install` the same read is a typed refusal that carries the

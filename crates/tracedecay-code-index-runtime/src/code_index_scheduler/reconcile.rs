@@ -930,6 +930,45 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                     "historical text generation has no publication pointer".to_owned(),
                 )
             })?;
+        Ok(self
+            .text_metadata_in(&pointer, generation_id)?
+            .map(|metadata| {
+                self.bind_text(
+                    metadata,
+                    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
+                )
+            }))
+    }
+
+    /// The manifest and snapshot of the active durable publication, without
+    /// binding a text owner. A seal moves the pointer before its text
+    /// projection and serving swap, so this names the newest generation well
+    /// before any serving slot holds it. `None` without reading the manifest
+    /// while the pointer still names `known`.
+    pub(crate) fn active_publication_text_metadata(
+        &self,
+        known: Option<&CodeGenerationId>,
+    ) -> Result<Option<VerifiedSealedTextGenerationMetadataV1>, CodeIndexSchedulerErrorV1> {
+        let Some(pointer) = self
+            .publication
+            .read_publication_pointer()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+        else {
+            return Ok(None);
+        };
+        if known.is_some_and(|known| known.as_str() == pointer.generation_id) {
+            return Ok(None);
+        }
+        let generation_id = CodeGenerationId::new(pointer.generation_id.clone())
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        self.text_metadata_in(&pointer, &generation_id)
+    }
+
+    fn text_metadata_in(
+        &self,
+        pointer: &DurablePublicationPointerV1,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<VerifiedSealedTextGenerationMetadataV1>, CodeIndexSchedulerErrorV1> {
         let Some(entry) = pointer
             .generation_index
             .iter()
@@ -959,10 +998,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             )
             .into());
         }
-        Ok(Some(self.bind_text(
-            metadata,
-            tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
-        )))
+        Ok(Some(metadata))
     }
 
     /// Load an exact durable code generation even after a newer capture has

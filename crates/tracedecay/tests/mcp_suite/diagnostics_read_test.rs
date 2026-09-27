@@ -100,7 +100,7 @@ async fn diagnostics_read_names_a_missing_producer_and_rejects_a_bad_scope() {
 async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
     use crate::common::fixture::{
         TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TypeScriptFixtureCompiler,
-        write_typescript_diagnostics_fixture,
+        typescript_fixture_build_info, write_typescript_diagnostics_fixture,
     };
     use crate::support::production_composition_fixture_with_sources;
 
@@ -145,6 +145,7 @@ async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
 
     // The compiler that ran is the project's own, from the project root, with
     // the check-only arguments; nothing else could have produced the record.
+    // Its incremental state lives in the project store, never the checkout.
     let invocations = std::fs::read_to_string(
         fixture
             .project_root
@@ -155,13 +156,11 @@ async fn typescript_project_publishes_diagnostics_from_its_own_compiler() {
         .project_root
         .canonicalize()
         .expect("canonical project root");
-    let root = canonical_root.display();
     for invocation in invocations.lines() {
-        assert_eq!(
-            invocation,
-            format!("{root} -p {root}/tsconfig.json --noEmit --pretty false"),
-            "{invocations}"
-        );
+        let build_info =
+            typescript_fixture_build_info(invocation, &canonical_root, "tsconfig.json")
+                .unwrap_or_else(|| panic!("unexpected tsc invocation: {invocations}"));
+        assert!(!build_info.starts_with(&canonical_root), "{invocations}");
     }
     assert!(
         !invocations.is_empty(),
@@ -221,7 +220,7 @@ async fn typescript_project_without_a_compiler_names_the_install_command() {
 async fn typescript_monorepo_checks_each_package_tsconfig() {
     use crate::common::fixture::{
         TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_MONOREPO_APP_FILE,
-        TYPESCRIPT_MONOREPO_UNOWNED_FILE, TypeScriptFixtureCompiler,
+        TYPESCRIPT_MONOREPO_UNOWNED_FILE, TypeScriptFixtureCompiler, typescript_fixture_build_info,
         write_typescript_monorepo_diagnostics_fixture,
     };
     use crate::support::production_composition_fixture_with_sources;
@@ -276,25 +275,25 @@ async fn typescript_monorepo_checks_each_package_tsconfig() {
         .project_root
         .canonicalize()
         .expect("canonical project root");
-    let root = root.display();
     let invocations = std::fs::read_to_string(
         fixture
             .project_root
             .join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS),
     )
     .expect("the fixture compiler records every invocation");
-    let expected = ["app", "lib"].map(|package| {
-        format!("{root} -p {root}/packages/{package}/tsconfig.json --noEmit --pretty false")
-    });
+    let checks = |line: &str, package: &str| {
+        typescript_fixture_build_info(line, &root, &format!("packages/{package}/tsconfig.json"))
+            .is_some()
+    };
     assert!(
         invocations
             .lines()
-            .all(|line| expected.contains(&line.to_owned())),
+            .all(|line| checks(line, "app") || checks(line, "lib")),
         "every run checks one package tsconfig from the workspace root: {invocations}"
     );
-    for invocation in &expected {
+    for package in ["app", "lib"] {
         assert!(
-            invocations.lines().any(|line| line == invocation),
+            invocations.lines().any(|line| checks(line, package)),
             "{invocations}"
         );
     }

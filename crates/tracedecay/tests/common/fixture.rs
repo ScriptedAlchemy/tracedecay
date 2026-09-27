@@ -907,6 +907,24 @@ pub fn write_typescript_diagnostics_fixture(project: &Path, compiler: TypeScript
     fs::set_permissions(&tsc, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// The build-info file a logged fixture-compiler invocation names when it is
+/// the producer's exact incremental check of `tsconfig` from `root`; `None`
+/// for an invocation of any other shape or tsconfig.
+#[cfg(unix)]
+pub fn typescript_fixture_build_info(
+    invocation: &str,
+    root: &Path,
+    tsconfig: &str,
+) -> Option<PathBuf> {
+    let root = root.display();
+    let build_info = PathBuf::from(invocation.strip_prefix(&format!(
+        "{root} -p {root}/{tsconfig} --noEmit --pretty false --incremental --tsBuildInfoFile "
+    ))?);
+    (build_info.extension() == Some("tsbuildinfo".as_ref())
+        && build_info.parent().and_then(Path::file_name) == Some("typescript-build-info".as_ref()))
+    .then_some(build_info)
+}
+
 /// The package file the monorepo fixture's `TS4023` is reported on.
 pub const TYPESCRIPT_MONOREPO_APP_FILE: &str = "packages/app/src/index.ts";
 

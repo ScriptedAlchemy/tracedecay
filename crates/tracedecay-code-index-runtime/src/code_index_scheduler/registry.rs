@@ -22,7 +22,9 @@ use std::{
 use std::sync::Condvar;
 
 use super::demand_admission::{CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1};
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_code_index::production::{
+    CodeIndexPublishedGenerationV1, VerifiedSealedTextGenerationMetadataV1,
+};
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
@@ -3715,25 +3717,81 @@ impl CodeIndexSchedulerRegistryV1 {
         {
             return None;
         }
-        let metadata = current.metadata();
-        let snapshot = metadata.snapshot();
-        Some(
-            tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
-                metadata.manifest().generation_id.clone(),
-                snapshot.repository.clone(),
-                snapshot.worktree.clone(),
-                snapshot.reference.clone(),
-                snapshot.source_revision.clone(),
-                snapshot.files.iter().map(|file| {
-                    (
-                        file.logical_path.clone(),
-                        file.file_occurrence_id.clone(),
-                        file.content_digest.clone(),
-                    )
-                }),
-            ),
-        )
+        Some(publication_identity(current.metadata()))
     }
+
+    /// The publication identity of the generation the latest seal named, for
+    /// a producer whose findings depend only on the sealed source. It answers
+    /// as soon as the seal moves the durable pointer, while the text
+    /// projection and serving swap that follow are still running, and only
+    /// while the fence's last source proof still describes that snapshot.
+    ///
+    /// A caller that already handled `known` gets `None` from one pointer
+    /// read while no newer seal exists; only a new seal pays for decoding
+    /// the generation's manifest.
+    #[hotpath::measure(label = "daemon.code_index.sealed_publication_identity", future = true)]
+    pub async fn sealed_publication_identity(
+        &self,
+        project_root: &Path,
+        known: Option<&CodeGenerationId>,
+    ) -> Result<
+        Option<tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1>,
+        CodeIndexSchedulerErrorV1,
+    > {
+        let Ok(root) = canonical_existing_identity(project_root) else {
+            return Ok(None);
+        };
+        let (owner, source_freshness, shutting_down) = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&root) else {
+                return Ok(None);
+            };
+            (
+                worktree.historical_generation_owner.clone(),
+                worktree.source_freshness.clone(),
+                Arc::clone(&worktree.shutting_down),
+            )
+        };
+        let known = known.cloned();
+        let metadata = tokio::task::spawn_blocking(move || {
+            owner.active_publication_text_metadata(known.as_ref())
+        })
+        .await
+        .map_err(|error| {
+            CodeIndexSchedulerErrorV1::Identity(format!(
+                "sealed publication identity read task failed: {error}"
+            ))
+        })??;
+        Ok(metadata
+            .filter(|metadata| {
+                source_freshness.serves_verified_source(
+                    &metadata.snapshot().content_identity,
+                    &root,
+                    &shutting_down,
+                )
+            })
+            .map(|metadata| publication_identity(&metadata)))
+    }
+}
+
+fn publication_identity(
+    metadata: &VerifiedSealedTextGenerationMetadataV1,
+) -> tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1 {
+    let snapshot = metadata.snapshot();
+    tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
+        metadata.manifest().generation_id.clone(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone(),
+        snapshot.reference.clone(),
+        snapshot.source_revision.clone(),
+        snapshot.files.iter().map(|file| {
+            (
+                file.logical_path.clone(),
+                file.file_occurrence_id.clone(),
+                file.content_digest.clone(),
+            )
+        }),
+    )
 }
 
 impl tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1

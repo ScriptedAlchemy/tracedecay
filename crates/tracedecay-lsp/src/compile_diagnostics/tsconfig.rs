@@ -132,6 +132,86 @@ pub fn typescript_install_command(project_root: &Path, package_dir: &Path) -> &'
         .unwrap_or(TYPESCRIPT_INSTALL_COMMAND)
 }
 
+/// The inputs of one project that its last check's program files cannot
+/// name: a source its `include` would newly admit, the tsconfig and its
+/// `extends` chain, and the package manifests and lockfiles that decide what
+/// resolves from `node_modules`.
+pub struct TypeScriptProjectConfigInputs {
+    config: Option<Tsconfig>,
+    tsconfig: PathBuf,
+    manifest_dirs: BTreeSet<PathBuf>,
+}
+
+impl TypeScriptProjectConfigInputs {
+    #[must_use]
+    pub fn load(project_root: &Path, tsconfig: &Path) -> Self {
+        let tsconfig = normalize(tsconfig);
+        let manifest_dirs = tsconfig
+            .parent()
+            .map(|dir| {
+                ancestors_within(project_root, dir)
+                    .map(Path::to_path_buf)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            config: Tsconfig::load(&tsconfig),
+            tsconfig,
+            manifest_dirs,
+        }
+    }
+
+    /// Whether a change to `file` (absolute) can change what tsc reports for
+    /// this project beyond the program files it already read.
+    #[must_use]
+    pub fn affected_by(&self, file: &Path) -> bool {
+        let file = normalize(file);
+        if file == self.tsconfig {
+            return true;
+        }
+        let manifest = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name == "package.json"
+                    || LOCKFILE_INSTALL_COMMANDS
+                        .iter()
+                        .any(|(lockfile, _)| *lockfile == name)
+            });
+        if manifest
+            && file
+                .parent()
+                .is_some_and(|dir| self.manifest_dirs.contains(dir))
+        {
+            return true;
+        }
+        self.config
+            .as_ref()
+            .is_some_and(|config| config.chain.contains(&file) || config.owns(&file))
+    }
+}
+
+/// The program files a `--tsBuildInfoFile` records, absolute. `None` when the
+/// file is missing or not a build-info tsc writes, so a caller cannot mistake
+/// an unreadable record for a project that reads nothing.
+#[must_use]
+pub fn typescript_build_info_program(build_info: &Path) -> Option<Vec<PathBuf>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BuildInfo {
+        file_names: Vec<String>,
+    }
+    let text = std::fs::read_to_string(build_info).ok()?;
+    let info: BuildInfo = serde_json::from_str(&text).ok()?;
+    let dir = build_info.parent()?;
+    Some(
+        info.file_names
+            .iter()
+            .map(|name| normalize(&dir.join(name)))
+            .collect(),
+    )
+}
+
 fn is_skipped_dir(name: &str) -> bool {
     name == "node_modules" || name.starts_with('.')
 }
@@ -284,6 +364,8 @@ struct Tsconfig {
     dir: PathBuf,
     inputs: Inputs,
     references: Vec<PathBuf>,
+    /// The config and every readable config its `extends` chain names.
+    chain: BTreeSet<PathBuf>,
 }
 
 impl Tsconfig {
@@ -301,11 +383,13 @@ impl Tsconfig {
                 }
             })
             .collect();
-        let inputs = Inputs::resolve(path, raw, &mut BTreeSet::new());
+        let mut chain = BTreeSet::new();
+        let inputs = Inputs::resolve(path, raw, &mut chain);
         Some(Self {
             dir,
             inputs,
             references,
+            chain,
         })
     }
 
@@ -629,6 +713,82 @@ mod tests {
         assert_eq!(
             typescript_install_command(root.path(), &package),
             TYPESCRIPT_INSTALL_COMMAND
+        );
+    }
+
+    /// A change outside the program files still reaches a project through its
+    /// config: a new source its `include` admits, its `extends` base, and the
+    /// manifests and lockfile above it. A sibling package's source does not.
+    #[test]
+    fn config_inputs_name_what_the_program_files_cannot() {
+        let root = monorepo();
+        let root = root.path();
+        let app =
+            TypeScriptProjectConfigInputs::load(root, &root.join("packages/app/tsconfig.json"));
+        let affected = [
+            "packages/app/tsconfig.json",
+            "packages/app/src/new.ts",
+            "tsconfig.base.json",
+            "packages/app/package.json",
+            "package.json",
+            "pnpm-lock.yaml",
+        ]
+        .into_iter()
+        .filter(|path| app.affected_by(&root.join(path)))
+        .collect::<Vec<_>>();
+        assert_eq!(
+            affected,
+            [
+                "packages/app/tsconfig.json",
+                "packages/app/src/new.ts",
+                "tsconfig.base.json",
+                "packages/app/package.json",
+                "package.json",
+                "pnpm-lock.yaml",
+            ]
+        );
+        let unaffected = [
+            "packages/app/src/generated/out.ts",
+            "packages/app/src/notes.md",
+            "packages/lib/src/b.ts",
+            "packages/lib/package.json",
+            "src/main.rs",
+        ]
+        .into_iter()
+        .filter(|path| app.affected_by(&root.join(path)))
+        .collect::<Vec<_>>();
+        assert_eq!(unaffected, Vec::<&str>::new());
+    }
+
+    /// tsc records program files relative to the build-info file; a record
+    /// that is not tsc's shape is unknown, never an empty program.
+    #[test]
+    fn build_info_program_resolves_against_the_build_info_directory() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "store/app.tsbuildinfo",
+            "{\"fileNames\":[\"lib.es5.d.ts\",\"../project/src/a.ts\"],\"version\":\"5.9.3\"}",
+        );
+        write(
+            root.path(),
+            "store/other.tsbuildinfo",
+            "{\"version\":\"5.9.3\"}",
+        );
+        assert_eq!(
+            typescript_build_info_program(&root.path().join("store/app.tsbuildinfo")),
+            Some(vec![
+                root.path().join("store/lib.es5.d.ts"),
+                root.path().join("project/src/a.ts"),
+            ])
+        );
+        assert_eq!(
+            typescript_build_info_program(&root.path().join("store/other.tsbuildinfo")),
+            None
+        );
+        assert_eq!(
+            typescript_build_info_program(&root.path().join("store/missing.tsbuildinfo")),
+            None
         );
     }
 

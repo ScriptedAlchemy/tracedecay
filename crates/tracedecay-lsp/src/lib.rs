@@ -61,8 +61,9 @@ pub use capabilities::{
     UpstreamCapabilities, negotiate_capabilities,
 };
 pub use compile_diagnostics::tsconfig::{
-    SearchedTsconfig, TypeScriptFileOwner, TypeScriptProject, typescript_file_owner,
-    typescript_install_command, typescript_projects,
+    SearchedTsconfig, TypeScriptFileOwner, TypeScriptProject, TypeScriptProjectConfigInputs,
+    typescript_build_info_program, typescript_file_owner, typescript_install_command,
+    typescript_projects,
 };
 pub use compile_diagnostics::typescript::{
     TYPESCRIPT_INSTALL_COMMAND, run_compiler as run_typescript_compiler,
