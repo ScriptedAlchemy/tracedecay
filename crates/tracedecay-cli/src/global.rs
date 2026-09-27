@@ -118,15 +118,21 @@ pub(crate) fn check_for_update(
             return;
         }
         config.cached_latest_version.clone()
-    } else if let Some(v) = crate::cloud::fetch_latest_version() {
-        config.cached_latest_version = v.clone();
-        config.last_version_check_at = now;
-        if let Err(err) = config.save_if_exists(profile.data_dir()) {
-            eprintln!("warning: could not save tracedecay config: {err}");
-        }
-        v
     } else {
-        return;
+        match crate::cloud::fetch_latest_version() {
+            Ok(v) => {
+                config.cached_latest_version = v.clone();
+                config.last_version_check_at = now;
+                if let Err(err) = config.save_if_exists(profile.data_dir()) {
+                    eprintln!("warning: could not save tracedecay config: {err}");
+                }
+                v
+            }
+            Err(error) => {
+                tracing::debug!(%error, "version-update check could not read releases");
+                return;
+            }
+        }
     };
 
     // The status page (skip_suppression=true) warns on any newer version;

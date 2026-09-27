@@ -508,12 +508,18 @@ impl McpServer {
         let server = self.dispatch_authority.server();
         let spawned = self.spawn_background_task(hotpath::future!(
             async move {
-                let latest = tokio::task::spawn_blocking(
+                let latest = match tokio::task::spawn_blocking(
                     tracedecay_dashboard_api::cloud::fetch_latest_version,
                 )
                 .await
-                .ok()
-                .flatten();
+                {
+                    Ok(Some(Ok(latest))) => Some(latest),
+                    Ok(Some(Err(error))) => {
+                        tracing::debug!(%error, "version-update check could not read releases");
+                        None
+                    }
+                    Ok(None) | Err(_) => None,
+                };
                 let Some(server) = server.upgrade() else {
                     return;
                 };

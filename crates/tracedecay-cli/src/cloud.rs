@@ -1,24 +1,25 @@
 //! HTTP client for the worldwide counter Cloudflare Worker and GitHub release
 //! version checking.
 //!
-//! All operations are best-effort: failures surface as `None` / empty. They
+//! Counter operations are best-effort: failures surface as `None` / empty.
+//! Release lookups classify every failure as a [`ReleaseLookupError`]. All
 //! are synchronous `ureq` calls that block the calling thread for up to their
 //! own timeout, which an enclosing Tokio deadline cannot cut short. A caller
 //! on an async or deadline-bound path must run them on a blocking thread and
 //! bound the join itself (see the CLI status command).
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::de::DeserializeOwned;
+use tracedecay_dashboard_api::cloud::ReleaseLookupError;
 
 /// The Cloudflare Worker endpoint URL.
 const WORKER_URL: &str = "https://tracedecay-counter.enzinol.workers.dev";
 
-/// GitHub API endpoint for the latest stable release.
-const GITHUB_RELEASES_URL: &str =
-    "https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases/latest";
-
-/// GitHub API endpoint for listing releases (used to find latest beta).
-const GITHUB_RELEASES_LIST_URL: &str =
-    "https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases?per_page=10";
+/// Base URL of the GitHub REST API release lookups are issued against.
+pub(crate) const GITHUB_API_URL: &str = "https://api.github.com";
+const GITHUB_OWNER: &str = "ScriptedAlchemy";
+const GITHUB_REPOSITORY: &str = "tracedecay";
 
 /// Timeout for flush (upload) requests.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -182,58 +183,150 @@ fn release_has_current_platform_asset(release: &GitHubRelease) -> bool {
     release.assets.iter().any(|a| a.name == required)
 }
 
-/// Fetches the latest release version from GitHub.
-/// For beta builds, fetches the latest prerelease; for stable builds,
-/// fetches the latest stable release. This ensures each channel only
-/// sees updates from its own channel. Releases whose CI hasn't yet
-/// uploaded the current-platform binary are skipped, see
-/// `release_has_current_platform_asset`.
-pub fn fetch_latest_version() -> Option<String> {
-    if is_beta() {
-        fetch_latest_beta_version()
+/// The credential release lookups send: the local GitHub login (`GH_TOKEN`,
+/// `gh auth token`, or the git credential helper), which raises the quota
+/// from 60 to 5000 requests per hour. `None` reads anonymously.
+pub(crate) fn github_authorization() -> Option<String> {
+    tracedecay_application::advisory::public_repository_read_authorization_v1(
+        GITHUB_OWNER,
+        GITHUB_REPOSITORY,
+    )
+    .map(|header| header.as_str().to_owned())
+}
+
+/// The REST URL of this repository's release collection under `api_base`.
+pub(crate) fn releases_url(api_base: &str) -> String {
+    format!("{api_base}/repos/{GITHUB_OWNER}/{GITHUB_REPOSITORY}/releases")
+}
+
+fn channel_name(is_beta: bool) -> &'static str {
+    if is_beta { "beta" } else { "stable" }
+}
+
+/// Issues one release-metadata `GET` and classifies the answer. `Ok(None)` is
+/// GitHub's 404 for `url`; every other non-success is a typed refusal.
+pub(crate) fn get_release_json<T: DeserializeOwned>(
+    url: &str,
+    authorization: Option<&str>,
+    timeout: Duration,
+) -> Result<Option<T>, ReleaseLookupError> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut request = agent
+        .get(url)
+        .header("User-Agent", "tracedecay")
+        .header("Accept", "application/vnd.github+json");
+    if let Some(authorization) = authorization {
+        request = request.header("Authorization", authorization);
+    }
+    let mut response = request.call().map_err(transport_failure)?;
+    let status = response.status().as_u16();
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+    };
+    match status {
+        200..=299 => {}
+        404 => return Ok(None),
+        403 | 429
+            if status == 429
+                || header("x-ratelimit-remaining") == Some("0")
+                || header("retry-after").is_some() =>
+        {
+            let reset_at = header("x-ratelimit-reset")
+                .and_then(|reset| reset.parse::<u64>().ok())
+                .or_else(|| {
+                    let retry_after = header("retry-after")?.parse::<u64>().ok()?;
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+                    Some(now.as_secs().saturating_add(retry_after))
+                });
+            return Err(ReleaseLookupError::RateLimited { reset_at });
+        }
+        401 | 403 => return Err(ReleaseLookupError::Unauthorized { status }),
+        _ => return Err(ReleaseLookupError::UnexpectedStatus { status }),
+    }
+    response
+        .body_mut()
+        .read_json()
+        .map(Some)
+        .map_err(|error| match error {
+            ureq::Error::Timeout(_) => ReleaseLookupError::TimedOut,
+            ureq::Error::Io(ref io) if io.kind() == std::io::ErrorKind::TimedOut => {
+                ReleaseLookupError::TimedOut
+            }
+            error => ReleaseLookupError::MalformedResponse {
+                detail: error.to_string(),
+            },
+        })
+}
+
+fn transport_failure(error: ureq::Error) -> ReleaseLookupError {
+    match error {
+        ureq::Error::Timeout(_) => ReleaseLookupError::TimedOut,
+        ureq::Error::Io(ref io) if io.kind() == std::io::ErrorKind::TimedOut => {
+            ReleaseLookupError::TimedOut
+        }
+        error => ReleaseLookupError::NetworkUnreachable {
+            detail: error.to_string(),
+        },
+    }
+}
+
+/// Fetches the latest release version on the running build's channel: a
+/// beta build sees only prereleases, a stable build only stable releases.
+/// Releases whose CI hasn't yet uploaded the current-platform binary are
+/// skipped, see `release_has_current_platform_asset`.
+pub fn fetch_latest_version() -> Result<String, ReleaseLookupError> {
+    fetch_latest_channel_version(is_beta())
+}
+
+/// Fetches the latest installable version of one channel from GitHub.
+pub fn fetch_latest_channel_version(is_beta: bool) -> Result<String, ReleaseLookupError> {
+    latest_release_version(GITHUB_API_URL, is_beta, github_authorization().as_deref())
+}
+
+#[hotpath::measure(label = "cloud.latest_release_version")]
+fn latest_release_version(
+    api_base: &str,
+    is_beta: bool,
+    authorization: Option<&str>,
+) -> Result<String, ReleaseLookupError> {
+    let releases = releases_url(api_base);
+    let candidates: Vec<GitHubRelease> = if is_beta {
+        get_release_json(
+            &format!("{releases}?per_page=10"),
+            authorization,
+            FETCH_TIMEOUT,
+        )?
+        .unwrap_or_default()
     } else {
-        fetch_latest_stable_version()
-    }
-}
-
-/// Fetches the latest stable release version from GitHub.
-#[hotpath::measure(label = "cloud.fetch_latest_stable_version")]
-pub fn fetch_latest_stable_version() -> Option<String> {
-    let agent = agent_with_timeout(FETCH_TIMEOUT);
-    let release: GitHubRelease = agent
-        .get(GITHUB_RELEASES_URL)
-        .header("User-Agent", "tracedecay")
-        .call()
-        .ok()?
-        .body_mut()
-        .read_json()
-        .ok()?;
-    if !release_has_current_platform_asset(&release) {
-        return None;
-    }
-    Some(release.tag_name.trim_start_matches('v').to_string())
-}
-
-/// Fetches the latest prerelease version from GitHub.
-#[hotpath::measure(label = "cloud.fetch_latest_beta_version")]
-pub fn fetch_latest_beta_version() -> Option<String> {
-    let agent = agent_with_timeout(FETCH_TIMEOUT);
-    let releases: Vec<GitHubRelease> = agent
-        .get(GITHUB_RELEASES_LIST_URL)
-        .header("User-Agent", "tracedecay")
-        .call()
-        .ok()?
-        .body_mut()
-        .read_json()
-        .ok()?;
-    // First prerelease that has the current platform's asset already
-    // uploaded. GitHub returns the list newest-first, so the first match
-    // is the latest installable beta. Releases whose CI is still in
-    // progress are skipped, they will be picked up on the next check.
-    releases
+        get_release_json::<GitHubRelease>(
+            &format!("{releases}/latest"),
+            authorization,
+            FETCH_TIMEOUT,
+        )?
         .into_iter()
-        .find(|r| r.prerelease && release_has_current_platform_asset(r))
-        .map(|r| r.tag_name.trim_start_matches('v').to_string())
+        .collect()
+    };
+    // GitHub lists releases newest-first, so the first installable match is
+    // the latest. Releases whose CI is still in progress are skipped, they
+    // will be picked up on the next check.
+    candidates
+        .into_iter()
+        .find(|release| {
+            release.prerelease == is_beta && release_has_current_platform_asset(release)
+        })
+        .map(|release| release.tag_name.trim_start_matches('v').to_string())
+        .ok_or(ReleaseLookupError::NoAssetForPlatform {
+            channel: channel_name(is_beta),
+            platform: current_platform(),
+        })
 }
 
 /// Returns true if the current build is a beta/prerelease version.
@@ -296,6 +389,9 @@ pub fn detect_install_method() -> InstallMethod {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
 
     fn release(tag: &str, prerelease: bool, asset_names: &[&str]) -> GitHubRelease {
         GitHubRelease {
@@ -358,6 +454,204 @@ mod tests {
                 "pre-reset release {tag} must not be an upgrade candidate"
             );
         }
+    }
+
+    /// Answers every connection on a loopback port with `response` (a raw
+    /// HTTP/1.1 response), or holds it unanswered when `None`, and forwards
+    /// each request head it read.
+    fn stub(response: Option<&'static str>) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (heads, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let _ = heads.send(String::from_utf8_lossy(&request[..read]).into_owned());
+                match response {
+                    Some(response) => {
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    None => std::thread::sleep(Duration::from_secs(10)),
+                }
+            }
+        });
+        (base, received)
+    }
+
+    fn respond(status: &str, headers: &str, body: &str) -> &'static str {
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .leak()
+    }
+
+    #[test]
+    fn an_exhausted_quota_is_rate_limited_until_the_advertised_reset() {
+        let (base, heads) = stub(Some(respond(
+            "403 Forbidden",
+            "x-ratelimit-limit: 60\r\nx-ratelimit-remaining: 0\r\n\
+             x-ratelimit-reset: 1790516841\r\n",
+            r#"{"message":"API rate limit exceeded"}"#,
+        )));
+
+        let error = latest_release_version(&base, true, Some("Bearer test-token")).unwrap_err();
+
+        assert_eq!(
+            error,
+            ReleaseLookupError::RateLimited {
+                reset_at: Some(1_790_516_841)
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "rate_limited: GitHub API rate limit is exhausted; authenticate with `gh auth \
+             login` or set GH_TOKEN (5000 requests/hour instead of 60), or retry after Sun, 27 \
+             Sep 2026 13:47:21 GMT"
+        );
+        let head = heads.recv().unwrap().to_ascii_lowercase();
+        assert!(
+            head.starts_with("get /repos/scriptedalchemy/tracedecay/releases?per_page=10 "),
+            "{head}"
+        );
+        assert!(
+            head.contains("\r\nauthorization: bearer test-token\r\n"),
+            "{head}"
+        );
+    }
+
+    #[test]
+    fn a_refused_credential_is_unauthorized() {
+        let (base, _heads) = stub(Some(respond(
+            "401 Unauthorized",
+            "",
+            r#"{"message":"Bad credentials"}"#,
+        )));
+
+        let error = latest_release_version(&base, true, Some("Bearer revoked")).unwrap_err();
+
+        assert_eq!(error, ReleaseLookupError::Unauthorized { status: 401 });
+        assert_eq!(
+            error.to_string(),
+            "unauthorized: GitHub refused the request's credentials (HTTP 401); refresh the \
+             GitHub login with `gh auth login`, or set GH_TOKEN to a valid token (or unset an \
+             invalid one)"
+        );
+    }
+
+    #[test]
+    fn a_missing_stable_release_is_no_asset_for_this_platform() {
+        let (base, heads) = stub(Some(respond(
+            "404 Not Found",
+            "",
+            r#"{"message":"Not Found"}"#,
+        )));
+
+        let error = latest_release_version(&base, false, None).unwrap_err();
+
+        assert_eq!(
+            error,
+            ReleaseLookupError::NoAssetForPlatform {
+                channel: "stable",
+                platform: current_platform(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "no_asset_for_platform: no stable release publishes a {} asset; release CI may \
+                 still be uploading binaries, retry in a few minutes",
+                current_platform()
+            )
+        );
+        let head = heads.recv().unwrap().to_ascii_lowercase();
+        assert!(
+            head.starts_with("get /repos/scriptedalchemy/tracedecay/releases/latest "),
+            "{head}"
+        );
+        assert!(!head.contains("authorization:"), "{head}");
+    }
+
+    #[test]
+    fn only_a_release_carrying_this_platforms_asset_is_installable() {
+        let listing = |assets: &str| {
+            respond(
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                &format!(
+                    r#"[{{"tag_name":"v0.9.9-beta.1","prerelease":true,"assets":[{assets}]}}]"#
+                ),
+            )
+        };
+        let installable = format!(r#"{{"name":"{}"}}"#, asset_name("0.9.9-beta.1", true));
+        let (base, _heads) = stub(Some(listing(&installable)));
+        assert_eq!(
+            latest_release_version(&base, true, None).unwrap(),
+            "0.9.9-beta.1"
+        );
+
+        let (base, _heads) = stub(Some(listing(
+            r#"{"name":"tracedecay-beta-v0.9.9-beta.1-other.tar.gz"}"#,
+        )));
+        assert_eq!(
+            latest_release_version(&base, true, None).unwrap_err(),
+            ReleaseLookupError::NoAssetForPlatform {
+                channel: "beta",
+                platform: current_platform(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_release_metadata_is_malformed() {
+        let (base, _heads) = stub(Some(respond("200 OK", "", "<html>garbage</html>")));
+
+        let error = latest_release_version(&base, true, None).unwrap_err();
+
+        assert!(
+            matches!(error, ReleaseLookupError::MalformedResponse { .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.state(), "malformed_response");
+        assert_eq!(
+            error.remedy(),
+            "retry later; if it persists, report it at \
+             https://github.com/ScriptedAlchemy/tracedecay/issues"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_request_times_out() {
+        let (base, _heads) = stub(None);
+
+        let error = latest_release_version(&base, true, None).unwrap_err();
+
+        assert_eq!(error, ReleaseLookupError::TimedOut);
+        assert_eq!(
+            error.to_string(),
+            "timed_out: GitHub did not answer in time; retry when the connection to GitHub is \
+             responsive"
+        );
+    }
+
+    #[test]
+    fn a_refused_connection_is_network_unreachable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+
+        let error = latest_release_version(&base, true, None).unwrap_err();
+
+        assert!(
+            matches!(error, ReleaseLookupError::NetworkUnreachable { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.remedy(),
+            "check the network connection and proxy settings, then retry"
+        );
     }
 
     #[test]

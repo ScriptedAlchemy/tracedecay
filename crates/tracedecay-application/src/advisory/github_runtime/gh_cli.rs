@@ -439,6 +439,19 @@ pub fn public_repository_read_credential_v1(
         .unwrap_or_else(GitHubReadOnlyCredentialV1::anonymous)
 }
 
+/// The `Authorization` header a read of a *public* repository sends, from the
+/// precedence of [`public_repository_read_credential_v1`]; `None` when the
+/// read is anonymous.
+pub fn public_repository_read_authorization_v1(
+    repository_owner: &str,
+    repository_name: &str,
+) -> Option<Zeroizing<String>> {
+    public_repository_read_credential_v1(repository_owner, repository_name)
+        .authorization_header_for(GitHubReadPermissionV1::Contents)
+        .ok()
+        .flatten()
+}
+
 /// Test-only guard installing an exact token source and clearing every
 /// retained authority (and its cached probe) on both ends of its lifetime.
 #[cfg(test)]
