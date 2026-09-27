@@ -349,3 +349,102 @@ async fn admin_sync_answers_the_scheduler_admission_and_refuses_arguments() {
 
     fixture.harness.shutdown().await;
 }
+
+/// `tracedecay_admin_project` is the owner's bookkeeping the CLI requests by
+/// name: each action answers its typed result through the project's owner,
+/// a profile reconcile reaches the daemon's profile owner from a project
+/// connection, and an argument outside the action's request is refused
+/// instead of being ignored or normalized.
+#[tokio::test]
+async fn admin_project_answers_through_its_owners_and_refuses_arguments_outside_its_action() {
+    let fixture = production_composition_fixture().await;
+    let project_id = fixture
+        .harness
+        .project_id(&fixture.project_root)
+        .await
+        .expect("registered project id");
+    let store_root = canonical_existing_identity(fixture.harness.profile_root())
+        .expect("canonical profile root")
+        .join("projects")
+        .join(&project_id);
+    let admin = |arguments: Value| call_json(&fixture, "tracedecay_admin_project", arguments);
+
+    assert_eq!(
+        admin(json!({"action": "counter_reset"})).await,
+        json!({"reset": true})
+    );
+    assert_eq!(
+        admin(json!({"action": "counter_get"})).await,
+        json!({"counter": 0})
+    );
+    assert_eq!(
+        admin(json!({"action": "automatic_fact_receipt_list", "state": "applied", "limit": 5}))
+            .await,
+        json!({
+            "availability": {"state": "available"},
+            "count": 0,
+            "receipts": [],
+            "next_after_apply_id": null,
+        })
+    );
+    // The fixture's project runs no automation scheduler.
+    assert_eq!(
+        admin(json!({"action": "automation_reconcile", "scope": "project"})).await,
+        json!({"scope": "project", "outcome": "owner_unavailable"})
+    );
+    assert_eq!(
+        admin(json!({"action": "automation_reconcile", "scope": "profile"})).await,
+        json!({
+            "scope": "profile",
+            "cached_owners": 1,
+            "outcomes": [{
+                "project_id": project_id,
+                "store_root": store_root.display().to_string(),
+                "graph_db_path": store_root.join("tracedecay.db").display().to_string(),
+                "scope_prefix": null,
+                "outcome": "owner_unavailable",
+            }],
+            "uncached_projects": "deferred_until_project_startup",
+        })
+    );
+
+    assert_eq!(
+        refusal(
+            &fixture,
+            "tracedecay_admin_project",
+            json!({"action": "counter_get", "project": "/elsewhere"})
+        )
+        .await,
+        invalid(
+            "tracedecay_admin_project",
+            "unknown field `project`, there are no fields"
+        )
+    );
+    assert_eq!(
+        refusal(
+            &fixture,
+            "tracedecay_admin_project",
+            json!({"action": "automatic_fact_receipt_list", "state": " applied ", "limit": 5})
+        )
+        .await,
+        invalid(
+            "tracedecay_admin_project",
+            "unknown variant ` applied `, expected `applied` or `quarantined`"
+        )
+    );
+    assert_eq!(
+        refusal(
+            &fixture,
+            "tracedecay_admin_project",
+            json!({"action": "automatic_fact_receipt_view", "id": "automatic-fact.missing"})
+        )
+        .await,
+        json!({
+            "kind": "invalid_request",
+            "code": "application.surface.invalid_request",
+            "message": "automatic fact receipt not found",
+        })
+    );
+
+    fixture.harness.shutdown().await;
+}

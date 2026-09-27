@@ -213,8 +213,7 @@ async fn projectless_response(
 fn projectless_tool_is_discoverable(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "tracedecay_admin_project"
-            | "tracedecay_hook_runtime"
+        "tracedecay_hook_runtime"
             | "tracedecay_admin_cli"
             | "tracedecay_project_list"
             | "tracedecay_project_search"
@@ -316,9 +315,18 @@ async fn projectless_tools_call_response_with_connection(
             return JsonRpcResponse::error(id, ErrorCode::InvalidParams, message.to_string());
         }
     };
-    // Call admission is the discovery predicate: a name `tools/list` did not
-    // advertise is refused here before any account or store work.
-    let discoverable = projectless_tool_is_discoverable(tool_name);
+    // Call admission is the discovery predicate, widened by the requests the
+    // daemon's profile owner answers: anything else is refused here before
+    // any account or store work.
+    let no_arguments = serde_json::Map::new();
+    let profile_owner_operation =
+        tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(tool_name).filter(
+            |operation| {
+                operation.is_profile_owner_request(arguments.as_object().unwrap_or(&no_arguments))
+            },
+        );
+    let discoverable =
+        profile_owner_operation.is_some() || projectless_tool_is_discoverable(tool_name);
     #[cfg(feature = "hotpath")]
     {
         let hotpath_tool_name = if discoverable { tool_name } else { "unknown" };
@@ -337,11 +345,18 @@ async fn projectless_tools_call_response_with_connection(
     // Keep unrelated tool families out of one generated poll frame. Some handlers
     // retain large typed futures, and combining them here can exhaust a Tokio
     // worker stack before the selected handler is polled.
+    if let Some(operation) = profile_owner_operation {
+        return boxed_projectless_phase(projectless_profile_owner_response(
+            id,
+            operation,
+            arguments,
+            connection,
+            store_administration,
+        ))
+        .await;
+    }
     let response =
         match tool_name {
-            "tracedecay_admin_project" => boxed_projectless_phase(
-                projectless_admin_project_response(id, arguments, connection, store_administration),
-            ),
             "tracedecay_hook_runtime" => boxed_projectless_phase(
                 projectless_hook_runtime_response(id, arguments, connection, store_administration),
             ),
@@ -351,17 +366,6 @@ async fn projectless_tools_call_response_with_connection(
                 connection,
                 store_administration,
             )),
-            tool_name @ ("tracedecay_project_list"
-            | "tracedecay_project_search"
-            | "tracedecay_project_context") => {
-                boxed_projectless_phase(projectless_registry_response(
-                    id,
-                    tool_name,
-                    arguments,
-                    connection,
-                    store_administration,
-                ))
-            }
             _ => {
                 // `projectless_tool_is_discoverable` admitted the name above,
                 // so any remaining tool is a retained profile operation.
@@ -398,22 +402,17 @@ fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResp
     )
 }
 
-/// Registry reads go to the daemon's profile owner, the one path every
-/// connection's registry read takes. Only the handshake's project, if any, is
-/// marked active.
-async fn projectless_registry_response(
+/// Profile-owner requests go to the daemon's profile owner, the one path
+/// every connection's profile-owner request takes. Only the handshake's
+/// project, if any, is marked active.
+async fn projectless_profile_owner_response(
     id: serde_json::Value,
-    tool_name: &str,
+    operation: tracedecay_tool_catalog::ApplicationSurfaceOperation,
     arguments: serde_json::Value,
     connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
 ) -> tracedecay_mcp::JsonRpcResponse {
-    let Some(operation) =
-        tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(tool_name)
-            .filter(|operation| operation.is_profile_registry_read())
-    else {
-        return requires_project_error(id, tool_name);
-    };
+    let tool_name = operation.mcp_tool_name();
     let executor = profile_executor(connection, store_administration);
     let result = match boxed_projectless_phase(crate::mcp::tools::execute_graph_tool_surface(
         tracedecay_tool_catalog::BindingSurface::Mcp,
@@ -449,67 +448,6 @@ fn profile_executor(
         store_administration: store_administration.clone(),
         active_project_root: connection.active_project_root.clone(),
     }
-}
-
-async fn projectless_admin_project_response(
-    id: serde_json::Value,
-    arguments: serde_json::Value,
-    connection: &ProjectlessConnectionStateV1,
-    store_administration: &StoreAdministration,
-) -> tracedecay_mcp::JsonRpcResponse {
-    #[derive(serde::Deserialize)]
-    #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-    enum ProjectlessAdminProjectAction {
-        AutomationReconcile {
-            scope: tracedecay_dashboard_api::AutomationReconcileScope,
-        },
-    }
-
-    let request = match serde_json::from_value::<ProjectlessAdminProjectAction>(arguments) {
-        Ok(request) => request,
-        Err(error) => {
-            return JsonRpcResponse::error(
-                id,
-                ErrorCode::InvalidParams,
-                format!("invalid projectless tracedecay_admin_project arguments: {error}"),
-            );
-        }
-    };
-    let ProjectlessAdminProjectAction::AutomationReconcile { scope } = request;
-    if scope != tracedecay_dashboard_api::AutomationReconcileScope::Profile {
-        return JsonRpcResponse::error(
-            id,
-            ErrorCode::InvalidParams,
-            "project-scoped automation reconciliation requires a project path".to_string(),
-        );
-    }
-    let outcomes = match boxed_projectless_phase(
-        store_administration
-            .reconcile_cached_automation_for_profile(&connection.client_identity.profile_root),
-    )
-    .await
-    {
-        Ok(outcomes) => outcomes,
-        Err(error) => {
-            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-        }
-    };
-    let report = tracedecay_dashboard_api::ProfileAutomationReconcileReport {
-        scope,
-        cached_owners: outcomes.len(),
-        outcomes,
-        uncached_projects:
-            tracedecay_dashboard_api::UncachedProjectReconcileOutcome::DeferredUntilProjectStartup,
-    };
-    JsonRpcResponse::success(
-        id,
-        json!({
-            "content": [{
-                "type": "text",
-                "text": serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
-            }]
-        }),
-    )
 }
 
 async fn projectless_hook_runtime_response(

@@ -1562,7 +1562,7 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
     );
     assert_eq!(
         reconcile,
-        Some(tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Retiring),
+        Some(tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Retiring),
         "replacement must remain unavailable while the old JoinHandle is live"
     );
     assert_eq!(
@@ -1592,7 +1592,7 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     use tracedecay_automation_runtime::automation::scheduler::{
         AutomationSchedulerControl, save_scheduler_control,
     };
-    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+    use tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome;
 
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");

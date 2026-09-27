@@ -67,7 +67,7 @@ impl DaemonInvocationState {
             .await;
         }
         // The caller's project, when it names one, only marks that project
-        // active in the profile's registry; the read never opens it.
+        // active in the profile's registry; the profile owner never opens it.
         if let DaemonInvocationPayload::ProfileGraphTool {
             surface_operation,
             arguments,
@@ -76,7 +76,7 @@ impl DaemonInvocationState {
             ..
         } = request.payload
         {
-            return super::super::profile_registry::invoke_profile_registry_read(
+            return super::super::profile_owner::invoke_profile_owner_operation(
                 store_administration,
                 project_path,
                 request.request_id,

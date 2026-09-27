@@ -38,7 +38,6 @@ pub const LONG_RUNNING_TOOL_DISPATCH_CEILING: std::time::Duration =
 const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
     "tracedecay_fact_store_curate",
     "tracedecay_admin_cli",
-    "tracedecay_admin_project",
     "tracedecay_admin_branch_add",
 ];
 

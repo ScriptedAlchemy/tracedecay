@@ -1,4 +1,6 @@
-use super::daemon::daemon_tool_json;
+use tracedecay_contracts::retrieval::{
+    AdminProjectBenchV1, AdminProjectResultV1, AdminProjectSurfaceRequestV1,
+};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 #[hotpath::measure(label = "cli.bench.run", future = true)]
@@ -18,24 +20,19 @@ pub(crate) async fn handle_bench(
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("failed to read query file: {error}"),
         })?;
-    let result = daemon_tool_json(
+    let AdminProjectResultV1::Bench(AdminProjectBenchV1 { output }) = super::admin_project(
         profile,
-        Some(&resolved.project_path),
-        "tracedecay_admin_project",
-        serde_json::json!({
-            "action": "bench",
-            "queries_toml": queries_toml,
-            "json": json,
-            "max_nodes": max_nodes,
-        }),
+        &resolved.project_path,
+        AdminProjectSurfaceRequestV1::Bench {
+            queries_toml,
+            json,
+            max_nodes,
+        },
     )
-    .await?;
-    let output = result
-        .get("output")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: "daemon bench response omitted output".to_string(),
-        })?;
+    .await?
+    else {
+        return Err(super::unexpected_admin_project_result());
+    };
     print!("{output}");
     Ok(())
 }

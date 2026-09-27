@@ -483,7 +483,7 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
+    ) -> tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome {
         let transition = self.maintenance_transition_gate(&key).await;
         let _transition = transition.lock().await;
         let scope = super::branch_admin::owner_writer_scope(&key);
@@ -505,8 +505,8 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
-        use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+    ) -> tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome {
+        use tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome;
 
         if !self.lifecycle.accepting() {
             return AutomationSchedulerReconcileOutcome::LifecycleInactive;
@@ -689,8 +689,8 @@ impl DaemonEngine {
         project_path: PathBuf,
         handshake: DaemonHandshake,
         cg: Arc<TraceDecay>,
-    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
-        use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+    ) -> tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome {
+        use tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome;
 
         if !self.lifecycle.accepting() {
             return AutomationSchedulerReconcileOutcome::LifecycleInactive;

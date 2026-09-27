@@ -1687,7 +1687,8 @@ impl StoreAdministration {
     pub(super) async fn reconcile_cached_automation_for_profile(
         &self,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_dashboard_api::AutomationSchedulerOwnerReconcileOutcome>> {
+    ) -> Result<Vec<tracedecay_contracts::retrieval::AutomationSchedulerOwnerReconcileOutcome>>
+    {
         self.ensure_account_active().await?;
         let profile_root = authority::canonical_identity_path(profile_root)?;
         let servers = {
@@ -1702,7 +1703,7 @@ impl StoreAdministration {
         let mut outcomes = Vec::with_capacity(servers.len());
         for (key, server) in servers {
             outcomes.push(
-                tracedecay_dashboard_api::AutomationSchedulerOwnerReconcileOutcome {
+                tracedecay_contracts::retrieval::AutomationSchedulerOwnerReconcileOutcome {
                     project_id: key.owner.project_id,
                     store_root: key.owner.store_root,
                     graph_db_path: key.owner.graph_db_path,
