@@ -388,6 +388,9 @@ impl CodeLexicalArtifactReaderV1 {
         )
         .map_err(|error| map_reader_open_error(path, error))?;
         verify_named_path_identity(path, &file)?;
+        // An unserved revision's receipt has another shape; classify the
+        // revision before decoding it so an old artifact is Incompatible.
+        verify_artifact_state_revision(&connection, control)?;
         let receipt_bytes: Vec<u8> = connection
             .query_row(
                 "SELECT receipt FROM artifact_state WHERE singleton = 1",

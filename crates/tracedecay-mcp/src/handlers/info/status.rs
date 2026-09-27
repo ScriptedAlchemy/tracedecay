@@ -45,7 +45,7 @@ pub fn readiness_wait_outcome(
     read: CodeIndexReadinessWaitReadV1,
 ) -> CodeIndexReadinessWaitOutcomeV1 {
     match read {
-        CodeIndexReadinessWaitReadV1::Reached => CodeIndexReadinessWaitOutcomeV1::Reached,
+        CodeIndexReadinessWaitReadV1::Reached { .. } => CodeIndexReadinessWaitOutcomeV1::Reached,
         CodeIndexReadinessWaitReadV1::TimedOut { last } => {
             CodeIndexReadinessWaitOutcomeV1::TimedOut {
                 last_state: last
@@ -363,7 +363,8 @@ fn code_index_freshness_status(
 
 /// Computes `tracedecay_status`. `server_stats` is the serving MCP server's
 /// request counters; `wait` is the readiness wait the owner held the read
-/// for, when the request asked for one.
+/// for, when the request asked for one, and `reached_freshness` the reading
+/// that satisfied it, which the payload reports instead of a later reading.
 #[hotpath::measure(label = "mcp.info.status.total")]
 pub async fn compute_status(
     ctx: &McpToolContext<'_>,
@@ -371,6 +372,7 @@ pub async fn compute_status(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
     wait: Option<CodeIndexReadinessWaitOutcomeV1>,
+    reached_freshness: Option<CodeIndexWorktreeFreshnessV1>,
 ) -> Result<StatusResultV1> {
     if request.admission_only {
         return Ok(StatusResultV1::Admission(StatusAdmissionV1 {
@@ -385,11 +387,20 @@ pub async fn compute_status(
     // commonly push status over the response-frame budget, and the truncated
     // body is not something the caller should reassemble into context. Opt in
     // when the full diagnostic section is the thing being asked for.
-    let freshness_payload = hotpath::future!(
-        ctx.freshness(),
-        label = "mcp.info.status.code_index_freshness"
-    )
-    .await;
+    let freshness_payload = match reached_freshness {
+        Some(reading) => Some(
+            tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1::from_scheduler_read(
+                Some(reading),
+            ),
+        ),
+        None => {
+            hotpath::future!(
+                ctx.freshness(),
+                label = "mcp.info.status.code_index_freshness"
+            )
+            .await
+        }
+    };
     let (code_index_freshness, code_index_freshness_warning, retrieval_serving) =
         code_index_freshness_status(freshness_payload.as_ref());
     let github_source = match github_source_status_v1(ctx.project_root()) {
@@ -1081,6 +1092,7 @@ mod tests {
             coverage: CodeIndexFreshnessCoverageV1::PartialRefreshInProgress,
             ..Default::default()
         };
+        let reached_reading = Box::new(seated_graph_pending.clone());
         for (last, expected) in [
             (Some(Box::new(seated_graph_pending)), "current"),
             (Some(Box::new(rebuilding)), "warming"),
@@ -1096,7 +1108,9 @@ mod tests {
         }
         assert_eq!(
             serde_json::to_value(readiness_wait_outcome(
-                CodeIndexReadinessWaitReadV1::Reached
+                CodeIndexReadinessWaitReadV1::Reached {
+                    reading: reached_reading
+                }
             ))
             .expect("outcome serializes"),
             serde_json::json!({ "outcome": "reached" })

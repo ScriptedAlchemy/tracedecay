@@ -758,20 +758,6 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 if !matches!(current.coverage, DiagnosticQueryCoverage::Complete) {
                     return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
                 }
-                let Some(identity) = self
-                    .diagnostic_identity
-                    .resolve(self.source_runtime.project_root().to_path_buf())
-                    .await
-                else {
-                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
-                };
-                let scope = context.request.scope();
-                if identity.repository() != &scope.repository_id
-                    || identity.worktree() != Some(&scope.worktree_id)
-                    || identity.reference() != scope.reference.as_ref()
-                {
-                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
-                }
                 let document_path = match &request.scope {
                     super::super::runtime::DiagnosticsPrimitiveScope::Workspace => None,
                     super::super::runtime::DiagnosticsPrimitiveScope::File(path) => {
@@ -784,12 +770,6 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                                 OmissionReason::Unavailable,
                             );
                         };
-                        if identity.file(&path).is_none() {
-                            return diagnostics_unavailable(
-                                finished_at,
-                                OmissionReason::Unavailable,
-                            );
-                        }
                         Some(path)
                     }
                     super::super::runtime::DiagnosticsPrimitiveScope::Package(_) => {
@@ -809,8 +789,31 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
                     }
                 };
-                if current_index.code_generation_id != *identity.generation_id() {
+                if current_index.code_generation_id != current_generation {
                     return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
+                // The code index retains the published generation; an identity
+                // it cannot resolve is one whose source proof moved and is
+                // being renewed, so the publication is stale, not absent.
+                let Some(identity) = self
+                    .diagnostic_identity
+                    .resolve(self.source_runtime.project_root().to_path_buf())
+                    .await
+                else {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                };
+                let scope = context.request.scope();
+                if identity.repository() != &scope.repository_id
+                    || identity.worktree() != Some(&scope.worktree_id)
+                    || identity.reference() != scope.reference.as_ref()
+                {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
+                if document_path
+                    .as_deref()
+                    .is_some_and(|path| identity.file(path).is_none())
+                {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
                 }
                 if current_generation != *identity.generation_id() {
                     return diagnostics_unavailable(finished_at, OmissionReason::Stale);
