@@ -3906,11 +3906,6 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
 
 #[test]
 fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation() {
-    // Everything one prepared page of this fixture charges: the builder's
-    // fixed ledger, the prepared page, and one insert-plan entry per staged
-    // term and exact posting.
-    const EXACT_BUDGET: usize = 67_263_107;
-
     let (fixture, pages, _) = real_verified_pages();
     let pages = &pages[..1];
     let metadata = fixture.metadata;
@@ -3922,13 +3917,16 @@ fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation
     let prepared = probe
         .prepare_pages(pages, &control)
         .expect("prepare posting plans fixture");
+    let exact_budget = probe
+        .prepared_batch_ledger_charge_bytes(&prepared)
+        .expect("measure exact prepared posting-plan charge");
     drop(probe);
 
     let refused_path = directory.path().join("posting-plans-refused.sqlite");
     let mut refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
         &refused_path,
         metadata.clone(),
-        EXACT_BUDGET - 1,
+        exact_budget - 1,
     )
     .expect("create one-byte-under posting plans builder");
     assert!(matches!(
@@ -3937,7 +3935,7 @@ fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation
             limit: CodeLexicalArtifactBatchLimitV1::Memory,
             required,
             maximum,
-        }) if required == EXACT_BUDGET && maximum == EXACT_BUDGET - 1
+        }) if required == exact_budget && maximum == exact_budget - 1
     ));
     assert_eq!(
         refused
@@ -4003,7 +4001,7 @@ fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation
     let mut exact = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
         &exact_path,
         metadata,
-        EXACT_BUDGET,
+        exact_budget,
     )
     .expect("create exact posting plans builder");
     let progress = exact
