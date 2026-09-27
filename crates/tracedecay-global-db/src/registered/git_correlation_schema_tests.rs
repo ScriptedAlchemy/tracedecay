@@ -40,7 +40,11 @@ async fn an_older_git_correlation_schema_is_refused_without_mutation() {
 
     assert!(matches!(
         error,
-        TraceDecayError::ResetRequired { ref authority, .. } if authority == "git correlation"
+        TraceDecayError::ProfileResetRequired {
+            component: "git correlation",
+            found_version: Some(5),
+            required_version: 6,
+        }
     ));
     assert_eq!(
         fs::read(&database_path).unwrap(),

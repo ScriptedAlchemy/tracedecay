@@ -292,6 +292,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
              **memory.status:** nominal\n\
              {owner_bullets}\
              **project_root:** {root}\n\
+             **reset_required_stores:** 0 item(s)\n\
              **retrieval_serving.status:** serving\n\
              **schema_convergence.status:** completed\n\
              **server:** {{14 field(s)}}\n\

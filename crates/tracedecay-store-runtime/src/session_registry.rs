@@ -14,7 +14,7 @@ use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, StoreResetRequiredV1, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
 use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
@@ -2394,6 +2394,10 @@ pub struct DaemonSessionRuntimeRegistryV1 {
         >,
     >,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
+    /// Registered stores whose last attach was refused with a typed reset.
+    /// The refused store stays unmounted, so every open re-runs admission and
+    /// a reset store serves on its next open without a daemon restart.
+    reset_required_stores: StdMutex<BTreeMap<StoreShardIdV1, StoreResetRequiredV1>>,
     retained_hook_tasks: RetainedHookTasks,
     session_sync_service:
         Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>,

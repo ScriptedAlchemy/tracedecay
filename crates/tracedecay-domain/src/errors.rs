@@ -67,8 +67,9 @@ pub enum TraceDecayError {
     HostCliUnavailable { program: String, lifecycle: String },
 
     #[error(
-        "{component} profile schema {found_version:?} is incompatible with required schema \
-         {required_version}; reset the profile"
+        "{component} profile schema {} is incompatible with required schema \
+         {required_version}; reset the profile",
+        .found_version.map_or_else(|| "unversioned".to_owned(), |version| version.to_string())
     )]
     ProfileResetRequired {
         component: &'static str,
@@ -112,6 +113,25 @@ pub enum TraceDecayError {
 
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
 
+/// The one command that resets every profile-scoped persisted shape. Refused
+/// shapes are never migrated or backed up: the reset deletes the old data and
+/// the next open creates the shape the running binary writes.
+pub const PROFILE_RESET_COMMAND: &str = "tracedecay wipe --all --yes";
+
+/// A persisted store the daemon keeps mounted in a typed reset-required state
+/// instead of refusing to serve: every read against it returns the typed
+/// refusal, stores that admit keep serving, and `remedy` is the exact command
+/// the operator runs to reset it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoreResetRequiredV1 {
+    pub store: String,
+    pub authority: String,
+    pub found_version: Option<i64>,
+    pub required_version: Option<i64>,
+    pub reason: String,
+    pub remedy: String,
+}
+
 /// Flatten an error and its [`std::error::Error::source`] chain into one
 /// message string.
 ///
@@ -149,6 +169,32 @@ impl TraceDecayError {
             return None;
         };
         Some((authority, reason))
+    }
+
+    /// The typed reset-required state `store` is mounted in when this error is
+    /// a profile-scoped persisted-shape refusal, `None` for any other failure.
+    pub fn store_reset_required(&self, store: impl Into<String>) -> Option<StoreResetRequiredV1> {
+        let (authority, found_version, required_version) = match self {
+            Self::ResetRequired { authority, .. } => (authority.clone(), None, None),
+            Self::ProfileResetRequired {
+                component,
+                found_version,
+                required_version,
+            } => (
+                (*component).to_owned(),
+                *found_version,
+                Some(*required_version),
+            ),
+            _ => return None,
+        };
+        Some(StoreResetRequiredV1 {
+            store: store.into(),
+            authority,
+            found_version,
+            required_version,
+            reason: self.to_string(),
+            remedy: PROFILE_RESET_COMMAND.to_owned(),
+        })
     }
 
     pub fn project_route(

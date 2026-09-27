@@ -280,6 +280,11 @@ pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
         .registered_profile_session_database()
         .await
         .map_err(|error| {
+            // A persisted-shape refusal is terminal until the operator's
+            // reset; it stays typed instead of reading as a retryable outage.
+            if tracedecay_mcp::reset_required_context(&error).is_some() {
+                return error;
+            }
             TraceDecayError::project_route(
                 "registered_authority_unavailable",
                 true,

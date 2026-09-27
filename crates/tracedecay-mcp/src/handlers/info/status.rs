@@ -377,6 +377,7 @@ pub async fn handle_status(
         &ctx.store_runtime()
             .registered_schema_convergence_observations(),
     );
+    output["reset_required_stores"] = json!(ctx.store_runtime().reset_required_stores());
     let freshness_payload = hotpath::future!(
         ctx.freshness(),
         label = "mcp.info.status.code_index_freshness"
@@ -745,6 +746,16 @@ fn render_status_md(value: &Value) -> String {
                 }
                 Value::Array(a) => {
                     md.field(k, &format!("{} item(s)", a.len()));
+                    if k == "reset_required_stores" {
+                        for store in a {
+                            md.bullet(&format!(
+                                "pending operator action: {} requires reset ({}), run `{}`",
+                                store["store"].as_str().unwrap_or_default(),
+                                store["reason"].as_str().unwrap_or_default(),
+                                store["remedy"].as_str().unwrap_or_default(),
+                            ));
+                        }
+                    }
                 }
                 Value::Object(o) => {
                     if let Some(status) = o.get("status").and_then(Value::as_str) {

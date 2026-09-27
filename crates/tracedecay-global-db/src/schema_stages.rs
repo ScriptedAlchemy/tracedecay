@@ -471,7 +471,7 @@ async fn classify_registered_schema_authorities(
 
 /// Git evidence is stored as per-session rows since schema version 6. A store
 /// recorded at any other version holds a shape nothing converts, so it keeps
-/// its data untouched behind the typed reset.
+/// its data untouched behind the typed, versioned reset.
 async fn require_admissible_git_correlation_schema(
     connection: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -479,16 +479,13 @@ async fn require_admissible_git_correlation_schema(
         .await
         .map_err(|error| global_db_operation_error("inspect git correlation schema", error))?;
     match recorded {
-        Some(found) if found != GIT_CORRELATION_SCHEMA_VERSION => {
-            Err(tracedecay_domain::errors::TraceDecayError::reset_required(
-                "git correlation",
-                format!(
-                    "the store records Git correlation schema version {found}; this build \
-                     stores Git evidence as per-session rows at version \
-                     {GIT_CORRELATION_SCHEMA_VERSION}"
-                ),
-            ))
-        }
+        Some(found) if found != GIT_CORRELATION_SCHEMA_VERSION => Err(
+            tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
+                component: "git correlation",
+                found_version: Some(found),
+                required_version: GIT_CORRELATION_SCHEMA_VERSION,
+            },
+        ),
         _ => Ok(()),
     }
 }

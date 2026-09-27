@@ -1221,10 +1221,7 @@ async fn dispatch_command(
             dispatch_configuration_command(profile, command).await?;
             Ok(CommandOutcome::Success)
         }
-        CommandFamily::Diagnostics => {
-            dispatch_diagnostics_command(profile, command).await?;
-            Ok(CommandOutcome::Success)
-        }
+        CommandFamily::Diagnostics => dispatch_diagnostics_command(profile, command).await,
         CommandFamily::Knowledge => {
             dispatch_knowledge_command(profile, command).await?;
             Ok(CommandOutcome::Success)
@@ -1915,14 +1912,19 @@ async fn dispatch_configuration_command(
 async fn dispatch_diagnostics_command(
     profile: &ProfileRoot,
     command: Commands,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<CommandOutcome> {
     match command {
         Commands::Doctor => {
-            hotpath::future!(
+            let completion = hotpath::future!(
                 tracedecay::doctor::run_doctor(profile, crate::cloud::doctor_network_probes(),),
                 label = "cli.doctor.run"
             )
             .await?;
+            if completion == tracedecay::doctor::DoctorCompletion::PendingOperatorAction {
+                return Ok(CommandOutcome::Exit(
+                    agent_cmd::PENDING_OPERATOR_ACTION_EXIT_CODE,
+                ));
+            }
         }
         Commands::Cost {
             range,
@@ -1952,7 +1954,7 @@ async fn dispatch_diagnostics_command(
         }
         _ => unreachable!("non-diagnostics command passed to diagnostics dispatcher"),
     }
-    Ok(())
+    Ok(CommandOutcome::Success)
 }
 
 async fn dispatch_knowledge_command(

@@ -403,7 +403,7 @@ impl DaemonControlApi for NativeDaemonControl {
             timeout,
         );
         ControlObservation {
-            satisfied: matches!(protocol, super::probe::DaemonProtocolState::Ready),
+            satisfied: matches!(protocol, super::probe::DaemonProtocolState::Ready { .. }),
             diagnostic: format!("protocol {protocol}"),
         }
     }

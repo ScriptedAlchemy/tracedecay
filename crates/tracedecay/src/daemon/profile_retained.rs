@@ -97,6 +97,15 @@ pub(super) async fn invoke_profile_retained(
 /// A profile authority that could not be mounted keeps its reason code and
 /// retry verdict as a typed unavailable terminal.
 fn authority_problem(error: &TraceDecayError) -> ApplicationProblem {
+    if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
+        return ApplicationProblem::reset_required(SafeDiagnostic {
+            code: "application.retained.profile-reset-required".to_owned(),
+            message: format!(
+                "The {authority} requires an explicit reset: {reason}. Reset it with `{}`",
+                tracedecay_mcp::reset_required_command(&authority, None)
+            ),
+        });
+    }
     let (code, retryable) = match error {
         TraceDecayError::ProjectRoute {
             reason_code,
