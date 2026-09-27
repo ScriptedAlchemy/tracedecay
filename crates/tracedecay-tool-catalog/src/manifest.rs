@@ -152,6 +152,9 @@ pub enum EffectClass {
     /// it includes long work, a registry collection or a transcript import,
     /// that a cancelled call stops.
     MaintainsProfileState,
+    /// Records a host's session evidence (transcripts, hook admissions,
+    /// receipts) in daemon-owned session stores.
+    RecordsHostEvidence,
 }
 
 impl EffectClass {
@@ -169,6 +172,7 @@ impl EffectClass {
                 | Self::SchedulesWork
                 | Self::MaintainsOwnerState
                 | Self::MaintainsProfileState
+                | Self::RecordsHostEvidence
         )
     }
 

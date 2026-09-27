@@ -6,9 +6,10 @@
 //! `tracedecay_project_search`, and `tracedecay_project_context` read the
 //! profile's registry; `tracedecay_admin_project` reconciles every cached
 //! automation scheduler of the profile; `tracedecay_admin_cli` answers the
-//! registry, storage, savings, and profile-wide cost and analytics actions.
-//! The caller's project, when it has one, only marks that project active in
-//! registry reads and is the context read's default.
+//! registry, storage, savings, and profile-wide cost and analytics actions;
+//! `tracedecay_hook_runtime` records the session evidence of a hook with no
+//! project route. The caller's project, when it has one, only marks that
+//! project active in registry reads and is the context read's default.
 //!
 //! An operation joins by naming the requests the profile owner answers in
 //! `ApplicationSurfaceOperation::is_profile_owner_request` and computing its
@@ -16,24 +17,30 @@
 
 use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     AdminCliSurfaceRequestV1, AdminProjectResultV1, AdminProjectSurfaceRequestV1,
-    AutomationReconcileScope, ProfileAutomationReconcileReport, UncachedProjectReconcileOutcome,
+    AutomationReconcileScope, HookRuntimeResultV1, ProfileAutomationReconcileReport,
+    UncachedProjectReconcileOutcome,
 };
 use tracedecay_contracts::{
     ApplicationProblem, CancellationContext, CancellationStage, CancellationState, Deadline,
     ResolvedScope,
 };
+use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
 };
 use tracedecay_daemon_service::DaemonProjectRegistryReadService;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_mcp::handlers::{decode_primitive_request, unknown_tool_error};
+use tracedecay_mcp::handlers::{
+    SessionAuthorities, decode_primitive_request, hook_runtime, unknown_tool_error,
+};
+use tracedecay_mcp::server::join_hook_ingest_refresh;
 use tracedecay_mcp::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -142,6 +149,14 @@ async fn compute_profile_owner_operation(
                 .await?,
             ))
         }
+        ApplicationSurfaceOperation::HookRuntime => GraphToolResultV1::HookRuntime(
+            Box::pin(profile_hook_runtime(
+                store_administration,
+                profile_identity,
+                arguments,
+            ))
+            .await?,
+        ),
         operation => return Err(unknown_tool_error(operation.mcp_tool_name())),
     };
     Ok((
@@ -154,6 +169,44 @@ async fn compute_profile_owner_operation(
             cost: None,
         },
     ))
+}
+
+/// One hook action with no project route. It lands in the profile's user
+/// session store, and a transcript ingest answers only once the profile's
+/// refresh owner has published what it wrote.
+async fn profile_hook_runtime(
+    store_administration: &StoreAdministration,
+    profile_identity: &LocalProfileIdentityAuthorityV1,
+    arguments: Map<String, Value>,
+) -> Result<HookRuntimeResultV1> {
+    let request = hook_runtime::decode_hook_runtime_request(&Value::Object(arguments))?;
+    let global_db = Box::pin(store_administration.registered_profile_database()).await?;
+    let user_session_db =
+        Box::pin(store_administration.registered_profile_session_database()).await?;
+    let host_admission_broker =
+        Box::pin(store_administration.host_admission_broker(&user_session_db)).await?;
+    let schedulers = store_administration.session_temporal_refresh_schedulers();
+    let refresh_wake = Box::pin(schedulers.ensure_profile(
+        user_session_db.db_path().to_path_buf(),
+        user_session_db.clone(),
+    ))
+    .await;
+    let result = Box::pin(hook_runtime::compute_projectless_hook_runtime(
+        request,
+        profile_identity.profile_root(),
+        global_db.as_ref(),
+        SessionAuthorities::new(None, Some(&user_session_db))
+            .with_profile_identity(Some(Arc::new(profile_identity.clone())))
+            .with_background_cpu(schedulers.background_cpu()),
+        Ok(&host_admission_broker),
+    ))
+    .await?;
+    if let HookRuntimeResultV1::IngestTranscript(ingest) = &result {
+        join_hook_ingest_refresh(ingest.user_scope, None, Some(&refresh_wake)).await?;
+    } else {
+        refresh_wake.wake();
+    }
+    Ok(result)
 }
 
 /// One registry read against `registry`.

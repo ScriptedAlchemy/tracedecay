@@ -2338,126 +2338,73 @@ fn tool_returns_a_completed_authority_result_without_resending() {
     );
 }
 
-fn spawn_handshake_capturing_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let (handshake_tx, handshake_rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let _ = std::fs::remove_file(&socket_path);
-        let authority = seed_fake_daemon_authority(&socket_path);
-        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
-        listener
-            .set_nonblocking(true)
-            .expect("set listener nonblocking");
-        ready_tx.send(()).expect("notify fake daemon readiness");
-
-        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
-        let (stream, _) = common::poll_until(
-            deadline,
-            Duration::from_millis(10),
-            || match listener.accept() {
-                Ok(accepted) => Some(accepted),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
-                Err(e) => panic!("accept fake daemon client: {e}"),
-            },
-            || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
-        );
-        stream
-            .set_nonblocking(false)
-            .expect("set accepted stream blocking");
-        let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
-
-        let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
-        let mut preface = String::new();
-        reader.read_line(&mut preface).expect("read auth preface");
-        assert!(
-            DaemonAuthPreface::from_line(preface.trim())
-                .expect("fake daemon auth preface")
-                .authenticate(authority.auth_token()),
-            "the CLI must present the daemon token"
-        );
-        let mut handshake = String::new();
-        reader
-            .read_line(&mut handshake)
-            .expect("read daemon handshake");
-        let handshake: Value = serde_json::from_str(handshake.trim()).expect("handshake JSON");
-        handshake_tx
-            .send(handshake)
-            .expect("send observed handshake");
-
-        let mut request = String::new();
-        reader
-            .read_line(&mut request)
-            .expect("read JSON-RPC request");
-        let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
-        let response = json!({
-            "jsonrpc": "2.0",
-            "id": request["id"].clone(),
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": "{\"status\":\"ok\"}"
-                }]
-            }
-        });
-        let mut writer = stream;
-        writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
-            .expect("write fake daemon response");
-    });
-
-    ready_rx
-        .recv_timeout(LOCAL_READY_TIMEOUT)
-        .expect("fake daemon should become ready");
-    handshake_rx
-}
-
+/// Hermes sends a user-scope transcript with cwd=/ so its home is never
+/// mistaken for a project: the CLI handshakes projectless and asks the
+/// daemon's profile owner, not a project, for the ingest.
 #[test]
 fn user_scoped_transcript_ingest_handshakes_projectless_from_filesystem_root_cwd() {
     let home = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let observed_handshake = spawn_handshake_capturing_daemon(socket_path.clone());
+    let daemon = spawn_scripted_retained_daemon(
+        &home_path,
+        vec![completed_authority_problem(
+            "profile session store is unavailable",
+        )],
+    );
     let args = json!({
         "action": "ingest_transcript",
         "provider": "hermes",
         "session_id": "stock-check-session",
-        "storage_scope": "user",
+        "user_scope": true,
         "messages": [
             {"role": "user", "content": "hello", "id": "m1"},
             {"role": "assistant", "content": "hi there", "id": "m2"}
         ],
-    })
-    .to_string();
+    });
 
-    let output = tracedecay_command_with_home(&home_path)
-        .current_dir(std::path::Path::new("/"))
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args([
-            "tool",
-            "tracedecay_hook_runtime",
-            "--json",
-            "--args",
-            args.as_str(),
-        ])
-        .output()
-        .expect("tracedecay tool should run");
-
-    assert!(
-        output.status.success(),
-        "user-scoped LCM from cwd=/ must reach the daemon projectless\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let output = run_command_with_timeout(
+        {
+            let mut command = tracedecay_command_with_home(&home_path);
+            command.current_dir(std::path::Path::new("/")).args([
+                "tool",
+                "tracedecay_hook_runtime",
+                "--json",
+                "--args",
+                args.to_string().as_str(),
+            ]);
+            command
+        },
+        CLI_ROUNDTRIP_TIMEOUT,
     );
-    let handshake = observed_handshake
+
+    let (handshake, request) = daemon
+        .requests
         .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
-        .expect("fake daemon should observe handshake");
-    assert!(
-        handshake.get("project_path").is_none()
-            || handshake.get("project_path") == Some(&Value::Null),
+        .unwrap_or_else(|_| {
+            panic!(
+                "the daemon must receive the ingest\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    assert_eq!(
+        handshake.get("project_path").unwrap_or(&Value::Null),
+        &Value::Null,
         "Hermes user scope must not invent project=/; handshake was {handshake}"
     );
+    let DaemonInvocationPayload::ProfileGraphTool {
+        surface_operation,
+        arguments,
+        ..
+    } = request.payload
+    else {
+        panic!("user-scope ingest must reach the profile owner: {request:?}");
+    };
+    assert_eq!(
+        surface_operation,
+        tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime
+    );
+    assert_eq!(Value::Object(arguments), args);
 }
 
 #[test]
@@ -2523,6 +2470,7 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
         "action": "ingest_transcript",
         "provider": "hermes",
         "session_id": "stock-check-session",
+        "user_scope": false,
         "messages": [
             {
                 "role": "user",

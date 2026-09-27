@@ -257,13 +257,6 @@ fn github_stack_wakeup_is_cursor_desktop_only_and_first_admission_only() {
     }
 }
 
-#[test]
-fn hook_v2_catchup_response_propagates_transport_disposition() {
-    let response = hook_v2_catchup_response("hook_v2_admit");
-    assert_eq!(response["status"], "rejected");
-    assert_eq!(response["disposition"], "catchup_required");
-}
-
 /// A private profile root under `dir`, as profile identity requires.
 fn private_profile_root(dir: &std::path::Path) -> std::path::PathBuf {
     let profile_root = dir.join(".tracedecay");
@@ -283,29 +276,33 @@ fn profile_scoped_native_admission_is_idempotent_in_the_authenticated_profile() 
         br#"{"hook_event_name":"SessionStart"}"#,
     )
     .unwrap();
-    let args = serde_json::json!({
-        "admission": tracedecay_hooks::ProfileScopedNativeHookAdmissionV1 {
-            decoded,
-            material: tracedecay_hooks::NativeEnvelopeMaterialV1 {
-                event_id: [7; 16],
-                protected_session_id: [8; 32],
-                observed_at: UtcMicros(1_000),
-                tool_id: None,
-                effect_receipt_id: None,
-                file_id: None,
-                changed_range_count: 0,
-            },
+    let admission = serde_json::json!(tracedecay_hooks::ProfileScopedNativeHookAdmissionV1 {
+        decoded,
+        material: tracedecay_hooks::NativeEnvelopeMaterialV1 {
+            event_id: [7; 16],
+            protected_session_id: [8; 32],
+            observed_at: UtcMicros(1_000),
+            tool_id: None,
+            effect_receipt_id: None,
+            file_id: None,
+            changed_range_count: 0,
         },
     });
 
-    let first =
-        hook_v2_profile_admit(&args, "hook_v2_profile_admit", &profile_root, &identity).unwrap();
-    let duplicate =
-        hook_v2_profile_admit(&args, "hook_v2_profile_admit", &profile_root, &identity).unwrap();
-    assert_eq!(first["status"], "accepted");
-    assert_eq!(first["disposition"], "accepted");
-    assert_eq!(duplicate["status"], "exact_duplicate");
-    assert_eq!(duplicate["disposition"], "accepted");
+    let first = hook_v2_profile_admit(admission.clone(), &profile_root, &identity).unwrap();
+    let duplicate = hook_v2_profile_admit(admission, &profile_root, &identity).unwrap();
+    assert_eq!(
+        first,
+        HookV2ProfileAdmissionResultV1::Accepted {
+            disposition: HookRuntimeDispositionV1::Accepted,
+        }
+    );
+    assert_eq!(
+        duplicate,
+        HookV2ProfileAdmissionResultV1::ExactDuplicate {
+            disposition: HookRuntimeDispositionV1::Accepted,
+        }
+    );
     assert!(
         profile_root
             .join("hook-v2-profile-admissions")
@@ -326,22 +323,20 @@ fn concurrent_profile_scoped_admissions_are_all_recorded() {
     let identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root).unwrap();
     let admission = |event: u8| {
-        serde_json::json!({
-            "admission": tracedecay_hooks::ProfileScopedNativeHookAdmissionV1 {
-                decoded: tracedecay_hooks::decode_native_hook_event(
-                    tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-                    br#"{"hook_event_name":"SessionStart"}"#,
-                )
-                .unwrap(),
-                material: tracedecay_hooks::NativeEnvelopeMaterialV1 {
-                    event_id: [event; 16],
-                    protected_session_id: [8; 32],
-                    observed_at: UtcMicros(1_000),
-                    tool_id: None,
-                    effect_receipt_id: None,
-                    file_id: None,
-                    changed_range_count: 0,
-                },
+        serde_json::json!(tracedecay_hooks::ProfileScopedNativeHookAdmissionV1 {
+            decoded: tracedecay_hooks::decode_native_hook_event(
+                tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
+                br#"{"hook_event_name":"SessionStart"}"#,
+            )
+            .unwrap(),
+            material: tracedecay_hooks::NativeEnvelopeMaterialV1 {
+                event_id: [event; 16],
+                protected_session_id: [8; 32],
+                observed_at: UtcMicros(1_000),
+                tool_id: None,
+                effect_receipt_id: None,
+                file_id: None,
+                changed_range_count: 0,
             },
         })
     };
@@ -354,11 +349,8 @@ fn concurrent_profile_scoped_admissions_are_all_recorded() {
                     let args = admission(event);
                     scope.spawn(move || {
                         barrier.wait();
-                        hook_v2_profile_admit(
-                            &args,
-                            "hook_v2_profile_admit",
-                            profile_root,
-                            identity,
+                        serde_json::to_value(
+                            hook_v2_profile_admit(args, profile_root, identity).unwrap(),
                         )
                         .unwrap()["status"]
                             .as_str()

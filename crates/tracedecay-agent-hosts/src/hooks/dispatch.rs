@@ -7,6 +7,10 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
+use tracedecay_contracts::retrieval::{
+    HookRuntimeDispositionV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
+    HookV2ProfileAdmissionResultV1,
+};
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::{ProjectId, UtcMicros};
 #[cfg(test)]
@@ -529,13 +533,14 @@ async fn dispatch_profile_scoped(
         super::daemon_hook_action(
             runtime,
             None,
-            serde_json::json!({
-                "action": "hook_v2_profile_admit",
-                "admission": tracedecay_hooks::ProfileScopedNativeHookAdmissionV1 {
-                    decoded,
-                    material,
+            HookRuntimeSurfaceRequestV1::HookV2ProfileAdmit {
+                admission: match serde_json::to_value(
+                    tracedecay_hooks::ProfileScopedNativeHookAdmissionV1 { decoded, material },
+                ) {
+                    Ok(admission) => admission,
+                    Err(_) => return unavailable(),
                 },
-            }),
+            },
             telemetry,
         ),
     )
@@ -543,16 +548,16 @@ async fn dispatch_profile_scoped(
     let Ok(Ok(response)) = response else {
         return unavailable();
     };
-    let accepted = response.get("action").and_then(serde_json::Value::as_str)
-        == Some("hook_v2_profile_admit")
-        && matches!(
-            response.get("status").and_then(serde_json::Value::as_str),
-            Some("accepted" | "exact_duplicate")
-        )
-        && response
-            .get("disposition")
-            .and_then(serde_json::Value::as_str)
-            == Some("accepted");
+    let accepted = matches!(
+        HookRuntimeResultV1::deserialize(&response),
+        Ok(HookRuntimeResultV1::HookV2ProfileAdmit(
+            HookV2ProfileAdmissionResultV1::Accepted {
+                disposition: HookRuntimeDispositionV1::Accepted,
+            } | HookV2ProfileAdmissionResultV1::ExactDuplicate {
+                disposition: HookRuntimeDispositionV1::Accepted,
+            }
+        ))
+    );
     if accepted {
         HookDispatch::Handled {
             guidance: None,

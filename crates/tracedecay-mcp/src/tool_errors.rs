@@ -3,7 +3,6 @@
 use serde_json::{Value, json};
 use tracedecay_contracts::ApplicationProblem;
 use tracedecay_domain::errors::{PROFILE_RESET_COMMAND, TraceDecayError};
-use tracedecay_sessions::admission::HostAdmissionStatus;
 
 use crate::response_handles::{
     RESPONSE_RETRIEVE_TOOL, RETRIEVE_CORRUPT_RECORD_REASON, RETRIEVE_READ_FAILED_REASON,
@@ -47,18 +46,19 @@ fn value_has_semantic_error(value: &Value) -> bool {
         })
 }
 
-/// Projects a hook-runtime error onto the structured JSON-RPC data object.
+/// Projects a hook-runtime error's typed context for test assertions.
 ///
 /// The status is whatever the admission authority reported, carried through
 /// the error rather than re-derived here. Failures raised without an
 /// authority behind them report the application-level default.
+#[cfg(test)]
 #[must_use]
-pub fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
+pub(crate) fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
     let (reason_code, retryable, detail) = error.hook_runtime_context()?;
     let status = error
         .hook_runtime_status()
-        .and_then(HostAdmissionStatus::from_wire)
-        .unwrap_or(HostAdmissionStatus::Degraded);
+        .and_then(tracedecay_sessions::admission::HostAdmissionStatus::from_wire)
+        .unwrap_or(tracedecay_sessions::admission::HostAdmissionStatus::Degraded);
     Some(json!({
         "tool": "tracedecay_hook_runtime",
         "status": status,
@@ -215,20 +215,6 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
                 "tool project route failed: reason_code={reason_code} retryable={retryable}: {detail}"
             ),
             project_route_problem(tool_name, error),
-        );
-    }
-    if tool_name == "tracedecay_hook_runtime"
-        && let Some(data) = structured_hook_error_data(error)
-    {
-        let detail = data
-            .get("detail")
-            .and_then(Value::as_str)
-            .unwrap_or("Claude observation ingest failed");
-        return JsonRpcResponse::error_with_data(
-            id,
-            ErrorCode::InternalError,
-            format!("tool execution failed: {detail}"),
-            Some(data),
         );
     }
     if tool_name == RESPONSE_RETRIEVE_TOOL {

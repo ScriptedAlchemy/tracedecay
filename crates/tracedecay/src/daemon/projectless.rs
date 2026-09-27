@@ -1,14 +1,11 @@
 //! Projectless client handling: tool calls served without a mounted project
 //! (user-scoped LCM, message search, dashboard, doctor, version).
 
-use std::sync::Arc;
-
 use serde_json::json;
 
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_domain::errors::Result;
-use tracedecay_mcp::server::{LiveTranscriptRefreshJoin, join_required_live_transcript_refresh};
 use tracedecay_mcp::tool_errors::structure_tool_problem;
 use tracedecay_mcp::tools::catalog_discovery::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
@@ -16,9 +13,7 @@ use tracedecay_mcp::tools::catalog_discovery::{
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ToolRegistryMode,
     explore_call_budget, project_catalog_discovery_scope, tool_error_response,
-    tool_result_has_semantic_error,
 };
-use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
 use super::*;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
@@ -38,7 +33,6 @@ where
 
 /// Authenticated durable identity pinned once for a projectless connection.
 struct ProjectlessConnectionStateV1 {
-    client_identity: DaemonClientIdentity,
     active_project_root: Option<PathBuf>,
 }
 
@@ -86,12 +80,7 @@ fn admit_projectless_connection(
                 .to_owned(),
         });
     }
-    let pinned_profile_root = profile_identity.profile_root().to_path_buf();
     Ok(ProjectlessConnectionStateV1 {
-        client_identity: DaemonClientIdentity::new(
-            pinned_profile_root.clone(),
-            pinned_profile_root.join("global.db"),
-        ),
         active_project_root: None,
     })
 }
@@ -213,10 +202,7 @@ async fn projectless_response(
 fn projectless_tool_is_discoverable(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "tracedecay_hook_runtime"
-            | "tracedecay_project_list"
-            | "tracedecay_project_search"
-            | "tracedecay_project_context"
+        "tracedecay_project_list" | "tracedecay_project_search" | "tracedecay_project_context"
     ) || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
 }
 
@@ -354,30 +340,21 @@ async fn projectless_tools_call_response_with_connection(
         ))
         .await;
     }
-    let response =
-        match tool_name {
-            "tracedecay_hook_runtime" => boxed_projectless_phase(
-                projectless_hook_runtime_response(id, arguments, connection, store_administration),
-            ),
-            _ => {
-                // `projectless_tool_is_discoverable` admitted the name above,
-                // so any remaining tool is a retained profile operation.
-                let Some(operation) =
-                    tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name)
-                else {
-                    return requires_project_error(id, tool_name);
-                };
-                boxed_projectless_phase(projectless_profile_retained_response(
-                    id,
-                    tool_name,
-                    operation,
-                    arguments,
-                    connection,
-                    store_administration,
-                ))
-            }
-        };
-    response.await
+    // `projectless_tool_is_discoverable` admitted the name above, so any
+    // remaining tool is a retained profile operation.
+    let Some(operation) = tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name)
+    else {
+        return requires_project_error(id, tool_name);
+    };
+    boxed_projectless_phase(projectless_profile_retained_response(
+        id,
+        tool_name,
+        operation,
+        arguments,
+        connection,
+        store_administration,
+    ))
+    .await
 }
 
 fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResponse {
@@ -440,104 +417,6 @@ fn profile_executor(
     super::profile_retained::ProfileExecutor {
         store_administration: store_administration.clone(),
         active_project_root: connection.active_project_root.clone(),
-    }
-}
-
-async fn projectless_hook_runtime_response(
-    id: serde_json::Value,
-    arguments: serde_json::Value,
-    connection: &ProjectlessConnectionStateV1,
-    store_administration: &StoreAdministration,
-) -> tracedecay_mcp::JsonRpcResponse {
-    let global_db =
-        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
-            Ok(global_db) => global_db,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-    let session_runtime_registry =
-        match boxed_projectless_phase(store_administration.registered_runtime_registry()).await {
-            Ok(registry) => registry,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-    let user_session_db =
-        match boxed_projectless_phase(store_administration.registered_profile_session_database())
-            .await
-        {
-            Ok(database) => database,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-    let profile_identity = match store_administration.profile_identity() {
-        Ok(identity) => identity,
-        Err(error) => {
-            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-        }
-    };
-    let host_admission_broker =
-        match boxed_projectless_phase(store_administration.host_admission_broker(&user_session_db))
-            .await
-        {
-            Ok(broker) => broker,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-    let host_admission_broker = Ok(&host_admission_broker);
-    let refresh_wake = boxed_projectless_phase(
-        store_administration
-            .session_temporal_refresh_schedulers()
-            .ensure_profile(
-                user_session_db.db_path().to_path_buf(),
-                user_session_db.clone(),
-            ),
-    )
-    .await;
-    let user_refresh: Arc<dyn SessionRefreshWorkerPort> = Arc::new(refresh_wake.clone());
-    match boxed_projectless_phase(
-        tracedecay_mcp::handlers::hook_runtime::handle_projectless_hook_runtime(
-            arguments.clone(),
-            &connection.client_identity.profile_root,
-            session_runtime_registry,
-            global_db.as_ref(),
-            tracedecay_mcp::handlers::SessionAuthorities::new(None, Some(&user_session_db))
-                .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
-                .with_background_cpu(
-                    store_administration
-                        .session_temporal_refresh_schedulers()
-                        .background_cpu(),
-                ),
-            host_admission_broker,
-            Arc::clone(&user_refresh),
-        ),
-    )
-    .await
-    {
-        Ok(result) if tool_result_has_semantic_error(&result) => {
-            JsonRpcResponse::success(id, result.value)
-        }
-        Ok(result) => match boxed_projectless_phase(join_required_live_transcript_refresh(
-            "tracedecay_hook_runtime",
-            &arguments,
-            None,
-            Some(&refresh_wake),
-        ))
-        .await
-        {
-            Ok(LiveTranscriptRefreshJoin::PublicationJoined) => {
-                JsonRpcResponse::success(id, result.value)
-            }
-            Ok(LiveTranscriptRefreshJoin::NotRequired) => {
-                refresh_wake.wake();
-                JsonRpcResponse::success(id, result.value)
-            }
-            Err(error) => tool_error_response(id, "tracedecay_hook_runtime", &error),
-        },
-        Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
 }
 
@@ -760,20 +639,24 @@ mod projectless_admission_tests {
         )
         .expect("retarget profile symlink");
 
-        let response = projectless_hook_runtime_response(
+        let response = projectless_tools_call_response_with_connection(
             json!(1),
-            json!({
-                "action": "hermes_receipt",
-                "event": {
-                    "agent": "hermes",
-                    "event": "turnCompleted",
-                    "route": { "session_id": "pinned-hermes-session" },
-                    "receipt": {
-                        "status": "success",
-                        "transcript_watermark": "pinned-hermes-watermark"
-                    }
-                }
-            }),
+            Some(&json!({
+                "name": "tracedecay_hook_runtime",
+                "arguments": {
+                    "action": "hermes_receipt",
+                    "event": {
+                        "agent": "hermes",
+                        "event": "turnCompleted",
+                        "route": { "session_id": "pinned-hermes-session" },
+                        "receipt": {
+                            "status": "success",
+                            "transcript_watermark": "pinned-hermes-watermark"
+                        }
+                    },
+                    "format": "json",
+                },
+            })),
             &connection,
             &administration,
         )
@@ -787,9 +670,16 @@ mod projectless_admission_tests {
         let foreign_receipt_exists = foreign_automation_root.join("host_receipts.json").exists();
         administration.shutdown_host_admission_replay().await;
 
-        assert!(
-            response.error.is_none(),
-            "Hermes receipt failed: {response:?}"
+        let result = response.result.expect("Hermes receipt result");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                result["content"][0]["text"]
+                    .as_str()
+                    .expect("Hermes receipt text")
+            )
+            .expect("Hermes receipt JSON"),
+            json!({"action": "hermes_receipt", "status": "recorded"}),
+            "{result}"
         );
         assert!(
             pinned_receipt_exists,
@@ -799,59 +689,5 @@ mod projectless_admission_tests {
             !foreign_receipt_exists,
             "retargeting the client symlink must never redirect durable receipt writes"
         );
-    }
-
-    #[tokio::test]
-    async fn removed_client_profile_symlink_keeps_retained_codex_path_pinned() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (real_root, linked_root) = linked_profile_root(temp.path());
-        tracedecay_project::product_runtime::register_fixture_product_runtime();
-        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
-            .expect("install fixture worker authority");
-        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
-            .expect("pin profile identity");
-        let administration = StoreAdministration::default().with_profile_identity(identity);
-        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-            &real_root,
-            1,
-            "projectless-removed-codex-test",
-        )
-        .expect("enter fixture database scope");
-        let client = DaemonClientIdentity::new(linked_root.clone(), linked_root.join("global.db"));
-        let connection = admit_projectless_connection(&client, &administration)
-            .expect("admit symlinked client profile");
-        let runtime_registry = administration
-            .registered_runtime_registry()
-            .await
-            .expect("open profile runtime registry");
-
-        std::fs::remove_file(linked_root.parent().expect("linked profile parent"))
-            .expect("remove client profile symlink after admission");
-        let retained_profile_root = connection.client_identity.profile_root.clone();
-        let retained_global_db_path = connection.client_identity.global_db_path.clone();
-
-        let response = projectless_hook_runtime_response(
-            json!(2),
-            json!({
-                "action": "codex_stop",
-                "session_id": "pinned-codex-session"
-            }),
-            &connection,
-            &administration,
-        )
-        .await;
-        let terminal_shutdown = runtime_registry.shutdown_terminal_tasks().await;
-        administration.shutdown_host_admission_replay().await;
-
-        assert_eq!(retained_profile_root, real_root);
-        assert_eq!(
-            retained_global_db_path,
-            retained_profile_root.join("global.db")
-        );
-        assert!(
-            response.error.is_none(),
-            "retained Codex stop failed after client symlink removal: {response:?}"
-        );
-        terminal_shutdown.expect("join retained Codex task");
     }
 }

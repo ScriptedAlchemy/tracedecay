@@ -169,7 +169,8 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::ProjectContext
         | ApplicationSurfaceOperation::AdminSync
         | ApplicationSurfaceOperation::AdminCli
-        | ApplicationSurfaceOperation::AdminProject => return None,
+        | ApplicationSurfaceOperation::AdminProject
+        | ApplicationSurfaceOperation::HookRuntime => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

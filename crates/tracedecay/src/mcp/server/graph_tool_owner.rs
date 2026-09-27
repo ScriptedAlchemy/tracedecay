@@ -5,12 +5,16 @@
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
+use tracedecay_contracts::ApplicationProblem;
 use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::graph_tool::GraphToolResultV1;
+use tracedecay_contracts::retrieval::{HookRuntimeResultV1, hook_runtime_needs_session_stores};
 use tracedecay_daemon_service::{
     DaemonInvocationService, GraphToolFuture, GraphToolInvocationV1, ProjectGraphToolPortV1,
     RegisteredGraphToolOwnerV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::server::join_hook_ingest_refresh;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::McpServer;
@@ -32,6 +36,15 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
                     "the MCP server was released before the graph read was admitted",
                 )));
             };
+            // Project open registers the core server as owner before the
+            // full server, which mounts the session stores, replaces it. A
+            // hook that records session evidence meanwhile is still mounting.
+            if invocation.operation == ApplicationSurfaceOperation::HookRuntime
+                && server.project_session_db.is_none()
+                && hook_runtime_needs_session_stores(&invocation.arguments)
+            {
+                return Err(ApplicationProblem::runtime_mounting());
+            }
             server
                 .compute_graph_tool(invocation)
                 .await
@@ -62,7 +75,9 @@ impl McpServer {
                 self.project_session_db.as_ref(),
                 self.profile_session_db.as_ref(),
             )
-            .with_profile_identity(self.profile_identity.clone()),
+            .with_profile_identity(self.profile_identity.clone())
+            .with_background_cpu(self.background_cpu.clone())
+            .with_project_lcm_authority(self.project_lcm_authority.as_deref()),
             session_sync_service: session_sync_service.as_deref(),
             server_stats,
             code_index_readiness_waiter: self.code_index_readiness_waiter.clone(),
@@ -115,14 +130,34 @@ impl McpServer {
             retained_project_server_resolver: self.retained_project_server_resolver.clone(),
             ..ToolCallRegistryOptions::default()
         };
-        compute_graph_tool_for_owner(
+        let computed = compute_graph_tool_for_owner(
             cg.as_ref(),
             invocation.operation,
             serde_json::Value::Object(invocation.arguments),
             self.scope_prefix(),
             options,
-        )
-        .await
+        );
+        // This server's profile owns every transcript a hook action ingests.
+        let completion = match self.profile.clone() {
+            Some(profile) => {
+                tracedecay_sessions::runtime::with_transcript_source_profile(profile, computed)
+                    .await
+            }
+            None => computed.await,
+        }?;
+        if let GraphToolResultV1::HookRuntime(HookRuntimeResultV1::IngestTranscript(ingest)) =
+            &completion.result
+        {
+            // The ingest wrote through this server's session stores; answer
+            // only once their refresh owner has published it.
+            join_hook_ingest_refresh(
+                ingest.user_scope,
+                self.project_session_refresh_wake.as_deref(),
+                self.user_session_refresh_wake.as_deref(),
+            )
+            .await?;
+        }
+        Ok(completion)
     }
 
     /// Registers this server as its project's graph-tool owner, replacing an

@@ -70,8 +70,8 @@ use tracedecay_mcp::tools::response_trailers::{
     TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
 };
 use tracedecay_mcp::{
-    RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
-    render_tool_cli_help, short_tool_name,
+    RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, render_tool_cli_help,
+    short_tool_name,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -295,11 +295,9 @@ fn run_inner(
             Some(operation) => operation.mcp_tool_name(),
             None => canonical.as_str(),
         };
-        let internal_def = internal_daemon_tool_definition(advertised_name);
         let Some(def) = defs
             .iter()
             .find(|definition| definition.name == advertised_name)
-            .or(internal_def.as_ref())
         else {
             let suggestion = nearest_tool_name(&canonical, &defs)
                 .map(|name| format!(" Did you mean '{name}'?"))

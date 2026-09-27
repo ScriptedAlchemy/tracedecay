@@ -11,12 +11,16 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tracedecay_contracts::context_scout::{ContextScoutAddressV1, ContextScoutDeliveryReceiptV1};
+use tracedecay_contracts::retrieval::{
+    ContextScoutStoreStatusV1, HookRuntimeAcceptedV1, HookRuntimeDispositionV1,
+    HookRuntimeResultV1, HookRuntimeSurfaceRequestV1, HookV2AdmissionResultV1,
+    HookV2AdmitRequestV1, HookV2NoticeDeliveryResultV1,
+};
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HookAdmissionFutureV1,
     HookDeliveryFutureV1, HookEventEnvelopeV2, HookFeedbackDeliveryOutcomeV1,
     HookImmediateAdmissionV1, HookReadyGuidanceV1, HookSynchronousDeadlineV1,
-    HookTransportDispositionV1,
 };
 
 use crate::agents::context_scout::ContextScoutDeliveryReceiptHookV1;
@@ -97,31 +101,6 @@ pub(crate) struct DaemonAdmissionResponseV1 {
     pub(crate) github_stack_signal_available: bool,
 }
 
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum DaemonAdmissionStatusV1 {
-    Accepted,
-    Committed,
-    ExactDuplicate,
-    Backpressured,
-    Rejected,
-    Unavailable,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DaemonAdmissionResponseWireV1 {
-    action: String,
-    status: DaemonAdmissionStatusV1,
-    disposition: Option<HookTransportDispositionV1>,
-    orchestration: Option<serde_json::Value>,
-    context_scout_address: Option<ContextScoutAddressV1>,
-    ready_guidance: Option<HookReadyGuidanceV1>,
-    feedback_notice: Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
-    github_stack_signal_available: Option<bool>,
-    reason: Option<String>,
-}
-
 pub(crate) fn now_utc() -> UtcMicros {
     UtcMicros(
         tracedecay_runtime_core::tracedecay::saturating_utc_now()
@@ -138,53 +117,81 @@ pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonA
         feedback_notice: None,
         github_stack_signal_available: false,
     };
-    let Ok(wire) = DaemonAdmissionResponseWireV1::deserialize(response) else {
+    let Ok(HookRuntimeResultV1::HookV2Admit(admission)) =
+        HookRuntimeResultV1::deserialize(response)
+    else {
         return unavailable();
     };
-    if wire.action != "hook_v2_admit" {
+    let (ready_guidance, context_scout_address, feedback_notice, github_stack_signal_available) =
+        match admission {
+            HookV2AdmissionResultV1::Rejected {
+                disposition: HookRuntimeDispositionV1::CatchupRequired,
+                ..
+            } => {
+                return DaemonAdmissionResponseV1 {
+                    immediate: HookImmediateAdmissionV1::CatchupRequired,
+                    context_scout_address: None,
+                    feedback_notice: None,
+                    github_stack_signal_available: false,
+                };
+            }
+            HookV2AdmissionResultV1::Backpressured {} => {
+                return DaemonAdmissionResponseV1 {
+                    immediate: HookImmediateAdmissionV1::Backpressured,
+                    context_scout_address: None,
+                    feedback_notice: None,
+                    github_stack_signal_available: false,
+                };
+            }
+            HookV2AdmissionResultV1::Accepted {
+                disposition: HookRuntimeDispositionV1::Accepted,
+                context_scout_address,
+                ready_guidance,
+                feedback_notice,
+                github_stack_signal_available,
+                ..
+            } => (
+                ready_guidance,
+                context_scout_address,
+                feedback_notice,
+                github_stack_signal_available,
+            ),
+            HookV2AdmissionResultV1::ExactDuplicate {
+                disposition: HookRuntimeDispositionV1::Accepted,
+                context_scout_address,
+                ready_guidance,
+            } => (ready_guidance, context_scout_address, None, false),
+            HookV2AdmissionResultV1::Accepted { .. }
+            | HookV2AdmissionResultV1::ExactDuplicate { .. }
+            | HookV2AdmissionResultV1::Rejected { .. }
+            | HookV2AdmissionResultV1::Unavailable {} => return unavailable(),
+        };
+    let Ok(ready_guidance) = ready_guidance
+        .map(serde_json::from_value::<HookReadyGuidanceV1>)
+        .transpose()
+    else {
+        return unavailable();
+    };
+    let Ok(feedback_notice) = feedback_notice
+        .map(serde_json::from_value::<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>)
+        .transpose()
+    else {
+        return unavailable();
+    };
+    if feedback_notice
+        .as_ref()
+        .is_some_and(|notice| notice.validate().is_err())
+    {
         return unavailable();
     }
-    let _ = (&wire.orchestration, &wire.reason);
-    match (wire.status, wire.disposition) {
-        (DaemonAdmissionStatusV1::Rejected, Some(HookTransportDispositionV1::CatchupRequired)) => {
-            DaemonAdmissionResponseV1 {
-                immediate: HookImmediateAdmissionV1::CatchupRequired,
-                context_scout_address: None,
-                feedback_notice: None,
-                github_stack_signal_available: false,
-            }
-        }
-        (
-            DaemonAdmissionStatusV1::Accepted
-            | DaemonAdmissionStatusV1::Committed
-            | DaemonAdmissionStatusV1::ExactDuplicate,
-            Some(HookTransportDispositionV1::Accepted),
-        ) => {
-            if wire
-                .feedback_notice
-                .as_ref()
-                .is_some_and(|notice| notice.validate().is_err())
-            {
-                return unavailable();
-            }
-            DaemonAdmissionResponseV1 {
-                immediate: HookImmediateAdmissionV1::Accepted {
-                    admitted_at: now_utc(),
-                    ready_guidance: wire.ready_guidance,
-                },
-                context_scout_address: wire.context_scout_address,
-                feedback_notice: wire.feedback_notice,
-                github_stack_signal_available: wire.github_stack_signal_available.unwrap_or(false),
-            }
-        }
-        (DaemonAdmissionStatusV1::Backpressured, None) => DaemonAdmissionResponseV1 {
-            immediate: HookImmediateAdmissionV1::Backpressured,
-            context_scout_address: None,
-            feedback_notice: None,
-            github_stack_signal_available: false,
+    DaemonAdmissionResponseV1 {
+        immediate: HookImmediateAdmissionV1::Accepted {
+            admitted_at: now_utc(),
+            ready_guidance,
         },
-        (DaemonAdmissionStatusV1::Unavailable, None) => unavailable(),
-        _ => unavailable(),
+        context_scout_address,
+        feedback_notice,
+        github_stack_signal_available,
     }
 }
 
@@ -198,16 +205,18 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
             let Ok(envelope) = serde_json::to_value(envelope) else {
                 return HookImmediateAdmissionV1::Unavailable;
             };
+            let Ok(native_lifecycle) = self.lifecycle.map(serde_json::to_value).transpose() else {
+                return HookImmediateAdmissionV1::Unavailable;
+            };
             let response = tokio::time::timeout(
                 Duration::from_micros(deadline.remaining_micros()),
                 super::daemon_hook_action(
                     self.runtime,
                     Some(self.project_root),
-                    serde_json::json!({
-                        "action": "hook_v2_admit",
-                        "envelope": envelope,
-                        "native_session_id": self.session_id,
-                        "native_lifecycle": self.lifecycle,
+                    HookRuntimeSurfaceRequestV1::HookV2Admit(HookV2AdmitRequestV1 {
+                        envelope,
+                        native_session_id: self.session_id.map(str::to_owned),
+                        native_lifecycle,
                     }),
                     self.telemetry,
                 ),
@@ -238,12 +247,21 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
     }
 }
 
-fn delivery_outcome_from_status(status: Option<&str>) -> HookFeedbackDeliveryOutcomeV1 {
-    match status {
-        Some("stored") => HookFeedbackDeliveryOutcomeV1::Delivered,
+fn delivery_outcome(response: &serde_json::Value) -> HookFeedbackDeliveryOutcomeV1 {
+    match HookRuntimeResultV1::deserialize(response) {
+        Ok(
+            HookRuntimeResultV1::HookV2DeliveryReceipt {
+                status: ContextScoutStoreStatusV1::Stored,
+            }
+            | HookRuntimeResultV1::HookV2FeedbackNoticeDelivery(
+                HookV2NoticeDeliveryResultV1::Stored {},
+            ),
+        ) => HookFeedbackDeliveryOutcomeV1::Delivered,
         // Exact-address commits that lost a compare-and-swap still prove the
         // daemon retained an authoritative row for this receipt/feedback.
-        Some("duplicate" | "superseded") => HookFeedbackDeliveryOutcomeV1::Duplicate,
+        Ok(HookRuntimeResultV1::HookV2DeliveryReceipt {
+            status: ContextScoutStoreStatusV1::Duplicate | ContextScoutStoreStatusV1::Superseded,
+        }) => HookFeedbackDeliveryOutcomeV1::Duplicate,
         _ => HookFeedbackDeliveryOutcomeV1::Unavailable,
     }
 }
@@ -252,7 +270,7 @@ fn delivery_outcome_from_status(status: Option<&str>) -> HookFeedbackDeliveryOut
 async fn timed_daemon_hook_action(
     runtime: &HookRuntimeV1,
     project_root: &Path,
-    action: serde_json::Value,
+    action: HookRuntimeSurfaceRequestV1,
     deadline: HookSynchronousDeadlineV1,
     telemetry: Option<&HookTimingSpan>,
 ) -> HookFeedbackDeliveryOutcomeV1 {
@@ -264,7 +282,7 @@ async fn timed_daemon_hook_action(
     let Ok(Ok(response)) = response else {
         return HookFeedbackDeliveryOutcomeV1::Unavailable;
     };
-    delivery_outcome_from_status(response.get("status").and_then(|value| value.as_str()))
+    delivery_outcome(&response)
 }
 
 /// Daemon-backed Hook feedback-notice delivery. Acknowledgement crosses the
@@ -293,14 +311,19 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryH
         deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
+            let (Ok(envelope), Ok(feedback_notice)) = (
+                serde_json::to_value(envelope),
+                serde_json::to_value(feedback),
+            ) else {
+                return HookFeedbackDeliveryOutcomeV1::Unavailable;
+            };
             timed_daemon_hook_action(
                 self.runtime,
                 self.project_root,
-                serde_json::json!({
-                    "action": "hook_v2_feedback_notice_delivery",
-                    "envelope": envelope,
-                    "feedback_notice": feedback,
-                }),
+                HookRuntimeSurfaceRequestV1::HookV2FeedbackNoticeDelivery {
+                    envelope,
+                    feedback_notice,
+                },
                 deadline,
                 None,
             )
@@ -329,13 +352,13 @@ impl<'a> DaemonDeliveryReceiptPort<'a> {
         receipt: &ContextScoutDeliveryReceiptV1,
         deadline: HookSynchronousDeadlineV1,
     ) -> HookFeedbackDeliveryOutcomeV1 {
+        let Ok(receipt) = serde_json::to_value(receipt) else {
+            return HookFeedbackDeliveryOutcomeV1::Unavailable;
+        };
         timed_daemon_hook_action(
             self.runtime,
             self.project_root,
-            serde_json::json!({
-                "action": "hook_v2_delivery_receipt",
-                "receipt": receipt,
-            }),
+            HookRuntimeSurfaceRequestV1::HookV2DeliveryReceipt { receipt },
             deadline,
             None,
         )
@@ -381,22 +404,20 @@ impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
         let response = super::daemon_hook_action(
             self.runtime,
             Some(self.project_root),
-            serde_json::json!({
-                "action": "opencode_lsp_updated",
-                "event": event,
-            }),
+            HookRuntimeSurfaceRequestV1::OpencodeLspUpdated {
+                event: event.clone(),
+            },
             self.telemetry,
         )
         .await;
-        response
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .is_some_and(|status| status == "accepted")
+        response.is_ok_and(|response| {
+            matches!(
+                HookRuntimeResultV1::deserialize(&response),
+                Ok(HookRuntimeResultV1::OpencodeLspUpdated {
+                    status: HookRuntimeAcceptedV1::Accepted,
+                })
+            )
+        })
     }
 }
 
@@ -406,17 +427,29 @@ mod tests {
 
     #[test]
     fn delivery_outcome_maps_superseded_as_duplicate() {
-        assert_eq!(
-            delivery_outcome_from_status(Some("superseded")),
-            HookFeedbackDeliveryOutcomeV1::Duplicate
-        );
-        assert_eq!(
-            delivery_outcome_from_status(Some("stored")),
-            HookFeedbackDeliveryOutcomeV1::Delivered
-        );
-        assert_eq!(
-            delivery_outcome_from_status(Some("unavailable")),
-            HookFeedbackDeliveryOutcomeV1::Unavailable
-        );
+        for (response, outcome) in [
+            (
+                serde_json::json!({"action": "hook_v2_delivery_receipt", "status": "superseded"}),
+                HookFeedbackDeliveryOutcomeV1::Duplicate,
+            ),
+            (
+                serde_json::json!({"action": "hook_v2_delivery_receipt", "status": "stored"}),
+                HookFeedbackDeliveryOutcomeV1::Delivered,
+            ),
+            (
+                serde_json::json!({"action": "hook_v2_feedback_notice_delivery", "status": "stored"}),
+                HookFeedbackDeliveryOutcomeV1::Delivered,
+            ),
+            (
+                serde_json::json!({"action": "hook_v2_delivery_receipt", "status": "unavailable"}),
+                HookFeedbackDeliveryOutcomeV1::Unavailable,
+            ),
+            (
+                serde_json::json!({"status": "stored"}),
+                HookFeedbackDeliveryOutcomeV1::Unavailable,
+            ),
+        ] {
+            assert_eq!(delivery_outcome(&response), outcome, "{response}");
+        }
     }
 }

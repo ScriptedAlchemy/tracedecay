@@ -517,21 +517,6 @@ pub fn retain_host_available_tool_definitions(definitions: &mut Vec<ToolDefiniti
     );
 }
 
-/// Resolve a daemon-internal host surface for the CLI fallback without
-/// advertising it through MCP discovery.
-#[doc(hidden)]
-pub fn internal_daemon_tool_definition(name: &str) -> Option<ToolDefinition> {
-    match name {
-        "tracedecay_hook_runtime" => Some(def_rw(
-            "tracedecay_hook_runtime",
-            "Internal Host Ingest",
-            "Forward one exact host-ingest envelope to the daemon. The handler validates the action-specific payload.",
-            json!({ "type": "object" }),
-        )),
-        _ => None,
-    }
-}
-
 fn add_lcm_storage_scope_property(definitions: &mut [ToolDefinition]) {
     for definition in definitions.iter_mut().filter(|definition| {
         definition.name.starts_with("tracedecay_lcm_")

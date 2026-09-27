@@ -6,15 +6,15 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use serde_json::Value;
+use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::post_tool_use::is_post_tool_use_failure_event;
 use super::tool_hints::{ToolHintInput, decide_hint};
 use super::{
-    additional_context_json, compact_daemon_args, event_project_root_with_identity,
-    event_session_id, prompt_like_text, read_hook_event, record_hook_invoked_parsed,
-    research_block_reason,
+    additional_context_json, event_project_root_with_identity, event_session_id, prompt_like_text,
+    read_hook_event, record_hook_invoked_parsed, research_block_reason,
 };
 use tracedecay_domain::HostIntegrationIdV1;
 
@@ -110,7 +110,10 @@ pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
         &event,
         &parsed,
     );
-    let args = compact_daemon_args("claude_compact", "claude", root.is_none(), &event, None);
+    let args = HookRuntimeSurfaceRequestV1::ClaudeCompact {
+        event_json: event.clone(),
+        user_scope: root.is_none(),
+    };
     if let Err(error) =
         super::daemon_hook_action(runtime, root.as_deref(), args, Some(&hook_telemetry)).await
     {

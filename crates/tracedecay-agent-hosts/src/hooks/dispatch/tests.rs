@@ -88,11 +88,7 @@ fn daemon_catchup_disposition_is_not_reclassified_as_unavailable() {
     let response = serde_json::json!({
         "action": "hook_v2_admit",
         "status": "rejected",
-        "disposition": HookTransportDispositionV1::CatchupRequired,
-        "orchestration": null,
-        "ready_guidance": null,
-        "feedback_notice": null,
-        "reason": null,
+        "disposition": "catchup_required",
     });
 
     assert!(matches!(
@@ -183,11 +179,12 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     let response = serde_json::json!({
         "action": "hook_v2_admit",
         "status": "accepted",
-        "disposition": HookTransportDispositionV1::Accepted,
-        "orchestration": null,
+        "disposition": "accepted",
+        "orchestration": "enqueued",
+        "context_scout_address": null,
         "ready_guidance": null,
         "feedback_notice": notice,
-        "reason": null,
+        "github_stack_signal_available": false,
     });
 
     let admitted = daemon_admission_response(&response);
@@ -243,12 +240,12 @@ fn github_stack_wakeup_is_content_free() {
     let response = serde_json::json!({
         "action": "hook_v2_admit",
         "status": "accepted",
-        "disposition": HookTransportDispositionV1::Accepted,
-        "orchestration": null,
+        "disposition": "accepted",
+        "orchestration": "enqueued",
+        "context_scout_address": null,
         "ready_guidance": null,
         "feedback_notice": null,
         "github_stack_signal_available": true,
-        "reason": null,
     });
     let admitted = daemon_admission_response(&response);
     assert!(admitted.github_stack_signal_available);
@@ -515,6 +512,7 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
     };
     let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
     let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+        "action": "hook_v2_delivery_receipt",
         "status": "stored"
     })]);
 

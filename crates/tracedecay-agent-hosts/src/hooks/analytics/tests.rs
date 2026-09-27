@@ -1,5 +1,6 @@
 use super::*;
 use std::time::Duration;
+use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 fn enroll_project(project_root: &Path, profile_root: &Path, project_id: &str) -> PathBuf {
@@ -244,7 +245,7 @@ fn daemon_hook_action_records_completed_rtt_and_wire_length() {
             let result = crate::hooks::daemon_hook_action(
                 &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
                 Some(&project_root),
-                serde_json::json!({ "action": "reset_counter" }),
+                HookRuntimeSurfaceRequestV1::ResetCounter {},
                 Some(&span),
             )
             .await;

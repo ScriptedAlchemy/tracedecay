@@ -96,7 +96,9 @@ fn message_counted_route_still_commits_from_its_own_upserts() {
 
 #[test]
 fn cursor_compaction_response_matches_hook_contract() {
-    let value = cursor_compact_skipped("no messages to compact");
+    let value =
+        serde_json::to_value(HookRuntimeResultV1::CursorCompact(cursor_compact_skipped())).unwrap();
+    assert_eq!(value["action"], "cursor_compact");
     let outcome: tracedecay_agent_hosts::hooks::CursorPreCompactOutcome =
         serde_json::from_value(value).unwrap();
     assert_eq!(outcome.status, "skipped");
@@ -186,10 +188,14 @@ async fn transcript_admission_rejects_unknown_provider_without_echoing_hook_payl
     let secret = "hook-secret-unknown-provider";
     let error = ingest_transcript(
         None,
-        &json!({
-            "provider": "unknown-provider-v99",
-            "event_json": format!("{{\"raw_source\":\"{secret}\"}}"),
-        }),
+        &HookIngestTranscriptRequestV1 {
+            provider: "unknown-provider-v99".to_owned(),
+            user_scope: false,
+            session_id: None,
+            event_json: Some(format!("{{\"raw_source\":\"{secret}\"}}")),
+            messages: None,
+            max_new_bytes: None,
+        },
         None,
         None,
         None,
@@ -211,10 +217,14 @@ async fn supported_transcript_admission_requires_its_authority_without_echoing_p
     let secret = "hook-secret-unavailable-authority";
     let error = ingest_transcript(
         None,
-        &json!({
-            "provider": "claude",
-            "event_json": format!("{{\"malformed\":\"{secret}\"}}"),
-        }),
+        &HookIngestTranscriptRequestV1 {
+            provider: "claude".to_owned(),
+            user_scope: false,
+            session_id: None,
+            event_json: Some(format!("{{\"malformed\":\"{secret}\"}}")),
+            messages: None,
+            max_new_bytes: None,
+        },
         None,
         None,
         None,
@@ -235,24 +245,21 @@ async fn supported_transcript_admission_requires_its_authority_without_echoing_p
     assert!(!data.to_string().contains(secret));
 }
 
-#[tokio::test]
-async fn claude_postcompact_without_machine_provenance_is_read_only_unavailable() {
-    let outcome = claude_compact(
-        &json!({
-            "event_json": r#"{"compact_summary":"self-asserted","digest":"self-asserted"}"#,
-        }),
-        SessionAuthorities::default(),
-    )
-    .await
-    .unwrap();
+#[test]
+fn claude_postcompact_without_machine_provenance_is_read_only_unavailable() {
+    let outcome =
+        claude_compact(r#"{"compact_summary":"self-asserted","digest":"self-asserted"}"#).unwrap();
 
-    assert_eq!(outcome["status"], "unavailable");
     assert_eq!(
-        outcome["reason"],
-        "claude_postcompact_provenance_unavailable"
+        serde_json::to_value(HookRuntimeResultV1::ClaudeCompact(outcome)).unwrap(),
+        json!({
+            "action": "claude_compact",
+            "status": "unavailable",
+            "reason": "claude_postcompact_provenance_unavailable",
+            "summary_nodes_created": 0,
+            "summary_node_ids": [],
+        })
     );
-    assert_eq!(outcome["summary_nodes_created"], 0);
-    assert_eq!(outcome["summary_node_ids"], json!([]));
 }
 
 #[test]

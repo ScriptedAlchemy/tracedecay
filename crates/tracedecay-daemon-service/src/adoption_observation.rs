@@ -411,6 +411,7 @@ mod tests {
                     "capability.application.primitive.hermes-skill-bridge",
                     "available",
                 ),
+                ("capability.application.primitive.hook-runtime", "available"),
                 ("capability.application.primitive.hotspots", "available"),
                 ("capability.application.primitive.impact", "available"),
                 (

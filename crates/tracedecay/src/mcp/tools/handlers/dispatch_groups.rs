@@ -111,42 +111,6 @@ async fn admitted_graph_query_for_operation(
     Ok(query)
 }
 
-/// Dispatch the administrative `tracedecay_hook_runtime`.
-#[hotpath::measure(future = true, label = "mcp.dispatch.admin")]
-pub(super) async fn dispatch_admin_tools(
-    tool_name: &str,
-    cg: &TraceDecay,
-    args: Value,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    dispatch_admin_tools_inner(tool_name, cg, args, options).await
-}
-
-fn dispatch_admin_tools_inner<'a>(
-    tool_name: &'a str,
-    cg: &'a TraceDecay,
-    args: Value,
-    options: ToolCallRegistryOptions<'a>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    // Erase the deeply nested match-arm futures before they reach the
-    // measured wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        match tool_name {
-            "tracedecay_hook_runtime" => {
-                hook_runtime::handle_hook_runtime(
-                    cg,
-                    args,
-                    options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
-                    options.accounting_db,
-                    options.session_authorities,
-                )
-                .await
-            }
-            _ => Err(unknown_tool_error(tool_name)),
-        }
-    })
-}
-
 /// Dispatch catalog-owned application surfaces.
 #[hotpath::measure(future = true, label = "mcp.dispatch.application")]
 pub(super) async fn dispatch_application_surface_tools(
@@ -781,6 +745,16 @@ async fn compute_owner_side_effect(
                 .await?,
             ))
         }
+        ApplicationSurfaceOperation::HookRuntime => GraphToolResultV1::HookRuntime(
+            hook_runtime::compute_hook_runtime(
+                cg,
+                hook_runtime::decode_hook_runtime_request(&args)?,
+                options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
+                options.accounting_db,
+                options.session_authorities.clone(),
+            )
+            .await?,
+        ),
         ApplicationSurfaceOperation::Dashboard => {
             let request = tracedecay_mcp::handlers::decode_primitive_request(
                 &args,

@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
 
 use super::analytics::{HOOK_ANALYTICS_FILENAME, record_hook_invoked};
 use super::{TestDaemonHookActionGuard, daemon_hook_action};
@@ -194,7 +195,7 @@ fn matrix_daemon_unavailable_transport_does_not_invent_success() {
             let result = daemon_hook_action(
                 &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
                 Some(&project_root),
-                serde_json::json!({ "action": "reset_counter" }),
+                HookRuntimeSurfaceRequestV1::ResetCounter {},
                 Some(&span),
             )
             .await;

@@ -2,6 +2,10 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
 use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_contracts::retrieval::{
+    HookCompactionResultV1, HookIngestAdmissionV1, HookIngestTranscriptRequestV1,
+    HookIngestTranscriptResultV1,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -19,7 +23,7 @@ use tracedecay_sessions::runtime::source::TranscriptSource;
 
 use crate::handlers::SessionAuthorities;
 
-use super::required_str;
+use super::required_field;
 use crate::{
     hook_admission_error, map_claude_observation_ingest_error, map_transcript_ingest_error,
 };
@@ -193,12 +197,12 @@ async fn drain_host_observation_projections(
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.compact")]
 pub(super) async fn codex_compact(
     cg: &TraceDecay,
-    args: &Value,
+    event_json: &str,
     session_authorities: SessionAuthorities<'_>,
-) -> Result<Value> {
-    let event_json = required_str(args, "event_json")?;
+) -> Result<HookCompactionResultV1> {
+    let event_json = required_field(Some(event_json), "event_json")?;
     let Some(authority) = session_authorities.project_lcm else {
-        return Ok(compaction_authority_unavailable("codex_compact"));
+        return Ok(compaction_authority_unavailable());
     };
     let parsed = serde_json::from_str::<Value>(event_json).ok();
     let session_id = parsed.as_ref().and_then(|value| {
@@ -208,18 +212,17 @@ pub(super) async fn codex_compact(
             .map(str::to_string)
     });
     let Some(session_id) = session_id else {
-        return Ok(json!({
-            "action": "codex_compact",
-            "status": "unavailable",
-            "reason": "host_session_identity_unavailable",
-            "messages_upserted": 0,
-        }));
+        return Ok(HookCompactionResultV1::NoSession {
+            status: "unavailable".to_owned(),
+            reason: "host_session_identity_unavailable".to_owned(),
+            messages_upserted: 0,
+        });
     };
     // The daemon compaction compresses the session's durable history, so the
     // rollout must land in the owning store through the canonical ingest
     // route before pressure evidence is evaluated; compacting an unfilled
     // store would report an empty success.
-    let messages_upserted = hotpath::future!(
+    let ingested = hotpath::future!(
         admit_codex_rollouts_for_compaction(cg, session_authorities),
         label = "mcp.hook_runtime.compact_ingest"
     )
@@ -248,11 +251,19 @@ pub(super) async fn codex_compact(
     )
     .await
     else {
-        return Ok(compaction_authority_unavailable("codex_compact"));
+        return Ok(compaction_authority_unavailable());
     };
-    let mut output = compaction_response_json("codex_compact", &response);
-    output["messages_upserted"] = json!(messages_upserted);
-    Ok(output)
+    let mut result = compaction_response(&response)?;
+    if let HookCompactionResultV1::Settled {
+        messages_upserted, ..
+    }
+    | HookCompactionResultV1::Refused {
+        messages_upserted, ..
+    } = &mut result
+    {
+        *messages_upserted = ingested;
+    }
+    Ok(result)
 }
 
 /// The project-open catch-up scans the same Codex sources concurrently, so a
@@ -353,29 +364,27 @@ async fn admit_codex_rollouts_once(
     drain_host_observation_projections(&facade, &scope, &cancellation).await
 }
 
-pub(super) async fn claude_compact(
-    args: &Value,
-    _session_authorities: SessionAuthorities<'_>,
-) -> Result<Value> {
-    required_str(args, "event_json")?;
-    Ok(json!({
-        "action": "claude_compact",
-        "status": "unavailable",
-        "reason": "claude_postcompact_provenance_unavailable",
-        "summary_nodes_created": 0,
-        "summary_node_ids": [],
-    }))
+/// Claude's `PostCompact` summaries carry no machine provenance, so the
+/// daemon records nothing for them.
+pub(super) fn claude_compact(event_json: &str) -> Result<HookCompactionResultV1> {
+    required_field(Some(event_json), "event_json")?;
+    Ok(HookCompactionResultV1::NotRun {
+        status: "unavailable".to_owned(),
+        reason: "claude_postcompact_provenance_unavailable".to_owned(),
+        summary_nodes_created: 0,
+        summary_node_ids: Vec::new(),
+        relation_projection_status: None,
+    })
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.compact")]
 pub(super) async fn cursor_compact(
-    _cg: &TraceDecay,
-    args: &Value,
+    event_json: &str,
     session_authorities: SessionAuthorities<'_>,
-) -> Result<Value> {
-    let event_json = required_str(args, "event_json")?;
+) -> Result<HookCompactionResultV1> {
+    let event_json = required_field(Some(event_json), "event_json")?;
     let Some(authority) = session_authorities.project_lcm else {
-        return Ok(compaction_authority_unavailable("cursor_compact"));
+        return Ok(compaction_authority_unavailable());
     };
     let parsed: Value = serde_json::from_str(event_json)?;
     let session_id = ["session_id", "conversation_id", "chat_id"]
@@ -385,7 +394,7 @@ pub(super) async fn cursor_compact(
         .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
     let messages_to_compact = event_usize(&parsed, &["messages_to_compact", "compact_count"]);
     if messages_to_compact == Some(0) {
-        return Ok(cursor_compact_skipped("no messages to compact"));
+        return Ok(cursor_compact_skipped());
     }
     let message_count = event_usize(&parsed, &["message_count", "messages_count"]);
     let fresh_tail_count = message_count
@@ -412,64 +421,65 @@ pub(super) async fn cursor_compact(
     )
     .await
     else {
-        return Ok(compaction_authority_unavailable("cursor_compact"));
+        return Ok(compaction_authority_unavailable());
     };
-    Ok(compaction_response_json("cursor_compact", &response))
+    compaction_response(&response)
 }
 
-fn compaction_authority_unavailable(action: &str) -> Value {
-    json!({
-        "action": action,
-        "status": "unavailable",
-        "reason": "lcm_daemon_authority_unavailable",
-        "summary_nodes_created": 0,
-        "summary_node_ids": [],
-    })
+fn cursor_compact_skipped() -> HookCompactionResultV1 {
+    HookCompactionResultV1::NotRun {
+        status: "skipped".to_owned(),
+        reason: "no messages to compact".to_owned(),
+        summary_nodes_created: 0,
+        summary_node_ids: Vec::new(),
+        relation_projection_status: Some(Value::String("not_applicable".to_owned())),
+    }
 }
 
-fn compaction_response_json(
-    action: &str,
+fn compaction_authority_unavailable() -> HookCompactionResultV1 {
+    HookCompactionResultV1::NotRun {
+        status: "unavailable".to_owned(),
+        reason: "lcm_daemon_authority_unavailable".to_owned(),
+        summary_nodes_created: 0,
+        summary_node_ids: Vec::new(),
+        relation_projection_status: None,
+    }
+}
+
+fn compaction_response(
     response: &tracedecay_session_memory::session::lcm::LcmAuthorityResponse,
-) -> Value {
+) -> Result<HookCompactionResultV1> {
+    let authority_outcome = serde_json::to_value(&response.outcome)?;
+    let committed_state = serde_json::to_value(&response.receipt.committed_state)?;
     if let (LcmAuthorityOutcome::Ready, Some(LcmAuthorityPayload::Compaction(compression))) =
         (&response.outcome, &response.payload)
     {
-        return json!({
-            "action": action,
-            "status": compression.status,
-            "reason": compression.reason,
-            "summary_nodes_created": compression.summary_nodes_created,
-            "summary_node_ids": compression
+        return Ok(HookCompactionResultV1::Settled {
+            status: compression.status.clone(),
+            reason: compression.reason.clone(),
+            summary_nodes_created: compression.summary_nodes_created as u64,
+            summary_node_ids: compression
                 .summary_nodes
                 .iter()
                 .map(|node| node.node_id.clone())
-                .collect::<Vec<_>>(),
-            "relation_projection_status": compression.relation_projection_status,
-            "retry_status": compression.retry_status,
-            "authority_outcome": response.outcome,
-            "committed_state": response.receipt.committed_state,
-            "messages_upserted": 0,
+                .collect(),
+            relation_projection_status: serde_json::to_value(
+                compression.relation_projection_status,
+            )?,
+            retry_status: compression.retry_status.clone(),
+            authority_outcome,
+            committed_state,
+            messages_upserted: 0,
         });
     }
-    json!({
-        "action": action,
-        "status": "unavailable",
-        "reason": "lcm_daemon_authority_rejected",
-        "authority_outcome": response.outcome,
-        "committed_state": response.receipt.committed_state,
-        "summary_nodes_created": 0,
-        "summary_node_ids": [],
-        "messages_upserted": 0,
-    })
-}
-
-fn cursor_compact_skipped(reason: impl Into<String>) -> Value {
-    json!({
-        "status": "skipped",
-        "reason": reason.into(),
-        "summary_nodes_created": 0,
-        "summary_node_ids": [],
-        "relation_projection_status": "not_applicable",
+    Ok(HookCompactionResultV1::Refused {
+        status: "unavailable".to_owned(),
+        reason: "lcm_daemon_authority_rejected".to_owned(),
+        authority_outcome,
+        committed_state,
+        summary_nodes_created: 0,
+        summary_node_ids: Vec::new(),
+        messages_upserted: 0,
     })
 }
 
@@ -520,99 +530,28 @@ fn pressure_only_command(
     }))
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.accounting")]
-pub(super) async fn accounting_receipt(
-    cg: &TraceDecay,
-    provider_usage_db: &RegisteredGlobalDb,
-) -> Result<Value> {
-    let scope = ObservationScopeV1::Project {
-        project_id: project_observation_id(cg)?,
-    };
-    let usage = tracedecay_session_memory::provider_usage::provider_usage_aggregate(
-        provider_usage_db,
-        &scope,
-        None,
-        None,
-    )
-    .await;
-    let prices = tracedecay_session_memory::provider_pricing::load_table();
-    let priced = tracedecay_session_memory::provider_usage::price_provider_usage(&usage, prices, 0);
-    let complete = priced.coverage
-        == tracedecay_session_memory::provider_usage::ProviderUsageCoverageV1::Complete;
-    let tokens_consumed = complete
-        .then(|| {
-            priced
-                .total_input_tokens?
-                .checked_add(priced.total_output_tokens?)
-        })
-        .flatten();
-    let tokens_saved = cg
-        .get_tokens_saved()
-        .await
-        .map_err(|error| config_error(format!("failed to read saved tokens: {error}")))?;
-    let efficiency = tokens_consumed.and_then(|consumed| {
-        let denominator = tokens_saved.checked_add(consumed)?;
-        (denominator > 0).then_some((tokens_saved as f64 / denominator as f64) * 100.0)
-    });
-    Ok(json!({
-        "action": "accounting_receipt",
-        "coverage": priced.coverage,
-        "watermark": usage.upper_observation_sequence,
-        "provider_usage_events": priced.usage_events,
-        "cost_usd": priced.total_cost_usd,
-        "pricing_status": if priced.total_cost_usd.is_some() { "priced" } else { "unavailable" },
-        "pricing_revision": priced.pricing_revision,
-        "tokens_consumed": tokens_consumed,
-        "tokens_saved": tokens_saved,
-        "efficiency": efficiency,
-    }))
-}
-
-pub(super) async fn ingest_transcript(
-    cg: Option<&TraceDecay>,
-    args: &Value,
-    profile_root: Option<&Path>,
-    global_db: Option<&RegisteredGlobalDb>,
-    accounting_db: Option<&RegisteredGlobalDb>,
-    session_authorities: SessionAuthorities<'_>,
-) -> Result<Value> {
-    let cancellation = ObservationCancellation::default();
-    ingest_transcript_with_cancellation(
-        cg,
-        args,
-        profile_root,
-        global_db,
-        accounting_db,
-        session_authorities,
-        &cancellation,
-    )
-    .await
-}
-
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.ingest")]
 #[cfg_attr(
     not(feature = "hotpath"),
     expect(
         clippy::too_many_lines,
-        reason = "Transcript ingest is one cancelled-aware write through the capture authority."
+        reason = "Transcript ingest is one write through the capture authority."
     )
 )]
-pub async fn ingest_transcript_with_cancellation(
+pub(super) async fn ingest_transcript(
     cg: Option<&TraceDecay>,
-    args: &Value,
+    request: &HookIngestTranscriptRequestV1,
     profile_root: Option<&Path>,
     global_db: Option<&RegisteredGlobalDb>,
     accounting_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
-    cancellation: &ObservationCancellation,
-) -> Result<Value> {
-    let provider = required_str(args, "provider")?;
-    let user_scope = args
-        .get("user_scope")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let payload_route = TranscriptPayloadRouteV1::from_args(args);
-    let max_new_bytes = args.get("max_new_bytes").and_then(Value::as_u64);
+) -> Result<HookIngestTranscriptResultV1> {
+    let cancellation = ObservationCancellation::default();
+    let cancellation = &cancellation;
+    let provider = required_field(Some(&request.provider), "provider")?;
+    let user_scope = request.user_scope;
+    let payload_route = TranscriptPayloadRouteV1::from_request(request);
+    let max_new_bytes = request.max_new_bytes;
     let admission_scope = if user_scope {
         HostAdmissionScope::Profile
     } else {
@@ -641,7 +580,7 @@ pub async fn ingest_transcript_with_cancellation(
     let capture = hotpath::future!(
         kernel.capture(TranscriptCaptureContext {
             cg,
-            args,
+            request,
             user_scope,
             profile_root,
             global_db,
@@ -695,15 +634,32 @@ pub async fn ingest_transcript_with_cancellation(
         exact_duplicate,
         deferred_by_byte_cap,
     );
-    let mut output = json!({
-        "action": "ingest_transcript",
-        "provider": provider,
-        "user_scope": user_scope,
-        "completed": !deferred_by_byte_cap,
-        "status": admission.status,
-        "admission": admission,
-        "messages_upserted": messages_upserted,
-    });
+    let mut output = HookIngestTranscriptResultV1 {
+        provider: provider.to_owned(),
+        user_scope,
+        completed: !deferred_by_byte_cap,
+        status: admission.status.as_wire().to_owned(),
+        admission: HookIngestAdmissionV1 {
+            status: admission.status.as_wire().to_owned(),
+            retryable: admission.retryable,
+            reason_code: admission.reason_code.map(str::to_owned),
+        },
+        messages_upserted,
+        hint_outcomes: None,
+        observations_committed: None,
+        bytes_consumed: None,
+        deferred_by_byte_cap: None,
+        observation_duplicates: None,
+        cursor_advances: None,
+        cursor_duplicates: None,
+        records_rejected: None,
+        records_quarantined: None,
+        projections_completed: None,
+        projections_skipped: None,
+        projection_duplicates: None,
+        deferred_sources: None,
+        source_bytes_scanned: None,
+    };
     // Project-scope ingest is the production moment new post-hint session
     // activity becomes durable, so settle emitted hook hints into
     // `hint_outcome` analytics events here. Best-effort: unavailable or
@@ -712,7 +668,7 @@ pub async fn ingest_transcript_with_cancellation(
     if let Some(cg) = cg
         && !user_scope
     {
-        output["hint_outcomes"] = match profile_root.map(|profile_root| {
+        output.hint_outcomes = Some(match profile_root.map(|profile_root| {
             tracedecay_application::analytics_bridge::hook_import_sources(
                 profile_root,
                 Some(cg.project_root()),
@@ -736,31 +692,31 @@ pub async fn ingest_transcript_with_cancellation(
             )
             .await
             .as_json(),
-        };
+        });
     }
     // Routes that admit observations directly report what they committed, so a
     // `messages_upserted: 0` pass is readable without guessing which drainer
     // won. The snapshot and Claude blocks below own the key for their routes.
     if route_observations_committed > 0 {
-        output["observations_committed"] = json!(route_observations_committed);
+        output.observations_committed = Some(route_observations_committed);
     }
     if let Some(capture) = snapshot_capture {
-        output["observations_committed"] = json!(capture.stats.messages_upserted);
-        output["bytes_consumed"] = json!(capture.bytes_consumed);
-        output["deferred_by_byte_cap"] = json!(capture.deferred_by_byte_cap);
+        output.observations_committed = Some(capture.stats.messages_upserted);
+        output.bytes_consumed = Some(capture.bytes_consumed);
+        output.deferred_by_byte_cap = Some(capture.deferred_by_byte_cap);
     }
     if let Some(stats) = claude_observation_stats {
-        output["observations_committed"] = json!(stats.observations_committed);
-        output["observation_duplicates"] = json!(stats.observation_duplicates);
-        output["cursor_advances"] = json!(stats.cursor_advances);
-        output["cursor_duplicates"] = json!(stats.cursor_duplicates);
-        output["records_rejected"] = json!(stats.records_rejected);
-        output["records_quarantined"] = json!(stats.records_quarantined);
-        output["projections_completed"] = json!(stats.projections_completed);
-        output["projections_skipped"] = json!(stats.projections_skipped);
-        output["projection_duplicates"] = json!(stats.projection_duplicates);
-        output["deferred_sources"] = json!(stats.deferred_sources);
-        output["source_bytes_scanned"] = json!(stats.source_bytes_scanned);
+        output.observations_committed = Some(stats.observations_committed);
+        output.observation_duplicates = Some(stats.observation_duplicates);
+        output.cursor_advances = Some(stats.cursor_advances);
+        output.cursor_duplicates = Some(stats.cursor_duplicates);
+        output.records_rejected = Some(stats.records_rejected);
+        output.records_quarantined = Some(stats.records_quarantined);
+        output.projections_completed = Some(stats.projections_completed);
+        output.projections_skipped = Some(stats.projections_skipped);
+        output.projection_duplicates = Some(stats.projection_duplicates);
+        output.deferred_sources = Some(stats.deferred_sources);
+        output.source_bytes_scanned = Some(stats.source_bytes_scanned);
     }
     Ok(output)
 }

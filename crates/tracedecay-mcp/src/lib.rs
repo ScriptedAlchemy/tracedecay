@@ -97,10 +97,12 @@ pub use tool_context::{
     McpProjectIdentityV1, McpRequestAuthoritiesV1, McpToolBinding, McpToolBindingError,
     McpToolContext, RequestControls,
 };
+#[cfg(test)]
+pub(crate) use tool_errors::structured_hook_error_data;
 pub use tool_errors::{
     mark_semantic_tool_error, reset_required_command, reset_required_context,
-    reset_required_remedy, semantic_failure_reason, serialize_response_line,
-    structured_hook_error_data, tool_error_response, tool_result_has_semantic_error,
+    reset_required_remedy, semantic_failure_reason, serialize_response_line, tool_error_response,
+    tool_result_has_semantic_error,
 };
 pub use tools::render::format_relative_time;
 pub use tools::{
@@ -113,10 +115,9 @@ pub use tracedecay_mcp_catalog::{
     context_description, context_warming_description, explore_call_budget,
     format_capable_tool_names, get_maximal_tool_definitions,
     get_maximal_tool_definitions_with_budget, get_tool_definitions,
-    get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
-    internal_daemon_tool_definition, mcp_input_schema, project_catalog_discovery_scope,
-    registered_project_reader_tool_names, retain_host_available_tool_definitions,
-    tool_defaults_to_markdown,
+    get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget, mcp_input_schema,
+    project_catalog_discovery_scope, registered_project_reader_tool_names,
+    retain_host_available_tool_definitions, tool_defaults_to_markdown,
 };
 pub use workflow::{
     MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile, TestRunControl,

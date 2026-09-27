@@ -1071,19 +1071,10 @@ async fn hook_ingest_join_runs_the_bound_refresh_worker() {
     let wake = authority.ensure_profile(&registry).await;
     let before = registry.profile_pass_count(db.db_path()).await;
 
-    let joined = tracedecay_mcp::server::join_required_live_transcript_refresh(
-        "tracedecay_hook_runtime",
-        &json!({"action": "ingest_transcript"}),
-        Some(&wake),
-        None,
-    )
-    .await
-    .expect("hook ingest must join the refresh worker that owns the written store");
+    tracedecay_mcp::server::join_hook_ingest_refresh(false, Some(&wake), None)
+        .await
+        .expect("hook ingest must join the refresh worker that owns the written store");
 
-    assert_eq!(
-        joined,
-        tracedecay_mcp::server::LiveTranscriptRefreshJoin::PublicationJoined
-    );
     assert!(
         registry.profile_pass_count(db.db_path()).await > before,
         "hook ingest must advance the refresh worker, not wait for an unrelated wake"

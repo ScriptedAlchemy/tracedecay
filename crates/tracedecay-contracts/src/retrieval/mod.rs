@@ -12,6 +12,7 @@ mod git_topology_anchor;
 mod graph_lookup_surface;
 mod graph_report_surface;
 pub mod grep_analysis;
+mod hook_runtime_surface;
 mod owner_effect_surface;
 mod ports;
 mod primitive_surface;
@@ -197,6 +198,14 @@ pub use graph_report_surface::{
     TestRiskResultV1, TestRiskSummaryV1, TestRiskSurfaceRequestV1,
 };
 pub use grep_analysis::{DependencyDepthChainV1, DependencyDepthResultV1};
+pub use hook_runtime_surface::{
+    ContextScoutStoreStatusV1, HermesReceiptStatusV1, HookCompactionResultV1,
+    HookIngestAdmissionV1, HookIngestTranscriptRequestV1, HookIngestTranscriptResultV1,
+    HookRuntimeAcceptedV1, HookRuntimeDispositionV1, HookRuntimeResultV1,
+    HookRuntimeSurfaceRequestV1, HookV2AdmissionResultV1, HookV2AdmitRequestV1,
+    HookV2NoticeDeliveryResultV1, HookV2ProfileAdmissionResultV1, HookV2RejectionReasonV1,
+    hook_runtime_needs_session_stores,
+};
 pub use owner_effect_surface::{
     AdminSyncAdmissionV1, AdminSyncReconcileScopeV1, AdminSyncResultV1, AdminSyncSurfaceRequestV1,
     AffectedTestErrorV1, AffectedTestOutcomeV1, AffectedTestRunV1, AffectedTestsNotRunV1,

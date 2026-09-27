@@ -222,6 +222,7 @@ application_surface_operations! {
     AdminSync => "admin_sync";
     AdminCli => "admin_cli";
     AdminProject => "admin_project";
+    HookRuntime => "hook_runtime";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -358,6 +359,7 @@ impl ApplicationSurfaceOperation {
         Self::AdminSync,
         Self::AdminCli,
         Self::AdminProject,
+        Self::HookRuntime,
     ];
 
     /// Reads of the authenticated profile's project registry. They name no
@@ -369,7 +371,12 @@ impl ApplicationSurfaceOperation {
     /// Owner-served operations that first-party CLI commands and host hooks
     /// call by name. They are never advertised in `tools/list` or mounted on
     /// HTTP, so an agent cannot discover or select them.
-    pub const INTERNAL_OPERATIONS: &[Self] = &[Self::AdminSync, Self::AdminCli, Self::AdminProject];
+    pub const INTERNAL_OPERATIONS: &[Self] = &[
+        Self::AdminSync,
+        Self::AdminCli,
+        Self::AdminProject,
+        Self::HookRuntime,
+    ];
 
     pub fn is_graph_tool(self) -> bool {
         Self::GRAPH_TOOL_OPERATIONS.contains(&self)
@@ -409,6 +416,14 @@ impl ApplicationSurfaceOperation {
                 ) => true,
                 Some("cost_summary" | "analytics_sync" | "analytics_diagnostics") => {
                     argument("scope") == Some("profile")
+                }
+                _ => false,
+            },
+            // A hook with no project route lands in the profile's stores.
+            Self::HookRuntime => match argument("action") {
+                Some("user_review" | "hermes_receipt" | "hook_v2_profile_admit") => true,
+                Some("ingest_transcript" | "claude_compact") => {
+                    arguments.get("user_scope").and_then(Value::as_bool) == Some(true)
                 }
                 _ => false,
             },
@@ -485,6 +500,38 @@ mod tests {
             ApplicationSurfaceOperation::AdminCli,
             serde_json::json!({"action": "sessions_import"})
         ));
+        for (arguments, profile) in [
+            (
+                serde_json::json!({"action": "hermes_receipt", "event": {}}),
+                true,
+            ),
+            (serde_json::json!({"action": "hook_v2_profile_admit"}), true),
+            (serde_json::json!({"action": "user_review"}), true),
+            (
+                serde_json::json!({"action": "ingest_transcript", "user_scope": true}),
+                true,
+            ),
+            (
+                serde_json::json!({"action": "ingest_transcript", "user_scope": false}),
+                false,
+            ),
+            (
+                serde_json::json!({"action": "claude_compact", "user_scope": true}),
+                true,
+            ),
+            (
+                serde_json::json!({"action": "claude_compact", "user_scope": "true"}),
+                false,
+            ),
+            (serde_json::json!({"action": "reset_counter"}), false),
+            (serde_json::json!({"action": "hook_v2_admit"}), false),
+        ] {
+            assert_eq!(
+                owner(ApplicationSurfaceOperation::HookRuntime, arguments.clone()),
+                profile,
+                "{arguments}"
+            );
+        }
     }
 
     #[test]

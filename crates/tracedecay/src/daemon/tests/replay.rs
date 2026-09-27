@@ -101,10 +101,18 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         &first_admin,
     )
     .await;
-    assert!(
-        response.error.is_some(),
-        "blocked canonical apply must retain the daemon-admitted receipt"
+    // The profile owner refuses the receipt it could not apply, and keeps it
+    // retained for replay.
+    let result = response.result.clone().unwrap_or_else(|| {
+        panic!("blocked canonical apply must be the owner's typed refusal: {response:?}")
+    });
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(result["problem"]["kind"], "unavailable", "{result}");
+    assert_eq!(
+        result["problem"]["code"], "canonical_admission_failed",
+        "{result}"
     );
+    assert_eq!(result["problem"]["retryable"], true, "{result}");
     assert_eq!(broker.pending_count().await, 1);
     assert!(!profile_root.join("host_receipts.json").exists());
     first_admin.shutdown_host_admission_replay().await;

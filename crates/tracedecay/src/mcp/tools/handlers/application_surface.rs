@@ -592,6 +592,11 @@ pub(crate) fn graph_tool_error_problem(
     {
         return tracedecay_contracts::ApplicationProblem::from_detail(detail);
     }
+    // A hook's admission authority names its own reason and retry verdict;
+    // they travel as the problem's code and retry directive.
+    if let Some((reason_code, retryable, detail)) = error.hook_runtime_context() {
+        return graph_tool_unavailable(reason_code, retryable, detail);
+    }
     match error {
         TraceDecayError::Config { message } => {
             tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
@@ -937,6 +942,30 @@ mod tests {
                 "graph_tool.failed",
                 "never",
                 json!(["contact_administrator"]),
+            ),
+            (
+                TraceDecayError::hook_runtime_with_status(
+                    "observation_cursor_conflict",
+                    true,
+                    "Claude observation store operation failed",
+                    "backpressured",
+                ),
+                "unavailable",
+                "observation_cursor_conflict",
+                "after_delay",
+                json!(["retry"]),
+            ),
+            (
+                TraceDecayError::hook_runtime_with_status(
+                    "unknown_provider",
+                    false,
+                    "transcript provider is unsupported",
+                    "unknown",
+                ),
+                "unavailable",
+                "unknown_provider",
+                "never",
+                json!([]),
             ),
         ] {
             let problem = tracedecay_contracts::ApplicationProblemEnvelope::new(

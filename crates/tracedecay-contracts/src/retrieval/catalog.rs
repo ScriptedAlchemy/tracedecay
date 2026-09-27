@@ -1,5 +1,6 @@
 use crate::retrieval::admin_cli_surface::{AdminCliResultV1, AdminCliSurfaceRequestV1};
 use crate::retrieval::admin_project_surface::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
+use crate::retrieval::hook_runtime_surface::{HookRuntimeResultV1, HookRuntimeSurfaceRequestV1};
 use crate::retrieval::owner_effect_surface::{
     AdminSyncResultV1, AdminSyncSurfaceRequestV1, DashboardResultV1, DashboardSurfaceRequestV1,
     RunAffectedTestsResultV1, RunAffectedTestsSurfaceRequestV1,
@@ -283,6 +284,7 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     owner_side_effect_spec(ApplicationSurfaceOperation::AdminSync),
     owner_side_effect_spec(ApplicationSurfaceOperation::AdminCli),
     owner_side_effect_spec(ApplicationSurfaceOperation::AdminProject),
+    owner_side_effect_spec(ApplicationSurfaceOperation::HookRuntime),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
     git_context_spec("changelog"),
@@ -391,8 +393,9 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "project_search"
         | "project_context"
         | "admin_sync"
-        | "admin_cli" => &CLI_MCP_PRIMITIVE_SURFACES,
-        "admin_project" => &CLI_MCP_PRIMITIVE_SURFACES,
+        | "admin_cli"
+        | "admin_project"
+        | "hook_runtime" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -647,6 +650,9 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "admin_project" => {
             "Maintain the served project's daemon bookkeeping: its usage counter, registry token accounting, gitignore status, bench report, automatic-fact receipts, and automation scheduler reconcile."
+        }
+        "hook_runtime" => {
+            "Record one agent-host hook's session evidence (a transcript, a hook admission, or a receipt) in the daemon-owned session stores."
         }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
@@ -1213,6 +1219,11 @@ fn primitive_executable_schemas(
         "admin_project",
         AdminProjectSurfaceRequestV1,
         AdminProjectResultV1
+    );
+    add!(
+        "hook_runtime",
+        HookRuntimeSurfaceRequestV1,
+        HookRuntimeResultV1
     );
     Ok(schemas)
 }

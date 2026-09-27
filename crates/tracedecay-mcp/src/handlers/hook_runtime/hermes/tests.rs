@@ -22,20 +22,15 @@ async fn projectless_hermes_receipt_uses_user_profile_without_local_writer() {
         .unwrap();
 
     let result = hermes_receipt(
-        &json!({
-            "action": "hermes_receipt",
-            "event": hermes_turn_completed_event("session-local-writer", "wm-local-1"),
-        }),
+        hermes_turn_completed_event("session-local-writer", "wm-local-1"),
         &profile_root,
-        None,
         required_user_db(&crate::handlers::mcp_session_authorities(&fixture)).unwrap(),
         &broker,
     )
     .await
     .expect("projectless Hermes receipt should commit through the user-profile broker");
 
-    assert_eq!(result["action"], "hermes_receipt");
-    assert_eq!(result["status"], "recorded");
+    assert_eq!(result, HermesReceiptStatusV1::Recorded);
     assert_eq!(broker.pending_count().await, 0);
     let automation_root =
         tracedecay_automation_runtime::automation::runner::user_automation_root(&profile_root);
@@ -75,12 +70,8 @@ async fn projectless_hermes_receipt_is_durable_before_apply_and_replays_after_re
         .host_admission_broker_for_test(HostAdmissionScope::Profile)
         .unwrap();
     let err = hermes_receipt(
-        &json!({
-            "action": "hermes_receipt",
-            "event": hermes_turn_completed_event("session-restart", "wm-restart-1"),
-        }),
+        hermes_turn_completed_event("session-restart", "wm-restart-1"),
         &profile_root,
-        None,
         required_user_db(&crate::handlers::mcp_session_authorities(&fixture)).unwrap(),
         &broker,
     )

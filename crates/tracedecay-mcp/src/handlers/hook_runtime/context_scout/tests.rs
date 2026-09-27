@@ -1,6 +1,5 @@
 use std::sync::Mutex as StdMutex;
 
-use serde_json::json;
 use tracedecay_agent_hosts::agents::context_scout::ContextScoutDurableStoreOutcomeV1;
 use tracedecay_daemon_service::context_scout_lifecycle::AuthorityRegistrationV1;
 use tracedecay_domain::{ObservationSourceRangeV1, ProjectId, ProviderId, SessionId, UtcMicros};
@@ -124,58 +123,20 @@ fn receipt_outcomes_release_claims_and_only_retry_unavailable() {
 }
 
 #[test]
-fn scout_read_actions_are_closed_and_read_only() {
-    assert_eq!(
-        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_recent"),
-        Some(ContextScoutReadSurfaceV1::Recent)
-    );
-    assert_eq!(
-        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_explain"),
-        Some(ContextScoutReadSurfaceV1::Explain)
-    );
-    assert_eq!(
-        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_capability"),
-        Some(ContextScoutReadSurfaceV1::Capability)
-    );
-    assert_eq!(
-        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_budget"),
-        Some(ContextScoutReadSurfaceV1::Budget)
-    );
-    assert_eq!(
-        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_apply"),
-        None
-    );
-}
-
-#[test]
-fn hook_v2_scout_prepare_accepts_no_caller_candidates() {
-    let response = orchestration_response(
-        "hook_v2_scout_prepare",
-        tracedecay_daemon_service::HookOrchestrationAdmissionV1::Unavailable,
-    );
-    assert_eq!(response["status"], "unavailable");
-    assert_eq!(response["reason"], "orchestration_unavailable");
-    assert!(!response.to_string().contains("candidate"));
-    assert!(!response.to_string().contains("control"));
-}
-
-#[test]
 fn hook_v2_native_session_requires_exact_protected_locator() {
     let session_id = "native-session-1";
     let mut envelope = hook_v2_envelope_for_test();
     envelope.protected_session_id =
         tracedecay_agent_hosts::hooks::protected_native_session_id(session_id);
     assert_eq!(
-        hook_v2_native_session_id(&json!({ "native_session_id": session_id }), &envelope)
+        hook_v2_native_session_id(Some(session_id), &envelope)
             .as_ref()
             .map(SessionId::as_str),
         Some(session_id)
     );
 
     envelope.protected_session_id = [9; 32];
-    assert!(
-        hook_v2_native_session_id(&json!({ "native_session_id": session_id }), &envelope).is_none()
-    );
+    assert!(hook_v2_native_session_id(Some(session_id), &envelope).is_none());
 }
 
 #[tokio::test]

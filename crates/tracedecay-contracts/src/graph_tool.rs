@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::InvocationAnalyticsV1;
 use crate::remote::status::RemoteOperationalStatusReadV1;
 use crate::retrieval::{
-    ActiveProjectResultV1, ProjectContextResultV1, ProjectRegistryListingResultV1, RuntimeResultV1,
-    StatusResultV1,
+    ActiveProjectResultV1, HookRuntimeResultV1, ProjectContextResultV1,
+    ProjectRegistryListingResultV1, RuntimeResultV1, StatusResultV1,
 };
 use crate::retrieval::{
     AdminCliResultV1, AdminProjectResultV1, AdminSyncResultV1, AffectedResultV1, AnalyticsResultV1,
@@ -101,6 +101,7 @@ pub enum GraphToolResultV1 {
     AdminSync(AdminSyncResultV1),
     AdminCli(Box<AdminCliResultV1>),
     AdminProject(Box<AdminProjectResultV1>),
+    HookRuntime(HookRuntimeResultV1),
 }
 
 impl GraphToolResultV1 {
@@ -182,6 +183,7 @@ impl GraphToolResultV1 {
             Operation::AdminSync => Self::AdminSync(serde_json::from_value(value)?),
             Operation::AdminCli => Self::AdminCli(serde_json::from_value(value)?),
             Operation::AdminProject => Self::AdminProject(serde_json::from_value(value)?),
+            Operation::HookRuntime => Self::HookRuntime(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -262,6 +264,7 @@ impl GraphToolResultV1 {
             Self::AdminSync(result) => serde_json::to_value(result),
             Self::AdminCli(result) => serde_json::to_value(result),
             Self::AdminProject(result) => serde_json::to_value(result),
+            Self::HookRuntime(result) => serde_json::to_value(result),
         }
     }
 }

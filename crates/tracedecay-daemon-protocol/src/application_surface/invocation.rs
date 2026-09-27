@@ -930,6 +930,7 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::AdminSync
         | ApplicationSurfaceOperation::AdminCli
         | ApplicationSurfaceOperation::AdminProject
+        | ApplicationSurfaceOperation::HookRuntime
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
