@@ -4,6 +4,7 @@ pub(crate) use std::process::Command;
 pub(crate) use std::sync::Arc;
 pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) use std::thread;
+pub(crate) use std::time::{Duration, Instant};
 
 pub(crate) use crate::common::{
     MessageRecordBuilder, create_runtime, fake_codex_bin, get_json, http_agent,
@@ -854,6 +855,15 @@ pub(crate) struct FakeCodexAppServer {
 
 impl FakeCodexAppServer {
     pub(crate) fn new_memory_curator(fact_id: FactId, last_event_id: FactEventId) -> Self {
+        Self::new_memory_curator_answering_after(fact_id, last_event_id, Duration::ZERO)
+    }
+
+    /// A curator backend that holds each turn for `delay` before answering.
+    pub(crate) fn new_memory_curator_answering_after(
+        fact_id: FactId,
+        last_event_id: FactEventId,
+        delay: Duration,
+    ) -> Self {
         let temp = tempdir_or_panic();
         let script_path = temp.path().join("codex.py");
         let bin = fake_codex_bin(temp.path());
@@ -861,6 +871,7 @@ impl FakeCodexAppServer {
 import json
 import os
 import sys
+import time
 
 if len(sys.argv) != 2 or sys.argv[1] != "app-server":
     sys.exit(42)
@@ -880,6 +891,7 @@ for line in sys.stdin:
             "result": {"thread": {"id": "thread-dashboard", "model": "dashboard-fake-model"}}
         }), flush=True)
     elif method == "turn/start":
+        time.sleep(__TURN_DELAY_SECONDS__)
         payload = {
             "ops": [{
                 "op": "normalize_tags",
@@ -911,7 +923,8 @@ for line in sys.stdin:
             "__LAST_EVENT_ID__",
             &serde_json::to_string(last_event_id.as_str())
                 .unwrap_or_else(|error| panic!("encode fake curator event id: {error}")),
-        );
+        )
+        .replace("__TURN_DELAY_SECONDS__", &delay.as_secs_f64().to_string());
         write_file(&script_path, &script);
         install_fake_codex_launcher(&script_path, &bin);
         Self { _temp: temp, bin }

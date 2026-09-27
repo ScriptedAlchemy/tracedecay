@@ -3,7 +3,7 @@
 use serde_json::Value;
 use tracedecay_contracts::RequestId;
 use tracedecay_contracts::retained_surfaces::{
-    AutomationRunResultV1, FactStoreCurateRequestV1, SdkResultSemanticsV1,
+    FactStoreCurateRequestV1, FactStoreCurateResultV1, SdkResultSemanticsV1,
 };
 
 pub(crate) fn response_matches(
@@ -18,7 +18,7 @@ pub(crate) fn response_matches(
     }
     match semantics {
         SdkResultSemanticsV1::SchemaOnly => true,
-        SdkResultSemanticsV1::FactStoreCurateTerminal => {
+        SdkResultSemanticsV1::FactStoreCurateReceipt => {
             let Ok(request_id) = RequestId::new(request_id.to_owned()) else {
                 return false;
             };
@@ -29,7 +29,7 @@ pub(crate) fn response_matches(
             let Ok(admission) = request.automation_request(&request_id) else {
                 return false;
             };
-            serde_json::from_value::<AutomationRunResultV1>(result.clone())
+            serde_json::from_value::<FactStoreCurateResultV1>(result.clone())
                 .is_ok_and(|result| result.matches_admission(&admission))
         }
     }
@@ -38,36 +38,51 @@ pub(crate) fn response_matches(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_contracts::retained_surfaces::SdkResultSemanticsV1;
+    use tracedecay_contracts::RequestId;
+    use tracedecay_contracts::retained_surfaces::{
+        FactStoreCurateRequestV1, FactStoreCurateResultV1, SdkResultSemanticsV1,
+    };
 
     use super::response_matches;
 
     #[test]
-    fn curate_semantics_reject_a_structural_terminal_with_foreign_run_identity() {
-        let terminal = json!({
-            "run_id": "request.foreign",
-            "task": "memory_curator",
-            "request_digest": concat!(
-                "sha256:",
-                "0000000000000000000000000000000000000000000000000000000000000000"
-            ),
-            "terminal": {
-                "status": "completed",
-                "summary": {
-                    "reviewed_count": 0,
-                    "accepted_count": 0,
-                    "rejected_count": 0,
-                    "skipped_count": 0
-                }
-            },
-            "committed_receipts": []
-        });
-        assert!(!response_matches(
-            SdkResultSemanticsV1::FactStoreCurateTerminal,
-            "request.sdk.curate",
-            None,
-            &json!({}),
-            &terminal,
-        ));
+    fn curate_semantics_accept_only_the_receipt_for_the_admitted_run() {
+        let request = json!({ "fact_review_limit": 4 });
+        let admission = serde_json::from_value::<FactStoreCurateRequestV1>(request.clone())
+            .expect("curate request")
+            .automation_request(&RequestId::new("request.sdk.curate").expect("request id"))
+            .expect("admission");
+        let receipt =
+            serde_json::to_value(FactStoreCurateResultV1::started(&admission).expect("receipt"))
+                .expect("receipt json");
+        assert_eq!(receipt["run_id"], "request.sdk.curate");
+        assert_eq!(receipt["task"], "memory_curator");
+        assert_eq!(receipt["state"], "started");
+        let matches = |request_id: &str, result: &serde_json::Value| {
+            response_matches(
+                SdkResultSemanticsV1::FactStoreCurateReceipt,
+                request_id,
+                None,
+                &request,
+                result,
+            )
+        };
+        assert!(matches("request.sdk.curate", &receipt));
+        assert!(!matches("request.sdk.foreign", &receipt));
+
+        let mut terminal = receipt.clone();
+        let object = terminal.as_object_mut().expect("receipt object");
+        object.remove("state");
+        object.insert(
+            "terminal".to_owned(),
+            json!({"status": "completed", "summary": {
+                "reviewed_count": 0, "accepted_count": 0, "rejected_count": 0, "skipped_count": 0
+            }}),
+        );
+        object.insert("committed_receipts".to_owned(), json!([]));
+        assert!(
+            !matches("request.sdk.curate", &terminal),
+            "the run terminal is no longer the curate result"
+        );
     }
 }

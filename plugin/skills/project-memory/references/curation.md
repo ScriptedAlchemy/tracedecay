@@ -5,8 +5,11 @@ Its caller supplies review bounds, not task identity, arbitrary operations,
 validation, policy, or effect authority. The daemon collects evidence, validates,
 and automatically applies supported operations within that run.
 
-Inspect the run and advertised artifacts through supported automation views;
-artifact retrieval verifies its published chain. Terminal status, applied and
+The call returns the run's receipt (`run_id`, `state: started`) as soon as the
+run is admitted; the run then settles on the daemon. Read its terminal with
+`automation_run_view`, which reports an unsettled run as not found, and its
+advertised artifacts through the other automation views; artifact retrieval
+verifies its published chain. Terminal status, applied and
 rejected operations, and read-only fact verification establish the outcome.
 A failed run may contain committed effects: report and reconcile those effects
 before considering another launch. Dashboard launch and observation use this

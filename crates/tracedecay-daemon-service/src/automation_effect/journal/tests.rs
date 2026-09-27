@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunRequestV1, AutomationRunResultV1, AutomationRunSummaryV1,
     AutomationRunTerminalV1, AutomationTaskRequestV1, AutomationTaskV1, MemoryCuratorRunInputV1,
-    RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
-    UserJobRunInputV1, retained_surface_application_operation, retained_surface_execution_problem,
+    RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation, UserJobRunInputV1,
+    retained_surface_application_operation, retained_surface_execution_problem,
 };
 
 use tracedecay_contracts::{
@@ -592,7 +592,7 @@ fn result_terminal(
         .expect("execution"),
         ReconciliationState::Reconciled,
         receipt,
-        Some(RetainedSurfaceResultV1::FactStoreCurate(result)),
+        Some(result),
     )
     .expect("effect result");
     AutomationSettledTerminal::Outcome {

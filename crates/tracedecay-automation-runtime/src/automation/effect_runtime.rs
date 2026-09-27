@@ -35,4 +35,4 @@ pub use settlement::{
     ReusedSchedulerSkipStartError, observe_admission_decision,
     pinned_automation_configuration_digest,
 };
-pub use terminal::{AutomationSettledProblem, AutomationSettledTerminal};
+pub use terminal::{AutomationSettledProblem, AutomationSettledTerminal, curate_receipt_outcome};
