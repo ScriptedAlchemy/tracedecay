@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.57](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.56...v1.0.0-beta.57) (2026-09-27)
+
+
+### Bug Fixes
+
+* **automation:** retire unreferenced refused effect journals ([#2316](https://github.com/ScriptedAlchemy/tracedecay/issues/2316)) ([f0b18b4](https://github.com/ScriptedAlchemy/tracedecay/commit/f0b18b4525b65760999adebf624415fba4d393f4))
+* **cli:** keep the installed version when codesign fails ([87d275d](https://github.com/ScriptedAlchemy/tracedecay/commit/87d275d2481093da94cc8fea71d9a2305b4a7891)), closes [#2231](https://github.com/ScriptedAlchemy/tracedecay/issues/2231)
+* **cli:** type readiness waits and projectless refusals end to end ([#2314](https://github.com/ScriptedAlchemy/tracedecay/issues/2314)) ([95a63d4](https://github.com/ScriptedAlchemy/tracedecay/commit/95a63d4c6c119c1c8db91549d62d97c56d72cd24))
+* **code-index:** wait for a lapsed source proof before refusing reads ([#2318](https://github.com/ScriptedAlchemy/tracedecay/issues/2318)) ([b80c426](https://github.com/ScriptedAlchemy/tracedecay/commit/b80c426c03f5a76673aa65ab5b75276fe863cffa))
+* **config:** key pinned configuration by owning profile ([#2304](https://github.com/ScriptedAlchemy/tracedecay/issues/2304)) ([0477c09](https://github.com/ScriptedAlchemy/tracedecay/commit/0477c097eceb8ea80fb0f5ac1d5dd9c87392616e))
+* **domain:** box project route detail so master clippy passes ([#2315](https://github.com/ScriptedAlchemy/tracedecay/issues/2315)) ([1a0287b](https://github.com/ScriptedAlchemy/tracedecay/commit/1a0287bcfd19b58fc98c706f99f73661297b5e7b)), closes [#2308](https://github.com/ScriptedAlchemy/tracedecay/issues/2308)
+* **hosts:** remove install-created directories on uninstall ([#2309](https://github.com/ScriptedAlchemy/tracedecay/issues/2309)) ([453cd45](https://github.com/ScriptedAlchemy/tracedecay/commit/453cd459fbe27f735b725ce34aa51d5de1fac154))
+* **release:** stop release PRs closing referenced issues ([5ad8106](https://github.com/ScriptedAlchemy/tracedecay/commit/5ad810677f3d5e0126a7160465783e1924b6adc5))
+
 ## [1.0.0-beta.56](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.55...v1.0.0-beta.56) (2026-09-27)
 
 
