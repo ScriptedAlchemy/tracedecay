@@ -307,6 +307,7 @@ impl OperationEventError {
                 )?,
                 retry: RetryDirective::Never,
                 legal_actions: vec![LegalAction::ContactAdministrator],
+                detail: None,
             },
             // Genuinely transient: the resume-token authority could not answer.
             Self::ResumeUnavailable => ApplicationProblem::unavailable(SafeDiagnostic::new(

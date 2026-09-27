@@ -22,10 +22,10 @@ const NEW: &str = "pub fn after() {}";
 const ABSENT_DIGEST: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-const NO_JOURNAL: &str = "project route error (source_edit.execution_failed): config error: no source edit effect requires reconciliation";
-const IDENTITY_MISMATCH: &str = "project route error (source_edit.execution_failed): config error: source edit reconciliation identity does not match the retained effect";
-const COMMITTED_MISMATCH: &str = "project route error (source_edit.execution_failed): config error: source edit committed-state inspection does not match the exact preview";
-const ROLLED_BACK_MISMATCH: &str = "project route error (source_edit.execution_failed): config error: source edit rollback inspection does not match the admitted expected state";
+const NO_JOURNAL: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: no source edit effect requires reconciliation";
+const IDENTITY_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit reconciliation identity does not match the retained effect";
+const COMMITTED_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit committed-state inspection does not match the exact preview";
+const ROLLED_BACK_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit rollback inspection does not match the admitted expected state";
 const CONFIRM_REQUIRED: &str = "config error: source edit reconciliation requires confirm=true from the caller after it inspects the file; do not pause for a human";
 const ATTEMPT_KEY_CONFLICT: &str =
     "config error: reconciliation attempt idempotency key must differ from the original edit key";
@@ -64,6 +64,27 @@ fn refusal(result: Result<ToolResult, TraceDecayError>) -> String {
         Err(error) => error.to_string(),
         Ok(result) => panic!("reconcile must refuse, got {}", extract_text(&result.value)),
     }
+}
+
+/// The daemon's problem record a refused reconcile renders, as
+/// `kind code [legal actions]: message`.
+fn problem_refusal(result: Result<ToolResult, TraceDecayError>) -> String {
+    let result = result.expect("a daemon refusal renders as a tool result");
+    assert_eq!(result.semantic_error(), Some(true), "{}", result.value);
+    let problem = &result.value["problem"];
+    let actions = problem["legal_actions"]
+        .as_array()
+        .expect("legal actions")
+        .iter()
+        .map(|action| action.as_str().expect("legal action"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{} {} [{actions}]: {}",
+        problem["kind"].as_str().expect("problem kind"),
+        problem["code"].as_str().expect("problem code"),
+        problem["message"].as_str().expect("problem message")
+    )
 }
 
 async fn call_reconcile(
@@ -311,7 +332,7 @@ async fn reconcile_refuses_uninspected_and_absent_effects() {
     let mut absent = base;
     absent["confirm"] = Value::Bool(true);
     assert_eq!(
-        refusal(call_reconcile(&opened.fixture, absent).await),
+        problem_refusal(call_reconcile(&opened.fixture, absent).await),
         NO_JOURNAL
     );
     assert_eq!(fs::read(&opened.file).unwrap(), PREIMAGE);
@@ -336,7 +357,7 @@ async fn unpublished_effect_confirms_rolled_back_and_releases_the_file() {
         .to_owned();
 
     assert_eq!(
-        refusal(
+        problem_refusal(
             call_reconcile(
                 &opened.fixture,
                 reconcile_args(
@@ -478,7 +499,7 @@ async fn mismatched_inspection_keeps_bytes_and_confirm_committed_keeps_the_posti
         .to_owned();
 
     assert_eq!(
-        refusal(
+        problem_refusal(
             call_reconcile(
                 &opened.fixture,
                 reconcile_args(
@@ -498,7 +519,7 @@ async fn mismatched_inspection_keeps_bytes_and_confirm_committed_keeps_the_posti
 
     fs::write(&opened.file, POSTIMAGE).unwrap();
     assert_eq!(
-        refusal(
+        problem_refusal(
             call_reconcile(
                 &opened.fixture,
                 reconcile_args(

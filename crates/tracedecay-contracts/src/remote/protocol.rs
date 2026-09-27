@@ -541,6 +541,7 @@ pub fn remote_protocol_problem(
             )?,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
+            detail: None,
         },
         RemoteProtocolFailureV1::InsufficientCapability
         | RemoteProtocolFailureV1::ScopeMismatch => {

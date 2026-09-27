@@ -272,6 +272,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
         let detailed_kind = matches!(
             wire.kind,
             ApplicationProblemKind::Stale
+                | ApplicationProblemKind::Unsupported
                 | ApplicationProblemKind::Unavailable
                 | ApplicationProblemKind::ResetRequired
                 | ApplicationProblemKind::Saturated
@@ -325,6 +326,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                     diagnostic,
                     retry: wire.retry,
                     legal_actions: legal_actions.clone(),
+                    detail: detail.clone().map(Box::new),
                 }
             }
             (ApplicationProblemKind::Unavailable, Some(diagnostic), None) => {

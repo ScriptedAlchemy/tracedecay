@@ -1107,6 +1107,7 @@ fn map_git_port_problem(error: GitIndexTransactionPortError) -> ApplicationProbl
             },
             retry: RetryDirective::AfterRevalidate,
             legal_actions: Vec::new(),
+            detail: None,
         },
         GitIndexTransactionPortError::DaemonUnavailable
         | GitIndexTransactionPortError::RecoveryRequired

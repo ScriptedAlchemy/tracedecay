@@ -195,6 +195,7 @@ pub enum ApplicationProblem {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     Unavailable {
         classification: ApplicationUnavailableClassV1,
@@ -267,6 +268,8 @@ enum ApplicationProblemWire {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     Unavailable {
         classification: ApplicationUnavailableClassV1,
@@ -362,10 +365,12 @@ impl From<ApplicationProblem> for ApplicationProblemWire {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Unsupported {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblem::Unavailable {
                 classification,
@@ -509,10 +514,12 @@ impl ApplicationProblem {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Unsupported {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblemWire::Unavailable {
                 classification,
@@ -866,7 +873,9 @@ impl ApplicationProblem {
     /// A parked code index cannot answer until the operator applies the
     /// park's remedy, so it is never retried and names reconcile. A stale
     /// refresh frontier is revalidated from the committed frontier. A lock
-    /// deadline is capacity: the same request may succeed after a delay.
+    /// deadline is capacity: the same request may succeed after a delay. A
+    /// diagnostics scope no compiler owns is routed to publishing the
+    /// project's own check; a pending producer answers after a delay.
     pub fn from_detail(detail: ApplicationProblemDetailV1) -> Self {
         let diagnostic = SafeDiagnostic {
             code: detail.code().to_owned(),
@@ -898,12 +907,26 @@ impl ApplicationProblem {
                 legal_actions: vec![LegalAction::Reset],
                 detail: Some(Box::new(detail)),
             },
+            ApplicationProblemDetailV1::DiagnosticsUnsupported { .. } => Self::Unsupported {
+                diagnostic,
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::CorrectRequest],
+                detail: Some(Box::new(detail)),
+            },
+            ApplicationProblemDetailV1::DiagnosticsPending { .. } => Self::Unavailable {
+                classification: ApplicationUnavailableClassV1::Authority,
+                diagnostic,
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![LegalAction::Retry],
+                detail: Some(Box::new(detail)),
+            },
         }
     }
 
     pub fn detail(&self) -> Option<&ApplicationProblemDetailV1> {
         match self {
             Self::Stale { detail, .. }
+            | Self::Unsupported { detail, .. }
             | Self::Unavailable { detail, .. }
             | Self::ResetRequired { detail, .. }
             | Self::Saturated { detail, .. } => detail.as_deref(),
@@ -911,7 +934,6 @@ impl ApplicationProblem {
             | Self::NotFoundOrNotAuthorized { .. }
             | Self::Conflict { .. }
             | Self::PartialEffect { .. }
-            | Self::Unsupported { .. }
             | Self::ExecutionFailed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. } => None,

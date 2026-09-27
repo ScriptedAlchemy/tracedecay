@@ -879,6 +879,7 @@ pub(super) fn operation_event_problem(
             },
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::ContactAdministrator],
+            detail: None,
         },
         // Genuinely transient: the resume-token authority could not answer.
         OperationEventError::ResumeUnavailable => ApplicationProblem::unavailable(SafeDiagnostic {

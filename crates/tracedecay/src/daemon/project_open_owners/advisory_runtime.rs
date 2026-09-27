@@ -2060,6 +2060,7 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
                     },
                     retry: RetryDirective::Never,
                     legal_actions: vec![legal_action],
+                    detail: None,
                 };
             if code_index_disabled_for_scope(&self.code_index_schedulers, &self.scope) {
                 return Err(without_generation(

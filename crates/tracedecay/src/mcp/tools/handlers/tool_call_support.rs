@@ -6,15 +6,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 
 use super::support::{registered_project_context, validate_registered_project_selector_aliases};
-use tracedecay_mcp::ToolResult;
-use tracedecay_mcp::handlers::text_tool_result as text_result;
 use tracedecay_mcp::tools::binding::{
     tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
 };
-
-pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
-    text_result(text, Vec::new())
-}
 
 pub(super) fn boxed_send<'a, T, F>(
     future: F,

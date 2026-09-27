@@ -370,11 +370,15 @@ fn dispatch_application_surface_tools_inner<'a>(
                 options.application_cancellation.clone(),
             )
             .await?;
-            return tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                Some(&cg.store_layout().response_handle_root),
-                &args,
-                execution,
-            );
+            let response_handle_root = Some(cg.store_layout().response_handle_root.as_path());
+            return match execution {
+                Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+                    response_handle_root,
+                    &args,
+                    completion,
+                ),
+                Err(refusal) => refusal.render(response_handle_root, &args),
+            };
         }
         if source_edit {
             return edit::source_edit_tool(

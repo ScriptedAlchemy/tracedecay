@@ -15,8 +15,9 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::common::fixture::{
-    TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_MONOREPO_APP_FILE, TypeScriptFixtureCompiler,
-    write_typescript_diagnostics_fixture, write_typescript_monorepo_diagnostics_fixture,
+    TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_FIXTURE_TSC_RELEASE,
+    TYPESCRIPT_MONOREPO_APP_FILE, TypeScriptFixtureCompiler, write_typescript_diagnostics_fixture,
+    write_typescript_monorepo_diagnostics_fixture,
 };
 use crate::common::{
     canonical_existing_path, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
@@ -158,10 +159,31 @@ fn run_surface_tool_from(
     tool: &str,
     args: &str,
 ) -> SurfaceOutcome {
+    run_tool_from(home, working_directory, tool, &["--args", args])
+}
+
+/// [`run_surface_tool_from`] with `--json`, which prints the canonical
+/// envelope.
+fn run_surface_tool_json_from(
+    home: &Path,
+    working_directory: &Path,
+    tool: &str,
+    args: &str,
+) -> SurfaceOutcome {
+    run_tool_from(home, working_directory, tool, &["--args", args, "--json"])
+}
+
+fn run_tool_from(
+    home: &Path,
+    working_directory: &Path,
+    tool: &str,
+    tool_args: &[&str],
+) -> SurfaceOutcome {
     let mut command = tracedecay_command_with_home(home);
     command
         .current_dir(working_directory)
-        .args(["tool", tool, "--args", args])
+        .args(["tool", tool])
+        .args(tool_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -473,6 +495,90 @@ fn tool_diagnostics_names_the_install_command_without_a_compiler() {
             .is_some_and(|message| message.contains("`npm install --save-dev typescript`")),
         "{problem}"
     );
+}
+
+/// `--json` carries the typed facts of a scope no tsconfig owns: the file and
+/// every location the owner search checked.
+#[test]
+fn tool_diagnostics_json_carries_the_unowned_scope_detail() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let outcome = run_surface_tool_json_from(
+        &home_path,
+        &project_path,
+        "diagnostics",
+        r#"{"scope":"file","path":"src/lib.rs"}"#,
+    );
+    assert!(!outcome.success, "stdout:\n{}", outcome.stdout);
+    let problem = &outcome.payload()["problem"];
+    assert_eq!(
+        (&problem["code"], &problem["detail"]),
+        (
+            &serde_json::json!("application.diagnostics.unsupported"),
+            &serde_json::json!({
+                "kind": "diagnostics_unsupported",
+                "file": "src/lib.rs",
+                "searched": [
+                    {"path": "src/tsconfig.json", "present": false},
+                    {"path": "tsconfig.json", "present": false},
+                ],
+            }),
+        ),
+        "stdout:\n{}\nstderr:\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+/// While the project's own compiler is still running, `--json` carries the
+/// pending producer and that it has published no generation yet.
+#[test]
+fn tool_diagnostics_json_carries_the_pending_producer_detail() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Held);
+    });
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let started = Instant::now();
+    let pending = loop {
+        let outcome = run_surface_tool_json_from(
+            &home_path,
+            &project_path,
+            "diagnostics",
+            r#"{"scope":"file","path":"src/index.ts"}"#,
+        );
+        match outcome.problem_code().as_deref() {
+            Some("application.diagnostics.pending") => break outcome.payload(),
+            Some("application.diagnostics.stale") => {
+                assert!(
+                    started.elapsed() < SURFACE_TIMEOUT,
+                    "the read never reached the pending producer\nstdout:\n{}",
+                    outcome.stdout
+                );
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            code => panic!(
+                "a held producer can only be stale or pending, got {code:?}\nstdout:\n{}\nstderr:\n{}",
+                outcome.stdout, outcome.stderr
+            ),
+        }
+    };
+    assert_eq!(
+        pending["problem"]["detail"],
+        serde_json::json!({
+            "kind": "diagnostics_pending",
+            "producer": "node_modules/.bin/tsc",
+            "generation": null,
+        }),
+        "{pending}"
+    );
+    std::fs::write(project_path.join(TYPESCRIPT_FIXTURE_TSC_RELEASE), "")
+        .expect("release the held compiler");
 }
 
 const MONOREPO_APP_FILE_ARGS: &str =
