@@ -51,7 +51,6 @@ pub enum McpToolDispatchGroup {
     Admin,
     Git,
     Health,
-    SessionWorkflow,
     Work,
     Workflow,
 }
@@ -86,8 +85,7 @@ pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
             | McpToolDispatchGroup::Git
             | McpToolDispatchGroup::Health
             | McpToolDispatchGroup::MultiRoot
-            | McpToolDispatchGroup::ApplicationSurface
-            | McpToolDispatchGroup::SessionWorkflow,
+            | McpToolDispatchGroup::ApplicationSurface,
         ) => BranchSensitivity::Sensitive,
         Some(McpToolDispatchGroup::Work | McpToolDispatchGroup::Workflow) => {
             BranchSensitivity::Independent
@@ -296,6 +294,8 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::Config
         | ApplicationSurfaceOperation::Retrieve
         | ApplicationSurfaceOperation::Search
+        | ApplicationSurfaceOperation::RunAffectedTests
+        | ApplicationSurfaceOperation::Dashboard
         | HealthRead
         | HealthDelta
         | DiagnosticsRead
@@ -362,8 +362,6 @@ const BINDING_GROUPS: &[BindingGroup] = binding_groups![
     [Some(McpToolDispatchGroup::MultiRoot), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_multi_root_scope_set_read", "tracedecay_multi_root_scope_set_compare_and_swap",
         "tracedecay_multi_root_execute"],
-    [Some(McpToolDispatchGroup::SessionWorkflow), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_run_affected_tests", "tracedecay_dashboard"],
     [None, RegisteredProjectAccess::SelectorOnly, "tracedecay_fact_feedback"],
     [None, RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_lcm_describe", "tracedecay_lcm_doctor", "tracedecay_lcm_expand", "tracedecay_lcm_expand_query",
@@ -506,7 +504,6 @@ pub(super) fn tool_is_selector_bound_effect(tool_name: &str) -> bool {
 fn direct_effect(tool_name: &str) -> EffectClass {
     match tool_name {
         "tracedecay_multi_root_scope_set_compare_and_swap"
-        | "tracedecay_dashboard"
         | "tracedecay_fact_store_curate"
         | "tracedecay_fact_store_add"
         | "tracedecay_fact_store_update"
@@ -514,8 +511,7 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_fact_store_supersede"
         | "tracedecay_fact_feedback"
         | "tracedecay_session_refresh_begin"
-        | "tracedecay_session_refresh_cancel"
-        | "tracedecay_run_affected_tests" => EffectClass::Administrative,
+        | "tracedecay_session_refresh_cancel" => EffectClass::Administrative,
         _ => EffectClass::Read,
     }
 }
@@ -760,10 +756,7 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
             })
         || multi_root_operation_for_tool(tool_name).is_some()
         || compute_tool_dispatches_source_edit_effect(tool_name)
-        || matches!(
-            tool_name,
-            "tracedecay_admin_cli" | "tracedecay_search" | "tracedecay_run_affected_tests"
-        )
+        || matches!(tool_name, "tracedecay_admin_cli" | "tracedecay_search")
 }
 
 pub fn tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
@@ -790,8 +783,7 @@ fn compute_tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
 fn verified_effect_journey(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "tracedecay_dashboard"
-            | "tracedecay_fact_store_curate"
+        "tracedecay_fact_store_curate"
             | "tracedecay_fact_store_add"
             | "tracedecay_fact_store_update"
             | "tracedecay_fact_store_remove"
@@ -799,7 +791,6 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_fact_feedback"
             | "tracedecay_session_refresh_begin"
             | "tracedecay_session_refresh_cancel"
-            | "tracedecay_run_affected_tests"
             | "tracedecay_configuration_set"
             | "tracedecay_configuration_unset"
             | "tracedecay_configuration_batch"
@@ -899,9 +890,6 @@ fn cancellation_for_tool(
             CancellationPoint::EffectInFlight,
         ],
         _ if tool_name == "tracedecay_search" => vec![CancellationPoint::DuringRead],
-        _ if tool_name == "tracedecay_run_affected_tests" => {
-            vec![CancellationPoint::EffectInFlight]
-        }
         _ => return Ok(CancellationContract::NotCancellable),
     };
     CancellationContract::cooperative(points)
@@ -1167,24 +1155,6 @@ mod tests {
             let claimed = ApplicationSurfaceOperation::from_tool_name(entry.name).is_some()
                 || RetainedSurfaceOperation::from_tool_name(entry.name).is_some();
             assert!(claimed, "{} has no group and no surface owner", entry.name);
-        }
-    }
-
-    /// The retained-surface predicate used to sit between the health and
-    /// session-workflow arms of an ordered match, so retained tools won over
-    /// that group. A flat lookup only preserves that if no session-workflow
-    /// tool is also a retained operation.
-    #[test]
-    fn session_workflow_tools_are_not_retained_operations() {
-        for entry in MCP_TOOL_BINDINGS
-            .iter()
-            .filter(|entry| entry.group == Some(McpToolDispatchGroup::SessionWorkflow))
-        {
-            assert!(
-                RetainedSurfaceOperation::from_tool_name(entry.name).is_none(),
-                "{} would change groups under a flat lookup",
-                entry.name
-            );
         }
     }
 

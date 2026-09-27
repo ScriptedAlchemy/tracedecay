@@ -1,33 +1,30 @@
 //! Validation for the bounded `tracedecay_run_affected_tests` request.
 
-use serde_json::{Value, json};
-
-use crate::ToolResult;
-use crate::tools::render;
+use tracedecay_contracts::retrieval::{
+    AffectedTestErrorV1, AffectedTestsNotRunV1, RunAffectedTestsSurfaceRequestV1, TestProfileV1,
+};
 
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_MAX_TESTS: u64 = 100;
 /// Maximum exact test identities admitted to one managed foreground request.
 pub const MAX_TESTS_HARD_CAP: usize = 500;
 /// Managed test runs are foreground tool effects. A caller cannot turn one
 /// into an unbounded daemon job by selecting an arbitrarily distant deadline.
 pub const MAX_TEST_TIMEOUT_SECS: u64 = DEFAULT_TEST_TIMEOUT_SECS;
 
-fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> Box<ToolResult> {
-    let value = json!({
-        "passed": 0,
-        "failed": 0,
-        "results": [],
-        "error": {
-            "kind": kind,
-            "operation": operation,
-            "message": message,
-        }
-    });
-    let text = render::finalize(None, args, &value, || render::generic_md(&value));
-    Box::new(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        Vec::new(),
-    ))
+/// A run refused before any test was selected.
+pub(crate) fn refused_run(kind: &str, operation: &str, message: &str) -> AffectedTestsNotRunV1 {
+    AffectedTestsNotRunV1 {
+        passed: 0,
+        failed: 0,
+        results: Vec::new(),
+        note: None,
+        error: Some(AffectedTestErrorV1 {
+            kind: kind.to_owned(),
+            operation: operation.to_owned(),
+            message: message.to_owned(),
+        }),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,114 +33,65 @@ pub enum TestProfile {
     Release,
 }
 
-impl TestProfile {
-    fn parse(args: &Value) -> std::result::Result<Self, Box<ToolResult>> {
-        match args.get("profile") {
-            None => Ok(Self::Debug),
-            Some(Value::String(profile)) if profile == "debug" => Ok(Self::Debug),
-            Some(Value::String(profile)) if profile == "release" => Ok(Self::Release),
-            Some(_) => Err(error_result(
-                args,
-                "invalid_request",
-                "profile",
-                "`profile` must be `debug` or `release`",
-            )),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct RunAffectedArgs {
-    pub explicit_paths: Option<Vec<String>>,
+    pub changed_paths: Vec<String>,
     pub profile: TestProfile,
     pub timeout_secs: u64,
     pub max_tests: usize,
 }
 
 impl RunAffectedArgs {
+    /// Applies the managed-run bounds to a decoded request. A bound violation
+    /// is an in-band refusal, reported before any test is selected.
     #[hotpath::measure(label = "mcp.workflow.affected_tests.request_build")]
-    pub fn parse(args: &Value) -> std::result::Result<Self, Box<ToolResult>> {
-        let explicit_paths = match args.get("changed_paths") {
-            Some(Value::Array(paths)) => {
-                let mut parsed = Vec::with_capacity(paths.len());
-                for path in paths {
-                    let Some(path) = path.as_str() else {
-                        return Err(error_result(
-                            args,
-                            "invalid_request",
-                            "changed_paths",
-                            "`changed_paths` must contain only project-relative string paths",
-                        ));
-                    };
-                    parsed.push(path.to_owned());
-                }
-                Some(parsed)
-            }
-            Some(_) => {
-                return Err(error_result(
-                    args,
-                    "invalid_request",
-                    "changed_paths",
-                    "`changed_paths` must be an array of project-relative string paths",
-                ));
-            }
-            None => None,
-        };
-        let profile = TestProfile::parse(args)?;
-        let timeout_secs = bounded_positive_u64(
-            args,
+    pub fn from_request(
+        request: RunAffectedTestsSurfaceRequestV1,
+    ) -> std::result::Result<Self, Box<AffectedTestsNotRunV1>> {
+        let timeout_secs = bounded_positive(
+            request.timeout_secs,
             "timeout_secs",
             DEFAULT_TEST_TIMEOUT_SECS,
             MAX_TEST_TIMEOUT_SECS,
         )?;
-        let max_tests = usize::try_from(bounded_positive_u64(
-            args,
+        let max_tests = usize::try_from(bounded_positive(
+            request.max_tests,
             "max_tests",
-            100,
+            DEFAULT_MAX_TESTS,
             MAX_TESTS_HARD_CAP as u64,
         )?)
         .map_err(|_| {
-            error_result(
-                args,
+            Box::new(refused_run(
                 "invalid_request",
                 "max_tests",
                 "`max_tests` cannot be represented on this platform",
-            )
+            ))
         })?;
-
         Ok(Self {
-            explicit_paths,
-            profile,
+            changed_paths: request.changed_paths,
+            profile: match request.profile.unwrap_or_default() {
+                TestProfileV1::Debug => TestProfile::Debug,
+                TestProfileV1::Release => TestProfile::Release,
+            },
             timeout_secs,
             max_tests,
         })
     }
 }
 
-fn bounded_positive_u64(
-    args: &Value,
+fn bounded_positive(
+    value: Option<u64>,
     field: &str,
     default: u64,
     maximum: u64,
-) -> std::result::Result<u64, Box<ToolResult>> {
-    let Some(value) = args.get(field) else {
-        return Ok(default);
-    };
-    let Some(value) = value.as_u64() else {
-        return Err(error_result(
-            args,
-            "invalid_request",
-            field,
-            &format!("`{field}` must be an integer from 1 through {maximum}"),
-        ));
-    };
+) -> std::result::Result<u64, Box<AffectedTestsNotRunV1>> {
+    let value = value.unwrap_or(default);
     if !(1..=maximum).contains(&value) {
-        return Err(error_result(
-            args,
+        return Err(Box::new(refused_run(
             "invalid_request",
             field,
             &format!("`{field}` must be an integer from 1 through {maximum}"),
-        ));
+        )));
     }
     Ok(value)
 }

@@ -10,6 +10,7 @@ mod git_topology_anchor;
 mod graph_lookup_surface;
 mod graph_report_surface;
 pub mod grep_analysis;
+mod owner_effect_surface;
 mod ports;
 mod primitive_surface;
 mod project_file_surface;
@@ -173,6 +174,12 @@ pub use graph_report_surface::{
     TestRiskResultV1, TestRiskSummaryV1, TestRiskSurfaceRequestV1,
 };
 pub use grep_analysis::{DependencyDepthChainV1, DependencyDepthResultV1};
+pub use owner_effect_surface::{
+    AffectedTestErrorV1, AffectedTestOutcomeV1, AffectedTestRunV1, AffectedTestsNotRunV1,
+    DashboardActionV1, DashboardBoundV1, DashboardResultV1, DashboardSurfaceRequestV1,
+    ManagedTestTerminalV1, RunAffectedTestsResultV1, RunAffectedTestsSurfaceRequestV1,
+    TestProfileV1,
+};
 pub use ports::{
     AffectedTestsRetrievalPort, OperationalRetrievalPort, RetrievalPortContext,
     RetrievalPortOutcome, SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,

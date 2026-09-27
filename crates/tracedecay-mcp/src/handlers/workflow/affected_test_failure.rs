@@ -1,6 +1,7 @@
 //! Typed terminal results for failed managed affected-test executions.
 
-use serde_json::{Value, json};
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{AffectedTestErrorV1, RunAffectedTestsResultV1};
 use tracedecay_contracts::{Deadline, OperationTermination};
 use tracedecay_domain::UtcMicros;
 
@@ -11,7 +12,8 @@ use super::{
     TestTarget, emit_observed_test_results, finish_test_run, managed_test_terminal,
     parse_libtest_output, run_affected_tests_body,
 };
-use crate::{TestRunFailure, TestRunOutput, ToolResult};
+use crate::handlers::graph::graph_tool_completion;
+use crate::{TestRunFailure, TestRunOutput};
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.failure")]
 #[allow(
@@ -27,7 +29,6 @@ use crate::{TestRunFailure, TestRunOutput, ToolResult};
 )]
 pub(super) async fn terminal_failure(
     emitter: &OperationEmitter,
-    args: &Value,
     started_at: UtcMicros,
     effective_deadline: &Deadline,
     timeout_secs: u64,
@@ -35,7 +36,7 @@ pub(super) async fn terminal_failure(
     test_names: &[String],
     truncated: bool,
     selected_targets: &[TestTarget],
-) -> Result<ToolResult> {
+) -> Result<GraphToolCompletionV1> {
     let mut partial = failure.partial_output().cloned();
     let failure_exit_code = match &failure {
         TestRunFailure::Harness { exit_code, .. } => *exit_code,
@@ -135,26 +136,24 @@ pub(super) async fn terminal_failure(
         stderr: String::new(),
         output_bytes,
     });
-    let body = hotpath::measure_block!("mcp.workflow.affected_tests.assemble", {
-        let mut body = run_affected_tests_body(
+    let run = hotpath::measure_block!("mcp.workflow.affected_tests.assemble", {
+        let mut run = run_affected_tests_body(
             &partial,
             &results,
             test_names,
             truncated,
             selected_targets,
-            &managed_test_terminal(emitter, &receipt),
+            managed_test_terminal(emitter, receipt),
         );
-        body["error"] = json!({
-            "kind": kind,
-            "operation": operation,
-            "message": message,
+        run.error = Some(AffectedTestErrorV1 {
+            kind: kind.to_owned(),
+            operation: operation.to_owned(),
+            message,
         });
-        body
+        run
     });
-    Ok(crate::handlers::generic_tool_result(
-        None,
-        args,
-        &body,
-        vec![],
+    Ok(graph_tool_completion(
+        GraphToolResultV1::RunAffectedTests(RunAffectedTestsResultV1::Ran(Box::new(run))),
+        Vec::new(),
     ))
 }

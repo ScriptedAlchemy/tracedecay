@@ -149,29 +149,12 @@ pub(super) fn def_runtime() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_dashboard() -> ToolDefinition {
+pub(super) fn def_dashboard(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_dashboard",
         "Dashboard",
         "Start (or manage) the tracedecay dashboard server for the current project as a background task inside the MCP server. Returns the listening URL. Idempotent: if already running, returns the existing URL. Pass action:\"stop\" to shut down a running instance. MCP dashboard binds are loopback-only: optional host must be 127.0.0.1, localhost, or ::1. Port is optional.",
-        json!({
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["start", "stop"],
-                    "description": "Action to perform (default: \"start\"). \"stop\" shuts down a previously started dashboard if any."
-                },
-                "host": {
-                    "type": "string",
-                    "description": "Loopback host address to bind: 127.0.0.1, localhost, or ::1 (default: \"127.0.0.1\"). Wildcard, LAN, public IPs, and other hostnames are rejected."
-                },
-                "port": {
-                    "type": "number",
-                    "description": "Port to listen on; 0 picks an ephemeral port (default: 7341)"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 

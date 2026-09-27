@@ -69,6 +69,35 @@ impl McpServer {
             code_index_ignored_dependency_admission: self
                 .code_index_ignored_dependency_admission
                 .clone(),
+            // The dashboard the owner binds composes these daemon-owned
+            // readers, writers, and session authorities.
+            registered_profile_session_db: self.profile_session_db.clone(),
+            registered_savings_db: self.accounting_db.clone(),
+            dashboard_session_retrieval_service: self
+                .project_application_retrieval
+                .as_ref()
+                .map(|mounted| Arc::clone(&mounted.service)),
+            dashboard_session_retrieval_identity: self
+                .project_application_retrieval
+                .as_ref()
+                .map(|mounted| mounted.identity.clone()),
+            daemon_user_profile_id: self
+                .profile_identity
+                .as_ref()
+                .map(|identity| identity.profile_id().clone()),
+            automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
+            automation_writer: self.dashboard_automation_writer.clone(),
+            doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
+            remote_operational_status: self.remote_operational_status.clone(),
+            feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
+            pr_autotrack_reader: self.dashboard_pr_autotrack_reader.clone(),
+            diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
+            dashboard_application_invocation_executor: self.application_invocation_executor.clone(),
+            daemon_invocation_service: self.daemon_invocation_service.as_ref(),
+            dashboard_delivery_settlement_authority: self.delivery_settlement_authority.clone(),
+            code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
+            code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
+            retained_project_server_resolver: self.retained_project_server_resolver.clone(),
             ..ToolCallRegistryOptions::default()
         };
         compute_graph_tool_for_owner(

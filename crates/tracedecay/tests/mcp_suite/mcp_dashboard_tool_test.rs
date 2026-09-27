@@ -1,90 +1,73 @@
-//! Tests for the new `tracedecay_dashboard` MCP tool (via direct handler dispatch).
-//! Follows conventions from mcp_handler_test.rs: real TraceDecay + handle_tool_call,
-//! plus live HTTP probe of /api/capabilities on the returned URL.
+//! `tracedecay_dashboard` through the production MCP server and the project's
+//! graph-tool owner, plus a live HTTP probe of /api/capabilities on the
+//! returned URL.
 
-use std::fs;
-#[cfg(feature = "test-transport")]
+#![cfg(feature = "test-transport")]
+
 use std::time::Duration;
 
-#[cfg(feature = "test-transport")]
-use crate::common::http_agent;
-#[cfg(feature = "test-transport")]
-use serde_json::Value;
-use serde_json::json;
-use tempfile::TempDir;
-use tracedecay::mcp::handle_tool_call;
-use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use serde_json::{Value, json};
 
-use crate::common::canonical_existing_path;
-use crate::support::extract_text;
-#[cfg(feature = "test-transport")]
-use crate::support::{handle_real_server_tool_call, production_composition_fixture};
+use crate::common::http_agent;
+use crate::support::{extract_text, handle_real_server_tool_call, production_composition_fixture};
 
 /// The dashboard manager is process-global (one dashboard per MCP server
 /// process), so these tests must not run concurrently: serialize them.
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn setup_minimal_project() -> (TraceDecay, TempDir, TempDir) {
-    let home = TempDir::new().unwrap();
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    let profile_root = canonical_existing_path(home.path()).join(".tracedecay");
-    let open_options = TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
-    };
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/main.rs"),
-        r#"
-fn main() { println!("hi"); }
-#[test] fn t() {}
-"#,
-    )
-    .unwrap();
-    let cg = crate::fixture::init_project_from_template_with_options(project, open_options)
+async fn dashboard_refusal(
+    fixture: &crate::support::ProductionCompositionFixture,
+    mut arguments: Value,
+) -> String {
+    arguments["format"] = json!("json");
+    let response = fixture
+        .harness
+        .call_tool(&fixture.project_root, "tracedecay_dashboard", arguments)
         .await
-        .unwrap();
-    (cg, dir, home)
+        .expect("production dashboard invocation");
+    let result = serde_json::to_value(response.result.expect("refusal result")).unwrap();
+    assert_eq!(result["isError"], json!(true), "{result}");
+    let envelope: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().expect("refusal text"))
+            .expect("problem envelope JSON");
+    envelope["problem"]["message"]
+        .as_str()
+        .expect("problem message")
+        .to_owned()
 }
 
 // Multi-thread runtime: the blocking ureq probe must not starve the spawned
 // axum server task (same reason dashboard_api_test.rs builds a 2-worker runtime).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tracedecay_dashboard_tool_rejects_wildcard_host_without_starting() {
+async fn tracedecay_dashboard_tool_refuses_without_starting() {
     let _guard = TEST_LOCK.lock().await;
-    let (cg, _tmp, _home) = setup_minimal_project().await;
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
 
-    let err = match handle_tool_call(
-        &cg,
-        "tracedecay_dashboard",
-        json!({ "host": "0.0.0.0", "port": 0 }),
-        None,
-        None,
-    )
-    .await
-    {
-        Ok(_) => panic!("wildcard host should be rejected"),
-        Err(err) => err,
-    };
+    let wildcard = dashboard_refusal(&fixture, json!({ "host": "0.0.0.0", "port": 0 })).await;
     assert!(
-        err.to_string().contains("loopback-only"),
-        "unexpected error: {err}"
+        wildcard.contains("loopback-only"),
+        "unexpected error: {wildcard}"
+    );
+    assert_eq!(
+        dashboard_refusal(&fixture, json!({ "bind": "127.0.0.1", "port": 0 })).await,
+        "invalid arguments for tracedecay_dashboard: unknown field `bind`, expected one of `action`, `host`, `port`"
+    );
+    assert_eq!(
+        dashboard_refusal(&fixture, json!({ "port": 70000 })).await,
+        "invalid arguments for tracedecay_dashboard: invalid value: integer `70000`, expected u16"
     );
 
-    let stop_res = handle_tool_call(
-        &cg,
-        "tracedecay_dashboard",
-        json!({ "action": "stop" }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(extract_text(&stop_res.value).contains("not_running"));
+    let stop_res =
+        handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({ "action": "stop" }))
+            .await;
+    assert_eq!(extract_text(&stop_res), r#"{"status":"not_running"}"#);
+    fixture.harness.shutdown().await;
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilities() {
     let _guard = TEST_LOCK.lock().await;
@@ -111,12 +94,16 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
         .expect("text result");
 
     let payload: Value = serde_json::from_str(content_text).expect("dashboard payload");
-    assert!(
-        matches!(
-            payload["status"].as_str(),
-            Some("started" | "already_running")
-        ),
-        "expected started or already: {payload}",
+    let port = payload["port"].as_u64().expect("bound port");
+    assert_ne!(port, 0, "an ephemeral request reports the port it bound");
+    assert_eq!(
+        payload,
+        json!({
+            "status": "started",
+            "url": format!("http://127.0.0.1:{port}/"),
+            "host": "127.0.0.1",
+            "port": port,
+        })
     );
     let url = payload["url"].as_str().expect("dashboard url");
     let url = if url.ends_with('/') {
@@ -155,7 +142,6 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
     );
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
     let _guard = TEST_LOCK.lock().await;
@@ -201,7 +187,6 @@ async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
     fixture.harness.shutdown().await;
 }
 
-#[cfg(feature = "test-transport")]
 fn extract_url(text: &str) -> String {
     if let Some(start) = text.find("http://") {
         let rest = &text[start..];

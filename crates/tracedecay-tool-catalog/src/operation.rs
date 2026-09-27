@@ -217,6 +217,8 @@ application_surface_operations! {
     HermesSkillBridge => "hermes_skill_bridge";
     Analytics => "analytics";
     Search => "search";
+    RunAffectedTests => "run_affected_tests";
+    Dashboard => "dashboard";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -344,6 +346,8 @@ impl ApplicationSurfaceOperation {
         Self::HermesSkillBridge,
         Self::Analytics,
         Self::Search,
+        Self::RunAffectedTests,
+        Self::Dashboard,
     ];
 
     pub fn is_graph_tool(self) -> bool {

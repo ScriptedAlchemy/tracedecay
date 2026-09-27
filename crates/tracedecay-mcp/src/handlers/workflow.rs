@@ -10,11 +10,15 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::intake::content_digest;
 use tracedecay_contracts::clock::now_micros;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
+    AffectedTestOutcomeV1, AffectedTestRunV1, AffectedTestsNotRunV1, ManagedTestTerminalV1,
+    RunAffectedTestsResultV1, RunAffectedTestsSurfaceRequestV1,
+};
 use tracedecay_contracts::retrieval::{
     DiagnoseItemV1, DiagnosePublicationV1, DiagnoseResultV1, DiagnoseSeverityFilterV1,
     DiagnoseSeverityV1, DiagnoseSurfaceRequestV1, DiagnoseSymbolV1,
@@ -38,13 +42,13 @@ use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_r
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_project::project::TraceDecay;
 
-use crate::ToolResult;
 use crate::handlers::graph::graph_tool_completion;
 use crate::handlers::support::decode_primitive_request;
-use crate::handlers::{generic_tool_result, unique_file_paths};
+use crate::handlers::unique_file_paths;
 
 mod affected_test_failure;
 
+use crate::workflow::refused_run;
 #[cfg(test)]
 use crate::{MAX_TEST_TIMEOUT_SECS, cargo_test_args};
 use crate::{
@@ -436,17 +440,21 @@ fn severity_wire(s: Severity) -> DiagnoseSeverityV1 {
     }
 }
 
-/// Handles `tracedecay_run_affected_tests`.
-pub async fn handle_run_affected_tests<F>(
+/// Computes `tracedecay_run_affected_tests` on the graph-tool owner's side:
+/// selects the tests covering the changed-path manifest, runs them once each,
+/// and reports every observed outcome.
+pub async fn compute_run_affected_tests<F>(
     cg: &TraceDecay,
     graph: F,
     args: Value,
     cancellation: Option<CancellationSignal>,
-) -> Result<ToolResult>
+) -> Result<GraphToolCompletionV1>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
-    handle_run_affected_tests_with_runner(cg, graph, args, cancellation, run_cargo_tests).await
+    let request: RunAffectedTestsSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_run_affected_tests")?;
+    run_affected_tests_with_runner(cg, graph, request, cancellation, run_cargo_tests).await
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.total")]
@@ -457,34 +465,28 @@ where
         reason = "Affected-test run is one select-and-execute through the injected runner."
     )
 )]
-async fn handle_run_affected_tests_with_runner<F, Runner, RunFuture>(
+async fn run_affected_tests_with_runner<F, Runner, RunFuture>(
     cg: &TraceDecay,
     graph: F,
-    args: Value,
+    request: RunAffectedTestsSurfaceRequestV1,
     cancellation: Option<CancellationSignal>,
     runner: Runner,
-) -> Result<ToolResult>
+) -> Result<GraphToolCompletionV1>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
     Runner: FnOnce(PathBuf, TestProfile, Vec<String>, Duration, TestRunControl) -> RunFuture,
     RunFuture: Future<Output = std::result::Result<TestRunOutput, TestRunFailure>>,
 {
-    let run_args = match RunAffectedArgs::parse(&args) {
+    // The caller's manifest is the authority for the affected-test scope.
+    // Graph admission stays unawaited until that scope is validated.
+    let run_args = match RunAffectedArgs::from_request(request) {
         Ok(run_args) => run_args,
-        Err(result) => return Ok(*result),
+        Err(refused) => return Ok(not_run(*refused)),
     };
     let project_root = cg.project_root().to_path_buf();
-
-    // The caller's manifest is the authority for the affected-test scope.
-    // Graph admission stays unawaited until that scope is validated: a request
-    // without manifest-scoped changed paths is an invalid request regardless
-    // of whether the graph projection is mounted.
-    let changed_paths = match resolve_changed_paths(&args, run_args.explicit_paths) {
-        Ok(paths) => paths,
-        Err(result) => return Ok(*result),
-    };
+    let changed_paths = run_args.changed_paths;
     if changed_paths.is_empty() {
-        return Ok(empty_result(&args, "no changed files detected"));
+        return Ok(not_run(empty_result("no changed files detected")));
     }
 
     let graph =
@@ -495,25 +497,21 @@ where
     )?;
 
     if test_targets.is_empty() {
-        return Ok(empty_result(
-            &args,
-            &format!(
-                "no tests cover the changed paths ({} file(s))",
-                changed_paths.len()
-            ),
-        ));
+        return Ok(not_run(empty_result(&format!(
+            "no tests cover the changed paths ({} file(s))",
+            changed_paths.len()
+        ))));
     }
 
     let (selected_targets, test_names, truncated) =
         select_test_targets(test_targets, run_args.max_tests);
     for test_name in &test_names {
         if let Err(message) = validate_test_identity(test_name) {
-            return Ok(error_result(
-                &args,
+            return Ok(not_run(refused_run(
                 "invalid_test_identity",
                 "test_identity",
                 &message,
-            ));
+            )));
         }
     }
     let started_at = now_micros();
@@ -559,7 +557,6 @@ where
         Err(failure) => {
             return affected_test_failure::terminal_failure(
                 &emitter,
-                &args,
                 started_at,
                 &effective_deadline,
                 run_args.timeout_secs,
@@ -595,7 +592,6 @@ where
         };
         return affected_test_failure::terminal_failure(
             &emitter,
-            &args,
             started_at,
             &effective_deadline,
             run_args.timeout_secs,
@@ -617,7 +613,7 @@ where
     .await?;
 
     let touched_files: Vec<String> = unique_file_paths(changed_paths.iter().map(String::as_str));
-    let body = hotpath::measure_block!(
+    let run = hotpath::measure_block!(
         "mcp.workflow.affected_tests.assemble",
         run_affected_tests_body(
             &output,
@@ -625,16 +621,20 @@ where
             &test_names,
             truncated,
             &selected_targets,
-            &managed_test_terminal(&emitter, &receipt)
+            managed_test_terminal(&emitter, receipt)
         )
     );
-
-    Ok(generic_tool_result(
-        Some(&cg.store_layout().response_handle_root),
-        &args,
-        &body,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::RunAffectedTests(RunAffectedTestsResultV1::Ran(Box::new(run))),
         touched_files,
     ))
+}
+
+fn not_run(not_run: AffectedTestsNotRunV1) -> GraphToolCompletionV1 {
+    graph_tool_completion(
+        GraphToolResultV1::RunAffectedTests(RunAffectedTestsResultV1::NotRun(not_run)),
+        Vec::new(),
+    )
 }
 
 async fn wait_for_test_run_cancellation(
@@ -825,21 +825,6 @@ fn test_run_event_error(error: &OperationEventError) -> TraceDecayError {
 fn test_run_contract_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("managed test-run contract failed: {error}"),
-    }
-}
-
-fn resolve_changed_paths(
-    args: &Value,
-    explicit_paths: Option<Vec<String>>,
-) -> std::result::Result<Vec<String>, Box<ToolResult>> {
-    match explicit_paths {
-        Some(paths) => Ok(paths),
-        None => Err(Box::new(error_result(
-            args,
-            "invalid_request",
-            "changed_paths",
-            "`changed_paths` is required and must explicitly scope the affected-test run",
-        ))),
     }
 }
 
@@ -1074,40 +1059,40 @@ fn run_affected_tests_body(
     test_names: &[String],
     truncated: bool,
     selected_targets: &[TestTarget],
-    terminal: &Value,
-) -> Value {
+    terminal: ManagedTestTerminalV1,
+) -> AffectedTestRunV1 {
     let passed = results.iter().filter(|(_, ok)| *ok).count();
-    let failed = results.iter().filter(|(_, ok)| !*ok).count();
-
-    json!({
-        "exit_code": output.exit_code,
-        "passed": passed,
-        "failed": failed,
-        "total_observed": results.len(),
-        "dispatched_tests": test_names,
-        "truncated": truncated,
-        "results": results
+    AffectedTestRunV1 {
+        exit_code: output.exit_code,
+        passed: passed as u64,
+        failed: (results.len() - passed) as u64,
+        total_observed: results.len() as u64,
+        dispatched_tests: test_names.to_vec(),
+        truncated,
+        results: results
             .iter()
-            .map(|(name, ok)| {
-                json!({
-                    "test": name,
-                    "passed": ok,
-                    "covers_source_ids": covered_source_ids(name, selected_targets),
-                })
+            .map(|(name, ok)| AffectedTestOutcomeV1 {
+                test: name.clone(),
+                passed: *ok,
+                covers_source_ids: covered_source_ids(name, selected_targets),
             })
-            .collect::<Vec<_>>(),
-        "stderr_tail": tail(&output.stderr, 2000),
-        "stdout_tail": tail(&output.stdout, 2000),
-        "terminal": terminal,
-    })
+            .collect(),
+        stderr_tail: tail(&output.stderr, 2000),
+        stdout_tail: tail(&output.stdout, 2000),
+        terminal,
+        error: None,
+    }
 }
 
-fn managed_test_terminal(emitter: &OperationEmitter, receipt: &OperationReceipt) -> Value {
-    json!({
-        "operation_id": emitter.binding().operation_id().to_string(),
-        "result_tool": "tracedecay_test_results",
-        "receipt": receipt,
-    })
+fn managed_test_terminal(
+    emitter: &OperationEmitter,
+    receipt: OperationReceipt,
+) -> ManagedTestTerminalV1 {
+    ManagedTestTerminalV1 {
+        operation_id: emitter.binding().operation_id().to_string(),
+        result_tool: "tracedecay_test_results".to_owned(),
+        receipt,
+    }
 }
 
 fn covered_source_ids(name: &str, selected_targets: &[TestTarget]) -> Vec<String> {
@@ -1124,26 +1109,15 @@ fn covered_source_ids(name: &str, selected_targets: &[TestTarget]) -> Vec<String
     covers
 }
 
-/// Wraps a short status message in a normal `ToolResult`.
-fn empty_result(args: &Value, message: &str) -> ToolResult {
-    let value = json!({
-        "passed": 0, "failed": 0, "results": [], "note": message
-    });
-    generic_tool_result(None, args, &value, vec![])
-}
-
-fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> ToolResult {
-    let value = json!({
-        "passed": 0,
-        "failed": 0,
-        "results": [],
-        "error": {
-            "kind": kind,
-            "operation": operation,
-            "message": message,
-        }
-    });
-    generic_tool_result(None, args, &value, vec![])
+/// A run with nothing to dispatch.
+fn empty_result(message: &str) -> AffectedTestsNotRunV1 {
+    AffectedTestsNotRunV1 {
+        passed: 0,
+        failed: 0,
+        results: Vec::new(),
+        note: Some(message.to_owned()),
+        error: None,
+    }
 }
 
 /// Returns the last `n` characters of `s`, trimmed to a char boundary.

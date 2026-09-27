@@ -1,4 +1,5 @@
 use serde_json::Value;
+use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::{ApplicationOperation, RetainedSurfaceOperation};
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -412,6 +413,17 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                 std::time::Duration::ZERO,
             ));
         };
+        if operation.owner_side_effect().is_some() {
+            return match tokio::time::timeout(
+                budget,
+                compute_owner_side_effect(cg, operation, args, &options),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+            };
+        }
         if dispatch_controls::is_automation_read(operation) {
             return match tokio::time::timeout(
                 budget,
@@ -700,41 +712,34 @@ fn admitted_tool_context<'a>(
     Ok(McpToolContext::bind(McpToolBinding { project, request })?)
 }
 
-/// Dispatch dashboard and workflow tools that have not moved to a dedicated
-/// application family.
-#[hotpath::measure(future = true, label = "mcp.dispatch.session_workflow")]
-pub(super) async fn dispatch_session_workflow_tools(
-    tool_name: &str,
+/// Runs one side-effecting owner operation under the owner's admitted
+/// authorities. The dashboard composes the daemon-owned readers and writers
+/// this owner carries; the test run admits the verified graph to select tests.
+async fn compute_owner_side_effect(
     cg: &TraceDecay,
+    operation: ApplicationSurfaceOperation,
     args: Value,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    dispatch_session_workflow_tools_inner(tool_name, cg, args, options).await
-}
-
-fn dispatch_session_workflow_tools_inner<'a>(
-    tool_name: &'a str,
-    cg: &'a TraceDecay,
-    args: Value,
-    options: ToolCallRegistryOptions<'a>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    // Erase the deeply nested match-arm futures before they reach the
-    // measured wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        match tool_name {
-            "tracedecay_run_affected_tests" => {
-                workflow::handle_run_affected_tests(
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
+    let result = match operation {
+        ApplicationSurfaceOperation::RunAffectedTests => {
+            return workflow::compute_run_affected_tests(
+                cg,
+                admitted_graph_query(options, "file_dependents"),
+                args,
+                options.application_cancellation.clone(),
+            )
+            .await;
+        }
+        ApplicationSurfaceOperation::Dashboard => {
+            let request = tracedecay_mcp::handlers::decode_primitive_request(
+                &args,
+                operation.mcp_tool_name(),
+            )?;
+            GraphToolResultV1::Dashboard(
+                dashboard::compute_dashboard(
                     cg,
-                    admitted_graph_query(&options, "file_dependents"),
-                    args,
-                    options.application_cancellation.clone(),
-                )
-                .await
-            }
-            "tracedecay_dashboard" => {
-                dashboard::handle_dashboard(
-                    cg,
-                    args,
+                    request,
                     options.retained_project_server_resolver.clone(),
                     options.code_graph_read_admission_port.clone(),
                     options.code_graph_projection_read_port.clone(),
@@ -757,9 +762,16 @@ fn dispatch_session_workflow_tools_inner<'a>(
                     options.dashboard_delivery_settlement_authority.clone(),
                     options.daemon_invocation_service.cloned(),
                 )
-                .await
-            }
-            _ => Err(unknown_tool_error(tool_name)),
+                .await?,
+            )
         }
+        operation => return Err(unknown_tool_error(operation.mcp_tool_name())),
+    };
+    Ok(tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
+        result,
+        touched_files: Vec::new(),
+        code_graph: None,
+        analytics: None,
+        cost: None,
     })
 }

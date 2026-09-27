@@ -408,7 +408,8 @@ mod tests {
             .find(|definition| definition.name == "tracedecay_dashboard")
             .unwrap();
         let dispatch = &dashboard.meta.as_ref().unwrap()["tracedecay/dispatch"];
-        assert_eq!(dispatch["effect"], "administrative");
+        assert_eq!(dispatch["effect"], "binds_server");
+        assert_eq!(dispatch["read_only"], false);
         assert_eq!(dispatch["availability"]["state"], "available");
         assert_eq!(dispatch["idempotency"], "idempotent");
         assert_eq!(dispatch["inverse"]["mode"], "same_tool");
@@ -428,9 +429,11 @@ mod tests {
             .iter()
             .find(|definition| definition.name == "tracedecay_run_affected_tests")
             .unwrap();
+        let dispatch = &affected_tests.meta.as_ref().unwrap()["tracedecay/dispatch"];
+        assert_eq!(dispatch["effect"], "spawns_process");
+        assert_eq!(dispatch["read_only"], false);
         assert_eq!(
-            affected_tests.meta.as_ref().unwrap()["tracedecay/dispatch"]["deadline"]["maximum_millis"],
-            600_000,
+            dispatch["deadline"]["maximum_millis"], 600_000,
             "a long-running tool gets the ten-minute ceiling"
         );
 
@@ -464,12 +467,14 @@ mod tests {
         assert!(
             definitions
                 .iter()
-                .any(|definition| definition.name == "tracedecay_dashboard"),
+                .any(|definition| definition.name == "tracedecay_status"),
             "legacy production tools remain discoverable until cataloged"
         );
         assert!(
             definitions.iter().all(|definition| {
                 definition.name != "tracedecay_search"
+                    && definition.name != "tracedecay_run_affected_tests"
+                    && definition.name != "tracedecay_dashboard"
                     && definition.name != "tracedecay_context"
                     && definition.name != "tracedecay_git_preview"
             }),

@@ -380,7 +380,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_signature(request_schema("signature")?),
         def_diagnose(request_schema("diagnose")?),
         def_derives(request_schema("derives")?),
-        def_run_affected_tests(),
+        def_run_affected_tests(request_schema("run_affected_tests")?),
     ];
     definitions.extend(memory::memory_definitions(&request_schema)?);
     definitions.extend([
@@ -390,7 +390,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_skill_list(request_schema("skill_list")?),
         def_skill_view(request_schema("skill_view")?),
         def_hermes_skill_bridge(request_schema("hermes_skill_bridge")?),
-        def_dashboard(),
+        def_dashboard(request_schema("dashboard")?),
         def_analytics(request_schema("analytics")?),
         session::def_session_refresh_begin(request_schema("session_refresh_begin")?),
         session::def_session_refresh_status(request_schema("session_refresh_status")?),

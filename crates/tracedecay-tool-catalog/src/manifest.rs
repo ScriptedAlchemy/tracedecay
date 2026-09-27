@@ -135,11 +135,21 @@ pub enum EffectClass {
     GitIndexCommit,
     ConfigurationWrite,
     Administrative,
+    /// Runs a child process in the project (e.g. the project's test runner).
+    SpawnsProcess,
+    /// Binds a listening server in the daemon process.
+    BindsServer,
 }
 
 impl EffectClass {
     pub const fn is_effect(self) -> bool {
         !matches!(self, Self::Read | Self::Preview)
+    }
+
+    /// An effect of an owner-served operation that settles within the call:
+    /// it answers with an operation receipt and takes no idempotency key.
+    pub const fn is_owner_side_effect(self) -> bool {
+        matches!(self, Self::SpawnsProcess | Self::BindsServer)
     }
 
     pub const fn is_read_only(self) -> bool {
@@ -795,7 +805,21 @@ impl CapabilityManifestV1 {
             );
         }
 
-        if self.effect.is_effect() {
+        if self.effect.is_owner_side_effect() {
+            if self.receipt != ReceiptContract::Operation
+                || self.idempotency != IdempotencyContract::NotRequired
+                || self.reconciliation != ReconciliationContract::NotRequired
+                || !matches!(
+                    self.authority_revalidation,
+                    RevalidationContract::Required { .. }
+                )
+                || self.terminal_states.contains(TerminalState::EffectUnknown)
+            {
+                return Err(self.invalid(
+                    "owner side effects settle within the call: operation receipt, no idempotency key or reconciliation, revalidated authority, and no unknown-effect terminal",
+                ));
+            }
+        } else if self.effect.is_effect() {
             if self.receipt != ReceiptContract::DurableEffect
                 || self.idempotency != IdempotencyContract::Required
                 || self.reconciliation != ReconciliationContract::Required

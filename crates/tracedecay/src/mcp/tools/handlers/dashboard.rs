@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use tracedecay_contracts::retrieval::{
+    DashboardActionV1, DashboardBoundV1, DashboardResultV1, DashboardSurfaceRequestV1,
+};
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, RequestId, SafeDiagnostic,
 };
@@ -30,9 +32,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_project::project::TraceDecay;
 
-use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter;
-use tracedecay_mcp::handlers::generic_tool_result;
 
 use code_reads::DashboardCodeReadAdapter;
 use tracedecay_dashboard_api::{
@@ -663,15 +663,6 @@ pub(crate) async fn shutdown_dashboard() -> Result<()> {
     .await
 }
 
-fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
-    generic_tool_result(
-        Some(&cg.store_layout().response_handle_root),
-        args,
-        payload,
-        vec![],
-    )
-}
-
 /// The session authorities a project server admits; `None` for the core
 /// server of a project whose session store is not admitted yet.
 fn dashboard_session_authorities(
@@ -739,9 +730,9 @@ fn opening_project_sessions(
         reason = "Dashboard handling is one action match onto the composed dashboard readers."
     )
 )]
-pub(super) async fn handle_dashboard(
+pub(super) async fn compute_dashboard(
     cg: &TraceDecay,
-    args: Value,
+    request: DashboardSurfaceRequestV1,
     retained_project_server_resolver: Option<crate::mcp::server::RetainedProjectServerResolver>,
     code_graph_read_admission: Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     code_graph_projection_read_port: Option<crate::mcp::server::CodeGraphProjectionReadPort>,
@@ -773,14 +764,9 @@ pub(super) async fn handle_dashboard(
         Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     >,
     daemon_invocation_service: Option<tracedecay_daemon_service::DaemonInvocationService>,
-) -> Result<ToolResult> {
-    let action = args
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("start");
-
-    match action {
-        "stop" => {
+) -> Result<DashboardResultV1> {
+    match request.action.unwrap_or_default() {
+        DashboardActionV1::Stop => {
             let project_root =
                 cg.project_root()
                     .canonicalize()
@@ -796,19 +782,17 @@ pub(super) async fn handle_dashboard(
                     .get(&project_root)
                     .map(|dashboard| dashboard.url.clone())
             };
-            let payload = if let Some(previous_url) = previous_url {
-                hotpath::future!(
-                    shutdown_dashboard_for(&project_root),
-                    label = "mcp.dashboard.open.stop"
-                )
-                .await?;
-                json!({ "status": "stopped", "previous_url": previous_url })
-            } else {
-                json!({ "status": "not_running" })
+            let Some(previous_url) = previous_url else {
+                return Ok(DashboardResultV1::NotRunning);
             };
-            Ok(dashboard_tool_result(cg, &args, &payload))
+            hotpath::future!(
+                shutdown_dashboard_for(&project_root),
+                label = "mcp.dashboard.open.stop"
+            )
+            .await?;
+            Ok(DashboardResultV1::Stopped { previous_url })
         }
-        "start" | "" => {
+        DashboardActionV1::Start => {
             // Canonicalized once up front: it is both the manager key (each
             // enrolled project gets its own dashboard slot) and, later, the
             // invariant check against the retained project server's root.
@@ -824,47 +808,37 @@ pub(super) async fn handle_dashboard(
             if let Some(finished) = take_finished_dashboard_for(&requested_root).await {
                 join_dashboard(finished, false).await?;
             }
-            let host = args
-                .get("host")
-                .and_then(|v| v.as_str())
+            let host = request
+                .host
+                .as_deref()
                 .map(validate_dashboard_host)
                 .transpose()?
                 .unwrap_or("127.0.0.1")
                 .to_string();
-            let port = args
-                .get("port")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|p| u16::try_from(p).ok())
-                .unwrap_or(DEFAULT_PORT);
+            let port = request.port.unwrap_or(DEFAULT_PORT);
 
             let manager = get_manager();
             let mut guard = manager.lock().await;
 
             if let Some(handle) = guard.get(&requested_root) {
-                let status = if handle.shutdown.is_some() {
-                    "already_running"
-                } else {
-                    "stopping"
-                };
                 // The lookup is keyed by this project's own canonicalized
                 // root, so the reused server always serves *this* project,
                 // only the host/port the caller asked for may differ from
                 // what is actually bound. `port == 0` means "any port is
                 // fine", so it can never be dishonored.
-                let requested_port_honored = port == 0 || port == handle.addr.port();
-                return Ok(dashboard_tool_result(
-                    cg,
-                    &args,
-                    &json!({
-                        "status": status,
-                        "url": handle.url,
-                        "host": handle.addr.ip().to_string(),
-                        "port": handle.addr.port(),
-                        "requested_host": host,
-                        "requested_port": port,
-                        "requested_port_honored": requested_port_honored,
-                    }),
-                ));
+                let bound = DashboardBoundV1 {
+                    url: handle.url.clone(),
+                    host: handle.addr.ip().to_string(),
+                    port: handle.addr.port(),
+                    requested_host: host,
+                    requested_port: port,
+                    requested_port_honored: port == 0 || port == handle.addr.port(),
+                };
+                return Ok(if handle.shutdown.is_some() {
+                    DashboardResultV1::AlreadyRunning(bound)
+                } else {
+                    DashboardResultV1::Stopping(bound)
+                });
             }
 
             // Shared construction with the CLI path: resolved LCM/session store
@@ -1090,22 +1064,12 @@ pub(super) async fn handle_dashboard(
                 },
             );
 
-            Ok(dashboard_tool_result(
-                cg,
-                &args,
-                &json!({
-                    "status": "started",
-                    "url": url,
-                    "host": host,
-                    "port": addr.port()
-                }),
-            ))
+            Ok(DashboardResultV1::Started {
+                url,
+                host,
+                port: addr.port(),
+            })
         }
-        other => Err(TraceDecayError::Config {
-            message: format!(
-                "unknown action for tracedecay_dashboard: {other} (use 'start' or 'stop')"
-            ),
-        }),
     }
 }
 

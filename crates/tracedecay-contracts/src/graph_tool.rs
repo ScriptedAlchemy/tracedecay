@@ -11,15 +11,16 @@ use crate::retrieval::{
     AutomationRunListResultV1, AutomationRunViewResultV1, BranchDiffResultV1, BranchListResultV1,
     BranchSearchResultV1, ByQualifiedNameResultV1, ChangelogResultV1, CircularResultV1,
     CommitContextResultV1, ComplexityReportV1, ConfigResultV1, ConstructorsResultV1,
-    ContextResultV1, CouplingResultV1, DeadCodeResultV1, DependencyDepthResultV1, DerivesResultV1,
-    DiagnoseResultV1, DiffContextResultV1, DistributionResultV1, DocCoverageResultV1, DsmResultV1,
-    FieldSitesResultV1, FilesResultV1, FindExactSymbolResultV1, GiniResultV1, GodClassResultV1,
-    GrepSearchResultV1, HealthResultV1, HermesSkillBridgeResultV1, HotspotsResultV1,
-    ImpactResultV1, InheritanceDepthResultV1, LargestResultV1, NodeResultV1, PortOrderResultV1,
-    PortStatusResultV1, PrContextResultV1, RankResultV1, RecursionResultV1, RedundancyResultV1,
-    RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, SearchResultV1, SignatureResultV1,
-    SimilarResultV1, SkillListResultV1, SkillViewResultV1, TestMapResultV1, TestRiskResultV1,
-    TodosResultV1, UnmountedFilesResultV1, UnsafePatternsResultV1,
+    ContextResultV1, CouplingResultV1, DashboardResultV1, DeadCodeResultV1,
+    DependencyDepthResultV1, DerivesResultV1, DiagnoseResultV1, DiffContextResultV1,
+    DistributionResultV1, DocCoverageResultV1, DsmResultV1, FieldSitesResultV1, FilesResultV1,
+    FindExactSymbolResultV1, GiniResultV1, GodClassResultV1, GrepSearchResultV1, HealthResultV1,
+    HermesSkillBridgeResultV1, HotspotsResultV1, ImpactResultV1, InheritanceDepthResultV1,
+    LargestResultV1, NodeResultV1, PortOrderResultV1, PortStatusResultV1, PrContextResultV1,
+    RankResultV1, RecursionResultV1, RedundancyResultV1, RenamePreviewPrimitiveOutcomeV1,
+    RetrieveResultV1, RunAffectedTestsResultV1, SearchResultV1, SignatureResultV1, SimilarResultV1,
+    SkillListResultV1, SkillViewResultV1, TestMapResultV1, TestRiskResultV1, TodosResultV1,
+    UnmountedFilesResultV1, UnsafePatternsResultV1,
 };
 
 /// One graph read's typed result, tagged by its operation.
@@ -83,6 +84,8 @@ pub enum GraphToolResultV1 {
     HermesSkillBridge(Box<HermesSkillBridgeResultV1>),
     Analytics(Box<AnalyticsResultV1>),
     Search(Box<SearchResultV1>),
+    RunAffectedTests(RunAffectedTestsResultV1),
+    Dashboard(DashboardResultV1),
 }
 
 impl GraphToolResultV1 {
@@ -152,6 +155,8 @@ impl GraphToolResultV1 {
             Operation::HermesSkillBridge => Self::HermesSkillBridge(serde_json::from_value(value)?),
             Operation::Analytics => Self::Analytics(serde_json::from_value(value)?),
             Operation::Search => Self::Search(serde_json::from_value(value)?),
+            Operation::RunAffectedTests => Self::RunAffectedTests(serde_json::from_value(value)?),
+            Operation::Dashboard => Self::Dashboard(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -221,6 +226,8 @@ impl GraphToolResultV1 {
             Self::HermesSkillBridge(result) => serde_json::to_value(result),
             Self::Analytics(result) => serde_json::to_value(result),
             Self::Search(result) => serde_json::to_value(result),
+            Self::RunAffectedTests(result) => serde_json::to_value(result),
+            Self::Dashboard(result) => serde_json::to_value(result),
         }
     }
 }
