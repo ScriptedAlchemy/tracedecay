@@ -71,6 +71,7 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         line: start_line,
         column: start_column,
         file_path: state.file_path.clone(),
+        unmodeled_import: None,
     });
 
     let Some(module_specifier) = module_specifier else {

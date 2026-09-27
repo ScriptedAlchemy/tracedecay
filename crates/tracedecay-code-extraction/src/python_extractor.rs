@@ -591,6 +591,7 @@ impl PythonExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
     }
 
@@ -672,6 +673,7 @@ impl PythonExtractor {
                                 line,
                                 column,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         "attribute" => {
@@ -686,6 +688,7 @@ impl PythonExtractor {
                                 line,
                                 column,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         _ => {}
@@ -819,6 +822,7 @@ impl PythonExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);

@@ -583,6 +583,7 @@ impl QBasicExtractor {
             line: call_stmt.start_position().row as u32,
             column: call_stmt.start_position().column as u32,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
     }
 

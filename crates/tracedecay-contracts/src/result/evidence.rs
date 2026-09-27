@@ -348,6 +348,10 @@ pub enum OmissionReason {
     /// Evidence came from a macro body that was not expanded, so what the
     /// expansion defines or calls is not covered.
     MacroBodyUnparsed,
+    /// A caller sits under a `use` whose binding the index could not model
+    /// (a glob in a block or inline module), so whether it calls the target
+    /// is not covered.
+    ImportUnmodeled,
     /// The continuation cursor can no longer be redeemed (its lifetime ended
     /// or the snapshot it pages is gone); restart the request without it.
     CursorExpired,

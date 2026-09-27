@@ -4,6 +4,7 @@ use serde_json::Value;
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_code_index::{
     chunks::{CodeIndexImportEvidenceV1, content_digest},
+    graph_projection::UnresolvedCallerGapsV1,
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
         CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
@@ -13,8 +14,9 @@ use tracedecay_code_index::{
 use tracedecay_domain::{
     EdgeAuthorityV1, FileOccurrenceId, LanguageId, RelationEdgeKindV1, SanitizationReceiptId,
     SanitizedCodeFileV1, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
-    SymbolOccurrenceId,
+    SymbolOccurrenceId, UnmodeledImportShapeV1,
 };
+use tracedecay_graph_db::NeverCancelled;
 
 use crate::{
     production_orchestration::{
@@ -1320,4 +1322,66 @@ fn rust_calls_bind_through_a_use_declared_in_the_calling_block() {
         resolved_callers(&generation, &inner_x),
         ["crates/app/src/lib.rs::same_file"]
     );
+}
+
+#[test]
+fn rust_calls_bind_through_block_globs_and_inline_module_uses() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.glob-use.lib",
+            "crates/app/src/lib.rs",
+            "mod m;\nmod n;\nuse crate::n::only_in_n;\n\
+             pub fn glob_caller() {\n    use crate::m::*;\n    g();\n}\n\
+             pub fn glob_miss() {\n    use crate::m::*;\n    only_in_n();\n}\n\
+             mod inner {\n    use crate::m::h;\n    pub fn inline_caller() {\n        h();\n    }\n}\n\
+             mod globbed {\n    use crate::m::*;\n    pub fn inline_glob_caller() {\n        g();\n    }\n}\n",
+        ),
+        (
+            "file.glob-use.m",
+            "crates/app/src/m.rs",
+            "pub fn g() {}\npub fn h() {}\n",
+        ),
+        (
+            "file.glob-use.n",
+            "crates/app/src/n.rs",
+            "pub fn only_in_n() {}\n",
+        ),
+    ]);
+    let g = symbol_occurrence(&generation, "crates/app/src/m.rs::g");
+    let h = symbol_occurrence(&generation, "crates/app/src/m.rs::h");
+    let only_in_n = symbol_occurrence(&generation, "crates/app/src/n.rs::only_in_n");
+
+    assert_eq!(
+        resolved_callers(&generation, &g),
+        [
+            "crates/app/src/lib.rs::glob_caller",
+            "crates/app/src/lib.rs::globbed::inline_glob_caller"
+        ]
+    );
+    assert_eq!(
+        resolved_callers(&generation, &h),
+        ["crates/app/src/lib.rs::inner::inline_caller"]
+    );
+
+    // The block glob's module does not define `only_in_n`, and whether Rust
+    // then reaches the module-scope import is not modeled: the call stays a
+    // disclosed gap naming the glob, never a silently complete answer.
+    assert_eq!(
+        resolved_callers(&generation, &only_in_n),
+        Vec::<&str>::new()
+    );
+    let reader = crate::typescript_module_resolution::reader(&generation);
+    let gaps = |target: &SymbolOccurrenceId| {
+        reader
+            .unresolved_caller_gaps(std::slice::from_ref(target), None, Arc::new(NeverCancelled))
+            .expect("unresolved caller gaps")
+    };
+    assert_eq!(
+        gaps(&only_in_n),
+        UnresolvedCallerGapsV1 {
+            exact_target_unavailable: false,
+            unmodeled_imports: [UnmodeledImportShapeV1::BlockGlob].into(),
+        }
+    );
+    assert_eq!(gaps(&g), UnresolvedCallerGapsV1::default());
 }

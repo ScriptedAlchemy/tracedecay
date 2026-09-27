@@ -156,8 +156,9 @@ pub fn build_sealed_code_graph_rows(
 /// symbols, derived from every retained reference and edge of a generation.
 ///
 /// A dotted Rust-style call stays a limitation unless the canonical resolver
-/// bound its exact receiver site; TypeScript member calls are decided by the
-/// module resolver and arrive in `typescript_unresolved`.
+/// bound its exact receiver site, and so does a call the extractor marked as
+/// sitting under an unmodeled import; TypeScript member calls are decided by
+/// the module resolver and arrive in `typescript_unresolved`.
 pub(crate) fn unresolved_call_limitations<'a>(
     references: &[(&str, &'a CodeIndexUnresolvedReferenceV1)],
     edges: impl Iterator<Item = &'a CanonicalRelationEdgeV1>,
@@ -178,8 +179,12 @@ pub(crate) fn unresolved_call_limitations<'a>(
         }
     }
     let mut resolved_sites = BTreeMap::new();
+    let mut bound_call_sites = BTreeSet::new();
     for edge in edges {
         check()?;
+        if edge.kind == RelationEdgeKindV1::Calls {
+            bound_call_sites.insert((&edge.from_occurrence, edge.evidence_span));
+        }
         if edge.kind == RelationEdgeKindV1::Calls && edge.authority == EdgeAuthorityV1::NameResolved
         {
             let site = (&edge.from_occurrence, edge.evidence_span);
@@ -221,6 +226,22 @@ pub(crate) fn unresolved_call_limitations<'a>(
             && !resolved_method_token
         {
             unresolved_calls.push(reference.clone());
+            continue;
+        }
+        // A call under an import the extractor could not model stays a gap
+        // unless an edge binds its exact callee token.
+        if reference.kind == RelationEdgeKindV1::Calls && reference.unmodeled_import.is_some() {
+            let callee = reference
+                .reference_name
+                .rsplit("::")
+                .next()
+                .unwrap_or_default();
+            let bound = reference.evidence_span.len() == callee.len() as u64
+                && bound_call_sites
+                    .contains(&(&reference.from_occurrence, reference.evidence_span));
+            if !bound {
+                unresolved_calls.push(reference.clone());
+            }
         }
     }
     // A TypeScript call whose import names project code the seal could not

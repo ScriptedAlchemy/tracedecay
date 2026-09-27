@@ -316,6 +316,7 @@ impl DartExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
     }
 
@@ -510,6 +511,7 @@ impl DartExtractor {
                 line: superclass.start_position().row as u32,
                 column: superclass.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
         }
 
@@ -1624,6 +1626,7 @@ impl DartExtractor {
                             line: ident.start_position().row as u32,
                             column: ident.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                     }
                     Self::extract_call_sites(state, child, fn_node_id);
@@ -1643,6 +1646,7 @@ impl DartExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                     }
                 }
@@ -1664,6 +1668,7 @@ impl DartExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                     }
@@ -1880,6 +1885,7 @@ impl DartExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
 
         state.edges.push(Edge {

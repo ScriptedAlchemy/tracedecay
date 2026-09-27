@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolBindingV1,
-    CodeGraphSymbolSummaryV1,
+    CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
 };
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_contracts::retrieval::{
@@ -562,7 +562,7 @@ where
                 let Ok(graph) = open_graph(&self.code_graph, context).await else {
                     return failed(context, "caller traversal failed");
                 };
-                let (records, unsupported) = match relation_traversal(
+                let (records, unresolved) = match relation_traversal(
                     &graph.reader,
                     Arc::clone(&graph.cancellation),
                     &request.node_id,
@@ -573,7 +573,7 @@ where
                     Ok(records) => records,
                     Err(()) => return failed(context, "caller traversal failed"),
                 };
-                let mut gaps = if unsupported {
+                let mut gaps = if unresolved.exact_target_unavailable {
                     // Unresolved Rust receiver calls and TypeScript imports the
                     // seal could not bind share one disclosure; the gap is the
                     // call site, not a language.
@@ -586,6 +586,12 @@ where
                 } else {
                     Vec::new()
                 };
+                gaps.extend(
+                    unresolved
+                        .unmodeled_imports
+                        .iter()
+                        .map(|shape| PrimitiveSupportGap::import_unmodeled(shape.as_str())),
+                );
                 // A caller inside an unexpanded macro body is syntactic
                 // evidence only; what the expansion calls is not covered.
                 gaps.extend(
@@ -972,24 +978,28 @@ fn relation_traversal(
     maximum_depth: u32,
     incoming: bool,
     scope: &SymbolGraphScope,
-) -> Result<(Vec<SymbolRelationRecord>, bool), ()> {
+) -> Result<(Vec<SymbolRelationRecord>, UnresolvedCallerGapsV1), ()> {
     let seed = SymbolOccurrenceId::new(seed.to_owned()).map_err(|_| ())?;
     let mut seen = HashSet::from([seed.clone()]);
     let mut frontier = vec![seed];
     let mut records = Vec::new();
-    let mut unsupported_callers = false;
+    let mut unresolved_callers = UnresolvedCallerGapsV1::default();
     for depth in 1..=maximum_depth {
         if frontier.is_empty() || records.len() >= MAX_COMPATIBILITY_RESULTS {
             break;
         }
         if incoming {
-            unsupported_callers |= graph
-                .has_unresolved_callers(
+            let gaps = graph
+                .unresolved_caller_gaps(
                     &frontier,
                     scope.path_prefix.as_deref(),
                     Arc::clone(&cancellation),
                 )
                 .map_err(|_| ())?;
+            unresolved_callers.exact_target_unavailable |= gaps.exact_target_unavailable;
+            unresolved_callers
+                .unmodeled_imports
+                .extend(gaps.unmodeled_imports);
         }
         let batches = if incoming {
             graph.callers(
@@ -1029,7 +1039,7 @@ fn relation_traversal(
         }
         frontier = next;
     }
-    Ok((records, unsupported_callers))
+    Ok((records, unresolved_callers))
 }
 
 fn trait_dispatch_targets(

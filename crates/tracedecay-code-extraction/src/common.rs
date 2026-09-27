@@ -302,6 +302,7 @@ pub(crate) fn extract_call_expression_sites(
                     line: child.start_position().row as u32,
                     column: child.start_position().column as u32,
                     file_path: file_path.to_string(),
+                    unmodeled_import: None,
                 });
             }
             extract_call_expression_sites(source, file_path, unresolved_refs, child, fn_node_id);

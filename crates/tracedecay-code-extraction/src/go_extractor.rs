@@ -236,6 +236,7 @@ impl GoExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
     }
 
@@ -713,6 +714,7 @@ impl GoExtractor {
                             line,
                             column,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                     }
                 }
@@ -1020,6 +1022,7 @@ impl GoExtractor {
                                 line,
                                 column,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                             // Also try to create a direct Receives edge if we can find
                             // the struct node. We look for it by matching name.
@@ -1152,6 +1155,7 @@ impl GoExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         // Also recurse into the call expression for nested calls.

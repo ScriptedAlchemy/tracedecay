@@ -364,6 +364,7 @@ impl PascalExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
     }
 
@@ -483,6 +484,7 @@ impl PascalExtractor {
                 line: parent_ref.start_position().row as u32,
                 column: parent_ref.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
         }
 
@@ -1241,6 +1243,7 @@ impl PascalExtractor {
                     line: start_line,
                     column: start_column,
                     file_path: state.file_path.clone(),
+                    unmodeled_import: None,
                 });
             }
 
@@ -1335,6 +1338,7 @@ impl PascalExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1364,6 +1368,7 @@ impl PascalExtractor {
                                         line: fc.start_position().row as u32,
                                         column: fc.start_position().column as u32,
                                         file_path: state.file_path.clone(),
+                                        unmodeled_import: None,
                                     });
                                 }
                             }

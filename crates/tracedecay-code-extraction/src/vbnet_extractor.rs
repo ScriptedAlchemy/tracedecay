@@ -350,6 +350,7 @@ impl VbNetExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
     }
 
@@ -1214,6 +1215,7 @@ impl VbNetExtractor {
                         line: base_line + i as u32,
                         column: 0,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
                     });
                 }
             } else if let Some(iface_list) = trimmed.strip_prefix("Implements ") {
@@ -1228,6 +1230,7 @@ impl VbNetExtractor {
                             line: base_line + i as u32,
                             column: 0,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                     }
                 }
@@ -1318,6 +1321,7 @@ impl VbNetExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                         Self::extract_call_sites_from_children(state, child, fn_node_id);
                     }
@@ -1452,6 +1456,7 @@ impl VbNetExtractor {
                         line: start_line,
                         column: start_column,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
                     });
 
                     state.edges.push(Edge {

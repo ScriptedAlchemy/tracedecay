@@ -226,6 +226,9 @@ impl StaticLanguageRegistry {
             // declared module whose name is also a blocklisted std name. Rust
             // v15 rewrites a call through a `use` declared in a block to the
             // path that `use` names, so it binds like a module-scope import.
+            // Rust v16 does the same for a `use` in an inline `mod` body and
+            // rewrites a call under a block or inline-module glob into the
+            // glob's module, marking it so an unbound one stays a caller gap.
             // TypeScript v7 records `export … from` forwarding as public
             // import evidence and retains explicitly imported ubiquitous names
             // as cross-file candidates, so barrels and workspace packages bind.
@@ -240,7 +243,7 @@ impl StaticLanguageRegistry {
             // comments and `///` lost its stray `/`; QBasic dialects moved when
             // CONST names stopped losing their text before an underscore.
             let extractor_revision = match language.as_str() {
-                "rust" => 15,
+                "rust" => 16,
                 "typescript" => 9,
                 "protobuf" => 7,
                 "sql" => 6,
@@ -445,7 +448,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v15");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v16");
 
         assert_eq!(
             registry

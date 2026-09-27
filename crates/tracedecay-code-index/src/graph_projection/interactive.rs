@@ -52,7 +52,7 @@ pub use self::models::{
     CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphRankedNeighborsV1,
     CodeGraphRankedSymbolV1, CodeGraphRelationKeyV1, CodeGraphRelationKeysV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolRefV1,
-    CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1,
+    CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
 };
 
 pub type CodeGraphSymbolPredicate<'a> = dyn Fn(
@@ -332,7 +332,7 @@ impl CodeGraphInteractiveReader {
         ))
     }
 
-    /// Whether unresolved receiver sites can name one of the queried methods.
+    /// Whether unresolved call sites can name one of the queried methods.
     /// Matching a member name establishes uncertainty only, never a target edge.
     pub fn has_unresolved_callers(
         &self,
@@ -340,9 +340,23 @@ impl CodeGraphInteractiveReader {
         scope_prefix: Option<&str>,
         request_cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<bool, CodeGraphProjectionError> {
+        self.unresolved_caller_gaps(targets, scope_prefix, request_cancellation)
+            .map(|gaps| !gaps.is_empty())
+    }
+
+    /// The kinds of unresolved call site that can name one of the queried
+    /// methods: receiver or import calls without exact target evidence, and
+    /// calls under a `use` shape the extractor could not model.
+    pub fn unresolved_caller_gaps(
+        &self,
+        targets: &[SymbolOccurrenceId],
+        scope_prefix: Option<&str>,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<UnresolvedCallerGapsV1, CodeGraphProjectionError> {
         let cancellation = self.read_cancellation(request_cancellation)?;
         let catalog = self.catalog(Arc::clone(&cancellation))?;
         let mut methods = BTreeSet::new();
+        let mut gaps = UnresolvedCallerGapsV1::default();
         for target in targets {
             catalog::check_cancelled(cancellation.as_ref())?;
             let metadata = catalog
@@ -364,9 +378,8 @@ impl CodeGraphInteractiveReader {
                 .flatten()
             {
                 catalog::check_cancelled(cancellation.as_ref())?;
-                let path = catalog
-                    .symbols
-                    .get(source)
+                let symbol = catalog.symbols.get(source);
+                let path = symbol
                     .and_then(|symbol| symbol.binding.as_ref())
                     .and_then(|binding| binding.logical_path.as_deref())
                     .ok_or_else(|| {
@@ -374,12 +387,27 @@ impl CodeGraphInteractiveReader {
                             "unresolved caller source has no bound logical path".to_owned(),
                         )
                     })?;
-                if repository_path_matches_scope(path, scope_prefix) {
-                    return Ok(true);
+                if !repository_path_matches_scope(path, scope_prefix) {
+                    continue;
+                }
+                for call in symbol
+                    .into_iter()
+                    .flat_map(|symbol| &symbol.unresolved_calls)
+                {
+                    if models::unresolved_callee_name(&call.reference_name) != metadata.simple_name
+                    {
+                        continue;
+                    }
+                    match call.unmodeled_import {
+                        Some(shape) => {
+                            gaps.unmodeled_imports.insert(shape);
+                        }
+                        None => gaps.exact_target_unavailable = true,
+                    }
                 }
             }
         }
-        Ok(false)
+        Ok(gaps)
     }
 
     /// Lists the symbols bound to one file occurrence.

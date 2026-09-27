@@ -158,6 +158,7 @@ impl PrimitiveFailure {
 }
 
 const MACRO_BODY_UNPARSED: &str = "macro_body_unparsed";
+const IMPORT_UNMODELED: &str = "import_unmodeled";
 
 impl PrimitiveSupportGap {
     /// A caller that is an item-position macro invocation whose body was not
@@ -170,10 +171,21 @@ impl PrimitiveSupportGap {
         }
     }
 
+    /// Unresolved callers that sit under an import of `shape` (its
+    /// `snake_case` name) the index could not model.
+    pub fn import_unmodeled(shape: &str) -> Self {
+        Self {
+            provider: Some("code_index".to_owned()),
+            language: None,
+            reason: format!("{IMPORT_UNMODELED}: {shape}"),
+        }
+    }
+
     /// The typed omission this gap discloses in an evidence packet.
     pub fn omission_reason(&self) -> OmissionReason {
         match self.reason.split_once(':') {
             Some((MACRO_BODY_UNPARSED, _)) => OmissionReason::MacroBodyUnparsed,
+            Some((IMPORT_UNMODELED, _)) => OmissionReason::ImportUnmodeled,
             _ => OmissionReason::Unsupported,
         }
     }

@@ -415,3 +415,71 @@ async fn tracedecay_callers_parses_item_macro_bodies_and_discloses_unexpanded_on
 
     fixture.harness.shutdown().await;
 }
+
+const SCOPED_USE_LIB_RS: &str = "\
+mod m;
+mod n;
+use crate::n::only_in_n;
+pub fn glob_caller() {
+    use crate::m::*;
+    g();
+}
+mod inner {
+    use crate::m::h;
+    pub fn inline_caller() {
+        h();
+    }
+}
+pub fn glob_miss() {
+    use crate::m::*;
+    only_in_n();
+}
+";
+
+/// Issue #2270's shapes: a glob `use` in a block and a `use` in an inline
+/// module bind their calls. A call under a glob whose module does not
+/// define the name stays a disclosed `import_unmodeled` gap.
+#[tokio::test]
+async fn tracedecay_callers_binds_scoped_uses_and_discloses_an_unmodeled_glob() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("src/lib.rs"), SCOPED_USE_LIB_RS).unwrap();
+        fs::write(project.join("src/m.rs"), "pub fn g() {}\npub fn h() {}\n").unwrap();
+        fs::write(project.join("src/n.rs"), "pub fn only_in_n() {}\n").unwrap();
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    warm_code_index_search(&server, "only_in_n").await;
+
+    for (target, caller, line) in [("g", "glob_caller", 4), ("h", "inline_caller", 10)] {
+        let id = function_id(&server, target).await;
+        let callers =
+            evidence(&call_callers(&server, json!({"node_id": id, "maximum_depth": 1})).await);
+        assert_eq!(
+            caller_rows(&callers),
+            vec![row(caller, "src/lib.rs", line, 1)],
+            "{target}: {callers}"
+        );
+        assert_eq!(callers["coverage"]["completeness"], "complete", "{callers}");
+        assert_eq!(callers["omissions"], json!([]), "{callers}");
+    }
+
+    let id = function_id(&server, "only_in_n").await;
+    let callers =
+        evidence(&call_callers(&server, json!({"node_id": id, "maximum_depth": 1})).await);
+    assert_eq!(caller_rows(&callers), Vec::new(), "{callers}");
+    assert_eq!(callers["coverage"]["completeness"], "partial", "{callers}");
+    assert_eq!(
+        callers["omissions"],
+        json!([{"domain": "graph", "count": 1, "reason": "import_unmodeled"}])
+    );
+    assert_eq!(
+        callers["payload"]["support_gaps"],
+        json!([{"provider": "code_index", "language": null, "reason": "import_unmodeled: block_glob"}])
+    );
+
+    fixture.harness.shutdown().await;
+}

@@ -524,6 +524,7 @@ impl PerlExtractor {
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
                             }
                         }
@@ -543,6 +544,7 @@ impl PerlExtractor {
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
                             }
                         }
@@ -568,6 +570,7 @@ impl PerlExtractor {
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
                             } else {
                                 state.unresolved_refs.push(UnresolvedRef {
@@ -577,6 +580,7 @@ impl PerlExtractor {
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
                             }
                         }

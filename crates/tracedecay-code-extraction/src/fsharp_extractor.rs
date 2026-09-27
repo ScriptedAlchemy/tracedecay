@@ -433,6 +433,7 @@ impl FSharpExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         Self::extract_calls(state, child, fn_id);
