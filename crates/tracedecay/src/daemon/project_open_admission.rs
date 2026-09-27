@@ -1078,7 +1078,7 @@ pub(super) fn project_server_requirement(
                     == tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime
                         .mcp_tool_name() =>
             {
-                hook_runtime_requirement(arguments.get("action"))
+                hook_runtime_requirement(arguments.as_object())
             }
             _ => ProjectServerRequirement::Core,
         },
@@ -1086,15 +1086,18 @@ pub(super) fn project_server_requirement(
     }
 }
 
-/// A hook action records host evidence through the session stores only the
-/// full server mounts; resetting the local counter needs only the core one.
+/// The server a hook call needs: the full one whose session stores it
+/// records evidence in, or the core one for an action that records none.
 pub(super) fn hook_runtime_requirement(
-    action: Option<&serde_json::Value>,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> ProjectServerRequirement {
-    if action.and_then(serde_json::Value::as_str) == Some("reset_counter") {
-        ProjectServerRequirement::Core
-    } else {
-        ProjectServerRequirement::RegisteredHostIngest
+    match arguments {
+        Some(arguments)
+            if !tracedecay_contracts::retrieval::hook_runtime_needs_session_stores(arguments) =>
+        {
+            ProjectServerRequirement::Core
+        }
+        _ => ProjectServerRequirement::RegisteredHostIngest,
     }
 }
 

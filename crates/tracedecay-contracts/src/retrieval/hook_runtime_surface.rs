@@ -55,6 +55,14 @@ pub enum HookRuntimeSurfaceRequestV1 {
     HookV2ProfileAdmit { admission: Value },
 }
 
+/// Whether a hook call records session evidence, so it needs the session
+/// stores only the project's full server mounts. Resetting the local counter
+/// is the one action that does not; anything else, including a request that
+/// does not decode, waits for them.
+pub fn hook_runtime_needs_session_stores(arguments: &serde_json::Map<String, Value>) -> bool {
+    arguments.get("action").and_then(Value::as_str) != Some("reset_counter")
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookV2AdmitRequestV1 {

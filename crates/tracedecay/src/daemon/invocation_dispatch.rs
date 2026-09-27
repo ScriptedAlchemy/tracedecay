@@ -384,7 +384,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             surface_operation: tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime,
             arguments,
             ..
-        } => super::project_open_admission::hook_runtime_requirement(arguments.get("action")),
+        } => super::project_open_admission::hook_runtime_requirement(Some(arguments)),
         _ => ProjectServerRequirement::Core,
     };
     if request.requires_project() {

@@ -5,9 +5,10 @@
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
+use tracedecay_contracts::ApplicationProblem;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
-use tracedecay_contracts::retrieval::HookRuntimeResultV1;
+use tracedecay_contracts::retrieval::{HookRuntimeResultV1, hook_runtime_needs_session_stores};
 use tracedecay_daemon_service::{
     DaemonInvocationService, GraphToolFuture, GraphToolInvocationV1, ProjectGraphToolPortV1,
     RegisteredGraphToolOwnerV1,
@@ -35,6 +36,15 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
                     "the MCP server was released before the graph read was admitted",
                 )));
             };
+            // Project open registers the core server as owner before the
+            // full server, which mounts the session stores, replaces it. A
+            // hook that records session evidence meanwhile is still mounting.
+            if invocation.operation == ApplicationSurfaceOperation::HookRuntime
+                && server.project_session_db.is_none()
+                && hook_runtime_needs_session_stores(&invocation.arguments)
+            {
+                return Err(ApplicationProblem::runtime_mounting());
+            }
             server
                 .compute_graph_tool(invocation)
                 .await
