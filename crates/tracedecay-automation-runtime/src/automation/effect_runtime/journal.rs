@@ -252,7 +252,27 @@ pub enum ReservationResult {
 /// async cleanup path or a second durable lease authority.
 pub struct AutomationReservationClaim {
     path: PathBuf,
-    token: Arc<()>,
+    token: Arc<ReservationClaimState>,
+}
+
+/// What the live owner has itself made durable.
+///
+/// A visible journal replacement is not proof of durability, so a read that
+/// acts on journal state first republishes it. The claim owner already knows
+/// which state its own completed writes made durable; a read that observes
+/// exactly that state needs no second commit. Any failed write forgets it.
+#[derive(Default)]
+struct ReservationClaimState {
+    durable: Mutex<Option<DurableAutomationRecord>>,
+}
+
+impl ReservationClaimState {
+    fn durable(&self) -> MutexGuard<'_, Option<DurableAutomationRecord>> {
+        match self.durable.lock() {
+            Ok(durable) => durable,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 }
 
 impl Drop for AutomationReservationClaim {
@@ -271,12 +291,14 @@ impl Drop for AutomationReservationClaim {
     }
 }
 
-fn reservation_claims() -> &'static Mutex<HashMap<PathBuf, Weak<()>>> {
-    static CLAIMS: OnceLock<Mutex<HashMap<PathBuf, Weak<()>>>> = OnceLock::new();
+type ReservationClaims = HashMap<PathBuf, Weak<ReservationClaimState>>;
+
+fn reservation_claims() -> &'static Mutex<ReservationClaims> {
+    static CLAIMS: OnceLock<Mutex<ReservationClaims>> = OnceLock::new();
     CLAIMS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn reservation_claims_guard() -> MutexGuard<'static, HashMap<PathBuf, Weak<()>>> {
+fn reservation_claims_guard() -> MutexGuard<'static, ReservationClaims> {
     match reservation_claims().lock() {
         Ok(claims) => claims,
         Err(poisoned) => poisoned.into_inner(),
@@ -290,7 +312,7 @@ fn acquire_reservation_claim(path: &Path) -> Result<AutomationReservationClaim> 
             "an identical memory automation run is already in flight",
         ));
     }
-    let token = Arc::new(());
+    let token = Arc::new(ReservationClaimState::default());
     claims.insert(path.to_path_buf(), Arc::downgrade(&token));
     hotpath::gauge!("daemon.automation.effect.in_flight").inc(1_u64);
     Ok(AutomationReservationClaim {
@@ -300,10 +322,23 @@ fn acquire_reservation_claim(path: &Path) -> Result<AutomationReservationClaim> 
 }
 
 fn reservation_claim_is_live(path: &Path) -> bool {
-    reservation_claims_guard()
-        .get(path)
-        .and_then(Weak::upgrade)
-        .is_some()
+    live_reservation_claim(path).is_some()
+}
+
+fn live_reservation_claim(path: &Path) -> Option<Arc<ReservationClaimState>> {
+    reservation_claims_guard().get(path).and_then(Weak::upgrade)
+}
+
+/// Records the journal state the live owner just made durable, or forgets it
+/// after a write whose durability is unknown.
+fn note_owner_durable_record(path: &Path, record: Option<&DurableAutomationRecord>) {
+    if let Some(claim) = live_reservation_claim(path) {
+        *claim.durable() = record.cloned();
+    }
+}
+
+fn owner_made_durable(path: &Path, record: &DurableAutomationRecord) -> bool {
+    live_reservation_claim(path).is_some_and(|claim| claim.durable().as_ref() == Some(record))
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -498,9 +533,12 @@ fn classify_durable_settlement_with_stabilizer(
         publication.validate().map_err(contract_error)?;
     }
     with_journal_lock(path, || {
-        let Some(record) = read_stabilized_record_with_writer(path, stabilize_record)? else {
+        // Classification revalidates an uncertain settlement, so it republishes
+        // whatever it observes, including state its owner believes durable.
+        let Some(record) = read_record(path)? else {
             return Ok(DurableSettlementClassification::Missing);
         };
+        let record = stabilize_bound_record_after_visibility_with(path, &record, stabilize_record)?;
         validate_stable_admission(&record.admission, requested)?;
         match record.state {
             DurableAutomationState::Reserved => Ok(DurableSettlementClassification::Reserved),
@@ -610,7 +648,9 @@ pub fn persist_recovered_terminal_blocking(
             publication: None,
         };
         write_record(path, &record)?;
-        let stored = read_stabilized_record(path)?.ok_or_else(|| {
+        // `write_record` returned only after a durable replacement read back
+        // byte-identically, so this read verifies it without a second commit.
+        let stored = read_record(path)?.ok_or_else(|| {
             contract_error("recovered memory automation terminal disappeared after write")
         })?;
         validate_stable_admission(&stored.admission, requested)?;
@@ -677,7 +717,9 @@ pub fn persist_prepared_terminal_blocking(
             publication,
         };
         write_record(path, &record)?;
-        let stored = read_stabilized_record(path)?.ok_or_else(|| {
+        // `write_record` returned only after a durable replacement read back
+        // byte-identically, so this read verifies it without a second commit.
+        let stored = read_record(path)?.ok_or_else(|| {
             contract_error("prepared automation terminal disappeared after durable write")
         })?;
         validate_stable_admission(&stored.admission, requested)?;
@@ -825,7 +867,9 @@ fn promote_prepared_terminal_with_writers(
             publication: Some(publication.clone()),
         };
         write_terminal_record(path, &record)?;
-        let stored = read_stabilized_record(path)?.ok_or_else(|| {
+        // `write_record` returned only after a durable replacement read back
+        // byte-identically, so this read verifies it without a second commit.
+        let stored = read_record(path)?.ok_or_else(|| {
             contract_error("promoted automation terminal disappeared after durable write")
         })?;
         match stored.state {
@@ -900,7 +944,9 @@ pub fn persist_terminal_blocking(
             publication: None,
         };
         write_record(path, &record)?;
-        let stored = read_stabilized_record(path)?.ok_or_else(|| {
+        // `write_record` returned only after a durable replacement read back
+        // byte-identically, so this read verifies it without a second commit.
+        let stored = read_record(path)?.ok_or_else(|| {
             contract_error("memory automation terminal disappeared after durable write")
         })?;
         validate_stable_admission(&stored.admission, requested)?;
@@ -995,10 +1041,7 @@ fn with_journal_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> R
 /// can become visible and still return an error after publication, so
 /// visibility alone is not settlement evidence.
 fn read_stabilized_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
-    let Some(record) = read_record(path)? else {
-        return Ok(None);
-    };
-    stabilize_bound_record_after_visibility(path, &record).map(Some)
+    read_stabilized_record_with_writer(path, write_record)
 }
 
 fn read_stabilized_record_with_writer(
@@ -1008,14 +1051,10 @@ fn read_stabilized_record_with_writer(
     let Some(record) = read_record(path)? else {
         return Ok(None);
     };
+    if owner_made_durable(path, &record) {
+        return Ok(Some(record));
+    }
     stabilize_bound_record_after_visibility_with(path, &record, stabilize_record).map(Some)
-}
-
-fn stabilize_bound_record_after_visibility(
-    path: &Path,
-    expected: &DurableAutomationRecord,
-) -> Result<DurableAutomationRecord> {
-    stabilize_bound_record_after_visibility_with(path, expected, write_record)
 }
 
 test_helpers_pub! {
@@ -1194,9 +1233,15 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
 test_helpers_pub! {
 #[hotpath::measure(label = "daemon.automation.effect.journal_write")]
 fn write_record(path: &Path, record: &DurableAutomationRecord) -> Result<()> {
-    write_record_with_publisher(path, record, |temporary, destination| {
+    let written = write_record_with_publisher(path, record, |temporary, destination| {
         replace_automation_file_atomically(temporary, destination, "automation terminal journal")
-    })
+    });
+    note_owner_durable_record(path, written.is_ok().then_some(record));
+    #[cfg(test)]
+    if written.is_ok() {
+        durable_write_census::note(path, DurableWriteKind::Journal);
+    }
+    written
 }
 }
 
@@ -1341,6 +1386,8 @@ fn write_terminal_sidecar_with_publisher(
             "automation terminal sidecar did not replay byte-identically",
         ));
     }
+    #[cfg(test)]
+    durable_write_census::note(journal_path, DurableWriteKind::Sidecar);
     Ok(binding)
 }
 }
@@ -1625,4 +1672,47 @@ fn stable_admission_matches(
         && stored.scope == requested.scope
         && stored.request_id == requested.request_id
         && stored.recovery == requested.recovery
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum DurableWriteKind {
+    Journal,
+    Sidecar,
+}
+
+/// Completed durable journal and sidecar replacements, per journal.
+#[cfg(test)]
+pub(crate) mod durable_write_census {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    use super::DurableWriteKind;
+
+    fn writes() -> &'static Mutex<HashMap<PathBuf, (usize, usize)>> {
+        static WRITES: OnceLock<Mutex<HashMap<PathBuf, (usize, usize)>>> = OnceLock::new();
+        WRITES.get_or_init(Mutex::default)
+    }
+
+    pub(crate) fn note(journal: &Path, kind: DurableWriteKind) {
+        let mut writes = writes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let counts = writes.entry(journal.to_path_buf()).or_default();
+        match kind {
+            DurableWriteKind::Journal => counts.0 += 1,
+            DurableWriteKind::Sidecar => counts.1 += 1,
+        }
+    }
+
+    /// `(journal, sidecar)` durable writes for `journal` so far.
+    pub(crate) fn counts(journal: &Path) -> (usize, usize) {
+        writes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(journal)
+            .copied()
+            .unwrap_or_default()
+    }
 }

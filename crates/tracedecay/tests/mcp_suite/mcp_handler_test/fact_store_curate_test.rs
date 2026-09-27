@@ -12,6 +12,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tracedecay::mcp::McpServer;
 
 use crate::support::{extract_real_server_text, handle_real_server_tool_call_raw};
 
@@ -29,9 +30,10 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
     // The project's scheduler takes the same curator lock. A held lock is the
     // legal transient skip; wait it out so the assertion is the empty-store
     // terminal, not whichever neighbor happened to be running.
-    let mut response = Value::Null;
+    let mut envelope = Value::Null;
+    let mut record = Value::Null;
     for _attempt in 0..10 {
-        response = handle_real_server_tool_call_raw(
+        let response = handle_real_server_tool_call_raw(
             &server,
             "tracedecay_fact_store_curate",
             json!({
@@ -45,15 +47,18 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
             "legal bounds must be admitted: {response}"
         );
         assert_ne!(response["result"]["isError"], json!(true), "{response}");
-        let envelope = tool_document(&response);
-        if envelope["outcome"]["value"]["payload"]["terminal"]["reason"] != "scheduler_lock_active"
-        {
+        envelope = tool_document(&response);
+        let run_id = envelope["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_owned();
+        record = settled_run(&server, &run_id).await;
+        if record["error"] != "scheduler_lock_active" {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    let envelope = tool_document(&response);
     assert_eq!(
         envelope["contract"]["schema_id"],
         "schema.application.retained.fact-store-curate.result"
@@ -62,31 +67,37 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
     assert_eq!(envelope["outcome"]["outcome"], "effect");
     let effect = &envelope["outcome"]["value"];
     assert_eq!(effect["effect_class"], "administrative");
-    assert_eq!(effect["reconciliation"], "reconciled");
-    assert_eq!(effect["execution"]["termination"], "completed");
-    assert_eq!(effect["receipt"]["outcome"], "completed");
+    // The receipt is issued at admission, before the run commits anything.
+    assert_eq!(effect["reconciliation"], "pending");
+    assert_eq!(effect["execution"]["termination"], "effect_unknown");
+    assert_eq!(effect["receipt"]["outcome"], "effect_unknown");
+    assert_eq!(effect["receipt"]["committed_state"], Value::Null);
     assert_eq!(
         effect["receipt"]["operation"],
         "use-case.application.retained.fact-store-curate"
     );
-    let run = &effect["payload"];
-    assert_eq!(run["task"], "memory_curator");
-    assert_eq!(run["run_id"], envelope["request_id"]);
-    assert_eq!(run["terminal"]["status"], "skipped");
-    assert_eq!(run["terminal"]["reason"], "nothing_to_review");
-    assert_eq!(run["terminal"]["summary"]["reviewed_count"], 0);
-    assert_eq!(run["terminal"]["summary"]["accepted_count"], 0);
-    assert_eq!(run["terminal"]["summary"]["rejected_count"], 0);
-    // A skip terminal counts the run itself. Reviewed, accepted, and rejected
-    // stay at zero because no fact was examined for a mutation.
-    assert_eq!(run["terminal"]["summary"]["skipped_count"], 1);
-    assert_eq!(run["committed_receipts"], json!([]));
+    let receipt = &effect["payload"];
+    assert_eq!(
+        receipt,
+        &json!({
+            "run_id": envelope["request_id"],
+            "task": "memory_curator",
+            "request_digest": receipt["request_digest"],
+            "state": "started",
+        })
+    );
+    assert!(
+        receipt["request_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "{receipt}"
+    );
 
-    let run_id = run["run_id"]
+    let run_id = receipt["run_id"]
         .as_str()
-        .expect("curate payload must name the durable run")
+        .expect("curate receipt must name the durable run")
         .to_owned();
-    let record = ledger_record(&dashboard_root, &run_id);
+    assert_eq!(record["run_id"], run_id);
     assert_eq!(record["trigger"], "application");
     assert_eq!(record["task"], "memory_curator");
     assert_eq!(record["status"], "skipped");
@@ -94,6 +105,8 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
     assert_eq!(record["reviewed_count"], 0);
     assert_eq!(record["accepted_count"], 0);
     assert_eq!(record["rejected_count"], 0);
+    assert_eq!(record["skipped_count"], 1);
+    assert_eq!(ledger_record(&dashboard_root, &run_id)["status"], "skipped");
 
     let admitted = application_run_ids(&dashboard_root);
 
@@ -166,6 +179,29 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
     );
 
     fixture.harness.shutdown().await;
+}
+
+/// The run's settled ledger row, read the way callers read it: through
+/// `tracedecay_automation_run_view`, which refuses an unsettled run as not
+/// found.
+async fn settled_run(server: &McpServer, run_id: &str) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let response = handle_real_server_tool_call_raw(
+            server,
+            "tracedecay_automation_run_view",
+            json!({"run_id": run_id, "format": "json"}),
+        )
+        .await;
+        if response["error"].is_null() && response["result"]["isError"] != json!(true) {
+            return tool_document(&response)["run"].clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run {run_id} never settled: {response}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 fn tool_document(response: &Value) -> Value {

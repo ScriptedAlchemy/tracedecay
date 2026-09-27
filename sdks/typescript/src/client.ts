@@ -7,7 +7,7 @@ import {
   type ResponseFor,
   type ResultFor,
 } from "./operations";
-import { factStoreCurateTerminalMatches } from "./automation-terminal";
+import { factStoreCurateReceiptMatches } from "./automation-receipt";
 import {
   applyHttpRequestControls,
   type OperationRequestOptions,
@@ -1144,10 +1144,10 @@ export class TraceDecayClient {
         throw new TypeError("daemon returned a different application request ID");
       }
       if (
-        descriptor.resultSemantics === "fact_store_curate_terminal" &&
-        !await factStoreCurateTerminalMatches(decodedRequest, decoded)
+        descriptor.resultSemantics === "fact_store_curate_receipt" &&
+        !await factStoreCurateReceiptMatches(decodedRequest, decoded)
       ) {
-        throw new TypeError("automatic curation terminal invariants are invalid");
+        throw new TypeError("automatic curation receipt invariants are invalid");
       }
       return decoded;
     } catch (cause) {

@@ -18,7 +18,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 
-import { fetchPayloadWrite, type PayloadWriteResult } from "./payload.ts";
+import { fetchPayloadWrite, type PayloadResult, type PayloadWriteResult } from "./payload.ts";
 import { usePayload } from "./usePayload.ts";
 import {
   scopeKey,
@@ -38,14 +38,14 @@ import {
   AutomationSchedulerStatusV1Schema,
   AutomationSkillsPayloadV1Schema,
   ApplicationProblemEnvelopeSchema,
-  AutomationRunResultV1Schema,
+  FactStoreCurateResultV1Schema,
   ResolvedScopeSchema,
   type ApplicationProblemEnvelope,
   type AutomaticFactReceipt,
   type AutomationRunRowV1,
   type AutomationRunsPayloadV1,
   type AutomationSchedulerStatusV1,
-  type AutomationRunResultV1,
+  type FactStoreCurateResultV1,
   type ResolvedScope,
 } from "../../contracts/generated.ts";
 
@@ -299,7 +299,7 @@ const AutomaticCuratorResponseSchema = z
       scope: CuratorResolvedScopeSchema,
       outcome: z.object({
         outcome: z.literal("effect"),
-        value: z.object({ payload: AutomationRunResultV1Schema }),
+        value: z.object({ payload: FactStoreCurateResultV1Schema }),
       }),
     }),
   })
@@ -323,12 +323,13 @@ const CuratorApplicationProblemClaimSchema = z.object({
   }),
 });
 
-export type AutomaticCuratorRun = AutomationRunResultV1;
+/** The admitted run; its terminal is the run-ledger row for `run_id`. */
+export type AutomaticCuratorReceipt = FactStoreCurateResultV1;
 export type AutomaticCuratorPartialEffect = ApplicationProblemEnvelope;
 export type AutomaticCuratorResetRequired = ApplicationProblemEnvelope;
 
 export type AutomaticCuratorResult =
-  | { outcome: "ok"; run: AutomaticCuratorRun }
+  | { outcome: "started"; receipt: AutomaticCuratorReceipt }
   | { outcome: "partial_effect"; problem: AutomaticCuratorPartialEffect }
   | { outcome: "reset_required"; problem: AutomaticCuratorResetRequired }
   | { outcome: "not_dispatched"; writability: ScopeWritability }
@@ -377,12 +378,13 @@ export async function runAutomaticCurator(
   if (response.ok) {
     const result = AutomaticCuratorResponseSchema.safeParse(body);
     if (result.success) {
-      const run = result.data.value.outcome.value.payload;
+      const receipt = result.data.value.outcome.value.payload;
       if (
+        receipt.run_id === result.data.value.request_id &&
         (await automaticCuratorScopeMatchesEndpoint(result.data.value.scope)) &&
-        (await automaticCuratorRunMatchesEndpoint(run))
+        (await automaticCuratorReceiptMatchesEndpoint(receipt))
       ) {
-        return { outcome: "ok", run };
+        return { outcome: "started", receipt };
       }
     }
     return {
@@ -454,12 +456,13 @@ export async function runAutomaticCurator(
   }
 }
 
-async function automaticCuratorRunMatchesEndpoint(
-  run: AutomationRunResultV1,
+async function automaticCuratorReceiptMatchesEndpoint(
+  receipt: FactStoreCurateResultV1,
 ): Promise<boolean> {
-  if (
-    run.task !== "memory_curator" ||
-    run.request_digest !== await canonicalSha256([
+  return (
+    receipt.task === "memory_curator" &&
+    receipt.state === "started" &&
+    receipt.request_digest === await canonicalSha256([
       "tracedecay.automation-run.request-identity.v1",
       {
         kind: "memory_curator",
@@ -469,37 +472,6 @@ async function automaticCuratorRunMatchesEndpoint(
         },
       },
     ])
-  ) return false;
-  const summary = run.terminal.summary;
-  if (run.terminal.status === "skipped") {
-    return (
-      summary.reviewed_count === 0 &&
-      summary.accepted_count === 0 &&
-      summary.rejected_count === 0 &&
-      summary.skipped_count === 1 &&
-      memoryCuratorSkipReason(run.terminal.reason) &&
-      run.committed_receipts.length === 0
-    );
-  }
-  if (
-    summary.skipped_count !== 0 ||
-    summary.reviewed_count !== summary.accepted_count + summary.rejected_count ||
-    summary.rejected_count !== 0 ||
-    run.committed_receipts.length > 1
-  ) {
-    return false;
-  }
-  const receiptsMatch = (await Promise.all(run.committed_receipts.map(
-    (receipt) => receipt.kind === "curation" &&
-      automaticCurationReceiptMatches(run.run_id, receipt.receipt),
-  ))).every(Boolean);
-  return receiptsMatch && summary.accepted_count === run.committed_receipts.reduce(
-    (count, receipt) =>
-      count +
-      (receipt.kind === "curation"
-        ? receipt.receipt.receipt.accepted_operations
-        : 0),
-    0,
   );
 }
 
@@ -516,27 +488,6 @@ async function automaticCuratorScopeMatchesEndpoint(
     canonical.worktree_id,
     canonical.reference,
   ]);
-}
-
-function memoryCuratorSkipReason(reason: string): boolean {
-  return [
-    "automation_disabled",
-    "backend_disabled",
-    "delegated_host_mode",
-    "memory_curator_disabled",
-    "nothing_to_review",
-    "partial_coverage_no_candidates",
-    "scheduler_cooldown_active",
-    "scheduler_cron_not_due",
-    "scheduler_idle_window_active",
-    "scheduler_interval_not_elapsed",
-    "scheduler_lock_active",
-    "scheduler_non_retryable_failure",
-    "scheduler_schedule_invalid",
-    "scheduler_schedule_manual",
-    "similarity_authority_unavailable",
-    "task_not_schedulable",
-  ].includes(reason);
 }
 
 const FACT_STORE_CURATE_USE_CASE_ID =
@@ -564,252 +515,6 @@ async function automaticCuratorProblemMatchesEndpoint(
     receipt.outcome === "partial" &&
     receipt.committed_state !== null &&
     (await automaticCuratorScopeMatchesEndpoint(receipt.scope))
-  );
-}
-
-type CurationReceipt = Extract<
-  AutomationRunResultV1["committed_receipts"][number],
-  { kind: "curation" }
->["receipt"];
-
-async function automaticCurationReceiptMatches(
-  runId: string,
-  settled: CurationReceipt,
-): Promise<boolean> {
-  const receipt = settled.receipt;
-  if (
-    receipt.automation_run_id !== runId ||
-    !/^[0-9a-f]{64}$/.test(receipt.input_digest) ||
-    settled.canonical_digest !== await canonicalSha256([
-      "tracedecay.automation-run.curation-receipt.v1",
-      receipt,
-    ]) ||
-    receipt.operation_effects.length === 0 ||
-    receipt.operation_effects.length > 256 ||
-    receipt.accepted_operations !== receipt.operation_effects.length ||
-    receipt.changed_fact_ids.length > 256
-  ) {
-    return false;
-  }
-  const changedFactIds: string[] = [];
-  const committedEventIds = new Set<string>();
-  const ownerDigest = await canonicalSha256([
-    "fact-owner.v1",
-    receipt.owner,
-  ]);
-  if (ownerDigest === null) return false;
-  const ownerBinding = ownerDigest.slice("sha256:".length);
-  let factsAdded = 0;
-  let factsUpdated = 0;
-  let factsMerged = 0;
-  let factsRemoved = 0;
-  let normalizedTags = 0;
-  let factsLinked = 0;
-  let disposition: string | undefined;
-  let firstCommit: CurationCommit | undefined;
-  const operationIdentities = new Set<string>();
-  const appendChanged = (factId: string) => {
-    if (!changedFactIds.includes(factId)) changedFactIds.push(factId);
-  };
-  const acceptCommit = (
-    commit: CurationCommit,
-    factId: string,
-    eventCount: number | undefined,
-    assertion: "any" | "present" | "absent",
-  ): boolean => {
-    if (
-      canonicalJson(commit.owner) !== canonicalJson(receipt.owner) ||
-      commit.fact_id !== factId ||
-      commit.committed_event_ids.length === 0 ||
-      (eventCount !== undefined && commit.committed_event_ids.length !== eventCount) ||
-      commit.committed_event_ids.at(-1) !== commit.last_event_id ||
-      (assertion === "present" && commit.active_assertion_id === null) ||
-      (assertion === "absent" && commit.active_assertion_id !== null) ||
-      (disposition !== undefined && commit.disposition !== disposition) ||
-      commit.committed_event_ids.some((eventId) => {
-        if (committedEventIds.has(eventId)) return true;
-        committedEventIds.add(eventId);
-        return false;
-      })
-    ) {
-      return false;
-    }
-    disposition = commit.disposition;
-    firstCommit ??= commit;
-    return true;
-  };
-  for (const effect of receipt.operation_effects) {
-    switch (effect.kind) {
-      case "add": {
-        const comparisonMatches = effect.closest_fact_id !== null &&
-          effect.closest_fact_id !== effect.fact_id &&
-          effect.similarity_millionths !== null &&
-          effect.similarity_millionths <= 1_000_000;
-        const snapshotMatches = effect.disposition === "added"
-          ? effect.commit !== null && effect.closest_fact_id === null &&
-            effect.similarity_millionths === null
-          : effect.disposition === "near_duplicate"
-          ? (effect.commit === null && effect.closest_fact_id === effect.fact_id &&
-              effect.similarity_millionths === 1_000_000) ||
-            (effect.commit !== null && comparisonMatches)
-          : effect.commit !== null && comparisonMatches;
-        if (
-          !snapshotMatches ||
-          !factIdMatchesOwner(effect.fact_id, ownerBinding) ||
-          (effect.closest_fact_id !== null &&
-            !factIdMatchesOwner(effect.closest_fact_id, ownerBinding)) ||
-          (effect.commit !== null &&
-            !acceptCommit(effect.commit, effect.fact_id, undefined, "present"))
-        ) return false;
-        if (effect.commit !== null) {
-          factsAdded += 1;
-          appendChanged(effect.fact_id);
-        }
-        break;
-      }
-      case "update":
-        if (
-          !factIdMatchesOwner(effect.fact_id, ownerBinding) ||
-          effect.trust_delta_millionths < -1_000_000 ||
-          effect.trust_delta_millionths > 1_000_000 ||
-          !acceptCommit(effect.commit, effect.fact_id, undefined, "present")
-        ) return false;
-        factsUpdated += 1;
-        appendChanged(effect.fact_id);
-        break;
-      case "merge": {
-        const outcome = effect.outcome;
-        const expectedCommits = outcome.deleted_loser_fact_ids.length +
-          (outcome.content_updated ? 1 : 0);
-        if (
-          !/^[0-9a-f]{64}$/.test(outcome.input_digest) ||
-          !factIdMatchesOwner(outcome.winner_fact_id, ownerBinding) ||
-          outcome.deleted_loser_fact_ids.length === 0 ||
-          outcome.deleted_loser_fact_ids.length > 256 ||
-          outcome.commit_receipts.length !== expectedCommits ||
-          new Set(outcome.deleted_loser_fact_ids).size !==
-            outcome.deleted_loser_fact_ids.length ||
-          outcome.deleted_loser_fact_ids.some((factId) =>
-            factId === outcome.winner_fact_id ||
-            !factIdMatchesOwner(factId, ownerBinding))
-        ) return false;
-        let commitIndex = 0;
-        if (outcome.content_updated) {
-          if (!acceptCommit(
-            outcome.commit_receipts[0]!,
-            outcome.winner_fact_id,
-            2,
-            "present",
-          )) return false;
-          appendChanged(outcome.winner_fact_id);
-          commitIndex = 1;
-        }
-        for (const [index, loser] of outcome.deleted_loser_fact_ids.entries()) {
-          if (!acceptCommit(
-            outcome.commit_receipts[commitIndex + index]!,
-            loser,
-            2,
-            "absent",
-          )) return false;
-          appendChanged(loser);
-        }
-        factsMerged += outcome.deleted_loser_fact_ids.length;
-        break;
-      }
-      case "remove":
-        if (
-          !factIdMatchesOwner(effect.target_fact_id, ownerBinding) ||
-          (effect.disposition === "removed") !== (effect.commit !== null) ||
-          (effect.disposition !== "removed" && effect.commit !== null) ||
-          (effect.commit !== null &&
-            !acceptCommit(effect.commit, effect.target_fact_id, 1, "absent"))
-        ) return false;
-        if (effect.commit !== null) {
-          factsRemoved += 1;
-          appendChanged(effect.target_fact_id);
-        }
-        break;
-      case "normalize_tags": {
-        const identity = `normalize_tags:${effect.fact_id}`;
-        if (
-          operationIdentities.has(identity) ||
-          !factIdMatchesOwner(effect.fact_id, ownerBinding) ||
-          !acceptCommit(effect.commit, effect.fact_id, 2, "present")
-        ) return false;
-        operationIdentities.add(identity);
-        normalizedTags += 1;
-        appendChanged(effect.fact_id);
-        break;
-      }
-      case "link_facts": {
-        const identity = `link_facts:${effect.source_fact_id}:${effect.target_fact_id}:${effect.relation.kind}`;
-        if (
-          operationIdentities.has(identity) ||
-          !factIdMatchesOwner(effect.source_fact_id, ownerBinding) ||
-          !factIdMatchesOwner(effect.target_fact_id, ownerBinding) ||
-          !automaticCurationRelationMatches(effect, ownerBinding) ||
-          (effect.disposition === "linked" &&
-            (effect.commit === null ||
-              !acceptCommit(effect.commit, effect.source_fact_id, 1, "any"))) ||
-          (effect.disposition === "already_linked" && effect.commit !== null)
-        ) return false;
-        operationIdentities.add(identity);
-        if (effect.commit !== null) {
-          factsLinked += 1;
-          appendChanged(effect.source_fact_id);
-          appendChanged(effect.target_fact_id);
-        }
-        break;
-      }
-    }
-  }
-  return (
-    receipt.replay_fact_id === (firstCommit?.fact_id ?? null) &&
-    receipt.replay_event_id === (firstCommit?.last_event_id ?? null) &&
-    receipt.facts_added === factsAdded &&
-    receipt.facts_updated === factsUpdated &&
-    receipt.facts_merged === factsMerged &&
-    receipt.facts_removed === factsRemoved &&
-    receipt.normalized_tags === normalizedTags &&
-    receipt.facts_linked === factsLinked &&
-    receipt.changed_fact_ids.length === changedFactIds.length &&
-    receipt.changed_fact_ids.every((factId, index) => factId === changedFactIds[index])
-  );
-}
-
-type CurationEffect = CurationReceipt["receipt"]["operation_effects"][number];
-type CurationCommit = Extract<CurationEffect, { kind: "normalize_tags" }>["commit"];
-
-function automaticCurationRelationMatches(
-  effect: Extract<
-    Extract<
-      AutomationRunResultV1["committed_receipts"][number],
-      { kind: "curation" }
-    >["receipt"]["receipt"]["operation_effects"][number],
-    { kind: "link_facts" }
-  >,
-  ownerBinding: string,
-): boolean {
-  const relation = effect.relation;
-  const sourceLabel = relation.provenance.source_label;
-  const sanitization = relation.provenance.sanitization_receipt;
-  return (
-    effect.source_fact_id !== effect.target_fact_id &&
-    relation.evidence_fact_ids.length > 0 &&
-    relation.evidence_fact_ids.length <= 256 &&
-    relation.evidence_fact_ids.every((factId) =>
-      factIdMatchesOwner(factId, ownerBinding)) &&
-    relation.evidence_fact_ids.every(
-      (factId, index, facts) => index === 0 || facts[index - 1]! < factId,
-    ) &&
-    relation.confidence_millionths <= 1_000_000 &&
-    sourceLabel.length > 0 &&
-    new TextEncoder().encode(sourceLabel).length <= 4_096 &&
-    sourceLabel.trim() === sourceLabel &&
-    !/\p{Cc}/u.test(sourceLabel) &&
-    (sanitization.disposition === "accepted" ||
-      sanitization.disposition === "redacted") &&
-    sanitization.payload !== null
   );
 }
 
@@ -842,14 +547,6 @@ function canonicalApplicationIdentifier(value: string): boolean {
     !/\p{Cc}/u.test(value);
 }
 
-function factIdMatchesOwner(
-  factId: string,
-  ownerBinding: string,
-): boolean {
-  const match = /^fact\.v1\.([0-9a-f]{64})\.([0-9a-f]{64})$/.exec(factId);
-  return match !== null && match[1] === ownerBinding;
-}
-
 export function useAutomaticCurator() {
   const scope = useScope((state) => state.scope);
   const writability = scopeWritable(scope);
@@ -875,7 +572,7 @@ export function useAutomaticCurator() {
     }),
     onSuccess: ({ result }) => {
       if (
-        result.outcome !== "ok" &&
+        result.outcome !== "started" &&
         result.outcome !== "partial_effect" &&
         result.outcome !== "reset_required"
       ) {
@@ -902,11 +599,14 @@ export function useAutomaticCurator() {
   };
 }
 
-export function useAutomationRuns() {
+export function useAutomationRuns(options?: {
+  refetchInterval?: (latest: PayloadResult<AutomationRunsPayloadV1> | undefined) => number | false;
+}) {
   return usePayload(
     ["automation", "runs"],
     "/api/automation/runs",
     AutomationRunsPayloadV1Schema,
+    options,
   );
 }
 

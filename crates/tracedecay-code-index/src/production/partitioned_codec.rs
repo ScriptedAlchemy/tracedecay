@@ -1744,7 +1744,7 @@ pub type SealedGenerationSegmentReaderV1<'a> = dyn FnMut(SealedGenerationSegment
     + 'a;
 
 /// Files one window of a sealed generation's segments decodes at a time.
-const FILE_WINDOW_FILES_PER_WORKER_V1: usize = 4;
+pub(super) const FILE_WINDOW_FILES_PER_WORKER_V1: usize = 4;
 
 /// A sealed generation's file segments, decoded back one bounded window of
 /// files at a time without assembling the generation.

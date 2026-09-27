@@ -3,11 +3,16 @@
 # matches the bumped crate version, committing and pushing only when the
 # update changed Cargo.lock and touched nothing else. Shared by the stable and
 # beta release-please workflows so the branch extraction, drift guard, and bot
-# commit cannot diverge between channels.
+# commit cannot diverge between channels. It also neutralizes closing keywords
+# in the PR body, because a manual `release-please release-pr` refresh
+# rewrites the body without the workflow's neutralize step.
 #
-# Requires: the release PR branch checked out with push credentials, and the
-# release-please `pr` output JSON in $RELEASE_PR_JSON.
+# Requires: the release PR branch checked out with push credentials, the
+# release-please `pr` output JSON in $RELEASE_PR_JSON, and GH_TOKEN plus
+# GITHUB_REPOSITORY for the body rewrite.
 set -euo pipefail
+
+"$(dirname -- "${BASH_SOURCE[0]}")/neutralize-release-pr-closing-keywords.sh"
 
 RELEASE_PR_BRANCH=$(
   jq --exit-status --raw-output \

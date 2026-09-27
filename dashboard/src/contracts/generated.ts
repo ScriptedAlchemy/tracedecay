@@ -2925,6 +2925,23 @@ export const FactStoreCurateRequestV1Schema = z.object({
 }).strict();
 export type FactStoreCurateRequestV1 = z.infer<typeof FactStoreCurateRequestV1Schema>;
 
+/** Receipt of one admitted automatic curation.
+
+The curator runs on the daemon after this receipt is returned. Its terminal
+is the automation run ledger record for `run_id`, read with
+`automation_run_view`. */
+export const FactStoreCurateResultV1Schema = z.object({
+  request_digest: z.lazy(() => ManifestDigestSchema),
+  run_id: z.lazy(() => RunIdSchema),
+  state: z.lazy(() => FactStoreCurateStateV1Schema),
+  task: z.lazy(() => AutomationTaskV1Schema),
+}).strict();
+export type FactStoreCurateResultV1 = z.infer<typeof FactStoreCurateResultV1Schema>;
+
+/** Lifecycle state a `fact_store_curate` receipt reports. */
+export const FactStoreCurateStateV1Schema = z.literal("started");
+export type FactStoreCurateStateV1 = z.infer<typeof FactStoreCurateStateV1Schema>;
+
 export const FeedbackCoverageV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
 export type FeedbackCoverageV1 = z.infer<typeof FeedbackCoverageV1Schema>;
 

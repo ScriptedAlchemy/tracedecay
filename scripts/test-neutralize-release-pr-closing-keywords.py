@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -141,6 +145,79 @@ class NeutralizeReleasePrClosingKeywordsTests(unittest.TestCase):
                         self.assertEqual(
                             self.rewriter.neutralize_closing_keywords(raw), expected
                         )
+
+
+class ManualReleasePrRefreshTests(unittest.TestCase):
+    """A manual release-pr refresh runs only the lockfile script."""
+
+    def test_lockfile_refresh_neutralizes_the_release_pr_body(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch_path = Path(scratch)
+            checkout = scratch_path / "checkout"
+            (checkout / "scripts").mkdir(parents=True)
+            for name in (
+                "update-release-pr-lockfile.sh",
+                "neutralize-release-pr-closing-keywords.sh",
+                "neutralize-release-pr-closing-keywords.py",
+            ):
+                shutil.copy2(ROOT / "scripts" / name, checkout / "scripts" / name)
+            (checkout / "version.txt").write_text("1.0.0-beta.58\n")
+            (checkout / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.95.0"\n')
+            (checkout / "Cargo.lock").write_text("version = 4\n")
+            git_env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            }
+            subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+            subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "fixture"], cwd=checkout, check=True, env=git_env
+            )
+
+            bin_dir = scratch_path / "bin"
+            bin_dir.mkdir()
+            body_path = scratch_path / "body.md"
+            body_path.write_text(RELEASE_PLEASE_BODY)
+            edited_path = scratch_path / "edited.md"
+            stubs = {
+                # The lockfile already matches, the manual-refresh case that
+                # exits before any commit.
+                "cargo": "#!/bin/sh\nexit 0\n",
+                "gh": (
+                    "#!/bin/sh\n"
+                    'case "$1 $2" in\n'
+                    f'  "pr view") cat "{body_path}" ;;\n'
+                    '  "pr edit") while [ "$#" -gt 0 ]; do\n'
+                    '      if [ "$1" = --body-file ]; then '
+                    f'cp "$2" "{edited_path}"; fi; shift; done ;;\n'
+                    "  *) exit 64 ;;\n"
+                    "esac\n"
+                ),
+            }
+            for name, source in stubs.items():
+                stub = bin_dir / name
+                stub.write_text(source)
+                stub.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", "scripts/update-release-pr-lockfile.sh"],
+                cwd=checkout,
+                env={
+                    **git_env,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    "RELEASE_PR_JSON": '{"number": 42, "headBranchName": "release-please--x"}',
+                    "GH_TOKEN": "unused",
+                    "GITHUB_REPOSITORY": "ScriptedAlchemy/tracedecay",
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(edited_path.exists(), "the release PR body was never rewritten")
+            self.assertEqual(edited_path.read_text(), RELEASE_PLEASE_BODY_NEUTRALIZED)
 
 
 if __name__ == "__main__":

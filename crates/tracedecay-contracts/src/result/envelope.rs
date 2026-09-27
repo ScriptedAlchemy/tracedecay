@@ -97,6 +97,45 @@ pub enum ApplicationOutcome<T> {
 }
 
 impl<T> ApplicationOutcome<T> {
+    /// The same outcome and receipts carrying `map(payload)`.
+    pub fn map_payload<U>(self, map: impl FnOnce(T) -> U) -> ApplicationOutcome<U> {
+        match self {
+            Self::Evidence(packet) => ApplicationOutcome::Evidence(crate::EvidencePacket {
+                temporal: packet.temporal,
+                authority: packet.authority,
+                evidence_authorities: packet.evidence_authorities,
+                coverage: packet.coverage,
+                omissions: packet.omissions,
+                scores: packet.scores,
+                contributions: packet.contributions,
+                page: packet.page,
+                execution: packet.execution,
+                payload: packet.payload.map(map),
+            }),
+            Self::Preview(preview) => ApplicationOutcome::Preview(crate::PreviewResult {
+                preview_id: preview.preview_id,
+                preview_digest: preview.preview_digest,
+                effect_class: preview.effect_class,
+                authority: preview.authority,
+                expected_state: preview.expected_state,
+                execution: preview.execution,
+                payload: preview.payload.map(map),
+            }),
+            Self::Effect(effect) => ApplicationOutcome::Effect(crate::EffectResult {
+                effect_id: effect.effect_id,
+                effect_class: effect.effect_class,
+                idempotency_key: effect.idempotency_key,
+                authority: effect.authority,
+                expected_state: effect.expected_state,
+                execution: effect.execution,
+                reconciliation: effect.reconciliation,
+                receipt: effect.receipt,
+                payload: effect.payload.map(map),
+            }),
+            Self::Result(result) => ApplicationOutcome::Result(map(result)),
+        }
+    }
+
     pub fn payload(&self) -> Option<&T> {
         match self {
             Self::Evidence(result) => result.payload.as_ref(),

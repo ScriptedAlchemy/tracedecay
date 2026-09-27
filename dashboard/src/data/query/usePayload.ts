@@ -4,8 +4,12 @@ import type { QueryActivityDescriptor } from './activity.ts';
 import type { WireSchema } from './wireSchema.ts';
 import { scopedQueryKey, scopedUrl, useScope } from '../scope/store.ts';
 
-interface PayloadQueryOptions {
-  readonly refetchInterval?: number | false;
+interface PayloadQueryOptions<T> {
+  /** A function reads the latest answer, so polling can stop once it settles. */
+  readonly refetchInterval?:
+    | number
+    | false
+    | ((latest: PayloadResult<T> | undefined) => number | false);
   readonly staleTime?: number;
   readonly enabled?: boolean;
   readonly activity?: QueryActivityDescriptor;
@@ -15,7 +19,7 @@ export function usePayload<T>(
   key: readonly unknown[],
   url: string,
   schema: WireSchema<T>,
-  options?: PayloadQueryOptions,
+  options?: PayloadQueryOptions<T>,
 ) {
   const scope = useScope((s) => s.scope);
   const target = scopedUrl(scope, url);
@@ -35,7 +39,10 @@ export function usePayload<T>(
         : { dashboard: { activity: options.activity } },
     // Heavy stores make some payload queries expensive; default to
     // fetch-on-mount only so stacked refetches never starve the daemon.
-    refetchInterval: options?.refetchInterval ?? false,
+    refetchInterval: (query) => {
+      const interval = options?.refetchInterval ?? false;
+      return typeof interval === "function" ? interval(query.state.data) : interval;
+    },
     staleTime: options?.staleTime ?? 60_000,
     enabled: options?.enabled ?? true,
   });

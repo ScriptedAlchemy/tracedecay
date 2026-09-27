@@ -14,6 +14,7 @@ another; open the dashboard only when the user wants visual curation.
 Broad curation uses `fact_store_curate` and the `project-memory` curation
 reference. Direct operations require an exact fact-administration request.
 Prefer supersession for corrections. Exact deletion instructions are sufficient;
-resolve ambiguous targets before permanent removal. Inspect returned terminal
-state and advertised artifacts, report committed effects before any retry, and
-verify final facts with canonical reads.
+resolve ambiguous targets before permanent removal. `fact_store_curate`
+returns the started run's receipt; read its terminal with `automation_run_view`
+once it settles, inspect advertised artifacts, report committed effects before
+any retry, and verify final facts with canonical reads.

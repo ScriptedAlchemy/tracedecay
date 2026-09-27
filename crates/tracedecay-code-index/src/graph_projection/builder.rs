@@ -19,14 +19,15 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationRelation,
-    GraphGenerationRowSpill, GraphLabel, GraphProjectionIdentity, GraphProjectorRevision,
-    GraphPropertyName, GraphRelationId, GraphRelationKind, GraphWatermark, SpilledGraphGeneration,
+    GraphGenerationRowSpill, GraphLabel, GraphNamespace, GraphProjectionIdentity,
+    GraphProjectorRevision, GraphPropertyName, GraphRelationId, GraphRelationKind,
+    GraphSpillRowFootprint, GraphWatermark, SpilledGraphGeneration,
 };
 
 use super::schema::{
     FILE_IMPORT_EDGE_KIND, FILE_LABEL, FILE_RECORD_PROPERTY, IMPORT_LABEL, IMPORT_RECORD_PROPERTY,
-    file_entity_id, file_import_relation_id_with, import_entity_id, record_property, serialize,
-    stable_identity,
+    file_entity_id, file_import_relation_id_with, has_label, import_entity_id, record_property,
+    serialize, stable_identity,
 };
 use super::{
     CodeGraphProjectionError, CodeGraphSymbolBindingV1, EDGE_RECORD_PROPERTY,
@@ -268,6 +269,124 @@ fn group_unresolved_calls<'a>(
             .push(reference.clone());
     }
     Ok(by_source)
+}
+
+/// One file's graph inputs, for emitting the rows it owns before a build.
+pub(crate) struct CodeGraphSampleFileV1<'a> {
+    pub(crate) snapshot: &'a SanitizedCodeFileV1,
+    pub(crate) logical_path: &'a str,
+    pub(crate) chunks: &'a [Arc<CodeSearchChunkV1>],
+    pub(crate) symbols: &'a [Arc<LineageSymbolRecordV1>],
+    pub(crate) imports: &'a [CodeIndexImportEvidenceV1],
+    pub(crate) edges: &'a [CanonicalRelationEdgeV1],
+    pub(crate) unresolved: &'a [CodeIndexUnresolvedReferenceV1],
+}
+
+/// Rows of one kind and the spill bytes they took.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CodeGraphRowKindSampleV1 {
+    pub(crate) rows: usize,
+    pub(crate) footprint: GraphSpillRowFootprint,
+}
+
+impl CodeGraphRowKindSampleV1 {
+    fn add(&mut self, footprint: GraphSpillRowFootprint) {
+        self.rows += 1;
+        self.footprint.buffered = self.footprint.buffered.saturating_add(footprint.buffered);
+        self.footprint.resident = self.footprint.resident.saturating_add(footprint.resident);
+    }
+
+    /// The footprint of `rows` rows of this kind at the sampled mean.
+    pub(crate) fn scaled(&self, rows: usize) -> GraphSpillRowFootprint {
+        let scale = |bytes: usize| {
+            if self.rows == 0 {
+                0
+            } else {
+                (bytes as u128 * rows as u128 / self.rows as u128) as usize
+            }
+        };
+        GraphSpillRowFootprint {
+            buffered: scale(self.footprint.buffered),
+            resident: scale(self.footprint.resident),
+        }
+    }
+}
+
+/// The spill footprints of the rows sampled files emit, by row kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CodeGraphRowSampleV1 {
+    pub(crate) file_entities: CodeGraphRowKindSampleV1,
+    pub(crate) import_entities: CodeGraphRowKindSampleV1,
+    pub(crate) symbol_entities: CodeGraphRowKindSampleV1,
+    pub(crate) import_relations: CodeGraphRowKindSampleV1,
+    pub(crate) binding_relations: CodeGraphRowKindSampleV1,
+    pub(crate) edge_relations: CodeGraphRowKindSampleV1,
+}
+
+/// Emits each file's rows exactly as a sealed build batch would and measures
+/// the spill bytes of every row, by kind. Calls are limited to the file's
+/// own references, which only over-states the calls a symbol row discloses.
+pub(crate) fn sample_code_graph_rows(
+    generation: &CodeGenerationId,
+    files: &[CodeGraphSampleFileV1<'_>],
+) -> Result<CodeGraphRowSampleV1, CodeGraphProjectionError> {
+    let check = || Ok(());
+    let projection = super::code_graph_projection_identity(GraphNamespace::new("code-graph")?)?;
+    let mut sample = CodeGraphRowSampleV1::default();
+    for file in files {
+        let snapshot = BTreeMap::from([(&file.snapshot.file_occurrence_id, file.snapshot)]);
+        let bound = file
+            .chunks
+            .iter()
+            .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.clone())
+            .chain(file.symbols.iter().map(|symbol| symbol.occurrence.clone()))
+            .collect::<HashSet<_>>();
+        let references = file
+            .unresolved
+            .iter()
+            .map(|reference| (file.logical_path, reference))
+            .collect::<Vec<_>>();
+        let unresolved =
+            unresolved_call_limitations(&references, file.edges.iter(), Vec::new(), &check)?;
+        let unresolved_by_source = group_unresolved_calls(&unresolved, &check)?;
+        let rows = emit_code_graph_rows(
+            &CodeGraphRowContext {
+                projection: &projection,
+                generation,
+                files: Some(&snapshot),
+                bound: &bound,
+                unresolved_by_source: &unresolved_by_source,
+            },
+            &CodeGraphRowBatch {
+                files: &[file.snapshot],
+                imports: file.imports,
+                chunks: file.chunks,
+                symbols: file.symbols,
+                edges: file.edges,
+                bindings: None,
+            },
+            &check,
+        )?;
+        for entity in &rows.entities {
+            let footprint = GraphSpillRowFootprint::of_entity(entity)?;
+            if has_label(entity, FILE_LABEL) {
+                sample.file_entities.add(footprint);
+            } else if has_label(entity, IMPORT_LABEL) {
+                sample.import_entities.add(footprint);
+            } else {
+                sample.symbol_entities.add(footprint);
+            }
+        }
+        for relation in &rows.relations {
+            let footprint = GraphSpillRowFootprint::of_relation(relation)?;
+            match relation.kind.as_str() {
+                FILE_IMPORT_EDGE_KIND => sample.import_relations.add(footprint),
+                FILE_SYMBOL_EDGE_KIND => sample.binding_relations.add(footprint),
+                _ => sample.edge_relations.add(footprint),
+            }
+        }
+    }
+    Ok(sample)
 }
 
 pub(super) struct BuiltProjection {

@@ -110,6 +110,34 @@ pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
         .map(|text| text.trim_start().to_string())
 }
 
+/// Moves a tool result's typed `problem` into its MCP structured content.
+///
+/// `CallToolResult` has no extension members, so a problem left beside
+/// `content` reaches MCP clients only as prose. Every route that answers
+/// `tools/call` to a host renders the refusal record here.
+pub fn structure_tool_problem(result: &mut Value) {
+    let Some(object) = result.as_object_mut() else {
+        return;
+    };
+    let Some(problem) = object.remove("problem") else {
+        return;
+    };
+    match object
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    {
+        Some(structured) => {
+            structured.insert("problem".to_owned(), problem);
+        }
+        None => {
+            object.insert(
+                "structuredContent".to_owned(),
+                json!({ "problem": problem }),
+            );
+        }
+    }
+}
+
 pub fn mark_semantic_tool_error(result: &mut ToolResult) {
     if !tool_result_has_semantic_error(result) {
         return;
