@@ -14,8 +14,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
+use tracedecay_contracts::retrieval::{
+    ANALYTICS_DEFAULT_WINDOW_DAYS, ANALYTICS_MAX_WINDOW_DAYS, ANALYTICS_MIN_WINDOW_DAYS,
+    AnalyticsAutomationJobOutcomesV1, AnalyticsAutomationOutcomesV1, AnalyticsAutomationSectionV1,
+    AnalyticsCanonicalCallNameV1, AnalyticsEventCallNameV1, AnalyticsFactFunnelV1,
+    AnalyticsFactsSectionV1, AnalyticsLedgerUnavailableV1, AnalyticsProjectSectionUnavailableV1,
+    AnalyticsReportStatusV1, AnalyticsResultV1, AnalyticsScopeV1, AnalyticsSectionUnavailableV1,
+    AnalyticsSectionV1, AnalyticsSurfaceRequestV1, AnalyticsTierCountsV1, AnalyticsToolsSectionV1,
+    AnalyticsTopToolV1, AnalyticsZeroCallToolsV1,
+};
 use tracedecay_contracts::{
     CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
 };
@@ -23,8 +33,9 @@ use tracedecay_domain::{FactOwnerV1, ObservationScopeV1, ProjectId};
 use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 
+use tracedecay_automation_runtime::automation::backend::task_key;
 use tracedecay_automation_runtime::automation::run_ledger::{
-    canonical_record_started_at_seconds, load_run_records,
+    AutomationRunStatus, canonical_record_started_at_seconds, load_run_records,
 };
 use tracedecay_daemon_service::retained_owner::open_project_retained_memory_target;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -34,9 +45,8 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_store_runtime::retained_memory::MemoryTargetAccessV1;
 
-use crate::ToolResult;
-use crate::handlers::tool_json_with_md;
-use crate::tools::renderers;
+use crate::handlers::graph::graph_tool_completion;
+use crate::handlers::support::decode_primitive_request;
 
 /// Bound on how many automation run-ledger rows a single call will scan.
 const AUTOMATION_RECORD_LIMIT: usize = 200;
@@ -311,35 +321,8 @@ struct ToolCallCounts {
     errors: i64,
 }
 
-fn parse_scope(args: &Value) -> Result<bool> {
-    match args.get("scope").and_then(Value::as_str) {
-        None | Some("project") => Ok(false),
-        Some("all") => Ok(true),
-        Some(other) => Err(config_error(format!(
-            "unknown scope for tracedecay_analytics: {other} (use 'project' or 'all')"
-        ))),
-    }
-}
-
-fn parse_window_days(args: &Value) -> i64 {
-    args.get("window_days")
-        .and_then(Value::as_i64)
-        .unwrap_or(14)
-        .clamp(1, 365)
-}
-
-fn parse_section(args: &Value) -> Result<Option<&str>> {
-    match args.get("section").and_then(Value::as_str) {
-        None => Ok(None),
-        Some(section @ ("tools" | "hints" | "facts" | "automation")) => Ok(Some(section)),
-        Some(other) => Err(config_error(format!(
-            "unknown section for tracedecay_analytics: {other} (use 'tools', 'hints', 'facts', or 'automation')"
-        ))),
-    }
-}
-
-fn wants_section(filter: Option<&str>, name: &str) -> bool {
-    filter.is_none_or(|section| section == name)
+fn wants_section(filter: Option<AnalyticsSectionV1>, section: AnalyticsSectionV1) -> bool {
+    filter.is_none_or(|requested| requested == section)
 }
 
 struct ResolvedScope {
@@ -384,8 +367,8 @@ async fn observatory_and_costs_sections(
     scope: &ResolvedScope,
     all_projects: bool,
     since: i64,
-    value: &mut Value,
-) -> Result<()> {
+    report: &mut AnalyticsResultV1,
+) {
     let observatory = hotpath::future!(
         tracedecay_application::observability::observatory_read_model(
             gdb,
@@ -395,7 +378,6 @@ async fn observatory_and_costs_sections(
         label = "mcp.analytics.report.observatory"
     )
     .await;
-    let observatory = serde_json::to_value(&observatory).map_err(config_error)?;
     let provider_scope = if all_projects {
         None
     } else {
@@ -424,31 +406,46 @@ async fn observatory_and_costs_sections(
         label = "mcp.analytics.report.costs"
     )
     .await;
-    let costs = serde_json::to_value(&costs).map_err(config_error)?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| config_error("analytics response must be a JSON object"))?;
-    object.insert("observatory".to_string(), observatory);
-    object.insert("costs".to_string(), costs);
-    Ok(())
+    report.observatory = Some(observatory);
+    report.costs = Some(costs);
+}
+
+/// The authorities an analytics report reads beside the project itself.
+pub struct AnalyticsAuthority<'a> {
+    pub profile_root: Option<&'a Path>,
+    pub analytics_db: Option<&'a RegisteredGlobalDb>,
+    pub project_sessions: Option<&'a RegisteredGlobalDb>,
+    pub deadline: Deadline,
+    pub cancellation: CancellationSignal,
 }
 
 #[hotpath::measure(label = "mcp.analytics.report.total")]
-pub async fn handle_analytics(
+pub async fn compute_analytics(
     cg: &TraceDecay,
-    args: Value,
-    profile_root: Option<&Path>,
-    analytics_db: Option<&RegisteredGlobalDb>,
-    project_sessions: Option<&RegisteredGlobalDb>,
-    application_deadline: Deadline,
-    application_cancellation: CancellationSignal,
-) -> Result<ToolResult> {
+    args: &Value,
+    authority: AnalyticsAuthority<'_>,
+) -> Result<GraphToolCompletionV1> {
+    let request: AnalyticsSurfaceRequestV1 =
+        decode_primitive_request(args, "tracedecay_analytics")?;
+    let window_days = request.window_days.unwrap_or(ANALYTICS_DEFAULT_WINDOW_DAYS);
+    if !(ANALYTICS_MIN_WINDOW_DAYS..=ANALYTICS_MAX_WINDOW_DAYS).contains(&window_days) {
+        return Err(config_error(format!(
+            "invalid arguments for tracedecay_analytics: window_days must be between {ANALYTICS_MIN_WINDOW_DAYS} and {ANALYTICS_MAX_WINDOW_DAYS}"
+        )));
+    }
+    let scope_kind = request.scope.unwrap_or_default();
+    let all_projects = scope_kind == AnalyticsScopeV1::All;
+    let section = request.section;
+    let AnalyticsAuthority {
+        profile_root,
+        analytics_db,
+        project_sessions,
+        deadline,
+        cancellation,
+    } = authority;
     let read_control = FactReadControl::new(Arc::new(move || {
-        application_cancellation.is_cancelled() || application_deadline.is_elapsed_at(now_micros())
+        cancellation.is_cancelled() || deadline.is_elapsed_at(now_micros())
     }));
-    let all_projects = parse_scope(&args)?;
-    let window_days = parse_window_days(&args);
-    let section = parse_section(&args)?;
 
     let gdb = analytics_db.ok_or_else(|| {
         config_error("registered global analytics store is unavailable for tracedecay_analytics")
@@ -456,23 +453,29 @@ pub async fn handle_analytics(
 
     let scope = resolve_scope(cg, all_projects)?;
 
-    let since = current_timestamp().saturating_sub(window_days.saturating_mul(86_400));
+    let since = current_timestamp().saturating_sub(i64::from(window_days).saturating_mul(86_400));
     let event_count = hotpath::future!(
         gdb.count_analytics_events(scope.filter.as_deref(), since),
         label = "mcp.analytics.report.events"
     )
     .await
     .map_err(config_error)?;
-    let mut value = json!({
-        "status": "ok",
-        "scope": if all_projects { "all" } else { "project" },
-        "project_id": scope.filter,
-        "project_root": scope.display_root,
-        "window_days": window_days,
-        "since": since,
-        "event_count": event_count,
-        "event_count_truncated": false,
-    });
+    let mut report = AnalyticsResultV1 {
+        status: AnalyticsReportStatusV1::Ok,
+        scope: scope_kind,
+        project_id: scope.filter.clone(),
+        project_root: scope.display_root.clone(),
+        window_days,
+        since,
+        event_count,
+        event_count_truncated: false,
+        observatory: None,
+        costs: None,
+        tools: None,
+        hints: None,
+        facts: None,
+        automation: None,
+    };
 
     if section.is_none() {
         observatory_and_costs_sections(
@@ -482,60 +485,52 @@ pub async fn handle_analytics(
             &scope,
             all_projects,
             since,
-            &mut value,
+            &mut report,
         )
-        .await?;
+        .await;
     }
 
-    if wants_section(section, "tools") {
+    if wants_section(section, AnalyticsSectionV1::Tools) {
         let counts = hotpath::future!(
             gdb.query_analytics_tool_counts(scope.filter.as_deref(), since),
             label = "mcp.analytics.report.tools"
         )
         .await
         .map_err(config_error)?;
-        if let Some(object) = value.as_object_mut() {
-            object.insert("tools".to_string(), tools_section(&counts)?);
-        }
+        report.tools = Some(tools_section(&counts)?);
     }
-    if wants_section(section, "hints") {
+    if wants_section(section, AnalyticsSectionV1::Hints) {
         let counts = hotpath::future!(
             gdb.query_analytics_hint_counts(scope.filter.as_deref(), since),
             label = "mcp.analytics.report.hints"
         )
         .await
         .map_err(config_error)?;
-        let hints = tracedecay_dashboard_api::analytics_api::hint_summary_from_counts(&counts);
-        if let Some(object) = value.as_object_mut() {
-            object.insert("hints".to_string(), hints);
-        }
+        report.hints =
+            Some(tracedecay_dashboard_api::analytics_api::hint_summary_from_counts(&counts));
     }
-    if wants_section(section, "facts") {
-        let facts = hotpath::future!(
-            facts_section(cg, &scope, &read_control),
-            label = "mcp.analytics.report.facts"
-        )
-        .await;
-        if let Some(object) = value.as_object_mut() {
-            object.insert("facts".to_string(), facts);
-        }
+    if wants_section(section, AnalyticsSectionV1::Facts) {
+        report.facts = Some(
+            hotpath::future!(
+                facts_section(cg, &scope, &read_control),
+                label = "mcp.analytics.report.facts"
+            )
+            .await,
+        );
     }
-    if wants_section(section, "automation") {
-        let automation = hotpath::future!(
-            automation_section(profile_root, &scope.root, since),
-            label = "mcp.analytics.report.automation"
-        )
-        .await;
-        if let Some(object) = value.as_object_mut() {
-            object.insert("automation".to_string(), automation);
-        }
+    if wants_section(section, AnalyticsSectionV1::Automation) {
+        report.automation = Some(
+            hotpath::future!(
+                automation_section(profile_root, &scope.root, since),
+                label = "mcp.analytics.report.automation"
+            )
+            .await,
+        );
     }
 
-    Ok(tool_json_with_md(
-        Some(&cg.store_layout().response_handle_root),
-        &args,
-        &value,
-        || renderers::analytics_md(&value),
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Analytics(Box::new(report)),
+        Vec::new(),
     ))
 }
 
@@ -543,7 +538,7 @@ pub async fn handle_analytics(
     clippy::too_many_lines,
     reason = "The tools analytics section ranks every cataloged tool from one usage read."
 )]
-fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
+fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<AnalyticsToolsSectionV1> {
     let mut per_tool: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
     for row in rows {
         let counts = per_tool.entry(row.tool_name.clone()).or_default();
@@ -573,42 +568,35 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
     for (event_name, counts) in &per_tool {
         let normalized_event_name =
             tracedecay_automation::analytics::normalize_tool_name(event_name);
+        let canonical = |canonical_tool_name: &String| AnalyticsCanonicalCallNameV1 {
+            event_name: event_name.clone(),
+            canonical_tool_name: canonical_tool_name.clone(),
+            calls: counts.calls,
+            errors: counts.errors,
+        };
+        let event = || AnalyticsEventCallNameV1 {
+            event_name: event_name.clone(),
+            calls: counts.calls,
+            errors: counts.errors,
+        };
         let logical_tool_name = if let Some(canonical_tool_name) =
             available_public_name_to_canonical.get(&normalized_event_name)
         {
             called_available_defined.insert(canonical_tool_name.clone());
             if event_name != canonical_tool_name {
-                aliased_call_names.push(json!({
-                    "event_name": event_name,
-                    "canonical_tool_name": canonical_tool_name,
-                    "calls": counts.calls,
-                    "errors": counts.errors,
-                }));
+                aliased_call_names.push(canonical(canonical_tool_name));
             }
             canonical_tool_name
         } else if let Some(canonical_tool_name) =
             maximal_public_name_to_canonical.get(&normalized_event_name)
         {
-            unavailable_public_call_names.push(json!({
-                "event_name": event_name,
-                "canonical_tool_name": canonical_tool_name,
-                "calls": counts.calls,
-                "errors": counts.errors,
-            }));
+            unavailable_public_call_names.push(canonical(canonical_tool_name));
             canonical_tool_name
         } else if bound_but_unadvertised.contains(normalized_event_name.as_str()) {
-            bound_internal_call_names.push(json!({
-                "event_name": event_name,
-                "calls": counts.calls,
-                "errors": counts.errors,
-            }));
+            bound_internal_call_names.push(event());
             event_name
         } else {
-            unknown_or_retired_call_names.push(json!({
-                "event_name": event_name,
-                "calls": counts.calls,
-                "errors": counts.errors,
-            }));
+            unknown_or_retired_call_names.push(event());
             event_name
         };
         let logical_counts = logical_tool_counts
@@ -624,29 +612,29 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
         tier.calls += counts.calls;
         tier.errors += counts.errors;
     }
-    let tiers: Vec<Value> = TIERS
+    let tiers = TIERS
         .iter()
         .map(|(tier, _)| *tier)
         .chain(std::iter::once("other"))
         .filter_map(|tier| {
-            per_tier.get(tier).map(
-                |counts| json!({ "tier": tier, "calls": counts.calls, "errors": counts.errors }),
-            )
+            per_tier.get(tier).map(|counts| AnalyticsTierCountsV1 {
+                tier: tier.to_owned(),
+                calls: counts.calls,
+                errors: counts.errors,
+            })
         })
         .collect();
 
     let mut top_tools: Vec<(&String, &ToolCallCounts)> = logical_tool_counts.iter().collect();
     top_tools.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(b.0)));
-    let top_tools: Vec<Value> = top_tools
+    let top_tools = top_tools
         .into_iter()
         .take(TOP_TOOLS_LIMIT)
-        .map(|(tool_name, counts)| {
-            json!({
-                "tool_name": tool_name,
-                "tier": tool_tier(tool_name),
-                "calls": counts.calls,
-                "errors": counts.errors,
-            })
+        .map(|(tool_name, counts)| AnalyticsTopToolV1 {
+            tool_name: tool_name.clone(),
+            tier: tool_tier(tool_name).to_owned(),
+            calls: counts.calls,
+            errors: counts.errors,
         })
         .collect();
 
@@ -656,42 +644,50 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
         .collect();
     zero_call.sort();
     let zero_call_count = zero_call.len();
-    let zero_call_sample: Vec<&String> =
-        zero_call.into_iter().take(ZERO_CALL_SAMPLE_LIMIT).collect();
-    let zero_call_tools = json!({
-        "count": zero_call_count,
-        "sample": zero_call_sample,
-        "sample_truncated": zero_call_count > zero_call_sample.len(),
-    });
+    let sample: Vec<String> = zero_call
+        .into_iter()
+        .take(ZERO_CALL_SAMPLE_LIMIT)
+        .cloned()
+        .collect();
 
-    Ok(json!({
-        "available": !rows.is_empty(),
-        "tiers": tiers,
-        "top_tools": top_tools,
-        "raw_distinct_event_name_count": per_tool.len(),
-        "called_available_defined_tool_count": called_available_defined.len(),
-        "available_defined_tool_count": available_defined.len(),
-        "maximal_defined_tool_count": maximal_defined.len(),
-        "aliased_call_names": aliased_call_names,
-        "bound_internal_call_names": bound_internal_call_names,
-        "unavailable_public_call_names": unavailable_public_call_names,
-        "unknown_or_retired_call_names": unknown_or_retired_call_names,
-        "zero_call_available_defined_tools": zero_call_tools,
-    }))
+    Ok(AnalyticsToolsSectionV1 {
+        available: !rows.is_empty(),
+        tiers,
+        top_tools,
+        raw_distinct_event_name_count: per_tool.len(),
+        called_available_defined_tool_count: called_available_defined.len(),
+        available_defined_tool_count: available_defined.len(),
+        maximal_defined_tool_count: maximal_defined.len(),
+        aliased_call_names,
+        bound_internal_call_names,
+        unavailable_public_call_names,
+        unknown_or_retired_call_names,
+        zero_call_available_defined_tools: AnalyticsZeroCallToolsV1 {
+            count: zero_call_count,
+            sample_truncated: zero_call_count > sample.len(),
+            sample,
+        },
+    })
 }
 
 async fn facts_section(
     cg: &TraceDecay,
     scope: &ResolvedScope,
     read_control: &FactReadControl,
-) -> Value {
+) -> AnalyticsFactsSectionV1 {
+    let project_unavailable = |reason: String| {
+        AnalyticsFactsSectionV1::ProjectUnavailable(AnalyticsProjectSectionUnavailableV1 {
+            available: false,
+            reason,
+            project_root: scope.root.display().to_string(),
+        })
+    };
     let admitted_owner = match cg.project_memory_owner() {
         Ok(FactOwnerV1::Project { project_id }) => project_id,
         Ok(FactOwnerV1::Profile) | Err(_) => {
-            return json!({
-                "available": false,
-                "reason": "active analytics target has no project memory owner",
-            });
+            return AnalyticsFactsSectionV1::Unavailable(AnalyticsSectionUnavailableV1::new(
+                "active analytics target has no project memory owner",
+            ));
         }
     };
     let selector = (scope.project_id != admitted_owner).then(|| RetainedProjectSelectorV1 {
@@ -710,10 +706,9 @@ async fn facts_section(
         Ok(target) => target,
         Err(err) => {
             let problem = retained_surface_execution_problem(err);
-            return json!({
-                "available": false,
-                "reason": problem.canonical_code(),
-            });
+            return AnalyticsFactsSectionV1::Unavailable(AnalyticsSectionUnavailableV1::new(
+                problem.canonical_code(),
+            ));
         }
     };
     let memory = match MemoryApplication::new(
@@ -721,43 +716,35 @@ async fn facts_section(
         DatabaseFactStore::new(target.database()),
     ) {
         Ok(memory) => memory,
-        Err(err) => {
-            return json!({
-                "available": false,
-                "reason": format!("fact-store funnel unavailable: {err}"),
-                "project_root": scope.root.display().to_string(),
-            });
-        }
+        Err(err) => return project_unavailable(format!("fact-store funnel unavailable: {err}")),
     };
     let status = match memory.project_memory_status(read_control).await {
         Ok(status) => status,
-        Err(err) => {
-            return json!({
-                "available": false,
-                "reason": format!("fact-store funnel unavailable: {err}"),
-                "project_root": scope.root.display().to_string(),
-            });
-        }
+        Err(err) => return project_unavailable(format!("fact-store funnel unavailable: {err}")),
     };
     let funnel = status.feedback_funnel();
-    json!({
-        "available": true,
-        "project_root": scope.root.display().to_string(),
-        "facts": status.fact_count(),
-        "retrievals": funnel.retrieval_count_total(),
-        "facts_retrieved": funnel.retrieved_fact_count(),
-        "helpful_feedback": status.helpful_count(),
-        "unhelpful_feedback": status.unhelpful_count(),
-        "facts_rated": funnel.rated_fact_count(),
+    AnalyticsFactsSectionV1::Available(AnalyticsFactFunnelV1 {
+        available: true,
+        project_root: scope.root.display().to_string(),
+        facts: status.fact_count(),
+        retrievals: funnel.retrieval_count_total(),
+        facts_retrieved: funnel.retrieved_fact_count(),
+        helpful_feedback: status.helpful_count(),
+        unhelpful_feedback: status.unhelpful_count(),
+        facts_rated: funnel.rated_fact_count(),
     })
 }
 
-async fn automation_section(profile_root: Option<&Path>, project_root: &Path, since: i64) -> Value {
+async fn automation_section(
+    profile_root: Option<&Path>,
+    project_root: &Path,
+    since: i64,
+) -> AnalyticsAutomationSectionV1 {
+    let unavailable = |reason: String| {
+        AnalyticsAutomationSectionV1::Unavailable(AnalyticsSectionUnavailableV1::new(reason))
+    };
     let Some(profile_root) = profile_root else {
-        return json!({
-            "available": false,
-            "reason": "profile root unavailable",
-        });
+        return unavailable("profile root unavailable".to_owned());
     };
     // Only an enrolled project has an automation ledger; resolving through the
     // path-derived default layout would name a shard this directory never
@@ -767,32 +754,26 @@ async fn automation_section(profile_root: Option<&Path>, project_root: &Path, si
         profile_root,
     ) {
         Ok(Some(layout)) => layout.dashboard_root,
-        Ok(None) => {
-            return json!({
-                "available": false,
-                "reason": "project is not enrolled in this profile",
-            });
-        }
+        Ok(None) => return unavailable("project is not enrolled in this profile".to_owned()),
         Err(err) => {
-            return json!({
-                "available": false,
-                "reason": format!("could not resolve automation dashboard root: {err}"),
-            });
+            return unavailable(format!(
+                "could not resolve automation dashboard root: {err}"
+            ));
         }
     };
     let records = match load_run_records(&dashboard_root, AUTOMATION_RECORD_LIMIT).await {
         Ok(records) => records,
         Err(err) => {
-            return json!({
-                "available": false,
-                "reason": format!("could not read automation run ledger: {err}"),
-                "dashboard_root": dashboard_root.display().to_string(),
+            return AnalyticsAutomationSectionV1::LedgerUnavailable(AnalyticsLedgerUnavailableV1 {
+                available: false,
+                reason: format!("could not read automation run ledger: {err}"),
+                dashboard_root: dashboard_root.display().to_string(),
             });
         }
     };
 
     let mut in_window = 0usize;
-    let mut by_job: BTreeMap<String, BTreeMap<&'static str, i64>> = BTreeMap::new();
+    let mut by_job: BTreeMap<String, AnalyticsAutomationJobOutcomesV1> = BTreeMap::new();
     for record in &records {
         if let Ok(started_at) = canonical_record_started_at_seconds(record, "analytics window")
             && started_at < since
@@ -800,45 +781,32 @@ async fn automation_section(profile_root: Option<&Path>, project_root: &Path, si
             continue;
         }
         in_window += 1;
-        let job = serde_json::to_value(record.task)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_else(|| "unknown".to_string());
-        *by_job
-            .entry(job)
-            .or_default()
-            .entry(record.status.as_str())
-            .or_default() += 1;
+        let job = task_key(record.task).to_owned();
+        let outcomes =
+            by_job
+                .entry(job.clone())
+                .or_insert_with(|| AnalyticsAutomationJobOutcomesV1 {
+                    job,
+                    succeeded: 0,
+                    failed: 0,
+                    skipped: 0,
+                    other: 0,
+                });
+        let count = match record.status {
+            AutomationRunStatus::Succeeded => &mut outcomes.succeeded,
+            AutomationRunStatus::Failed => &mut outcomes.failed,
+            AutomationRunStatus::Skipped => &mut outcomes.skipped,
+            AutomationRunStatus::Queued | AutomationRunStatus::Running => &mut outcomes.other,
+        };
+        *count += 1;
     }
 
-    let by_job: Vec<Value> = by_job
-        .into_iter()
-        .map(|(job, statuses)| {
-            let succeeded = statuses.get("succeeded").copied().unwrap_or(0);
-            let failed = statuses.get("failed").copied().unwrap_or(0);
-            let skipped = statuses.get("skipped").copied().unwrap_or(0);
-            let mut other = 0i64;
-            for (status, count) in &statuses {
-                if !matches!(*status, "succeeded" | "failed" | "skipped") {
-                    other += *count;
-                }
-            }
-            json!({
-                "job": job,
-                "succeeded": succeeded,
-                "failed": failed,
-                "skipped": skipped,
-                "other": other,
-            })
-        })
-        .collect();
-
-    json!({
-        "available": true,
-        "dashboard_root": dashboard_root.display().to_string(),
-        "records_considered": records.len(),
-        "records_in_window": in_window,
-        "records_truncated": records.len() >= AUTOMATION_RECORD_LIMIT,
-        "by_job": by_job,
+    AnalyticsAutomationSectionV1::Available(AnalyticsAutomationOutcomesV1 {
+        available: true,
+        dashboard_root: dashboard_root.display().to_string(),
+        records_considered: records.len(),
+        records_in_window: in_window,
+        records_truncated: records.len() >= AUTOMATION_RECORD_LIMIT,
+        by_job: by_job.into_values().collect(),
     })
 }

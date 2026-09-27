@@ -1,9 +1,10 @@
 use tracedecay_automation_runtime::automation::managed_skills::{
-    MAX_MANAGED_SKILL_BODY_BYTES, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-    ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
-    apply_managed_skill_update, archive_managed_skill, create_managed_skill, disable_managed_skill,
-    list_managed_skills, load_managed_skill, managed_skill_dir, restore_managed_skill,
-    save_managed_skill, set_managed_skill_pinned, set_managed_skill_state, update_managed_skill,
+    MAX_MANAGED_SKILL_BODY_BYTES, ManagedSkillDraft, ManagedSkillExt, ManagedSkillProvenance,
+    ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile,
+    ManagedSupportFileExt, SkillInstallTarget, apply_managed_skill_update, archive_managed_skill,
+    create_managed_skill, disable_managed_skill, list_managed_skills, load_managed_skill,
+    managed_skill_dir, restore_managed_skill, save_managed_skill, set_managed_skill_pinned,
+    set_managed_skill_state, update_managed_skill,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
     SkillUsageAction, SkillUsageEvent, ingest_analytics_events, load_skill_usage_records,

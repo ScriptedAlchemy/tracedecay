@@ -17,6 +17,7 @@
 pub mod advisory;
 mod application_catalog_projection;
 pub mod authorization;
+pub mod automation;
 mod bearer_token;
 pub mod branch_snapshots;
 mod capability_manifest;

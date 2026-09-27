@@ -54,13 +54,16 @@ impl McpServer {
             }
             None => None,
         };
-        if tracedecay_automation::analytics::is_skill_view_tool(tool_name)
-            && let Some(request_id) = json_rpc_request_id_string(id)
-            && let Some(map) = handler_arguments.as_object_mut()
-        {
-            map.insert("__mcp_request_id".to_string(), json!(request_id));
-        }
-        if tool_supports_live_cancellation(tool_name)
+        // A skill view keys its usage record by the JSON-RPC id its analytics
+        // event records, so importing that event later cannot count it twice.
+        // Its cancellation identity travels in the dispatch control, not here.
+        if tracedecay_automation::analytics::is_skill_view_tool(tool_name) {
+            if let Some(request_id) = json_rpc_request_id_string(id)
+                && let Some(map) = handler_arguments.as_object_mut()
+            {
+                map.insert("__mcp_request_id".to_string(), json!(request_id));
+            }
+        } else if tool_supports_live_cancellation(tool_name)
             && let Some(map) = handler_arguments.as_object_mut()
         {
             map.remove("__mcp_request_id");

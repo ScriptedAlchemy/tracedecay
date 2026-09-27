@@ -16,6 +16,7 @@ mod ast_grep_rewrite_behavior_test;
 mod ast_grep_search_test;
 mod automation_run_list_behavior_test;
 mod automation_runs_test;
+mod automation_skill_request_test;
 mod bounded_analysis_test;
 mod branch_diff_behavior_test;
 #[cfg(feature = "test-transport")]

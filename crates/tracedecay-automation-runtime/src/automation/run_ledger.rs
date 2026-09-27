@@ -1,16 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
-use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
-use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
-
-use super::backend::{
-    AgentTaskFailureClass, AgentTaskKind, AgentTaskRetryAttempt, task_key as canonical_task_key,
+pub use tracedecay_contracts::automation::{
+    AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
+    AutomationRunStatus, AutomationTrigger,
 };
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
+
+use super::backend::{AgentTaskKind, task_key as canonical_task_key};
 use super::config_error;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -43,179 +42,6 @@ const RUN_ARTIFACTS_DIR: &str = "automation_artifacts";
 /// readers use the fixed-buffer `exact_lookup` scanner instead of allocating
 /// this window or the complete append-only ledger.
 const RUN_LEDGER_TAIL_CHUNK_BYTES: u64 = 256 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AutomationTrigger {
-    #[default]
-    ManualCli,
-    ManualMcp,
-    Dashboard,
-    Application,
-    Scheduler,
-    HostReceipt,
-}
-
-impl AutomationTrigger {
-    /// Explicit operator-triggered runs are admitted independently of whether
-    /// recurring scheduling is enabled. Backend availability, host mode,
-    /// policy, cancellation, and deadline checks still apply.
-    pub const fn is_on_demand(self) -> bool {
-        matches!(
-            self,
-            Self::ManualCli | Self::ManualMcp | Self::Dashboard | Self::Application
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AutomationRunStatus {
-    Queued,
-    Running,
-    Succeeded,
-    Failed,
-    Skipped,
-}
-
-impl AutomationRunStatus {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Skipped)
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Skipped => "skipped",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AutomationRunArtifactKind {
-    Traces,
-    Feedback,
-    GeneratedEvals,
-    ValidationGate,
-    OptimizerDiagnosis,
-    CodexHandoff,
-}
-
-impl AutomationRunArtifactKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Traces => "traces",
-            Self::Feedback => "feedback",
-            Self::GeneratedEvals => "generated_evals",
-            Self::ValidationGate => "validation_gate",
-            Self::OptimizerDiagnosis => "optimizer_diagnosis",
-            Self::CodexHandoff => "codex_handoff",
-        }
-    }
-
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "traces" => Some(Self::Traces),
-            "feedback" => Some(Self::Feedback),
-            "generated_evals" => Some(Self::GeneratedEvals),
-            "validation_gate" => Some(Self::ValidationGate),
-            "optimizer_diagnosis" => Some(Self::OptimizerDiagnosis),
-            "codex_handoff" => Some(Self::CodexHandoff),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct AutomationRunArtifact {
-    pub schema_version: u32,
-    pub kind: String,
-    pub path: String,
-    pub sha256: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct AutomationRunLedgerRecord {
-    pub schema_version: u32,
-    pub run_id: String,
-    pub trigger: AutomationTrigger,
-    pub task: AgentTaskKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_key: Option<String>,
-    pub backend: String,
-    /// The durable backend/configuration identity this run executed under.
-    ///
-    /// A settled deterministic failure stays suppressed only while this
-    /// matches the identity now configured, so the scheduler can re-admit the
-    /// task the moment the backend or configuration changes. Records written
-    /// before this field existed carry `None` and never suppress: an
-    /// unidentified failure cannot be shown to have failed under the current
-    /// identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend_identity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_schema: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strict_json: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    pub status: AutomationRunStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proposed_ops: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_ops: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rejected_ops: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validation_report: Option<Value>,
-    #[serde(default)]
-    pub reviewed_count: usize,
-    pub accepted_count: usize,
-    pub rejected_count: usize,
-    #[serde(default)]
-    pub skipped_count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Exhausted retrieval boundary of a `session_evidence_budget_exhausted`
-    /// skip; present exactly on those skips.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_evidence_budget_stage: Option<SessionRetrievalBudgetStageV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_classification: Option<AgentTaskFailureClass>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_retryable: Option<bool>,
-    #[serde(default)]
-    pub backend_attempt_count: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub backend_attempts: Vec<AgentTaskRetryAttempt>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fallback_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report_ref: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<AutomationRunArtifact>,
-    pub started_at: String,
-    pub completed_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at_micros: Option<i64>,
-}
 
 pub fn run_ledger_path(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join(RUN_LEDGER_FILENAME)
@@ -1152,7 +978,7 @@ const RUN_LEDGER_SUMMARY_TAIL_DIGEST_BYTES: u64 = 4096;
 
 /// Memo key: canonical ledger path, canonical task-kind name, exact task key.
 ///
-/// `AgentTaskKind` is defined in `tracedecay-automation` and does not derive
+/// `AgentTaskKind` is defined in `tracedecay-contracts` and does not derive
 /// `Hash`, so the kind is keyed by [`canonical_task_key`], which is injective
 /// over the kind enum and therefore carries the same identity.
 type RunLedgerSummaryMemoKey = (PathBuf, &'static str, String);

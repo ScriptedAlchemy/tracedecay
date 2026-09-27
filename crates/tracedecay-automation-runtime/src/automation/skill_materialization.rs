@@ -38,7 +38,7 @@ use super::artifact_refs::sha256_bytes;
 use super::config_error;
 use super::host_io::{HostIo, uses_default_user_profile};
 pub use crate::automation::managed_skills::managed_skill_root;
-use crate::automation::managed_skills::{ManagedSkill, ManagedSkillState};
+use crate::automation::managed_skills::{ManagedSkill, ManagedSkillExt, ManagedSkillState};
 use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_private_fs::FileLease;

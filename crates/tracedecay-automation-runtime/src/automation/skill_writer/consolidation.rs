@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 
 use super::super::managed_skills::{
-    ManagedSkill, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
+    ManagedSkill, ManagedSkillExt, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
     apply_managed_skill_overlap_archive, apply_managed_skill_overlap_consolidation,
     preview_managed_skill_update,
 };
@@ -262,8 +262,9 @@ pub(super) fn applied_consolidation_record(
 #[cfg(test)]
 mod tests {
     use super::super::super::managed_skills::{
-        ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, apply_managed_skill_update,
-        create_managed_skill, default_managed_skill_targets, load_managed_skill,
+        ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, ManagedSupportFileExt,
+        apply_managed_skill_update, create_managed_skill, default_managed_skill_targets,
+        load_managed_skill,
     };
     #[cfg(unix)]
     use super::super::super::skill_usage::skill_usage_record_path;

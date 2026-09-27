@@ -8,9 +8,10 @@ use tracedecay_policy::CurationApplyDecisionV1;
 use super::artifacts::sha256_bytes;
 use super::host_io::{HostIo, ManagedSkillExportReport};
 use super::managed_skills::{
-    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, apply_managed_skill_update,
-    create_managed_skill, default_managed_skill_targets, list_managed_skills,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillExt, ManagedSkillProvenance, ManagedSkillSource,
+    ManagedSkillUpdate, ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget,
+    apply_managed_skill_update, create_managed_skill, default_managed_skill_targets,
+    list_managed_skills,
 };
 use super::skill_usage::{
     SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageSummary,

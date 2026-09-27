@@ -1,6 +1,5 @@
 //! Runtime adapters for leaf-owned automation backend contracts and policies.
 
-use schemars::JsonSchema;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -13,6 +12,7 @@ pub use tracedecay_automation::backend::{
     AgentTaskResponse, agent_task_contract, agent_task_failure_disposition,
     classify_agent_task_error_message, prompt_version, task_key,
 };
+pub use tracedecay_contracts::automation::AgentTaskRetryAttempt;
 use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 use tracedecay_domain::errors::Result;
 
@@ -59,15 +59,6 @@ impl BackendRetryPolicy {
             .copied()
             .unwrap_or_default()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
-pub struct AgentTaskRetryAttempt {
-    pub attempt: u32,
-    pub succeeded: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_classification: Option<AgentTaskFailureClass>,
-    pub backoff_millis: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

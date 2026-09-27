@@ -17,9 +17,10 @@ pub(crate) const MANAGED_SKILL_STORE_AUTHORITY: &str = "managed skill store";
 pub use tracedecay_automation::managed_skills::validate_managed_support_files;
 pub use tracedecay_automation::managed_skills::{
     MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
-    ManagedSkill, ManagedSkillDraft, ManagedSkillMaterializationScope, ManagedSkillMetadata,
-    ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-    ManagedSupportFile, SkillInstallTarget, default_managed_skill_targets,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillExt, ManagedSkillMaterializationScope,
+    ManagedSkillMetadata, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
+    ManagedSkillUpdate, ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget,
+    default_managed_skill_targets,
 };
 use tracedecay_automation::managed_skills::{
     validate_managed_skill, validate_managed_skill_update, validate_skill_id,

@@ -1,6 +1,6 @@
 //! Project registry, runtime, and automation admin tool definitions.
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{def, def_always_load, def_rw, project_selector_object};
 use crate::ToolDefinition;
@@ -175,94 +175,38 @@ pub(super) fn def_dashboard() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_analytics() -> ToolDefinition {
+pub(super) fn def_analytics(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_analytics",
         "Usage Analytics",
         "Read-only adoption/telemetry rollup over the durable analytics_events table, the memory-fact funnel, and the automation run ledger. Answers 'what did the agent actually do' without querying .tracedecay databases directly: per-tool call/error counts grouped into tiers (navigation, analysis, session, memory, edit, admin), top-N tools by call volume, zero-call defined tools, hint emitted/followed/ignored/suppressed counts by category, the fact-store funnel (facts, retrievals, rated, helpful/unhelpful), and automation run outcomes (succeeded/failed/skipped) per job from the run ledger. Defaults to the active project over the last 14 days; pass scope:\"all\" for every registered project's analytics_events, or a project selector to inspect another registered project (fact/automation sections always report the resolved single project even in scope:\"all\").",
-        json!({
-            "type": "object",
-            "properties": {
-                "scope": {
-                    "type": "string",
-                    "enum": ["project", "all"],
-                    "description": "\"project\" (default) scopes analytics_events to the resolved project; \"all\" reports across every registered project."
-                },
-                "window_days": {
-                    "type": "number",
-                    "description": "Lookback window in days for events and automation runs (default: 14, clamped 1-365)."
-                },
-                "section": {
-                    "type": "string",
-                    "enum": ["tools", "hints", "facts", "automation"],
-                    "description": "Optional filter to a single section. Omit to return all sections."
-                },
-                "project_selector": project_selector_object(
-                    "Advanced optional registered project selector. Omit to use the active project."
-                )
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_automation_run_artifact_view() -> ToolDefinition {
+pub(super) fn def_automation_run_artifact_view(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_automation_run_artifact_view",
         "Automation Run Artifact View",
         "Read and hash-verify one durable automation run artifact payload from the active project's dashboard sidecar. Returns the run id, artifact metadata, and JSON payload without mutating automation state. Human/operator equivalents: `tracedecay automation runs artifact <run_id> <kind> --json` and `GET /api/automation/runs/{run_id}/artifacts/{kind}`.",
-        json!({
-            "type": "object",
-            "properties": {
-                "run_id": {
-                    "type": "string",
-                    "description": "Automation run id to inspect."
-                },
-                "kind": {
-                    "type": "string",
-                    "description": "Artifact kind to read, such as traces, feedback, generated_evals, validation_gate, optimizer_diagnosis, or codex_handoff."
-                }
-            },
-            "required": ["run_id", "kind"]
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_automation_run_list() -> ToolDefinition {
+pub(super) fn def_automation_run_list(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_automation_run_list",
         "Automation Run List",
         "List the newest durable automation run ledger records for the active project without triggering or mutating automation. Results are newest-first, deduplicated by run id, bounded to 200 records, and report whether the returned page is complete or contains malformed ledger rows.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 200,
-                    "description": "Maximum run records to return (default: 50, max: 200)."
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_automation_run_view() -> ToolDefinition {
+pub(super) fn def_automation_run_view(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_automation_run_view",
         "Automation Run View",
         "Read one exact durable automation run ledger record from the active project by run id without triggering or mutating automation. A missing run returns a typed not-found error and does not enumerate other run ids.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "run_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Exact automation run id to inspect."
-                }
-            },
-            "required": ["run_id"]
-        }),
+        input_schema,
     )
 }
