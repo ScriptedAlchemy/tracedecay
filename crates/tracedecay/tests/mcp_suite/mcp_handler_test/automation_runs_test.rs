@@ -110,17 +110,17 @@ async fn automation_run_list_and_view_use_the_active_project_ledger() {
     assert_eq!(view_payload["run"]["run_id"], "run-older");
     assert_eq!(view_payload["run"]["reviewed_count"], 3);
 
-    let missing = server
-        .call_tool_for_test(
-            "tracedecay_automation_run_view",
-            json!({"run_id": "run-missing"}),
-        )
-        .await
-        .unwrap_err();
-    let message = missing.to_string();
-    assert!(message.contains("automation run not found: run-missing"));
-    assert!(!message.contains("run-older"));
-    assert!(!message.contains("run-newer"));
+    let problem = expect_tool_refusal(
+        server
+            .call_tool_for_test(
+                "tracedecay_automation_run_view",
+                json!({"run_id": "run-missing"}),
+            )
+            .await,
+    );
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], "automation run not found: run-missing");
 
     drop(server);
 }

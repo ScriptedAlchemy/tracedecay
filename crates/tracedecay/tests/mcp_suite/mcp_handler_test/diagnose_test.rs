@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tracedecay_mcp::JsonRpcResponse;
 
 use crate::support::{
-    ProductionCompositionFixture, production_composition_fixture_with_sources,
+    ProductionCompositionFixture, production_composition_fixture_with_sources, refusal_problem,
     warm_code_index_search,
 };
 
@@ -324,18 +324,16 @@ _No diagnostics._
     );
 
     let refused = diagnose_rpc(&fixture, json!({})).await;
-    let error = refused
-        .error
-        .as_ref()
-        .expect("missing cargo_output is a JSON-RPC error");
-    assert_eq!(error.code, -32603);
-    assert_eq!(
-        error.message,
-        "tool execution failed: config error: invalid arguments for tracedecay_diagnose: missing field `cargo_output`"
+    assert!(
+        refused.error.is_none(),
+        "missing cargo_output must be an isError refusal: {refused:?}"
     );
+    let problem = refusal_problem(refused.result.as_ref().expect("refusal result"));
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
     assert_eq!(
-        error.data.as_ref().map(|data| &data["tool"]),
-        Some(&json!("tracedecay_diagnose"))
+        problem["message"],
+        "invalid arguments for tracedecay_diagnose: missing field `cargo_output`"
     );
 
     fixture.harness.shutdown().await;

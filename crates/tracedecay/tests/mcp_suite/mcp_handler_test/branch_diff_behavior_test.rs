@@ -13,7 +13,7 @@ use tracedecay::mcp::McpServer;
 
 use crate::common::fixture::{git_capture, git_run};
 use crate::support::{
-    handle_real_server_tool_call, handle_real_server_tool_call_raw, test_temp_dir,
+    handle_real_server_tool_call, handle_real_server_tool_call_raw, refusal_problem, test_temp_dir,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -300,14 +300,18 @@ async fn branch_diff_reports_the_symbols_that_differ_between_master_and_feature(
 
     let missing_base =
         handle_real_server_tool_call_raw(&server, "tracedecay_branch_diff", json!({})).await;
-    assert_eq!(missing_base["error"]["code"], -32603, "{missing_base}");
+    let missing_base_problem = refusal_problem(&missing_base["result"]);
     assert_eq!(
-        missing_base["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_branch_diff: missing field `base`",
+        missing_base_problem["kind"], "invalid_request",
         "{missing_base}"
     );
     assert_eq!(
-        missing_base["error"]["data"]["tool"], "tracedecay_branch_diff",
+        missing_base_problem["code"], "application.surface.invalid_request",
+        "{missing_base}"
+    );
+    assert_eq!(
+        missing_base_problem["message"],
+        "invalid arguments for tracedecay_branch_diff: missing field `base`",
         "{missing_base}"
     );
 
@@ -317,10 +321,17 @@ async fn branch_diff_reports_the_symbols_that_differ_between_master_and_feature(
         json!({"base": "master", "head": "feature", "limit": 0}),
     )
     .await;
-    assert_eq!(zero_limit["error"]["code"], -32603, "{zero_limit}");
+    let zero_limit_problem = refusal_problem(&zero_limit["result"]);
     assert_eq!(
-        zero_limit["error"]["message"],
-        "tool execution failed: config error: branch-diff limit must be positive",
+        zero_limit_problem["kind"], "invalid_request",
+        "{zero_limit}"
+    );
+    assert_eq!(
+        zero_limit_problem["code"], "application.surface.invalid_request",
+        "{zero_limit}"
+    );
+    assert_eq!(
+        zero_limit_problem["message"], "branch-diff limit must be positive",
         "{zero_limit}"
     );
 

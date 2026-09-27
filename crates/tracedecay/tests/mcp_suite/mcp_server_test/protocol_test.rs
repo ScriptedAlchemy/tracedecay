@@ -795,19 +795,6 @@ async fn test_tools_call_missing_name() {
     );
 }
 
-fn handle_read_failed_error() -> Value {
-    json!({
-        "code": -32603,
-        "message": "tool project route failed: reason_code=handle_read_failed retryable=true: response-handle cache is unavailable",
-        "data": {
-            "tool": "tracedecay_retrieve",
-            "reason_code": "handle_read_failed",
-            "retryable": true,
-            "detail": "response-handle cache is unavailable"
-        }
-    })
-}
-
 #[tokio::test]
 async fn test_unknown_method() {
     let (server, _dir) = setup_server().await;
@@ -1070,11 +1057,13 @@ async fn test_server_stats_include_response_handle_metrics() {
         json!({ "handle": broken.handle }),
     )
     .await;
+    let problem = crate::support::refusal_problem(&broken_result["result"]);
     assert_eq!(
-        broken_result["error"],
-        handle_read_failed_error(),
+        problem["kind"], "unavailable",
         "broken handle fixture should increment retrieve failure telemetry"
     );
+    assert_eq!(problem["code"], "handle_read_failed");
+    assert_eq!(problem["message"], "response-handle cache is unavailable");
     fs::remove_dir(&broken_path).unwrap();
 
     store_response_handle(

@@ -8,7 +8,7 @@ use serde_json::json;
 #[cfg(feature = "test-transport")]
 use crate::support::{
     extract_json, extract_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
-    production_composition_fixture,
+    production_composition_fixture, refusal_problem,
 };
 #[cfg(feature = "test-transport")]
 use serde_json::Value;
@@ -17,6 +17,14 @@ use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 #[cfg(feature = "test-transport")]
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::tracedecay::current_timestamp;
+
+#[cfg(feature = "test-transport")]
+fn assert_invalid_request(response: &Value, message: &str) {
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
+}
 
 #[cfg(feature = "test-transport")]
 fn tool_call_event(
@@ -105,9 +113,9 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
         .await;
     }
     let failed_grep = handle_real_server_tool_call_raw(&server, "tracedecay_grep", json!({})).await;
-    assert!(
-        failed_grep["error"].is_object(),
-        "missing grep pattern must fail over production MCP: {failed_grep}"
+    assert_invalid_request(
+        &failed_grep,
+        "invalid arguments for tracedecay_grep: missing field `pattern`",
     );
     handle_real_server_tool_call(&server, "tracedecay_fact_store_list", json!({})).await;
     server.ledger_writes_settled().await;
@@ -280,10 +288,9 @@ async fn analytics_rejects_unknown_scope_and_section() {
         json!({"scope": "bogus"}),
     )
     .await;
-    assert_eq!(response["error"]["code"].as_i64(), Some(-32603));
-    assert_eq!(
-        response["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_analytics: unknown variant `bogus`, expected `project` or `all`"
+    assert_invalid_request(
+        &response,
+        "invalid arguments for tracedecay_analytics: unknown variant `bogus`, expected `project` or `all`",
     );
 
     let response = handle_real_server_tool_call_raw(
@@ -292,10 +299,9 @@ async fn analytics_rejects_unknown_scope_and_section() {
         json!({"section": "bogus"}),
     )
     .await;
-    assert_eq!(response["error"]["code"].as_i64(), Some(-32603));
-    assert_eq!(
-        response["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_analytics: unknown variant `bogus`, expected one of `tools`, `hints`, `facts`, `automation`"
+    assert_invalid_request(
+        &response,
+        "invalid arguments for tracedecay_analytics: unknown variant `bogus`, expected one of `tools`, `hints`, `facts`, `automation`",
     );
     drop(server);
     fixture.harness.shutdown().await;
@@ -1080,10 +1086,9 @@ async fn analytics_applies_the_requested_window_and_refuses_one_out_of_range() {
             json!({"section": "tools", "window_days": window_days}),
         )
         .await;
-        assert_eq!(
-            refused["error"]["message"],
-            "tool execution failed: config error: invalid arguments for tracedecay_analytics: window_days must be between 1 and 365",
-            "{refused}"
+        assert_invalid_request(
+            &refused,
+            "invalid arguments for tracedecay_analytics: window_days must be between 1 and 365",
         );
     }
     drop(server);

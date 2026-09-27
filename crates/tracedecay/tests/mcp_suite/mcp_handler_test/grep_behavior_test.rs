@@ -9,7 +9,7 @@
 
 use crate::support::{
     extract_real_server_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
-    production_composition_fixture_with_sources, warm_code_index_search,
+    production_composition_fixture_with_sources, refusal_problem, warm_code_index_search,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -31,10 +31,6 @@ const LIB_RS: &str = concat!(
 );
 const NOTE_TXT: &str = "# Notes\nALPHA_NOTE_TOKEN\n";
 const CONTEXT_TXT: &str = "w\nx\ny\nz\nCONTEXT_TARGET\nd\ne\nf\ng\n";
-const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool grep ...` \
-(`tracedecay tool grep --help` for parameters). If MCP calls keep failing or timing out, fall \
-back to that CLI instead of querying .tracedecay databases directly.";
-
 fn write_grep_project(project: &Path) {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::create_dir_all(project.join("docs")).unwrap();
@@ -169,19 +165,18 @@ fn assert_json_payload(response: &Value, expected: Value, touched_bytes: Option<
     }
 }
 
-fn execution_failed(message: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "error": {
-            "code": -32603,
-            "message": message,
-            "data": {
-                "tool": "tracedecay_grep",
-                "cli_fallback": CLI_FALLBACK,
-            }
-        }
-    })
+fn assert_grep_refusal(response: &Value, message: &str) {
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "{response}"
+    );
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request", "{response}");
+    assert_eq!(
+        problem["code"], "application.surface.invalid_request",
+        "{response}"
+    );
+    assert_eq!(problem["message"], message, "{response}");
 }
 
 fn greeting_markdown(node_id: &str) -> String {
@@ -211,18 +206,13 @@ async fn tracedecay_grep_reports_literal_matches_and_typed_failures() {
     let note_id = symbol_node_id(&server, "note").await;
 
     let missing = grep(&server, json!({"format": "json"})).await;
-    assert_eq!(
-        missing,
-        execution_failed(
-            "tool execution failed: config error: invalid arguments for tracedecay_grep: missing field `pattern`"
-        )
+    assert_grep_refusal(
+        &missing,
+        "invalid arguments for tracedecay_grep: missing field `pattern`",
     );
 
     let empty = grep(&server, json!({"pattern": "", "format": "json"})).await;
-    assert_eq!(
-        empty,
-        execution_failed("tool execution failed: config error: pattern must not be empty")
-    );
+    assert_grep_refusal(&empty, "pattern must not be empty");
 
     let absent = grep(
         &server,
@@ -469,29 +459,23 @@ _Scanned {FILES_SCANNED} files._
     assert_eq!(generated_payload["omissions"], json!([]));
 
     let invalid_group = grep(&server, json!({"pattern": "(", "format": "json"})).await;
-    assert_eq!(
-        invalid_group,
-        execution_failed(
-            "tool execution failed: config error: invalid regex pattern '(': regex parse error: ( ^ error: unclosed group"
-        )
+    assert_grep_refusal(
+        &invalid_group,
+        "invalid regex pattern '(': regex parse error: ( ^ error: unclosed group",
     );
     let invalid_braces = grep(&server, json!({"pattern": "Hello, {}!", "format": "json"})).await;
-    assert_eq!(
-        invalid_braces,
-        execution_failed(
-            "tool execution failed: config error: invalid regex pattern 'Hello, {}!': regex parse error: Hello, {}! ^ error: repetition quantifier expects a valid decimal"
-        )
+    assert_grep_refusal(
+        &invalid_braces,
+        "invalid regex pattern 'Hello, {}!': regex parse error: Hello, {}! ^ error: repetition quantifier expects a valid decimal",
     );
     let invalid_glob = grep(
         &server,
         json!({"pattern": "VISIBLE_TOKEN", "path_glob": "[", "format": "json"}),
     )
     .await;
-    assert_eq!(
-        invalid_glob,
-        execution_failed(
-            "tool execution failed: config error: invalid path_glob '[': error parsing glob '[': unclosed character class; missing ']'"
-        )
+    assert_grep_refusal(
+        &invalid_glob,
+        "invalid path_glob '[': error parsing glob '[': unclosed character class; missing ']'",
     );
 
     drop(server);

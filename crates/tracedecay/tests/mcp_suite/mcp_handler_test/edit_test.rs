@@ -164,9 +164,12 @@ async fn path_containment_config_rejects_parent_traversal_before_serving_config(
     )
     .await;
 
-    assert!(
-        result.is_err(),
-        "config read should reject parent traversal, got {result:?}"
+    let problem = expect_tool_refusal(result);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(
+        problem["message"],
+        "path '../outside.toml' is not normalized"
     );
     close_test_graph(cg).await;
 }
@@ -198,10 +201,14 @@ async fn path_containment_config_rejects_symlink_escape_before_serving_config() 
     )
     .await;
 
-    assert!(
-        result.is_err(),
-        "config read should reject symlink escape, got {result:?}"
+    let problem = expect_tool_refusal(result);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    let message = format!(
+        "path 'escape/secret.toml' escapes project root '{}'",
+        project.display()
     );
+    assert_eq!(problem["message"], message.as_str());
 }
 
 #[tokio::test]

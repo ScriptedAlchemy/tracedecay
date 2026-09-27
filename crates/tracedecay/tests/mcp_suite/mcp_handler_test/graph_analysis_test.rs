@@ -119,6 +119,12 @@ async fn handle_tool_call(
         .await
 }
 
+fn assert_refusal_problem(problem: &Value, kind: &str, code: &str, message: &str) {
+    assert_eq!(problem["kind"], kind, "{problem}");
+    assert_eq!(problem["code"], code, "{problem}");
+    assert_eq!(problem["message"], message, "{problem}");
+}
+
 async fn close_test_graph(host: impl AnalysisToolHost) {
     host.close_analysis_host().await;
 }
@@ -1690,11 +1696,12 @@ async fn test_dsm_reports_authored_file_dependencies() {
         None,
         None,
     )
-    .await
-    .expect_err("an unknown DSM shape must be refused");
-    assert_eq!(
-        unknown.to_string(),
-        "config error: tracedecay_dsm failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_dsm: unknown variant `layers`, expected one of `stats`, `clusters`, `matrix`"
+    .await;
+    assert_refusal_problem(
+        &expect_tool_refusal(unknown),
+        "invalid_request",
+        "application.surface.invalid_request",
+        "invalid arguments for tracedecay_dsm: unknown variant `layers`, expected one of `stats`, `clusters`, `matrix`",
     );
 
     let matrix =
@@ -3680,11 +3687,12 @@ async fn pr_context_reports_the_pinned_feature_summary() {
         None,
         None,
     )
-    .await
-    .expect_err("a numeric cursor is not a continuation token");
-    assert_eq!(
-        cursor.to_string(),
-        "config error: tracedecay_pr_context failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_pr_context: invalid type: integer `1`, expected a string"
+    .await;
+    assert_refusal_problem(
+        &expect_tool_refusal(cursor),
+        "invalid_request",
+        "application.surface.invalid_request",
+        "invalid arguments for tracedecay_pr_context: invalid type: integer `1`, expected a string",
     );
 
     close_test_graph(host).await;
@@ -3937,8 +3945,9 @@ pub fn write_both(target: &mut Target, other: &mut Other) {
         "payload: {output}"
     );
 
-    for shadow_source in [
-        r#"
+    for (shadow_source, message) in [
+        (
+            r#"
 pub struct Target { pub value: u32 }
 pub struct Other { pub value: u32 }
 
@@ -3947,7 +3956,10 @@ pub fn closure_then_sibling(target: &Target) -> u32 {
     read_other(Other { value: 3 }) + target.value
 }
 "#,
-        r#"
+            "the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:6 to exactly one qualified owner",
+        ),
+        (
+            r#"
 pub struct Target { pub value: u32 }
 pub struct Other { pub value: u32 }
 
@@ -3956,7 +3968,10 @@ pub fn if_let_then_sibling(target: &Target, other: Option<Other>) -> u32 {
     read_other + target.value
 }
 "#,
-        r#"
+            "the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:6 to exactly one qualified owner",
+        ),
+        (
+            r#"
 pub struct Target { pub value: u32 }
 pub struct Other { pub value: u32 }
 
@@ -3966,13 +3981,15 @@ pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 
     read_other + target.value
 }
 "#,
+            "the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:7 to exactly one qualified owner",
+        ),
     ] {
         let shadow_dir = test_temp_dir();
         let shadow_root = shadow_dir.path().join("project");
         fs::create_dir_all(shadow_root.join("src")).unwrap();
         fs::write(shadow_root.join("src/lib.rs"), shadow_source).unwrap();
         let shadow_host = init_test_project(&shadow_root).await;
-        let error = expect_tool_error(
+        let problem = expect_tool_refusal(
             handle_tool_call(
                 &shadow_host,
                 "tracedecay_field_sites",
@@ -3982,9 +3999,11 @@ pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 
             )
             .await,
         );
-        assert!(
-            error.contains("verified-field-qualifier-unavailable"),
-            "shadowed receiver must not be attributed to the parameter owner: {error}"
+        assert_refusal_problem(
+            &problem,
+            "unavailable",
+            "verified-field-qualifier-unavailable",
+            message,
         );
     }
 }
@@ -4196,7 +4215,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
         }),
     );
 
-    let missing_field = expect_tool_error(
+    let missing_field = expect_tool_refusal(
         handle_tool_call(
             &host,
             "tracedecay_field_sites",
@@ -4206,15 +4225,17 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
         )
         .await,
     );
-    assert_eq!(
-        missing_field,
-        "config error: tracedecay_field_sites failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_field_sites: missing field `field`"
+    assert_refusal_problem(
+        &missing_field,
+        "invalid_request",
+        "application.surface.invalid_request",
+        "invalid arguments for tracedecay_field_sites: missing field `field`",
     );
 
     // `take!` is parseable Rust, but its body is a token tree, so the qualifier
     // path cannot bind `counter.n` to `Counter`. The first unbound site stops
     // the qualified census.
-    let unbound_macro = expect_tool_error(
+    let unbound_macro = expect_tool_refusal(
         handle_tool_call(
             &host,
             "tracedecay_field_sites",
@@ -4224,9 +4245,11 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
         )
         .await,
     );
-    assert_eq!(
-        unbound_macro,
-        "config error: tracedecay_field_sites failed over production MCP: tool project route failed: reason_code=verified-field-qualifier-unavailable retryable=false: the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:31 to exactly one qualified owner"
+    assert_refusal_problem(
+        &unbound_macro,
+        "unavailable",
+        "verified-field-qualifier-unavailable",
+        "the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:31 to exactly one qualified owner",
     );
     close_test_graph(host).await;
 
@@ -4307,7 +4330,7 @@ pub fn closure_then_sibling(counter: &Counter) -> u32 {
     .unwrap();
     let host = init_test_project(&project_root).await;
 
-    let error = expect_tool_error(
+    let problem = expect_tool_refusal(
         handle_tool_call(
             &host,
             "tracedecay_field_sites",
@@ -4317,9 +4340,11 @@ pub fn closure_then_sibling(counter: &Counter) -> u32 {
         )
         .await,
     );
-    assert_eq!(
-        error,
-        "config error: tracedecay_field_sites failed over production MCP: tool project route failed: reason_code=verified-field-qualifier-unavailable retryable=false: the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:9 to exactly one qualified owner"
+    assert_refusal_problem(
+        &problem,
+        "unavailable",
+        "verified-field-qualifier-unavailable",
+        "the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:9 to exactly one qualified owner",
     );
 
     close_test_graph(host).await;
@@ -4600,11 +4625,11 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         None,
     )
     .await;
-    assert_eq!(
-        missing_files
-            .expect_err("missing files must be refused")
-            .to_string(),
-        "config error: tracedecay_diff_context failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_diff_context: missing field `files`"
+    assert_refusal_problem(
+        &expect_tool_refusal(missing_files),
+        "invalid_request",
+        "application.surface.invalid_request",
+        "invalid arguments for tracedecay_diff_context: missing field `files`",
     );
 
     let files_not_array = handle_tool_call(
@@ -4615,11 +4640,11 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         None,
     )
     .await;
-    assert_eq!(
-        files_not_array
-            .expect_err("a string files argument must be refused")
-            .to_string(),
-        "config error: tracedecay_diff_context failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_diff_context: invalid type: string \"src/tier_c.rs\", expected a sequence"
+    assert_refusal_problem(
+        &expect_tool_refusal(files_not_array),
+        "invalid_request",
+        "application.surface.invalid_request",
+        "invalid arguments for tracedecay_diff_context: invalid type: string \"src/tier_c.rs\", expected a sequence",
     );
 
     let not_object = handle_tool_call(
@@ -4630,6 +4655,8 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         None,
     )
     .await;
+    // A non-object argument list never reaches the owner's typed parser: the
+    // MCP boundary rejects the call itself.
     assert_eq!(
         not_object
             .expect_err("non-object arguments must be refused")
@@ -4645,9 +4672,11 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         None,
     )
     .await;
-    assert_eq!(
-        zero_depth.expect_err("depth 0 must be refused").to_string(),
-        "config error: tracedecay_diff_context failed over production MCP: tool project route failed: reason_code=code-graph-invalid-request retryable=false: the code-graph read request is invalid: code graph impact depth must be positive"
+    assert_refusal_problem(
+        &expect_tool_refusal(zero_depth),
+        "unavailable",
+        "code-graph-invalid-request",
+        "the code-graph read request is invalid: code graph impact depth must be positive",
     );
 
     close_test_graph(host).await;
@@ -5240,18 +5269,17 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     );
     assert_savings_footer(&chain_markdown, CHAIN_SOURCE.len());
 
-    let rejected = chain_rejected.error.expect("zero limit is a tool error");
-    assert_eq!(rejected.code, -32603);
-    assert_eq!(
-        rejected.message,
-        "tool execution failed: config error: invalid parameter: tracedecay_hotspots requires limit to be at least 1"
+    assert!(
+        chain_rejected.error.is_none(),
+        "zero limit is a tool result: {:?}",
+        chain_rejected.error
     );
-    assert_eq!(
-        rejected.data,
-        Some(json!({
-            "tool": "tracedecay_hotspots",
-            "cli_fallback": "This tool is also available from the shell: `tracedecay tool hotspots ...` (`tracedecay tool hotspots --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-        }))
+    let rejected = refusal_problem(chain_rejected.result.as_ref().expect("zero limit refusal"));
+    assert_refusal_problem(
+        rejected,
+        "invalid_request",
+        "application.surface.invalid_request",
+        "invalid parameter: tracedecay_hotspots requires limit to be at least 1",
     );
 
     let fanout_dir = test_temp_dir();
@@ -5524,7 +5552,7 @@ async fn recursion_reports_literal_cycles_and_refuses_non_positive_limit() {
         "limit 1 keeps the shortest cycle: {limited}"
     );
 
-    let error = expect_tool_error(
+    let problem = expect_tool_refusal(
         handle_tool_call(
             &graph,
             "tracedecay_recursion",
@@ -5534,9 +5562,11 @@ async fn recursion_reports_literal_cycles_and_refuses_non_positive_limit() {
         )
         .await,
     );
-    assert_eq!(
-        error,
-        "config error: tracedecay_recursion failed over production MCP: tool execution failed: config error: invalid parameter: tracedecay_recursion requires limit to be at least 1"
+    assert_refusal_problem(
+        &problem,
+        "invalid_request",
+        "application.surface.invalid_request",
+        "invalid parameter: tracedecay_recursion requires limit to be at least 1",
     );
     close_test_graph(graph).await;
 }

@@ -120,17 +120,19 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
         "inspect artifact through MCP"
     );
 
-    let missing = server
-        .call_tool_for_test(
-            "tracedecay_automation_run_artifact_view",
-            json!({"run_id": run_id, "kind": "generated_evals"}),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        missing
-            .to_string()
-            .contains("automation run artifact not found")
+    let problem = expect_tool_refusal(
+        server
+            .call_tool_for_test(
+                "tracedecay_automation_run_artifact_view",
+                json!({"run_id": run_id, "kind": "generated_evals"}),
+            )
+            .await,
+    );
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(
+        problem["message"],
+        format!("automation run artifact not found: {run_id}/generated_evals")
     );
 
     drop(server);

@@ -6,7 +6,7 @@
 //! enumerate the ledger.
 
 use super::support::{jsonrpc_request, response_with_id, run_server_with_messages};
-use crate::support::{init_test_project, real_mcp_server};
+use crate::support::{init_test_project, real_mcp_server, refusal_problem};
 use serde_json::{Value, json};
 use std::fs;
 use tempfile::TempDir;
@@ -116,36 +116,17 @@ fn assert_tool_text(response: &Value, id: i64, expected: &str) {
     );
 }
 
-fn invalid_params(id: i64, message: &str, reason_code: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": -32602,
-            "message": message,
-            "data": {
-                "tool": "tracedecay_automation_run_view",
-                "reason_code": reason_code,
-                "retryable": false,
-                "detail": message
-            }
-        }
-    })
-}
-
-fn config_refusal(id: i64, message: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": -32603,
-            "message": format!("tool execution failed: config error: {message}"),
-            "data": {
-                "tool": "tracedecay_automation_run_view",
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool automation_run_view ...` (`tracedecay tool automation_run_view --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-            }
-        }
-    })
+fn assert_invalid_request(response: &Value, id: i64, message: &str) {
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], id);
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "tools/call refusal is an isError result: {response}"
+    );
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
 }
 
 #[tokio::test]
@@ -233,23 +214,20 @@ async fn automation_run_view_returns_the_exact_active_project_record() {
     assert_tool_text(&response_with_id(&responses, json!(2)), 2, EXACT_MARKDOWN);
     assert_tool_text(&response_with_id(&responses, json!(3)), 3, FAILED_JSON);
 
-    assert_eq!(
-        response_with_id(&responses, json!(4)),
-        invalid_params(4, "automation run not found: run-missing", "not_found")
+    assert_invalid_request(
+        &response_with_id(&responses, json!(4)),
+        4,
+        "automation run not found: run-missing",
     );
-    assert_eq!(
-        response_with_id(&responses, json!(5)),
-        config_refusal(
-            5,
-            "invalid arguments for tracedecay_automation_run_view: run_id must not be empty"
-        )
+    assert_invalid_request(
+        &response_with_id(&responses, json!(5)),
+        5,
+        "invalid arguments for tracedecay_automation_run_view: run_id must not be empty",
     );
-    assert_eq!(
-        response_with_id(&responses, json!(6)),
-        config_refusal(
-            6,
-            "invalid arguments for tracedecay_automation_run_view: missing field `run_id`"
-        )
+    assert_invalid_request(
+        &response_with_id(&responses, json!(6)),
+        6,
+        "invalid arguments for tracedecay_automation_run_view: missing field `run_id`",
     );
 
     assert_eq!(

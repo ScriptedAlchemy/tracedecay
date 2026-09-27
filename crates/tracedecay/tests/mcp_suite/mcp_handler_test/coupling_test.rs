@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use tracedecay_mcp::jsonrpc::JsonRpcResponse;
 
 use crate::support::{
-    ProductionCompositionFixture, production_composition_fixture_with_sources,
+    ProductionCompositionFixture, production_composition_fixture_with_sources, refusal_problem,
     warm_code_index_search,
 };
 
@@ -192,15 +192,16 @@ async fn coupling_ranks_distinct_other_files_for_fan_in_and_fan_out() {
     assert_eq!(tool_text(&markdown), FAN_IN_MARKDOWN);
 
     let invalid = call_coupling(&fixture, json!({"direction": "sideways", "format": "json"})).await;
-    let error = invalid
-        .error
-        .as_ref()
-        .expect("invalid direction must fail the MCP call");
-    assert!(invalid.result.is_none(), "{invalid:?}");
-    assert_eq!(error.code, -32603);
+    assert!(
+        invalid.error.is_none(),
+        "invalid direction must be an isError refusal: {invalid:?}"
+    );
+    let problem = refusal_problem(invalid.result.as_ref().expect("refusal result"));
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
     assert_eq!(
-        error.message,
-        "tool execution failed: config error: invalid arguments for tracedecay_coupling: unknown variant `sideways`, expected `fan_in` or `fan_out`"
+        problem["message"],
+        "invalid arguments for tracedecay_coupling: unknown variant `sideways`, expected `fan_in` or `fan_out`"
     );
 
     fixture.harness.shutdown().await;

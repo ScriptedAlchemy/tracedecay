@@ -304,16 +304,22 @@ async fn lazy_dependency_fixture(
 }
 
 fn assert_generation_advanced_retry(response: &Value) {
-    assert!(
-        response["result"].is_null(),
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(
+        problem["kind"], "unavailable",
         "the generation-advancing call must not return a same-call symbol payload: {response}"
     );
     assert_eq!(
-        response["error"]["data"]["reason_code"].as_str(),
+        problem["code"].as_str(),
         Some(GENERATION_ADVANCED_REASON),
         "lazy admission must expose the canonical usecase retry reason: {response}"
     );
-    assert_eq!(response["error"]["data"]["retryable"], true);
+    assert_eq!(
+        problem["message"],
+        "ignored dependency indexing advanced the graph generation; retry the request",
+        "{response}"
+    );
+    assert_eq!(problem["retryable"], true, "{response}");
 }
 
 fn code_generation(payload: &Value) -> &str {

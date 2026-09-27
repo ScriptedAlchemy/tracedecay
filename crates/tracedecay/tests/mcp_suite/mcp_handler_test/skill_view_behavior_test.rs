@@ -17,11 +17,8 @@ use crate::fixture;
 use crate::mcp_server_test::support::{
     jsonrpc_request, response_with_id, run_client_connection_with_messages,
 };
-use crate::support::{TestTraceDecay, open_active_project_scoped_runtime};
+use crate::support::{TestTraceDecay, open_active_project_scoped_runtime, refusal_problem};
 
-const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool skill_view ...` \
-(`tracedecay tool skill_view --help` for parameters). If MCP calls keep failing or timing out, fall \
-back to that CLI instead of querying .tracedecay databases directly.";
 const PROBE_ID: &str = "probe-skill";
 const OTHER_ID: &str = "other-skill";
 const PROBE_BODY: &str = "Read the checklist, then stop.";
@@ -362,34 +359,24 @@ async fn skill_view_denies_missing_id_and_unknown_skill() {
     let missing = call_skill_view(&fixture.server, 11, json!({})).await;
     assert_eq!(missing["jsonrpc"], "2.0");
     assert_eq!(missing["id"], 11);
-    assert_eq!(
-        missing["error"],
-        json!({
-            "code": -32603,
-            "message": "tool execution failed: config error: invalid arguments for tracedecay_skill_view: missing field `id`",
-            "data": {
-                "tool": "tracedecay_skill_view",
-                "cli_fallback": CLI_FALLBACK,
-            }
-        })
+    assert_skill_view_refusal(
+        &missing,
+        "invalid arguments for tracedecay_skill_view: missing field `id`",
     );
-    assert!(missing.get("result").is_none());
 
     let unknown = call_skill_view(&fixture.server, 12, json!({"id": "no-such-skill"})).await;
     assert_eq!(unknown["jsonrpc"], "2.0");
     assert_eq!(unknown["id"], 12);
-    assert_eq!(
-        unknown["error"],
-        json!({
-            "code": -32602,
-            "message": "managed skill 'no-such-skill' not found",
-            "data": {
-                "tool": "tracedecay_skill_view",
-                "reason_code": "not_found",
-                "retryable": false,
-                "detail": "managed skill 'no-such-skill' not found"
-            }
-        })
+    assert_skill_view_refusal(&unknown, "managed skill 'no-such-skill' not found");
+}
+
+fn assert_skill_view_refusal(response: &Value, message: &str) {
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "skill view refusal is an isError result: {response}"
     );
-    assert!(unknown.get("result").is_none());
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
 }

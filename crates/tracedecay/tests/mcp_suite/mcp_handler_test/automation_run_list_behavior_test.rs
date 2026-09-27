@@ -21,7 +21,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 use crate::mcp_server_test::run_client_connection_with_messages;
 use crate::mcp_server_test::support::{jsonrpc_request, response_with_id};
 use crate::support::{
-    TestEnv, TestTraceDecay, close_test_graph, init_test_project, real_mcp_server,
+    TestEnv, TestTraceDecay, close_test_graph, init_test_project, real_mcp_server, refusal_problem,
 };
 
 const STARTED_AT: &str = "1782283199";
@@ -195,10 +195,12 @@ _No automation runs recorded._
 
     for limit in [0, 201] {
         let refused = list_call(&served.server, json!({"format": "json", "limit": limit})).await;
+        let problem = refusal_problem(&refused["result"]);
+        assert_eq!(problem["kind"], "invalid_request");
+        assert_eq!(problem["code"], "application.surface.invalid_request");
         assert_eq!(
-            refused["error"]["message"],
-            "tool execution failed: config error: invalid arguments for tracedecay_automation_run_list: limit must be between 1 and 200",
-            "{refused}"
+            problem["message"],
+            "invalid arguments for tracedecay_automation_run_list: limit must be between 1 and 200"
         );
     }
 }
@@ -561,18 +563,11 @@ async fn automation_run_list_refuses_a_non_directory_dashboard_root() {
     fs::write(&served.dashboard_root, "not a dashboard directory\n").unwrap();
 
     let response = list_call(&served.server, json!({"format": "json"})).await;
-    assert!(response["result"].is_null(), "{response}");
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "unavailable");
+    assert_eq!(problem["code"], "automation_run_ledger_unavailable");
     assert_eq!(
-        response["error"],
-        json!({
-            "code": -32603,
-            "message": "tool project route failed: reason_code=automation_run_ledger_unavailable retryable=true: automation run ledger is unavailable during list: config error: automation dashboard root is not a directory",
-            "data": {
-                "tool": "tracedecay_automation_run_list",
-                "reason_code": "automation_run_ledger_unavailable",
-                "retryable": true,
-                "detail": "automation run ledger is unavailable during list: config error: automation dashboard root is not a directory"
-            }
-        })
+        problem["message"],
+        "automation run ledger is unavailable during list: config error: automation dashboard root is not a directory"
     );
 }

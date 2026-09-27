@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     ProductionCompositionFixture, extract_json, production_composition_fixture_with_sources,
-    warm_code_index_search,
+    refusal_problem, warm_code_index_search,
 };
 
 const SOURCE: &str = "#[derive(Debug, Clone)]\npub struct TypedWidget {\n    pub id: u32,\n}\n\npub fn fetch_typed_widget() -> u32 {\n    TYPED_REQUEST_MARKER\n}\n";
@@ -39,21 +39,32 @@ async fn call_json(
     )
 }
 
-async fn call_error(
+async fn assert_refused(
     fixture: &ProductionCompositionFixture,
     tool_name: &str,
     arguments: Value,
-) -> String {
+    message: &str,
+) {
     let response = fixture
         .harness
         .call_tool(&fixture.project_root, tool_name, arguments)
         .await
         .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
-    assert!(response.result.is_none(), "{:?}", response.result);
-    response
-        .error
-        .unwrap_or_else(|| panic!("{tool_name} must refuse the request"))
-        .message
+    assert!(
+        response.error.is_none(),
+        "{tool_name} returned a production MCP error: {:?}",
+        response.error.as_ref().map(|error| &error.message)
+    );
+    let result = response
+        .result
+        .unwrap_or_else(|| panic!("{tool_name} returned no production MCP result"));
+    let problem = refusal_problem(&result);
+    assert_eq!(problem["kind"], "invalid_request", "{tool_name}: {problem}");
+    assert_eq!(
+        problem["code"], "application.surface.invalid_request",
+        "{tool_name}: {problem}"
+    );
+    assert_eq!(problem["message"], message, "{tool_name}: {problem}");
 }
 
 #[tokio::test]
@@ -133,33 +144,27 @@ async fn graph_lookup_tools_refuse_arguments_outside_their_typed_request() {
         )
     );
 
-    assert_eq!(
-        call_error(
-            &fixture,
-            "tracedecay_grep",
-            json!({"pattern": "TYPED_REQUEST_MARKER", "max_results": "5"}),
-        )
-        .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_grep: invalid type: string \"5\", expected u32"
-    );
-    assert_eq!(
-        call_error(
-            &fixture,
-            "tracedecay_derives",
-            json!({"qualified_name": "src/lib.rs::TypedWidget", "include_generated": true}),
-        )
-        .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_derives: unknown field `include_generated`, expected one of `id`, `node_id`, `qualified_name`"
-    );
-    assert_eq!(
-        call_error(
-            &fixture,
-            "tracedecay_find_exact_symbol",
-            json!({"name": "fetch_typed_widget", "limit": "3"}),
-        )
-        .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_find_exact_symbol: invalid type: string \"3\", expected u32"
-    );
+    assert_refused(
+        &fixture,
+        "tracedecay_grep",
+        json!({"pattern": "TYPED_REQUEST_MARKER", "max_results": "5"}),
+        "invalid arguments for tracedecay_grep: invalid type: string \"5\", expected u32",
+    )
+    .await;
+    assert_refused(
+        &fixture,
+        "tracedecay_derives",
+        json!({"qualified_name": "src/lib.rs::TypedWidget", "include_generated": true}),
+        "invalid arguments for tracedecay_derives: unknown field `include_generated`, expected one of `id`, `node_id`, `qualified_name`",
+    )
+    .await;
+    assert_refused(
+        &fixture,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "fetch_typed_widget", "limit": "3"}),
+        "invalid arguments for tracedecay_find_exact_symbol: invalid type: string \"3\", expected u32",
+    )
+    .await;
 
     fixture.harness.shutdown().await;
 }

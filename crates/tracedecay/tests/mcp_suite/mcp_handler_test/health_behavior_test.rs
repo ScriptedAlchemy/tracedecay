@@ -17,7 +17,7 @@ use tracedecay_mcp::ToolResult;
 
 use crate::support::{
     ProductionCompositionFixture, extract_json, extract_text,
-    production_composition_fixture_with_sources, wait_for_current_graph,
+    production_composition_fixture_with_sources, refusal_problem, wait_for_current_graph,
 };
 
 async fn call_health(fixture: &ProductionCompositionFixture, arguments: Value) -> ToolResult {
@@ -183,21 +183,32 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
     );
 }
 
-async fn health_report_error(
+async fn assert_refused(
     fixture: &ProductionCompositionFixture,
     tool_name: &str,
     arguments: Value,
-) -> String {
+    message: &str,
+) {
     let response = fixture
         .harness
         .call_tool(&fixture.project_root, tool_name, arguments)
         .await
         .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
-    assert!(response.result.is_none(), "{:?}", response.result);
-    response
-        .error
-        .unwrap_or_else(|| panic!("{tool_name} must refuse the request"))
-        .message
+    assert!(
+        response.error.is_none(),
+        "{tool_name} returned a production MCP error: {:?}",
+        response.error.as_ref().map(|error| &error.message)
+    );
+    let result = response
+        .result
+        .unwrap_or_else(|| panic!("{tool_name} returned no production MCP result"));
+    let problem = refusal_problem(&result);
+    assert_eq!(problem["kind"], "invalid_request", "{tool_name}: {problem}");
+    assert_eq!(
+        problem["code"], "application.surface.invalid_request",
+        "{tool_name}: {problem}"
+    );
+    assert_eq!(problem["message"], message, "{tool_name}: {problem}");
 }
 
 #[tokio::test]
@@ -229,18 +240,27 @@ async fn health_reports_refuse_arguments_outside_their_typed_request() {
         (&json!("lines"), &json!("file"), &json!(2), &json!(0.0))
     );
 
-    assert_eq!(
-        health_report_error(&fixture, "tracedecay_gini", json!({"metric": "cyclomatic"})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_gini: unknown variant `cyclomatic`, expected one of `complexity`, `lines`, `fan_in`, `fan_out`, `members`"
-    );
-    assert_eq!(
-        health_report_error(&fixture, "tracedecay_dsm", json!({"max_files": "30"})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_dsm: invalid type: string \"30\", expected u32"
-    );
-    assert_eq!(
-        health_report_error(&fixture, "tracedecay_health", json!({"detail": true})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_health: unknown field `detail`, expected `path` or `details`"
-    );
+    assert_refused(
+        &fixture,
+        "tracedecay_gini",
+        json!({"metric": "cyclomatic"}),
+        "invalid arguments for tracedecay_gini: unknown variant `cyclomatic`, expected one of `complexity`, `lines`, `fan_in`, `fan_out`, `members`",
+    )
+    .await;
+    assert_refused(
+        &fixture,
+        "tracedecay_dsm",
+        json!({"max_files": "30"}),
+        "invalid arguments for tracedecay_dsm: invalid type: string \"30\", expected u32",
+    )
+    .await;
+    assert_refused(
+        &fixture,
+        "tracedecay_health",
+        json!({"detail": true}),
+        "invalid arguments for tracedecay_health: unknown field `detail`, expected `path` or `details`",
+    )
+    .await;
 
     fixture.harness.shutdown().await;
 }

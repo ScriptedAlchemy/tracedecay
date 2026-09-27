@@ -15,7 +15,8 @@ use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
 use crate::support::{
-    dispatch_mcp_tool_call, production_composition_fixture_with_sources, wait_for_current_graph,
+    dispatch_mcp_tool_call, production_composition_fixture_with_sources, refusal_problem,
+    wait_for_current_graph,
 };
 
 const SOURCE: &str = r#"/// Loads the current value.
@@ -148,32 +149,32 @@ async fn tracedecay_node_reports_declared_symbols_and_typed_refusals() {
 
     assert_execution_failed(
         &node_call(&server, json!({})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_node: missing field `node_id`",
+        "invalid arguments for tracedecay_node: missing field `node_id`",
     );
     assert_execution_failed(
         &node_call(&server, json!({"node_id": ""})).await,
-        "tool execution failed: config error: invalid parameter: node_id must not be empty",
+        "invalid parameter: node_id must not be empty",
     );
     assert_execution_failed(
         &node_call(&server, json!({"node_id": "   "})).await,
-        "tool execution failed: config error: invalid parameter: node_id must not be empty",
+        "invalid parameter: node_id must not be empty",
     );
     assert_execution_failed(
         &node_call(&server, json!({"id": fetch_id})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_node: unknown field `id`, expected `node_id`",
+        "invalid arguments for tracedecay_node: unknown field `id`, expected `node_id`",
     );
     assert_execution_failed(
         &node_call(&server, json!({"node_id": fetch_id, "limit": 1})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_node: unknown field `limit`, expected `node_id`",
+        "invalid arguments for tracedecay_node: unknown field `limit`, expected `node_id`",
     );
-    assert_execution_failed(
+    assert_malformed_call(
         &node_call(&server, json!([fetch_id])).await,
         "tool execution failed: config error: invalid arguments: tracedecay_node expects a JSON object",
     );
     assert_execution_failed(
         &node_call(&server, json!({"node_id": EVIDENCE_ANCHOR})).await,
         &format!(
-            "tool execution failed: config error: invalid parameter: node_id `{EVIDENCE_ANCHOR}` is an evidence anchor, not a graph symbol occurrence"
+            "invalid parameter: node_id `{EVIDENCE_ANCHOR}` is an evidence anchor, not a graph symbol occurrence"
         ),
     );
 
@@ -514,7 +515,9 @@ fn parse_json(text: &str) -> Value {
         .unwrap_or_else(|error| panic!("MCP text was not JSON: {error}\n{text}"))
 }
 
-fn assert_execution_failed(response: &Value, message: &str) {
+/// A non-object argument list never reaches the owner's typed parser: the
+/// MCP boundary rejects the call itself.
+fn assert_malformed_call(response: &Value, message: &str) {
     assert_eq!(response["error"]["code"], -32603, "{response}");
     assert_eq!(response["error"]["message"], message, "{response}");
     assert_eq!(
@@ -525,4 +528,15 @@ fn assert_execution_failed(response: &Value, message: &str) {
         }),
         "{response}"
     );
+}
+
+fn assert_execution_failed(response: &Value, message: &str) {
+    assert!(response["error"].is_null(), "{response}");
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request", "{response}");
+    assert_eq!(
+        problem["code"], "application.surface.invalid_request",
+        "{response}"
+    );
+    assert_eq!(problem["message"], message, "{response}");
 }

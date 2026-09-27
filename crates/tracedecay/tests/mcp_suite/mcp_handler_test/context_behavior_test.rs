@@ -15,7 +15,7 @@ use tracedecay::mcp::McpServer;
 
 use crate::support::{
     extract_real_server_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
-    production_composition_fixture_with_sources, warm_code_index_search,
+    production_composition_fixture_with_sources, refusal_problem, warm_code_index_search,
 };
 
 fn write_billing_sources(project: &Path) {
@@ -301,15 +301,16 @@ async fn tracedecay_context_returns_invoice_total_and_tax_policy() {
 }
 
 fn assert_rejected(response: &Value, message: &str) {
-    assert!(
-        response.get("result").is_none(),
-        "rejected call must not return a result: {response}"
-    );
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 1);
-    assert_eq!(response["error"]["code"], json!(-32603));
-    assert_eq!(response["error"]["message"], message);
-    assert_eq!(response["error"]["data"]["tool"], "tracedecay_context");
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "rejected call returned a JSON-RPC error: {response}"
+    );
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message, "{response}");
 }
 
 #[tokio::test]
@@ -323,7 +324,7 @@ async fn tracedecay_context_rejects_malformed_requests() {
     let missing = handle_real_server_tool_call_raw(&server, "tracedecay_context", json!({})).await;
     assert_rejected(
         &missing,
-        "tool execution failed: config error: invalid arguments for tracedecay_context: missing field `task`",
+        "invalid arguments for tracedecay_context: missing field `task`",
     );
 
     let unknown = handle_real_server_tool_call_raw(
@@ -334,7 +335,7 @@ async fn tracedecay_context_rejects_malformed_requests() {
     .await;
     assert_rejected(
         &unknown,
-        "tool execution failed: config error: invalid arguments for tracedecay_context: unknown field `not_a_context_field`, expected one of `task`, `max_nodes`, `include_code`, `max_code_blocks`, `mode`, `include_memory`, `memory_limit`, `memory_min_trust`, `lexical_anchors`, `prefer_symbol`",
+        "invalid arguments for tracedecay_context: unknown field `not_a_context_field`, expected one of `task`, `max_nodes`, `include_code`, `max_code_blocks`, `mode`, `include_memory`, `memory_limit`, `memory_min_trust`, `lexical_anchors`, `prefer_symbol`",
     );
 
     let mode = handle_real_server_tool_call_raw(
@@ -345,7 +346,7 @@ async fn tracedecay_context_rejects_malformed_requests() {
     .await;
     assert_rejected(
         &mode,
-        "tool execution failed: config error: invalid arguments for tracedecay_context: unknown variant `nope`, expected `explore` or `plan`",
+        "invalid arguments for tracedecay_context: unknown variant `nope`, expected `explore` or `plan`",
     );
 
     let empty_anchor = handle_real_server_tool_call_raw(
@@ -354,10 +355,7 @@ async fn tracedecay_context_rejects_malformed_requests() {
         json!({"task": "invoice_total", "lexical_anchors": [""]}),
     )
     .await;
-    assert_rejected(
-        &empty_anchor,
-        "tool execution failed: config error: lexical anchor 0 is empty",
-    );
+    assert_rejected(&empty_anchor, "lexical anchor 0 is empty");
 
     let spaced_anchor = handle_real_server_tool_call_raw(
         &server,
@@ -367,7 +365,7 @@ async fn tracedecay_context_rejects_malformed_requests() {
     .await;
     assert_rejected(
         &spaced_anchor,
-        "tool execution failed: config error: lexical anchor 0 must be one identifier or technical term: no surrounding whitespace, inner whitespace, or control characters",
+        "lexical anchor 0 must be one identifier or technical term: no surrounding whitespace, inner whitespace, or control characters",
     );
 
     fixture.harness.shutdown().await;

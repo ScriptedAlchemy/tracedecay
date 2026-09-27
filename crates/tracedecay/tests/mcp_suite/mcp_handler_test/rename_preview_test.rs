@@ -16,7 +16,7 @@ use tracedecay::mcp::McpServer;
 
 use crate::support::{
     ProductionCompositionFixture, handle_real_server_tool_call_raw,
-    production_composition_fixture_with_sources, warm_code_index_search,
+    production_composition_fixture_with_sources, refusal_problem, warm_code_index_search,
 };
 
 const STOCK_RS: &str = "\
@@ -166,20 +166,15 @@ async fn rename_preview_reports_the_declaration_the_caller_and_text_only_names()
     assert_sources_unchanged(&fixture);
 }
 
-fn assert_execution_refused(response: &Value, message: &str) {
+fn assert_invalid_request_refused(response: &Value, message: &str) {
+    assert!(response.get("error").is_none(), "{response}");
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request", "{response}");
     assert_eq!(
-        response["error"],
-        json!({
-            "code": -32603,
-            "message": message,
-            "data": {
-                "tool": "tracedecay_rename_preview",
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool rename_preview ...` (`tracedecay tool rename_preview --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-            }
-        }),
+        problem["code"], "application.surface.invalid_request",
         "{response}"
     );
-    assert!(response.get("result").is_none(), "{response}");
+    assert_eq!(problem["message"], message, "{response}");
 }
 
 #[tokio::test]
@@ -210,9 +205,9 @@ async fn rename_preview_refuses_unknown_and_unusable_node_identity() {
         json!({ "format": "json" }),
     )
     .await;
-    assert_execution_refused(
+    assert_invalid_request_refused(
         &omitted,
-        "tool execution failed: config error: invalid arguments for tracedecay_rename_preview: missing field `node_id`",
+        "invalid arguments for tracedecay_rename_preview: missing field `node_id`",
     );
 
     let empty = handle_real_server_tool_call_raw(
@@ -221,10 +216,7 @@ async fn rename_preview_refuses_unknown_and_unusable_node_identity() {
         json!({ "node_id": "", "format": "json" }),
     )
     .await;
-    assert_execution_refused(
-        &empty,
-        "tool execution failed: config error: invalid parameter: node_id must not be empty",
-    );
+    assert_invalid_request_refused(&empty, "invalid parameter: node_id must not be empty");
 
     let apply_shaped = handle_real_server_tool_call_raw(
         &server,
@@ -236,9 +228,9 @@ async fn rename_preview_refuses_unknown_and_unusable_node_identity() {
         }),
     )
     .await;
-    assert_execution_refused(
+    assert_invalid_request_refused(
         &apply_shaped,
-        "tool execution failed: config error: invalid arguments for tracedecay_rename_preview: unknown field `dry_run`, expected `node_id` or `new_name`",
+        "invalid arguments for tracedecay_rename_preview: unknown field `dry_run`, expected `node_id` or `new_name`",
     );
     assert_sources_unchanged(&fixture);
 }
