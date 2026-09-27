@@ -156,7 +156,8 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::BranchDiff
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
-        | ApplicationSurfaceOperation::Config) => {
+        | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::Retrieve) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList

@@ -386,6 +386,14 @@ export type ApplicationExecutionFailureClassV1 = z.infer<typeof ApplicationExecu
 /** The structured facts behind a problem. Adapters read these fields; the
 problem's `message` is only their one human rendering. */
 export const ApplicationProblemDetailV1Schema = z.discriminatedUnion("kind", [z.object({
+  generation: z.string().nullable(),
+  kind: z.literal("diagnostics_pending"),
+  producer: z.string(),
+}).strict(), z.object({
+  file: z.string().nullable(),
+  kind: z.literal("diagnostics_unsupported"),
+  searched: z.array(z.lazy(() => DiagnosticsSearchedTsconfigV1Schema)),
+}).strict(), z.object({
   deadline_ms: z.number().int().safe().min(0),
   kind: z.literal("lock_deadline"),
   resource: z.string(),
@@ -394,6 +402,13 @@ export const ApplicationProblemDetailV1Schema = z.discriminatedUnion("kind", [z.
   kind: z.literal("parked"),
   remedy: z.string(),
   retries_on_wake: z.boolean(),
+}).strict(), z.object({
+  authority: z.string(),
+  found_version: z.number().int().safe().nullable(),
+  kind: z.literal("reset_required"),
+  reason: z.string(),
+  remedy: z.string(),
+  required_version: z.number().int().safe().nullable(),
 }).strict(), z.object({
   active: z.number().int().safe().min(0),
   committed: z.number().int().safe().min(0),
@@ -2234,6 +2249,13 @@ export const DeliverySharedCodeRefV1Schema = z.object({
   state: z.lazy(() => DeliverySharedCodeRefStateV1Schema),
 });
 export type DeliverySharedCodeRefV1 = z.infer<typeof DeliverySharedCodeRefV1Schema>;
+
+/** One tsconfig location the diagnostics owner search checked. */
+export const DiagnosticsSearchedTsconfigV1Schema = z.object({
+  path: z.string(),
+  present: z.boolean(),
+}).strict();
+export type DiagnosticsSearchedTsconfigV1 = z.infer<typeof DiagnosticsSearchedTsconfigV1Schema>;
 
 /** Whether Doctor observed all of a family's evidence sources. */
 export const DoctorCoverageCompletenessV1Schema = z.union([z.literal("complete"), z.literal("partial"), z.literal("unknown")]);

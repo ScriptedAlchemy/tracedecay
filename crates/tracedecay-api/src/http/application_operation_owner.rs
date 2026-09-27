@@ -148,7 +148,8 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::BranchDiff
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
-        | ApplicationSurfaceOperation::Config => return None,
+        | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::Retrieve => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

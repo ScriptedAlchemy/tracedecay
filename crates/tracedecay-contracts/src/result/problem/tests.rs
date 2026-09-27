@@ -269,6 +269,7 @@ fn direct_serialization_rejects_an_invalid_terminal() {
             .expect("fixture diagnostic is valid"),
         retry: RetryDirective::AfterDelay,
         legal_actions: vec![LegalAction::Retry],
+        detail: None,
     };
     assert!(serde_json::to_value(invalid).is_err());
 }

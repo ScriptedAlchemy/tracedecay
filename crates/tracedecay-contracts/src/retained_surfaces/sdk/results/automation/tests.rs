@@ -17,7 +17,7 @@ use crate::retained_surfaces::{
 use crate::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationUnavailableClassV1, CancellationStage, EffectReceipt, EffectTermination,
-    IdempotencyKey, LegalAction, RequestId, ResolvedScope, RetryDirective, SafeDiagnostic,
+    IdempotencyKey, RequestId, ResolvedScope, SafeDiagnostic,
 };
 
 fn zero_terminal(status: &str) -> Value {
@@ -693,15 +693,13 @@ fn non_partial_problem_rejects_committed_memory_receipts() {
     let operation =
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .expect("automation operation");
-    let problem = ApplicationProblem::ResetRequired {
-        diagnostic: SafeDiagnostic::new(
+    let problem = ApplicationProblem::reset_required(
+        SafeDiagnostic::new(
             "application.automation-run.reset-required",
             "The exact admitted run requires reconciliation before it can resume",
         )
         .expect("diagnostic"),
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::Reset],
-    };
+    );
     let problem = ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         request_id.clone(),

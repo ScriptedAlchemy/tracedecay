@@ -1,17 +1,17 @@
 //! Source-edit tools served through the canonical application surface.
 //!
 //! Every transport decodes the arguments with the shared source-edit decoder,
-//! dispatches the typed invocation, and renders the result as these tools
-//! always have: typed refusals stay project-route errors, and a completed
-//! edit reports its touched files and failure message.
+//! dispatches the typed invocation, and renders the result: a typed refusal
+//! renders its whole problem record, and a completed edit reports its touched
+//! files and failure message.
 
 use std::path::Path;
 
 use serde_json::Value;
 use tracedecay_contracts::source_edit::SourceEditSurfaceResultV1;
 use tracedecay_contracts::{
-    ApplicationOutcome, ApplicationProblem, ApplicationProblemRecord, CancellationSignal, Deadline,
-    InvocationTarget, PageRequest, RequestId, SafeDiagnostic,
+    ApplicationOutcome, ApplicationProblem, CancellationSignal, Deadline, InvocationTarget,
+    PageRequest, RequestId, SafeDiagnostic,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, DaemonInvocationExecutor, RequestedOutputFormat,
@@ -24,6 +24,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use crate::ToolResult;
+use crate::application_output::tool_result::ApplicationRefusal;
 use crate::handlers::{generic_tool_result, rendered_tool_result};
 use crate::tools::render;
 
@@ -66,8 +67,7 @@ fn adapter_error(error: ApplicationSurfaceAdapterError) -> TraceDecayError {
 
 /// A completed source-edit invocation: the typed result, or the daemon's
 /// typed refusal.
-pub type SourceEditOutcome =
-    std::result::Result<SourceEditSurfaceResultV1, ApplicationProblemRecord>;
+pub type SourceEditOutcome = std::result::Result<SourceEditSurfaceResultV1, ApplicationRefusal>;
 
 /// Run one source-edit tool on `surface` and render its tool result.
 #[hotpath::measure(label = "mcp.edit.total", future = true)]
@@ -118,6 +118,7 @@ pub async fn run_source_edit(
     )
     .map_err(adapter_error)?;
     dispatched.invocation.invocation.scope = target;
+    let binding_id = dispatched.invocation.binding_id.clone();
     let result = hotpath::future!(
         execute_application_surface(operation, dispatched, Some(executor)),
         label = "mcp.edit.execute"
@@ -126,7 +127,13 @@ pub async fn run_source_edit(
     .map_err(adapter_error)?;
     let envelope = match result.result {
         Ok(envelope) => envelope,
-        Err(problem) => return Ok(Err(*problem.problem)),
+        Err(problem) => {
+            return Ok(Err(ApplicationRefusal {
+                operation,
+                binding_id,
+                problem,
+            }));
+        }
     };
     let ApplicationOutcome::Result(value) = envelope.outcome else {
         return Err(unexpected_outcome());
@@ -136,15 +143,18 @@ pub async fn run_source_edit(
         .map_err(|_| unexpected_outcome())
 }
 
-/// Render a settled source edit as the edit tools always have.
+/// Render a settled source edit: its result, or the daemon's whole problem
+/// record.
 pub fn render_source_edit_outcome(
     response_handle_root: Option<&Path>,
     operation: ApplicationSurfaceOperation,
     args: &Value,
     outcome: SourceEditOutcome,
 ) -> Result<ToolResult> {
-    let result = outcome.map_err(|problem| problem.into_source().into_trace_decay_error())?;
-    render_source_edit_result(response_handle_root, operation, args, &result)
+    match outcome {
+        Ok(result) => render_source_edit_result(response_handle_root, operation, args, &result),
+        Err(refusal) => refusal.render(response_handle_root, args),
+    }
 }
 
 fn unexpected_outcome() -> TraceDecayError {
@@ -467,12 +477,12 @@ mod tests {
         }
     }
 
-    async fn source_edit_refusal(
-        outcome: DaemonInvocationOutcome,
-    ) -> tracedecay_domain::errors::TraceDecayError {
+    /// The problem record a refused `str_replace` renders beside its text,
+    /// with `isError` set.
+    async fn source_edit_refusal(outcome: DaemonInvocationOutcome) -> Value {
         let project = tempdir().unwrap();
         let executor = RefusingSourceEditExecutor { outcome };
-        source_edit_tool(
+        let result = source_edit_tool(
             Some(project.path()),
             BindingSurface::Mcp,
             ApplicationSurfaceOperation::StrReplace,
@@ -480,25 +490,40 @@ mod tests {
             invocation_context(Some(&executor)),
         )
         .await
-        .expect_err("refused source edit must stay a typed failure")
+        .expect("a refused source edit renders as a tool result");
+        assert_eq!(result.semantic_error(), Some(true), "{}", result.value);
+        result.value["problem"].clone()
+    }
+
+    fn problem_summary(problem: &Value) -> Value {
+        json!({
+            "kind": problem["kind"],
+            "code": problem["code"],
+            "retryable": problem["retryable"],
+            "legal_actions": problem["legal_actions"],
+        })
     }
 
     #[tokio::test]
     async fn denied_source_edit_preserves_reason_code_and_is_not_retryable() {
-        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+        let problem = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
             problem: ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
         })
         .await;
-        let (reason_code, retryable, _) = error
-            .project_route_context()
-            .expect("denial must stay a typed project-route error");
-        assert_eq!(reason_code, "not_found_or_not_authorized");
-        assert!(!retryable);
+        assert_eq!(
+            problem_summary(&problem),
+            json!({
+                "kind": "not_found_or_not_authorized",
+                "code": "not_found_or_not_authorized",
+                "retryable": false,
+                "legal_actions": [],
+            })
+        );
     }
 
     #[tokio::test]
     async fn warming_source_edit_gate_is_retryable_unavailable() {
-        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+        let problem = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
             problem: ApplicationProblem::unavailable(
                 SafeDiagnostic::new(
                     tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE,
@@ -508,19 +533,20 @@ mod tests {
             ),
         })
         .await;
-        let (reason_code, retryable, _) = error
-            .project_route_context()
-            .expect("warming must stay a typed project-route error");
         assert_eq!(
-            reason_code,
-            tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+            problem_summary(&problem),
+            json!({
+                "kind": "unavailable",
+                "code": tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE,
+                "retryable": true,
+                "legal_actions": ["retry"],
+            })
         );
-        assert!(retryable);
     }
 
     #[tokio::test]
     async fn kernel_digest_mismatch_reaches_mcp_with_reason_code_and_retryability() {
-        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+        let problem = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
             problem: ApplicationProblem::stale(
                 SafeDiagnostic::new(
                     "source_edit.expected_state_mismatch",
@@ -530,43 +556,82 @@ mod tests {
             ),
         })
         .await;
-        let (reason_code, retryable, _) = error
-            .project_route_context()
-            .expect("digest mismatch must stay a typed project-route error");
-        assert_eq!(reason_code, "source_edit.expected_state_mismatch");
-        assert!(retryable);
-        assert_ne!(reason_code, "not_found_or_not_authorized");
+        assert_eq!(
+            problem_summary(&problem),
+            json!({
+                "kind": "stale",
+                "code": "source_edit.expected_state_mismatch",
+                "retryable": true,
+                "legal_actions": ["refresh"],
+            })
+        );
     }
 
     #[tokio::test]
     async fn kernel_conflict_reaches_mcp_with_reason_code_and_retryability() {
-        let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+        let problem = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
             problem: ApplicationProblem::conflict(
                 "source_edit.idempotency_conflict",
                 "source edit idempotency key conflicts with a prior input",
             ),
         })
         .await;
-        let (reason_code, retryable, _) = error
-            .project_route_context()
-            .expect("idempotency conflict must stay a typed project-route error");
-        assert_eq!(reason_code, "source_edit.idempotency_conflict");
-        assert!(retryable);
-        assert_ne!(reason_code, "not_found_or_not_authorized");
+        assert_eq!(
+            problem_summary(&problem),
+            json!({
+                "kind": "conflict",
+                "code": "source_edit.idempotency_conflict",
+                "retryable": true,
+                "legal_actions": ["refresh"],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missed_writer_lock_deadline_reaches_mcp_as_its_typed_detail() {
+        let problem = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::from_detail(
+                tracedecay_contracts::ApplicationProblemDetailV1::LockDeadline {
+                    resource: "source-edit writer lock".to_owned(),
+                    deadline_ms: 30_000,
+                },
+            ),
+        })
+        .await;
+        assert_eq!(
+            (problem_summary(&problem), &problem["detail"]),
+            (
+                json!({
+                    "kind": "saturated",
+                    "code": "application.lock-deadline",
+                    "retryable": true,
+                    "legal_actions": ["retry"],
+                }),
+                &json!({
+                    "kind": "lock_deadline",
+                    "resource": "source-edit writer lock",
+                    "deadline_ms": 30_000,
+                })
+            )
+        );
     }
 
     #[tokio::test]
     async fn source_edit_protocol_problem_stays_typed_without_debug_formatting() {
-        let error = source_edit_refusal(DaemonInvocationOutcome::Problem {
+        let problem = source_edit_refusal(DaemonInvocationOutcome::Problem {
             problem: DaemonInvocationProblem::NotFoundOrNotAuthorized,
         })
         .await;
-        let (reason_code, retryable, _) = error
-            .project_route_context()
-            .expect("protocol refusal must stay a typed project-route error");
-        assert_eq!(reason_code, "not_found_or_not_authorized");
-        assert!(!retryable);
-        assert!(!error.to_string().contains("NotFoundOrNotAuthorized"));
+        assert_eq!(
+            problem_summary(&problem),
+            json!({
+                "kind": "not_found_or_not_authorized",
+                "code": "not_found_or_not_authorized",
+                "retryable": false,
+                "legal_actions": [],
+            })
+        );
+        assert!(!problem.to_string().contains("NotFoundOrNotAuthorized"));
     }
 
     #[tokio::test]

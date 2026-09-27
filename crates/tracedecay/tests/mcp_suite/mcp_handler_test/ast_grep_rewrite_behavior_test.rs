@@ -367,10 +367,25 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
             "expected_state": bound_state
         }),
     )
-    .await;
+    .await
+    .expect("a daemon refusal renders as a tool result");
+    assert_eq!(conflict.semantic_error(), Some(true), "{}", conflict.value);
+    let problem = &conflict.value["problem"];
     assert_eq!(
-        expect_tool_error(conflict),
-        "project route error (source_edit.idempotency_conflict): source edit idempotency key conflicts with a prior input"
+        (
+            &problem["kind"],
+            &problem["code"],
+            &problem["legal_actions"],
+            &problem["message"],
+        ),
+        (
+            &json!("conflict"),
+            &json!("source_edit.idempotency_conflict"),
+            &json!(["refresh"]),
+            &json!("source edit idempotency key conflicts with a prior input"),
+        ),
+        "{}",
+        conflict.value
     );
     assert_file(&fixture, CHECKOUT, CHECKOUT_AFTER);
 }

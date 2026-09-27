@@ -118,19 +118,27 @@ pub(crate) fn namespace_key_id(namespace: &GraphNamespace) -> NamespaceKeyId {
 
 /// Unique-key bytes for `identity` inside the namespace `namespace_id` names.
 ///
-/// Keys are only ever matched exactly through a property hash index; no scan
-/// orders by them. The encoding is injective: a `<kind>:<64 lowercase hex>`
-/// identity (every [`graph_stable_identity`]) is stored as its kind followed
-/// by the 32 digest bytes, anything else verbatim, and a tag byte separates
-/// the two forms.
+/// The encoding is injective: a `<kind>:<64 lowercase hex>` identity (every
+/// [`graph_stable_identity`]) is its kind followed by the 32 digest bytes,
+/// anything else verbatim, and a tag byte separates the two forms.
 pub(crate) fn stable_key(namespace_id: &NamespaceKeyId, identity: &str) -> Vec<u8> {
+    key_bytes(namespace_id, identity, DIGEST_BYTES)
+}
+
+/// Digest bytes an indexed key keeps. Keys are only ever matched exactly
+/// through a property hash index and no scan orders by them; every keyed
+/// read and upsert re-checks the row's namespace and identity scalars, so a
+/// 128-bit prefix collision surfaces as `Corrupt` instead of aliasing a row.
+const INDEXED_KEY_DIGEST_BYTES: usize = 16;
+
+fn key_bytes(namespace_id: &NamespaceKeyId, identity: &str, digest_bytes: usize) -> Vec<u8> {
     let mut key = Vec::with_capacity(NAMESPACE_KEY_ID_BYTES + 1 + identity.len());
     key.extend_from_slice(namespace_id);
     match digest_identity(identity) {
         Some((kind, digest)) => {
             key.push(DIGEST_IDENTITY_TAG);
             key.extend_from_slice(kind.as_bytes());
-            key.extend_from_slice(&digest);
+            key.extend_from_slice(&digest[..digest_bytes]);
         }
         None => {
             key.push(RAW_IDENTITY_TAG);
@@ -220,11 +228,15 @@ fn decode_lower_hex_digest(digest: &str) -> Option<[u8; DIGEST_BYTES]> {
     Some(bytes)
 }
 
-/// A unique key as the indexed scalar: unpadded base64url of
-/// [`stable_key`]'s bytes, a string for the same reason as
-/// [`encode_identity`].
+/// A unique key as the indexed scalar: unpadded base64url of the key bytes
+/// with [`INDEXED_KEY_DIGEST_BYTES`] of the digest, a string for the same
+/// reason as [`encode_identity`].
 pub(crate) fn key_value(namespace: &GraphNamespace, identity: &str) -> Value {
-    Value::from(URL_SAFE_NO_PAD.encode(stable_key(&namespace_key_id(namespace), identity)))
+    Value::from(URL_SAFE_NO_PAD.encode(key_bytes(
+        &namespace_key_id(namespace),
+        identity,
+        INDEXED_KEY_DIGEST_BYTES,
+    )))
 }
 
 /// The indexed unique-key value for one entity.
@@ -402,7 +414,7 @@ pub(crate) fn entity_properties(
         ),
         (
             ENTITY_ID_PROPERTY.to_owned(),
-            Value::from(entity.identity.as_str()),
+            encode_identity(entity.identity.as_str()),
         ),
     ];
     properties.extend(
@@ -574,7 +586,7 @@ fn commit_properties(commit: &GraphCommit) -> Result<Vec<(String, Value)>, Graph
 
 pub(crate) fn decode_entity(node: &Node) -> Result<GraphEntity, GraphDbError> {
     require_label(node, ENTITY_LABEL, "entity")?;
-    let identity = GraphEntityId::new(required_string(
+    let identity = GraphEntityId::new(decode_identity(
         node.get_property(ENTITY_ID_PROPERTY),
         "entity identity",
     )?)

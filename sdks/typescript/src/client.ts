@@ -244,6 +244,30 @@ function isProblemDetail(value: unknown): boolean {
       );
     case "lock_deadline":
       return typeof value.resource === "string" && isSafeUnsignedInteger(value.deadline_ms);
+    case "diagnostics_unsupported":
+      return (
+        (value.file === null || typeof value.file === "string") &&
+        Array.isArray(value.searched) &&
+        value.searched.every(
+          (candidate) =>
+            isRecord(candidate) &&
+            typeof candidate.path === "string" &&
+            typeof candidate.present === "boolean",
+        )
+      );
+    case "diagnostics_pending":
+      return (
+        typeof value.producer === "string" &&
+        (value.generation === null || typeof value.generation === "string")
+      );
+    case "reset_required":
+      return (
+        typeof value.authority === "string" &&
+        (value.found_version === null || isSafeInteger(value.found_version)) &&
+        (value.required_version === null || isSafeInteger(value.required_version)) &&
+        typeof value.reason === "string" &&
+        typeof value.remedy === "string"
+      );
     default:
       return false;
   }
@@ -318,7 +342,7 @@ function isProblemEnvelope(value: unknown): value is HttpProblemEnvelope {
   const legalActions = Array.isArray(problem.legal_actions)
     ? problem.legal_actions
     : null;
-  const detailKinds = ["stale", "unavailable", "saturated"];
+  const detailKinds = ["stale", "unsupported", "unavailable", "reset_required", "saturated"];
   const diagnosticKinds = [
     "invalid_request", "conflict", "partial_effect", "stale", "unsupported",
     "unavailable", "execution_failed", "reset_required", "saturated",

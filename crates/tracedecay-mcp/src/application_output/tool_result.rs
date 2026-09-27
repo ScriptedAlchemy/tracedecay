@@ -1,0 +1,101 @@
+//! The one tool-result rendering of a settled application call, shared by
+//! every MCP tool family and the `tracedecay tool` CLI.
+
+use std::path::Path;
+
+use serde_json::Value;
+use tracedecay_contracts::{ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult};
+use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
+use tracedecay_domain::errors::Result;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
+
+use super::markdown;
+use super::view::CanonicalHumanView;
+use crate::ToolResult;
+use crate::handlers::support::text_tool_result;
+use crate::tools::render::finalize_with_format;
+use crate::tools::response_trailers::ResponseTrailer;
+
+/// A daemon's typed refusal of one application call. The whole problem
+/// record travels so every surface renders its detail, retry directive, and
+/// legal actions rather than a reason code and a sentence.
+#[derive(Clone, Debug)]
+pub struct ApplicationRefusal {
+    pub operation: ApplicationSurfaceOperation,
+    pub binding_id: BindingId,
+    pub problem: ApplicationProblemEnvelope,
+}
+
+impl ApplicationRefusal {
+    /// Renders the refusal in the output format `args` requested.
+    pub fn render(self, response_handle_root: Option<&Path>, args: &Value) -> Result<ToolResult> {
+        render_application_result(
+            response_handle_root,
+            self.operation.as_str(),
+            &self.binding_id,
+            &Err(self.problem),
+            requested_output_format(args),
+        )
+    }
+}
+
+/// Renders one settled application call. A problem is a semantic failure
+/// whose whole record rides beside the text as `problem`, which MCP carries
+/// as structured content and `--json` prints with the result.
+pub fn render_application_result(
+    response_handle_root: Option<&Path>,
+    operation: &str,
+    binding_id: &BindingId,
+    result: &ApplicationResult<Value>,
+    requested_format: RequestedOutputFormat,
+) -> Result<ToolResult> {
+    let (value, failure_message) = match result {
+        Ok(application) => (serde_json::to_value(application)?, None),
+        Err(problem) => {
+            let failure_message = match problem.problem.kind() {
+                ApplicationProblemKind::NotFoundOrNotAuthorized => {
+                    "application surface was not found or is not authorized"
+                }
+                ApplicationProblemKind::Unavailable => "application surface unavailable",
+                _ => "application surface request failed",
+            };
+            (serde_json::to_value(problem)?, Some(failure_message))
+        }
+    };
+    let markdown = match requested_format {
+        RequestedOutputFormat::Json => None,
+        RequestedOutputFormat::Markdown => {
+            let view = CanonicalHumanView::from_application_result(operation, binding_id, result)?;
+            Some(markdown::render(view).as_str().to_owned())
+        }
+    };
+    let text = finalize_with_format(response_handle_root, requested_format, &value, || {
+        markdown.unwrap_or_default()
+    });
+    let mut rendered = text_tool_result(&text, Vec::new());
+    match result {
+        Ok(envelope) => ResponseTrailer {
+            touched_files: &envelope.touched_files,
+            code_graph: envelope.code_graph.as_ref(),
+            cost: envelope.cost.as_ref(),
+        }
+        .attach(&mut rendered),
+        // Markdown alone would strand the problem in prose no client can
+        // classify; the legal actions, retry directive, detail, and any
+        // committed receipt are what a caller acts on.
+        Err(problem) => {
+            if let Some(object) = rendered.value.as_object_mut() {
+                object.insert(
+                    "problem".to_string(),
+                    serde_json::to_value(problem.problem.as_ref())?,
+                );
+            }
+        }
+    }
+    Ok(match failure_message {
+        Some(failure_message) => rendered
+            .with_semantic_error(true)
+            .with_failure_message(failure_message),
+        None => rendered,
+    })
+}

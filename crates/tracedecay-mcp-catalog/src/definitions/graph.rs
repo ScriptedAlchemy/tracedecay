@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::{context_description, def, def_always_load, with_project_selector_properties};
+use super::{context_description, def, def_always_load};
 use crate::ToolDefinition;
 
 // ── alwaysLoad tools (loaded into the model prompt immediately) ─────────
@@ -134,34 +134,12 @@ pub(super) fn def_grep(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_retrieve() -> ToolDefinition {
+pub(super) fn def_retrieve(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_retrieve",
         "Retrieve Truncated Response",
         "Use `tracedecay_retrieve` with required argument `handle` to read one bounded page of a truncated MCP response's locally cached text. Pass offset and max_chars for the omitted span you need. Do not walk next_offset until has_more is false or concatenate pages back into the conversation: the stored body already exceeded the response budget. max_chars is clamped to the response-frame budget. This does not re-run the source tool or read a file/session/node again; handles are scoped to the active project store, expire automatically, and never reference remote storage. If the original truncated response used project_selector.project_id, pass the same selector here. Only call it when the missing details are needed to answer the user's request.",
-        json!({
-            "type": "object",
-            "properties": with_project_selector_properties(json!({
-                "handle": {
-                    "type": "string",
-                    "description": "The required `handle` argument copied exactly from a truncated MCP response envelope."
-                },
-                "offset": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "default": 0,
-                    "description": "Character offset into the immutable stored response. Use the prior page's next_offset."
-                },
-                "max_chars": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": crate::MAX_RESPONSE_CHARS,
-                    "description": "Maximum characters requested for this page. Values above the safe response-frame budget are clamped."
-                }
-            })),
-            "required": ["handle"],
-            "additionalProperties": false
-        }),
+        input_schema,
     )
 }
 

@@ -833,6 +833,10 @@ pub const TYPESCRIPT_FIXTURE_TSC_REPORT: &str = "src/index.ts(3,14): error TS402
 /// the working directory and the arguments it received.
 pub const TYPESCRIPT_FIXTURE_TSC_INVOCATIONS: &str = "node_modules/tsc-invocations.log";
 
+/// The file whose creation lets a [`TypeScriptFixtureCompiler::Held`]
+/// compiler finish its run.
+pub const TYPESCRIPT_FIXTURE_TSC_RELEASE: &str = "node_modules/tsc-release";
+
 /// Whether the TypeScript fixture project carries its own compiler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeScriptFixtureCompiler {
@@ -840,6 +844,10 @@ pub enum TypeScriptFixtureCompiler {
     Present,
     /// No `node_modules` at all: a checkout before `npm install`.
     Missing,
+    /// Like `Present`, but each run of the single-project fixture's compiler
+    /// waits for [`TYPESCRIPT_FIXTURE_TSC_RELEASE`] before reporting, so the
+    /// producer stays pending until the test lets it publish.
+    Held,
 }
 
 /// A small TypeScript project whose sources genuinely produce `TS4023` under
@@ -879,10 +887,18 @@ pub fn write_typescript_diagnostics_fixture(project: &Path, compiler: TypeScript
     let bin = project.join("node_modules/.bin");
     fs::create_dir_all(&bin).unwrap();
     let tsc = bin.join("tsc");
+    let hold = if compiler == TypeScriptFixtureCompiler::Held {
+        format!(
+            "while [ ! -e \"{}\" ]; do sleep 0.1; done\n",
+            project.join(TYPESCRIPT_FIXTURE_TSC_RELEASE).display()
+        )
+    } else {
+        String::new()
+    };
     fs::write(
         &tsc,
         format!(
-            "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"$*\" >> \"{}\"\ncat <<'TSC_REPORT'\n{}TSC_REPORT\nexit 2\n",
+            "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"$*\" >> \"{}\"\n{hold}cat <<'TSC_REPORT'\n{}TSC_REPORT\nexit 2\n",
             project.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS).display(),
             TYPESCRIPT_FIXTURE_TSC_REPORT
         ),

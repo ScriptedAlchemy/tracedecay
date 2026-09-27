@@ -647,12 +647,16 @@ struct PreparedSealedRelation {
 }
 
 impl SealedCompactRows {
-    fn new() -> Self {
-        Self {
-            builder: IncrementalCompactStoreBuilder::new(),
+    /// Spools pushed column values to an anonymous file in `staging`, so
+    /// the build holds the row topology rather than every value.
+    fn new(staging: &Path) -> Result<Self, GraphDbError> {
+        let spool = tempfile::tempfile_in(staging)
+            .map_err(|error| sealed_store_io_failure("column spool", error))?;
+        Ok(Self {
+            builder: IncrementalCompactStoreBuilder::spooling_to(spool),
             next_node: 0,
             next_edge: 0,
-        }
+        })
     }
 
     fn push_node(
@@ -800,17 +804,16 @@ impl SealedCompactRows {
     }
 
     /// Encodes every pushed row and writes the sealed container at `path`
-    /// in one durable pass. The container holds the compact store, an empty
-    /// LPG overlay whose id allocators start past the written ids, and a
-    /// catalog naming the unique-key property indexes.
+    /// in one durable pass, one column at a time. The container holds the
+    /// compact store, an empty LPG overlay whose id allocators start past
+    /// the written ids, and a catalog naming the unique-key property
+    /// indexes.
     fn write_container(self, path: &Path) -> Result<(), GraphDbError> {
-        let store = hotpath::measure_block!("code_index.seal.write.compact", self.builder.finish())
-            .map_err(|error| sealed_build_failure("encode", error))?;
         hotpath::measure_block!(
             "code_index.seal.write.container",
             GrafeoDB::write_compact_container(
                 path,
-                Arc::new(store),
+                self.builder,
                 INDEXED_PROPERTIES
                     .iter()
                     .map(|property| (*property).to_owned()),
@@ -1508,7 +1511,7 @@ fn build_sealed_container(
 ) -> Result<(usize, usize), GraphDbError> {
     hotpath::gauge!("code_index.seal.encode.effective_workers").set(1);
     let physical_namespace = identity.physical_namespace()?;
-    let mut sealed = SealedCompactRows::new();
+    let mut sealed = SealedCompactRows::new(staging)?;
     let (entity_count, relation_count, dependency_namespaces_written) =
         hotpath::measure_block!("code_index.seal.encode", {
             match rows {
@@ -2140,7 +2143,7 @@ mod build_tests {
 
     use super::{
         SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
-        sealed_generation_directory, sealed_store_root,
+        build_sealed_container, sealed_generation_directory, sealed_store_root,
     };
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
@@ -2216,6 +2219,45 @@ mod build_tests {
         })
         .unwrap();
         owner.issue_lease().unwrap()
+    }
+
+    /// The direct build holds the rows' topology and one column at a time,
+    /// not every pushed value: its peak above the resident manifest stays
+    /// within a fixed budget for a 30,000-entity, 45,000-relation generation,
+    /// and the column spool it used is gone once the container is written.
+    /// Holding every value until the columnar store was encoded peaked at
+    /// 89,678,855 bytes on this generation.
+    #[test]
+    fn direct_build_holds_one_column_not_every_value() {
+        const PEAK_BUDGET_BYTES: usize = 30_000_000;
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let manifest = manifest(30_000, 45_000);
+        let identity = manifest.identity();
+        let staging = tempfile::tempdir().unwrap();
+
+        let (built, peak) = crate::thread_allocation::peak_above_start(|| {
+            build_sealed_container(
+                SealedRowSource::Manifest(&manifest),
+                &identity,
+                staging.path(),
+                check,
+            )
+        });
+        eprintln!("SEALED BUILD peak {peak}");
+
+        assert_eq!(built.unwrap(), (30_000, 45_000));
+        assert!(
+            peak <= PEAK_BUDGET_BYTES,
+            "the sealed build held {peak} bytes at peak, over its {PEAK_BUDGET_BYTES}-byte budget"
+        );
+        let left: Vec<_> = std::fs::read_dir(staging.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from(SEALED_STORE_DATABASE_FILE)]
+        );
     }
 
     /// The sealed container is written once, complete, after every row has

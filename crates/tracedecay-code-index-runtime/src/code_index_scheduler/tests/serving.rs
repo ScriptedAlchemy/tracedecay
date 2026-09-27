@@ -925,7 +925,7 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
             |row| row.get(0),
         )
         .expect("read sealed revision");
-    assert_eq!(revision, 28);
+    assert_eq!(revision, 29);
     let staging = std::fs::read_dir(code_text_artifact_staging_root(store.path()))
         .expect("artifacts root")
         .map(|entry| entry.expect("artifact entry").file_name())

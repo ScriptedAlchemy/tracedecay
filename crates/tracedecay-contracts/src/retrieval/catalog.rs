@@ -71,6 +71,7 @@ use crate::retrieval::requests::{
     SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusPrimitiveRequest,
     StorageStatusPrimitiveResult,
 };
+use crate::retrieval::response_handle_surface::{RetrieveResultV1, RetrieveSurfaceRequestV1};
 use crate::retrieval::symbol_graph::{
     ImplementationRecord, SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord,
     TypeHierarchyRecord,
@@ -236,6 +237,7 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("ast_grep_search"),
     graph_report_spec("files"),
     graph_report_spec("config"),
+    graph_report_spec("retrieve"),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
     git_context_spec("changelog"),
@@ -285,9 +287,8 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "god_class" | "unsafe_patterns" | "constructors" | "field_sites"
         | "find_exact_symbol" | "by_qualified_name" | "signature" | "derives" | "grep"
         | "ast_grep_search" | "affected" | "diff_context" | "changelog" | "commit_context"
-        | "pr_context" | "branch_search" | "branch_diff" | "branch_list" | "files" | "config" => {
-            &CLI_MCP_PRIMITIVE_SURFACES
-        }
+        | "pr_context" | "branch_search" | "branch_diff" | "branch_list" | "files" | "config"
+        | "retrieve" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -481,6 +482,9 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "config" => {
             "Query TOML or JSON config files by dotted key path, reporting each file's value and defining line."
+        }
+        "retrieve" => {
+            "Read one bounded page of a truncated tool response cached in the project's store."
         }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
@@ -923,6 +927,7 @@ fn primitive_executable_schemas(
     );
     add!("files", FilesSurfaceRequestV1, FilesResultV1);
     add!("config", ConfigSurfaceRequestV1, ConfigResultV1);
+    add!("retrieve", RetrieveSurfaceRequestV1, RetrieveResultV1);
     Ok(schemas)
 }
 

@@ -205,18 +205,17 @@ fn tool_call_open_refusal_response(
     if !matches!(classify_mcp_method(&request.method), McpMethod::ToolsCall) {
         return None;
     }
-    let (authority, reason) = tracedecay_mcp::reset_required_context(error)?;
+    let (authority, _) = tracedecay_mcp::reset_required_context(error)?;
+    let detail = tracedecay_contracts::ApplicationProblemDetailV1::from_reset_required(
+        error,
+        tracedecay_mcp::reset_required_command(&authority, None),
+    )?;
     let id = request.id.clone()?;
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
     let request_id =
         tracedecay_contracts::request_identity::mcp_connection_request_id(&id, connection_scope)?;
-    let reset_command = tracedecay_mcp::reset_required_command(&authority, None);
     let envelope = tracedecay_daemon_service::application_surface::mcp_project_open_reset_refusal(
-        tool_name,
-        request_id,
-        &authority,
-        &reason,
-        &reset_command,
+        tool_name, request_id, detail,
     )?;
     let text = serde_json::to_string(&envelope).ok()?;
     let problem = serde_json::to_value(envelope.problem.as_ref()).ok()?;

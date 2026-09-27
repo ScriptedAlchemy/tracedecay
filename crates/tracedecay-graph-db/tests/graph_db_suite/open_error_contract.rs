@@ -38,7 +38,7 @@ fn raw_store(temp: &TempDir) -> grafeo_engine::GrafeoDB {
 }
 
 const FORMAT_MARKER: [(&str, i64); 2] = [
-    ("__tracedecay_graph_db_version", 5),
+    ("__tracedecay_graph_db_version", 6),
     ("__tracedecay_graph_db_sequence", 0),
 ];
 
@@ -88,11 +88,11 @@ fn persisted_scalar_identity_mismatch_is_corrupt_on_point_read() {
     ));
 }
 
-/// A format-5 relation as it lies on disk: one native edge row carrying the
+/// A format-6 relation as it lies on disk: one native edge row carrying the
 /// relation's kind and payload, and its locator carrying the key, identity,
 /// source, and target. Keys are base64url of
-/// `sha256("workspace")[..8] ‖ digest-identity tag ‖ kind ‖ digest`;
-/// identities are U+0001, kind, and base64url digest. Keyed reads and edge
+/// `sha256("workspace")[..8] ‖ digest-identity tag ‖ kind ‖ digest[..16]`;
+/// entity and relation identities are U+0001, kind, and base64url digest. Keyed reads and edge
 /// fan-outs both resolve the same relation, payload included.
 #[test]
 fn single_row_edge_reads_back_its_payload_through_keys_and_fanouts() {
@@ -102,7 +102,7 @@ fn single_row_edge_reads_back_its_payload_through_keys_and_fanouts() {
     session
         .create_node_with_props(&["__tracedecay_graph_db_format"], format_marker())
         .unwrap();
-    let symbol = |key: &str, identity: String| {
+    let symbol = |key: &str, identity: &str| {
         session
             .create_node_with_props(
                 &["__tracedecay_graph_db_entity"],
@@ -116,12 +116,12 @@ fn single_row_edge_reads_back_its_payload_through_keys_and_fanouts() {
             .unwrap()
     };
     let caller = symbol(
-        "IaMjDgN3KlgBc3ltYm9sERERERERERERERERERERERERERERERERERERERERERE",
-        format!("symbol:{}", "11".repeat(32)),
+        "IaMjDgN3KlgBc3ltYm9sEREREREREREREREREREREQ",
+        "\u{1}symbolERERERERERERERERERERERERERERERERERERERERERE",
     );
     let callee = symbol(
-        "IaMjDgN3KlgBc3ltYm9sIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
-        format!("symbol:{}", "22".repeat(32)),
+        "IaMjDgN3KlgBc3ltYm9sIiIiIiIiIiIiIiIiIiIiIg",
+        "\u{1}symbolIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
     );
     let edge = session
         .create_edge_with_props(
@@ -147,7 +147,7 @@ fn single_row_edge_reads_back_its_payload_through_keys_and_fanouts() {
             [
                 (
                     "__tracedecay_graph_db_relation_key",
-                    "IaMjDgN3KlgBZWRnZTMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMz".into(),
+                    "IaMjDgN3KlgBZWRnZTMzMzMzMzMzMzMzMzMzMzM".into(),
                 ),
                 ("__tracedecay_graph_db_namespace", "workspace".into()),
                 ("__tracedecay_graph_db_projection", "code".into()),

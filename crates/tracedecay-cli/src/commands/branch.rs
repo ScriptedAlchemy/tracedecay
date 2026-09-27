@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::Spinner;

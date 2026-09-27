@@ -14,9 +14,9 @@ use crate::epoch_cache::LabelKeyCache;
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_KEY_PROPERTY, ENTITY_LABEL, NAMESPACE_PROPERTY, PROJECTION_PROPERTY,
     RELATION_FROM_PROPERTY, RELATION_KIND_PROPERTY, RELATION_TO_PROPERTY, decode_entity,
-    decode_graph_properties, decode_relation_identity, edge_locator, edge_relation_identity,
-    entity_key_value, entity_projection_label, label_keys, locator_identity,
-    relation_kind_from_type, relation_type_for_kind,
+    decode_graph_properties, decode_identity, decode_relation_identity, edge_locator,
+    edge_relation_identity, entity_key_value, entity_projection_label, label_keys,
+    locator_identity, relation_kind_from_type, relation_type_for_kind,
 };
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphNamespace,
@@ -1123,12 +1123,10 @@ fn entity_identity(
         namespace,
         "traversal node",
     )?;
-    let identity = stored
-        .get_property(ENTITY_ID_PROPERTY)
-        .and_then(Value::as_str)
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "traversal node has no native entity identity".to_owned(),
-        })?;
+    let identity = decode_identity(
+        stored.get_property(ENTITY_ID_PROPERTY),
+        "traversal node entity identity",
+    )?;
     GraphEntityId::new(identity).map_err(|error| GraphDbError::Corrupt {
         message: format!("traversal node has an invalid native entity identity: {error}"),
     })

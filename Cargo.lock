@@ -2580,7 +2580,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2595,7 +2595,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2615,7 +2615,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2638,7 +2638,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2660,7 +2660,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
 dependencies = [
  "bincode",
  "byteorder",
@@ -5373,7 +5373,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "1.0.0-beta.54"
+version = "1.0.0-beta.55"
 dependencies = [
  "axum",
  "constant_time_eq",
@@ -5641,7 +5641,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "1.0.0-beta.54"
+version = "1.0.0-beta.55"
 dependencies = [
  "axum",
  "clap",
@@ -6393,7 +6393,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "1.0.0-beta.54"
+version = "1.0.0-beta.55"
 dependencies = [
  "hotpath",
  "rusqlite",

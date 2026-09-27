@@ -130,9 +130,14 @@ async fn test_tools_call_explicit_null_id_is_refused_before_dispatch() {
 /// The advertised schema is the contract a host validates arguments against,
 /// so the listed `tracedecay_retrieve` schema is pinned whole and then called
 /// with arguments it admits, against a handle stored in the fixture project.
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_tools_list() {
-    let (server, _dir) = setup_server().await;
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production tools/list server");
     let now = current_timestamp();
     let stored = store_response_handle(
         &server.cg().await.store_layout().response_handle_root,
@@ -140,8 +145,8 @@ async fn test_tools_list() {
         now,
     )
     .unwrap();
-    let responses = run_server_with_messages(
-        server,
+    let responses = run_client_connection_with_messages(
+        Arc::clone(&server),
         vec![
             jsonrpc_request(json!(20), "tools/list", json!({})),
             jsonrpc_request(
@@ -175,19 +180,20 @@ async fn test_tools_list() {
             "properties": {
                 "handle": {
                     "type": "string",
-                    "description": "The required `handle` argument copied exactly from a truncated MCP response envelope."
+                    "description": "The required `handle` argument copied exactly from a truncated MCP\nresponse envelope."
                 },
                 "offset": {
-                    "type": "integer",
+                    "type": ["integer", "null"],
+                    "format": "uint64",
                     "minimum": 0,
                     "default": 0,
-                    "description": "Character offset into the immutable stored response. Use the prior page's next_offset."
+                    "description": "Character offset into the immutable stored response (default: 0). Use\nthe prior page's next_offset."
                 },
                 "max_chars": {
-                    "type": "integer",
+                    "type": ["integer", "null"],
+                    "format": "uint64",
                     "minimum": 1,
-                    "maximum": 15000,
-                    "description": "Maximum characters requested for this page. Values above the safe response-frame budget are clamped."
+                    "description": "Maximum characters requested for this page. Values above the safe\nresponse-frame budget are clamped."
                 },
                 "format": {
                     "type": "string",
@@ -231,6 +237,7 @@ async fn test_tools_list() {
             "content": "items"
         })
     );
+    fixture.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
@@ -788,154 +795,15 @@ async fn test_tools_call_missing_name() {
     );
 }
 
-#[tokio::test]
-async fn test_tracedecay_retrieve_missing_handle_argument_is_invalid_params_with_reason_code() {
-    let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(
-            json!(61),
-            "tools/call",
-            json!({
-                "name": "tracedecay_retrieve",
-                "arguments": {}
-            }),
-        )],
-    )
-    .await;
-
-    assert_eq!(
-        response_with_id(&responses, json!(61))["error"],
-        json!({
-            "code": -32602,
-            "message": "tracedecay_retrieve requires the `handle` argument copied from a truncated MCP response envelope.",
-            "data": {
-                "tool": "tracedecay_retrieve",
-                "reason_code": "missing_handle_argument",
-                "retryable": false,
-                "retry_instruction": "Call `tracedecay_retrieve` again with the exact `handle` value emitted by the truncated response envelope."
-            }
-        })
-    );
-}
-
-#[tokio::test]
-async fn test_tracedecay_retrieve_invalid_handle_is_invalid_params_with_reason_code() {
-    let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(
-            json!(62),
-            "tools/call",
-            json!({
-                "name": "tracedecay_retrieve",
-                "arguments": { "handle": "bogus" }
-            }),
-        )],
-    )
-    .await;
-
-    assert_eq!(
-        response_with_id(&responses, json!(62))["error"],
-        json!({
-            "code": -32602,
-            "message": "invalid response handle: expected `rh_` followed by 24 hex characters copied from a truncated MCP response envelope",
-            "data": {
-                "tool": "tracedecay_retrieve",
-                "reason_code": "invalid_handle",
-                "retryable": false,
-                "retry_instruction": "Pass the exact `handle` string from a truncated MCP response envelope; do not shorten or edit it."
-            }
-        })
-    );
-}
-
-#[tokio::test]
-async fn test_tracedecay_retrieve_corrupt_handle_record_returns_actionable_internal_error() {
-    let (server, _dir) = setup_server().await;
-    let cg = server.cg().await;
-    let stored = store_response_handle(
-        &cg.store_layout().response_handle_root,
-        "{\"items\":[1]}",
-        current_timestamp(),
-    )
-    .unwrap();
-    fs::write(
-        response_handle_dir(&cg).join(format!("{}.json", stored.handle)),
-        "{not-json",
-    )
-    .unwrap();
-
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(
-            json!(63),
-            "tools/call",
-            json!({
-                "name": "tracedecay_retrieve",
-                "arguments": { "handle": stored.handle }
-            }),
-        )],
-    )
-    .await;
-
-    assert_eq!(
-        response_with_id(&responses, json!(63))["error"],
-        json!({
-            "code": -32603,
-            "message": "tool execution failed: cached response handle record is unreadable.",
-            "data": {
-                "tool": "tracedecay_retrieve",
-                "reason_code": "corrupt_handle_record",
-                "retryable": true,
-                "retry_instruction": "Re-run the original MCP tool in this project to regenerate the full response and a fresh handle."
-            }
-        })
-    );
-}
-
-#[tokio::test]
-async fn test_tracedecay_retrieve_handle_read_failure_returns_actionable_internal_error() {
-    let (server, _dir) = setup_server().await;
-    let cg = server.cg().await;
-    let stored = store_response_handle(
-        &cg.store_layout().response_handle_root,
-        "{\"items\":[2]}",
-        current_timestamp(),
-    )
-    .unwrap();
-    let handle_path = response_handle_dir(&cg).join(format!("{}.json", stored.handle));
-    fs::remove_file(&handle_path).unwrap();
-    fs::create_dir(&handle_path).unwrap();
-
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(
-            json!(64),
-            "tools/call",
-            json!({
-                "name": "tracedecay_retrieve",
-                "arguments": { "handle": stored.handle }
-            }),
-        )],
-    )
-    .await;
-
-    assert_eq!(
-        response_with_id(&responses, json!(64))["error"],
-        handle_read_failed_error()
-    );
-}
-
 fn handle_read_failed_error() -> Value {
     json!({
         "code": -32603,
-        "message": "tool execution failed: failed to read cached response handle.",
+        "message": "tool project route failed: reason_code=handle_read_failed retryable=true: response-handle cache is unavailable",
         "data": {
             "tool": "tracedecay_retrieve",
             "reason_code": "handle_read_failed",
             "retryable": true,
-            "retry_instruction": "Fix the local project cache/filesystem issue, then re-run the original MCP tool to regenerate the full response and a fresh handle."
+            "detail": "response-handle cache is unavailable"
         }
     })
 }
