@@ -58,6 +58,7 @@ use crate::{
         classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1},
         feedback_document_identity_from_generation,
         freshness_witness::RestoreFreshnessWitnessV1,
+        freshness_witness::SourceSweepStatsV1,
         registry::{
             ColdMountOpenEventV1, ServingGenerationInstallationOutcomeV1,
             ServingGenerationRollbackOutcomeV1, dashboard_code_graph_serving,
@@ -6742,12 +6743,10 @@ async fn readiness_wait_reaches_ready_exactly_when_the_held_graph_publishes() {
     registry.shutdown().await;
 }
 
-/// A settled worktree already satisfies `fresh`, so a short wait reaches it
-/// even while another holder owns the scheduler lock the source sweep would
-/// need; the busy-read ladder still reports the served generation current.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn readiness_wait_reaches_a_target_the_current_reading_already_holds() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn source() -> u32 { 1 }\n")]);
+async fn settled_fresh_wait_fixture(
+    source: &str,
+) -> (GitFixture, TempDir, CodeIndexSchedulerRegistryV1) {
+    let fixture = GitFixture::new(&[("src/lib.rs", source)]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
@@ -6760,44 +6759,219 @@ async fn readiness_wait_reaches_a_target_the_current_reading_already_holds() {
         .expect("mount worktree");
     wait_for_initial_generation(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
-    let fresh = tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh;
-    assert!(matches!(
-        registry
-            .wait_for_readiness(fixture.path(), fresh, SERVING_SEAT_FAILURE_CEILING)
-            .await
-            .expect("freshness read"),
-        tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
-    ));
+    (fixture, store, registry)
+}
 
-    let handle = registry
-        .scheduler_handle(fixture.path())
+async fn served_texts_containing(
+    registry: &CodeIndexSchedulerRegistryV1,
+    root: &Path,
+    needle: &str,
+) -> Vec<String> {
+    let mut texts = registry
+        .latest_complete_serving_for_test(root)
         .await
-        .expect("mounted scheduler");
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let lock_thread = std::thread::spawn(move || {
-        let _guard = handle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held_tx.send(()).expect("signal scheduler lock held");
-        let _ = release_rx.recv();
-    });
-    held_rx.recv().expect("scheduler lock acquired");
+        .expect("served generation")
+        .lexical()
+        .iter()
+        .filter(|chunk| chunk.sanitized_text.as_str().contains(needle))
+        .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+        .collect::<Vec<_>>();
+    texts.sort();
+    texts
+}
 
-    let held = registry
-        .wait_for_readiness(fixture.path(), fresh, Duration::from_millis(200))
+/// `tracedecay_status wait_for { state: fresh }` on a current index verifies
+/// the source and reaches it well inside a one-second budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_wait_on_a_current_index_reaches_inside_one_second() {
+    let (fixture, _store, registry) =
+        settled_fresh_wait_fixture("pub fn source() -> u32 { 1 }\n").await;
+    let started = Instant::now();
+    let outcome = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
+            Duration::from_secs(1),
+        )
         .await
         .expect("freshness read");
-    release_tx.send(()).expect("release scheduler lock");
-    lock_thread.join().expect("lock thread joins");
+    let elapsed = started.elapsed();
     assert!(
         matches!(
-            held,
+            outcome,
             tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
         ),
-        "a current worktree must not time out behind the source sweep: {held:?}"
+        "{outcome:?}"
+    );
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    registry.shutdown().await;
+}
+
+/// A save no hook reported is still part of "the source as of the request":
+/// the `fresh` wait's own sweep finds it, and the wait returns only once the
+/// index serves the saved bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_wait_catches_an_unreported_save_and_returns_after_its_reindex() {
+    let (fixture, _store, registry) =
+        settled_fresh_wait_fixture("pub fn source() -> u32 { 1 }\n").await;
+    let before = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("initial generation");
+    fixture.edit("src/lib.rs", "pub fn source() -> u32 { 2 }\n");
+
+    let outcome = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
+            SERVING_SEAT_FAILURE_CEILING,
+        )
+        .await
+        .expect("freshness read");
+    assert!(
+        matches!(
+            outcome,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+        ),
+        "{outcome:?}"
+    );
+    assert_ne!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(before)
+    );
+    assert_eq!(
+        served_texts_containing(&registry, fixture.path(), "fn source").await,
+        vec![
+            "pub fn source() -> u32 { 2 }".to_owned(),
+            "pub fn source() -> u32 { 2 }\n".to_owned()
+        ]
     );
     registry.shutdown().await;
+}
+
+/// The `fresh` sweep never waits for the scheduler mutex. While another
+/// holder owns it, a quiet tree is still verified and reached, and an
+/// unreported save is still found: the wait times out on the old generation
+/// refreshing instead of reaching it, and the save is indexed once the
+/// holder lets go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_wait_verifies_the_source_while_a_pass_holds_the_scheduler() {
+    let (fixture, _store, registry) =
+        settled_fresh_wait_fixture("pub fn source() -> u32 { 1 }\n").await;
+    let fresh = tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh;
+    let before = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("initial generation");
+    let held = hold_scheduler_for_root(&registry, fixture.path()).await;
+
+    let quiet = registry
+        .wait_for_readiness(fixture.path(), fresh, Duration::from_secs(1))
+        .await
+        .expect("freshness read");
+    fixture.edit("src/lib.rs", "pub fn source() -> u32 { 3 }\n");
+    let edited = registry
+        .wait_for_readiness(fixture.path(), fresh, Duration::from_millis(500))
+        .await
+        .expect("freshness read");
+    held.release().await;
+    assert!(
+        matches!(
+            quiet,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+        ),
+        "{quiet:?}"
+    );
+    let tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::TimedOut {
+        last: Some(last),
+    } = edited
+    else {
+        panic!("an unreported save must not read as fresh: {edited:?}");
+    };
+    assert_eq!(
+        (last.staleness_state, last.latest_generation_id.as_deref()),
+        (
+            Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Refreshing),
+            Some(before.as_str())
+        )
+    );
+
+    let reindexed = registry
+        .wait_for_readiness(fixture.path(), fresh, SERVING_SEAT_FAILURE_CEILING)
+        .await
+        .expect("freshness read");
+    assert!(
+        matches!(
+            reindexed,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+        ),
+        "{reindexed:?}"
+    );
+    assert_eq!(
+        served_texts_containing(&registry, fixture.path(), "fn source").await,
+        vec![
+            "pub fn source() -> u32 { 3 }".to_owned(),
+            "pub fn source() -> u32 { 3 }\n".to_owned()
+        ]
+    );
+    registry.shutdown().await;
+}
+
+/// Settled stats vouch for digests an earlier sweep derived, so re-sweeping a
+/// quiet tree walks no directories and reads no source bytes, while a
+/// same-length rewrite that restores its mtime still advances the change
+/// time and is re-read and caught.
+#[test]
+fn source_sweep_rereads_only_files_whose_settled_stat_moved() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n"),
+        ("src/other.rs", "pub fn beta() -> u32 { 1 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let _ = published(scheduler.reconcile_now().expect("initial publish"));
+    let fence = scheduler.freshness_fence();
+    let shutting_down = std::sync::atomic::AtomicBool::new(false);
+    std::thread::sleep(Duration::from_millis(2_100));
+
+    assert_eq!(
+        fence.source_sweep_for_test(fixture.path(), &shutting_down),
+        (
+            true,
+            SourceSweepStatsV1 {
+                walked: true,
+                candidates: 2,
+                hashed: 2
+            }
+        )
+    );
+    assert_eq!(
+        fence.source_sweep_for_test(fixture.path(), &shutting_down),
+        (
+            true,
+            SourceSweepStatsV1 {
+                walked: false,
+                candidates: 2,
+                hashed: 0
+            }
+        )
+    );
+    rewrite_preserving_stat(&fixture, "src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert_eq!(
+        fence.source_sweep_for_test(fixture.path(), &shutting_down),
+        (
+            false,
+            SourceSweepStatsV1 {
+                walked: false,
+                candidates: 2,
+                hashed: 1
+            }
+        )
+    );
 }
 
 /// A pass can start and settle entirely between two reads of the running
