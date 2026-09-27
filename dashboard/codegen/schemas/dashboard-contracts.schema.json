@@ -11203,17 +11203,31 @@
     },
     "EffectClass": {
       "description": "The stable effect classification of one application operation.\n\nGit index writes remain separate classes so policy cannot accidentally\nsubstitute one index mutation for another.",
-      "enum": [
-        "read",
-        "preview",
-        "source_edit",
-        "git_index_stage",
-        "git_index_unstage",
-        "git_index_commit",
-        "configuration_write",
-        "administrative"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "read",
+            "preview",
+            "source_edit",
+            "git_index_stage",
+            "git_index_unstage",
+            "git_index_commit",
+            "configuration_write",
+            "administrative"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "spawns_process",
+          "description": "Runs a child process in the project (e.g. the project's test runner).",
+          "type": "string"
+        },
+        {
+          "const": "binds_server",
+          "description": "Binds a listening server in the daemon process.",
+          "type": "string"
+        }
+      ]
     },
     "EffectReceipt": {
       "additionalProperties": false,

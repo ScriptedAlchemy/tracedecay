@@ -536,10 +536,12 @@ fn route_effect(effect: EffectClass) -> Result<CapabilityEffectClassV1, Applicat
         EffectClass::GitIndexStage => Ok(CapabilityEffectClassV1::GitIndexStage),
         EffectClass::GitIndexUnstage => Ok(CapabilityEffectClassV1::GitIndexUnstage),
         EffectClass::GitIndexCommit => Ok(CapabilityEffectClassV1::GitIndexCommit),
-        EffectClass::SourceEdit | EffectClass::ConfigurationWrite | EffectClass::Administrative => {
-            Err(ApplicationContractError::Inconsistent {
-                field: "capability routing effect class",
-            })
-        }
+        EffectClass::SourceEdit
+        | EffectClass::ConfigurationWrite
+        | EffectClass::Administrative
+        | EffectClass::SpawnsProcess
+        | EffectClass::BindsServer => Err(ApplicationContractError::Inconsistent {
+            field: "capability routing effect class",
+        }),
     }
 }

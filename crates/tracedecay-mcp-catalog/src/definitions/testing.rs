@@ -1,6 +1,6 @@
 //! Test-coverage and diagnostics workflow tool definitions.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{def, def_rw};
 use crate::ToolDefinition;
@@ -36,7 +36,7 @@ pub(super) fn def_diagnose(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_run_affected_tests() -> ToolDefinition {
+pub(super) fn def_run_affected_tests(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_run_affected_tests",
         "Run Affected Tests",
@@ -45,40 +45,19 @@ pub(super) fn def_run_affected_tests() -> ToolDefinition {
          `tracedecay_test_map` / `tracedecay_test_risk`, emits pass/fail per \
          test alongside the source nodes each test covers. Output is the \
          libtest summary parsed into JSON.",
-        json!({
-            "type": "object",
-            "properties": {
-                "changed_paths": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Explicit manifest of file paths used to compute affected tests."
-                },
-                "profile": {
-                    "type": "string",
-                    "enum": ["debug", "release"],
-                    "description": "Cargo profile (default: debug)."
-                },
-                "timeout_secs": {
-                    "type": "number",
-                    "description": "Maximum wall time before the cargo subprocess is killed (default: 300)."
-                },
-                "max_tests": {
-                    "type": "number",
-                    "description": "Cap on tests dispatched in a single invocation (default: 100)."
-                }
-            },
-            "required": ["changed_paths"]
-        }),
+        input_schema,
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::def_run_affected_tests;
-
     #[test]
     fn affected_test_execution_requires_an_explicit_file_manifest() {
-        let definition = def_run_affected_tests();
+        let definition = crate::get_maximal_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name == "tracedecay_run_affected_tests")
+            .expect("tracedecay_run_affected_tests definition");
         assert_eq!(
             definition.input_schema["required"],
             serde_json::json!(["changed_paths"])

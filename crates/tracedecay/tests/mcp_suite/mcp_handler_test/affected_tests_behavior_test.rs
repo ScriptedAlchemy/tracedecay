@@ -111,6 +111,39 @@ async fn run_affected(fixture: &ProductionCompositionFixture, arguments: Value) 
     )
 }
 
+/// The problem message a typed request refusal carries. The owner refuses
+/// with an error result whose body is the problem envelope.
+async fn refusal(fixture: &ProductionCompositionFixture, mut arguments: Value) -> String {
+    arguments["format"] = json!("json");
+    let response = fixture
+        .harness
+        .call_tool(
+            &fixture.project_root,
+            "tracedecay_run_affected_tests",
+            arguments,
+        )
+        .await
+        .expect("production run_affected_tests invocation");
+    let result = serde_json::to_value(response.result.expect("refusal result")).unwrap();
+    assert_eq!(result["isError"], json!(true), "{result}");
+    let envelope: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().expect("refusal text"))
+            .expect("problem envelope JSON");
+    assert_eq!(
+        envelope["problem"]["kind"],
+        json!("invalid_request"),
+        "{result}"
+    );
+    envelope["problem"]["message"]
+        .as_str()
+        .expect("problem message")
+        .to_owned()
+}
+
+fn refused(detail: &str) -> String {
+    format!("invalid arguments for tracedecay_run_affected_tests: {detail}")
+}
+
 async fn symbol_id(fixture: &ProductionCompositionFixture, name: &str, file: &str) -> String {
     let result = call_tool(
         fixture,
@@ -181,37 +214,44 @@ async fn run_affected_tests_reports_the_cargo_result_for_the_changed_manifest() 
         .expect("production affected-tests server");
     wait_for_current_graph(&server).await;
 
-    assert_rejection(
-        &run_affected(&fixture, json!({"timeout_secs": 1})).await,
-        "changed_paths",
-        "`changed_paths` is required and must explicitly scope the affected-test run",
+    assert_eq!(
+        refusal(&fixture, json!({"timeout_secs": 1})).await,
+        refused("missing field `changed_paths`")
     );
-    assert_rejection(
-        &run_affected(
+    assert_eq!(
+        refusal(
             &fixture,
-            json!({"changed_paths": "src/lib.rs", "timeout_secs": 1}),
+            json!({"changed_paths": "src/lib.rs", "timeout_secs": 1})
         )
         .await,
-        "changed_paths",
-        "`changed_paths` must be an array of project-relative string paths",
+        refused("invalid type: string \"src/lib.rs\", expected a sequence")
     );
-    assert_rejection(
-        &run_affected(
+    assert_eq!(
+        refusal(
             &fixture,
-            json!({"changed_paths": ["src/lib.rs", 7], "timeout_secs": 1}),
+            json!({"changed_paths": ["src/lib.rs", 7], "timeout_secs": 1})
         )
         .await,
-        "changed_paths",
-        "`changed_paths` must contain only project-relative string paths",
+        refused("invalid type: integer `7`, expected a string")
     );
-    assert_rejection(
-        &run_affected(
+    assert_eq!(
+        refusal(
             &fixture,
-            json!({"changed_paths": ["src/lib.rs"], "profile": "bench", "timeout_secs": 1}),
+            json!({"changed_paths": ["src/lib.rs"], "profile": "bench", "timeout_secs": 1})
         )
         .await,
-        "profile",
-        "`profile` must be `debug` or `release`",
+        refused("unknown variant `bench`, expected `debug` or `release`")
+    );
+    // An argument outside the typed request is refused, not silently ignored.
+    assert_eq!(
+        refusal(
+            &fixture,
+            json!({"changed_paths": ["src/lib.rs"], "filter": "greeting", "timeout_secs": 1})
+        )
+        .await,
+        refused(
+            "unknown field `filter`, expected one of `changed_paths`, `profile`, `timeout_secs`, `max_tests`"
+        )
     );
     assert_rejection(
         &run_affected(
@@ -385,6 +425,69 @@ async fn run_affected_tests_reports_the_cargo_result_for_the_changed_manifest() 
         "max_tests must not execute the omitted test:\n{truncated_stdout}"
     );
 
+    fixture.harness.shutdown().await;
+}
+
+fn coalescing_counts(stats: &Value) -> (u64, u64) {
+    let counts = &stats["identical_read_coalescing"];
+    (
+        counts["leaders"].as_u64().expect("coalescing leaders"),
+        counts["followers"].as_u64().expect("coalescing followers"),
+    )
+}
+
+/// A side-effecting owner call is never answered from an identical call in
+/// flight beside it: two identical concurrent runs are two managed test runs.
+/// Two identical concurrent reads still enter the identical-read coalescer.
+#[tokio::test]
+async fn identical_concurrent_test_runs_each_run_while_identical_reads_still_ride() {
+    let fixture = production_composition_fixture_with_sources(write_affected_fixture).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production affected-tests server");
+    wait_for_current_graph(&server).await;
+    let run = json!({
+        "changed_paths": ["tests/ordered.rs"],
+        "timeout_secs": 120,
+        "max_tests": 1,
+        "format": "json",
+    });
+
+    let before = coalescing_counts(&server.server_stats_json().await);
+    let (first, second) = tokio::join!(
+        run_affected(&fixture, run.clone()),
+        run_affected(&fixture, run.clone())
+    );
+    let after_runs = coalescing_counts(&server.server_stats_json().await);
+    for output in [&first, &second] {
+        assert_eq!(output["dispatched_tests"], json!([KEPT_TEST]), "{output}");
+        assert_eq!(output["passed"], json!(1), "{output}");
+    }
+    assert_ne!(
+        first["terminal"]["operation_id"], second["terminal"]["operation_id"],
+        "each identical run records its own managed test run"
+    );
+    assert_eq!(
+        after_runs, before,
+        "test runs never enter the identical-read coalescer"
+    );
+
+    let read = json!({"path": "src", "format": "json"});
+    let (first_read, second_read) = tokio::join!(
+        call_tool(&fixture, "tracedecay_files", read.clone()),
+        call_tool(&fixture, "tracedecay_files", read.clone())
+    );
+    assert_eq!(
+        extract_text(&first_read.value),
+        extract_text(&second_read.value)
+    );
+    let after_reads = coalescing_counts(&server.server_stats_json().await);
+    assert_eq!(
+        (after_reads.0 - after_runs.0) + (after_reads.1 - after_runs.1),
+        2,
+        "both identical reads enter the identical-read coalescer"
+    );
     fixture.harness.shutdown().await;
 }
 

@@ -1,11 +1,15 @@
+use crate::retrieval::owner_effect_surface::{
+    DashboardResultV1, DashboardSurfaceRequestV1, RunAffectedTestsResultV1,
+    RunAffectedTestsSurfaceRequestV1,
+};
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
     CancellationContract, CancellationPoint, CapabilityId, CatalogContributionInputV1,
     CatalogContributionV1, ContributionContractRef, ContributionId, CoverageContractRef,
     DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableSchemaAuthority, LifecycleClass, OmissionContractRef, PaginationContract,
-    PrivacyClass, ProfileId, ProtocolRevisionRange, RetrievalFamily,
+    ExecutableSchemaAuthority, LifecycleClass, OmissionContractRef, OwnerSideEffectEntryV1,
+    PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange, RetrievalFamily,
     RetrievalPrimitiveManifestInputV1, RetrievalPrimitiveManifestV1, RetrieverId,
     RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
     ScopeDimension, ScopeRequirement, ScoringContractRef, SortContract, SortContractId,
@@ -154,6 +158,9 @@ struct PrimitiveReadSpec {
     /// answer in one response and advertise no pagination.
     paginated: bool,
     deadline_millis: u64,
+    /// The tool-catalog entry of an operation that acts beyond reading; its
+    /// effect class and ceiling replace the read defaults.
+    side_effect: Option<OwnerSideEffectEntryV1>,
 }
 
 fn primitive_profile_ids(operation: &str) -> &'static [&'static str] {
@@ -255,6 +262,8 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("hermes_skill_bridge"),
     graph_report_spec("analytics"),
     graph_report_spec("search"),
+    owner_side_effect_spec(ApplicationSurfaceOperation::RunAffectedTests),
+    owner_side_effect_spec(ApplicationSurfaceOperation::Dashboard),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
     git_context_spec("changelog"),
@@ -352,7 +361,9 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "skill_view"
         | "hermes_skill_bridge"
         | "analytics"
-        | "search" => &CLI_MCP_PRIMITIVE_SURFACES,
+        | "search"
+        | "run_affected_tests"
+        | "dashboard" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -574,6 +585,12 @@ fn primitive_read_description(operation: &str) -> &'static str {
         "search" => {
             "Rank symbols by name, identifier fragment, signature, path, or phrase through exact and lexical routes."
         }
+        "run_affected_tests" => {
+            "Run the libtest tests that cover a changed-path manifest and report each observed outcome."
+        }
+        "dashboard" => {
+            "Start or stop this project's loopback dashboard server and report its bound address."
+        }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
 }
@@ -593,6 +610,7 @@ const fn primitive_spec_with_default_page_size(
         default_page_size,
         paginated: true,
         deadline_millis: 10_000,
+        side_effect: None,
     }
 }
 
@@ -616,6 +634,63 @@ const fn graph_report_spec(operation: &'static str) -> PrimitiveReadSpec {
         default_page_size: CALLABLE_CODE_DEFAULT_PAGE_SIZE,
         paginated: false,
         deadline_millis: 120_000,
+        side_effect: None,
+    }
+}
+
+/// A read observes cancellation until it answers. A spawned process is killed
+/// when its call is cancelled; binding a server is not interruptible.
+fn primitive_cancellation(
+    spec: &PrimitiveReadSpec,
+) -> Result<CancellationContract, ApplicationContractError> {
+    let points = match spec.side_effect.map(|entry| entry.effect) {
+        None => vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::BeforeRead,
+            CancellationPoint::DuringRead,
+        ],
+        Some(EffectClass::SpawnsProcess) => vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::EffectInFlight,
+        ],
+        Some(_) => return Ok(CancellationContract::NotCancellable),
+    };
+    Ok(CancellationContract::cooperative(points)?)
+}
+
+fn primitive_terminal_states(spec: &PrimitiveReadSpec) -> Vec<TerminalState> {
+    let mut states = vec![TerminalState::Completed];
+    if !matches!(
+        spec.side_effect.map(|entry| entry.effect),
+        Some(EffectClass::BindsServer)
+    ) {
+        states.push(TerminalState::Cancelled);
+    }
+    states.extend([
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial,
+    ]);
+    states
+}
+
+/// An owner-served operation that acts beyond reading. Its tool-catalog side
+/// effect entry is the authority for its effect class and ceiling; an
+/// operation without one yields a zero deadline the catalog refuses.
+const fn owner_side_effect_spec(operation: ApplicationSurfaceOperation) -> PrimitiveReadSpec {
+    let side_effect = operation.owner_side_effect();
+    PrimitiveReadSpec {
+        operation: operation.as_str(),
+        capability: operation.as_str(),
+        use_case: operation.as_str(),
+        default_page_size: CALLABLE_CODE_DEFAULT_PAGE_SIZE,
+        paginated: false,
+        deadline_millis: match side_effect {
+            Some(entry) => entry.ceiling_millis,
+            None => 0,
+        },
+        side_effect,
     }
 }
 
@@ -720,6 +795,11 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             })?);
             binding_ids.push(binding_id);
         }
+        let verb = if spec.side_effect.is_some() {
+            "Run"
+        } else {
+            "Read"
+        };
         capabilities.push(application_capability_manifest(
             ApplicationCapabilityManifestInput {
                 capability_id,
@@ -729,23 +809,25 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                 ))?,
                 routing: RoutingContractV1::new(
                     1,
-                    format!("Read {}", spec.operation.replace('_', " ")),
+                    format!("{verb} {}", spec.operation.replace('_', " ")),
                     primitive_read_description(spec.operation),
-                    vec![format!("Read {}", spec.operation.replace('_', " "))],
+                    vec![format!("{verb} {}", spec.operation.replace('_', " "))],
                 )?,
                 request_schema: primitive_schema(spec.operation, "request")?,
                 result_schema: primitive_schema(spec.operation, "result")?,
-                effect: EffectClass::Read,
+                effect: spec
+                    .side_effect
+                    .map_or(EffectClass::Read, |entry| entry.effect),
                 scope: symbol_search_scope()?,
                 denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
                 privacy: PrivacyClass::ScopedMetadata,
-                lifecycle: LifecycleClass::Resumable,
+                lifecycle: if spec.side_effect.is_some() {
+                    LifecycleClass::Stateless
+                } else {
+                    LifecycleClass::Resumable
+                },
                 streaming: StreamingContract::Unsupported,
-                cancellation: CancellationContract::cooperative(vec![
-                    CancellationPoint::BeforeAdmission,
-                    CancellationPoint::BeforeRead,
-                    CancellationPoint::DuringRead,
-                ])?,
+                cancellation: primitive_cancellation(spec)?,
                 deadline: DeadlineContract::new(
                     spec.deadline_millis,
                     DeadlineBehavior::ReturnOperationReceipt,
@@ -766,14 +848,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                     RevalidationPoint::Policy,
                     RevalidationPoint::Configuration,
                 ])?,
-                terminal_states: TerminalStateContract::new(vec![
-                    TerminalState::Completed,
-                    TerminalState::Cancelled,
-                    TerminalState::TimedOut,
-                    TerminalState::Failed,
-                    TerminalState::Unavailable,
-                    TerminalState::Partial,
-                ])?,
+                terminal_states: TerminalStateContract::new(primitive_terminal_states(spec))?,
                 availability: AvailabilityContract::Available,
                 binding_ids,
                 profile_eligibility: application_profile_ids(primitive_profile_ids(
@@ -1040,6 +1115,12 @@ fn primitive_executable_schemas(
     );
     add!("analytics", AnalyticsSurfaceRequestV1, AnalyticsResultV1);
     add!("search", SearchSurfaceRequestV1, SearchResultV1);
+    add!(
+        "run_affected_tests",
+        RunAffectedTestsSurfaceRequestV1,
+        RunAffectedTestsResultV1
+    );
+    add!("dashboard", DashboardSurfaceRequestV1, DashboardResultV1);
     Ok(schemas)
 }
 

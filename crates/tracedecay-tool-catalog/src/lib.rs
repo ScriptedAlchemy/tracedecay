@@ -13,6 +13,7 @@ mod id;
 mod manifest;
 mod mcp;
 mod operation;
+mod owner_side_effect;
 mod profile;
 mod retrieval;
 mod snapshot;
@@ -50,6 +51,10 @@ pub use mcp::{
     McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
 pub use operation::ApplicationSurfaceOperation;
+pub use owner_side_effect::{
+    INTERACTIVE_CEILING_MILLIS, IdenticalCallPolicyV1, LONG_RUNNING_CEILING_MILLIS,
+    OwnerSideEffectEntryV1,
+};
 pub use profile::{ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind};
 pub use retrieval::{
     ContributionContractRef, CoverageContractRef, OmissionContractRef, RetrievalFamily,

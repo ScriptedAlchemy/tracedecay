@@ -1,5 +1,9 @@
 use super::*;
 
+use serde_json::json;
+
+use crate::ToolResult;
+
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::future::ready;
@@ -22,6 +26,33 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+/// Decodes `args` the way the owner does and renders the typed result the
+/// way every surface does.
+async fn handle_run_affected_tests_with_runner<F, Runner, RunFuture>(
+    cg: &TraceDecay,
+    graph: F,
+    args: Value,
+    cancellation: Option<CancellationSignal>,
+    runner: Runner,
+) -> Result<ToolResult>
+where
+    F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
+    Runner: FnOnce(PathBuf, TestProfile, Vec<String>, Duration, TestRunControl) -> RunFuture,
+    RunFuture: Future<Output = std::result::Result<TestRunOutput, TestRunFailure>>,
+{
+    let request = decode_primitive_request(&args, "tracedecay_run_affected_tests")?;
+    let completion =
+        run_affected_tests_with_runner(cg, graph, request, cancellation, runner).await?;
+    crate::handlers::graph_tool::render_graph_tool(None, &args, completion)
+}
+
+fn bounds(arguments: Value) -> Value {
+    let request = serde_json::from_value(arguments).expect("typed affected-test request");
+    let refused = RunAffectedArgs::from_request(request)
+        .expect_err("an out-of-bounds request must be refused before any test runs");
+    serde_json::to_value(refused).expect("refusal JSON")
+}
 
 #[allow(dead_code)]
 fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
@@ -502,7 +533,7 @@ async fn non_string_changed_paths_are_rejected_before_test_selection() {
         qualified_name: "util",
         annotated_test: false,
     }]);
-    let result = handle_run_affected_tests_with_runner(
+    let error = handle_run_affected_tests_with_runner(
         &cg,
         ready(Ok(graph)),
         json!({
@@ -515,15 +546,10 @@ async fn non_string_changed_paths_are_rejected_before_test_selection() {
         },
     )
     .await
-    .unwrap();
-
-    let text = result.value["content"][0]["text"].as_str().unwrap();
-    let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["error"]["kind"], "invalid_request");
-    assert_eq!(output["error"]["operation"], "changed_paths");
-    assert!(
-        output["note"].is_null(),
-        "malformed producer input must not be relabelled as an empty change set"
+    .expect_err("a non-string changed path is refused, not relabelled as an empty change set");
+    assert_eq!(
+        error.to_string(),
+        "config error: invalid arguments for tracedecay_run_affected_tests: invalid type: integer `7`, expected a string"
     );
 
     cg.close();
@@ -531,9 +557,7 @@ async fn non_string_changed_paths_are_rejected_before_test_selection() {
 
 #[test]
 fn zero_max_tests_is_rejected_before_any_test_runner_can_start() {
-    let result = RunAffectedArgs::parse(&json!({"max_tests": 0, "format": "json"}))
-        .expect_err("zero max tests must not become an unfiltered cargo invocation");
-    let output = tool_result_body(&result);
+    let output = bounds(json!({"changed_paths": ["src/lib.rs"], "max_tests": 0}));
 
     assert_eq!(output["error"]["kind"], "invalid_request");
     assert_eq!(output["error"]["operation"], "max_tests");
@@ -541,12 +565,10 @@ fn zero_max_tests_is_rejected_before_any_test_runner_can_start() {
 
 #[test]
 fn timeout_above_the_managed_test_limit_is_rejected() {
-    let result = RunAffectedArgs::parse(&json!({
+    let output = bounds(json!({
+        "changed_paths": ["src/lib.rs"],
         "timeout_secs": MAX_TEST_TIMEOUT_SECS + 1,
-        "format": "json"
-    }))
-    .expect_err("a managed test run cannot select an unbounded deadline");
-    let output = tool_result_body(&result);
+    }));
 
     assert_eq!(output["error"]["kind"], "invalid_request");
     assert_eq!(output["error"]["operation"], "timeout_secs");
@@ -554,12 +576,15 @@ fn timeout_above_the_managed_test_limit_is_rejected() {
 
 #[test]
 fn unsupported_profile_is_rejected_before_test_selection() {
-    let result = RunAffectedArgs::parse(&json!({"profile": "bench", "format": "json"}))
-        .expect_err("an unsupported profile must not silently become a debug test run");
-    let output = tool_result_body(&result);
-
-    assert_eq!(output["error"]["kind"], "invalid_request");
-    assert_eq!(output["error"]["operation"], "profile");
+    let error = serde_json::from_value::<RunAffectedTestsSurfaceRequestV1>(json!({
+        "changed_paths": ["src/lib.rs"],
+        "profile": "bench",
+    }))
+    .expect_err("an unsupported profile must not silently become a debug test run");
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `bench`, expected `debug` or `release`"
+    );
 }
 
 #[tokio::test]

@@ -34,7 +34,10 @@ pub(crate) struct ApplicationCapabilityManifestInput {
 pub(crate) fn application_capability_manifest(
     input: ApplicationCapabilityManifestInput,
 ) -> Result<CapabilityManifestV1, CatalogValidationError> {
+    // Owner side effects settle within the call, so they carry the read
+    // receipt shape rather than a durable, idempotent effect journey.
     let is_effect = input.effect.is_effect();
+    let durable_effect = is_effect && !input.effect.is_owner_side_effect();
     CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id: input.capability_id,
         use_case_id: input.use_case_id,
@@ -51,7 +54,7 @@ pub(crate) fn application_capability_manifest(
         cancellation: input.cancellation,
         deadline: input.deadline,
         pagination: input.pagination,
-        idempotency: if is_effect {
+        idempotency: if durable_effect {
             IdempotencyContract::Required
         } else {
             IdempotencyContract::NotRequired
@@ -66,12 +69,12 @@ pub(crate) fn application_capability_manifest(
             }
         }),
         authority_revalidation: input.authority_revalidation,
-        reconciliation: if is_effect {
+        reconciliation: if durable_effect {
             ReconciliationContract::Required
         } else {
             ReconciliationContract::NotRequired
         },
-        receipt: if is_effect {
+        receipt: if durable_effect {
             ReceiptContract::DurableEffect
         } else {
             ReceiptContract::Operation

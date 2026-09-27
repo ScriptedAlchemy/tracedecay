@@ -754,28 +754,6 @@ async fn test_changelog_no_git() {
 }
 
 #[tokio::test]
-async fn run_affected_tests_requires_manifest_scoped_changed_paths() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_run_affected_tests",
-        json!({"timeout_secs": 1}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["error"]["kind"].as_str(), Some("invalid_request"));
-    assert_eq!(output["error"]["operation"].as_str(), Some("changed_paths"));
-    assert!(
-        output["note"].is_null(),
-        "missing scope input must not be reported as a no-change note: {output}"
-    );
-}
-
-#[tokio::test]
 async fn pr_context_no_git_returns_structured_git_error() {
     let cg = setup_empty_analysis_project().await;
     let result = handle_tool_call(

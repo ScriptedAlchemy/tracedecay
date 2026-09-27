@@ -906,6 +906,8 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::HermesSkillBridge
         | ApplicationSurfaceOperation::Analytics
         | ApplicationSurfaceOperation::Search
+        | ApplicationSurfaceOperation::RunAffectedTests
+        | ApplicationSurfaceOperation::Dashboard
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

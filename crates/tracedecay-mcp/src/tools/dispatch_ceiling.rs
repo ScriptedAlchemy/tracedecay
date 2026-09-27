@@ -5,6 +5,7 @@
 //! contract without an explicit deadline.
 
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// The hard ceiling every MCP tool call is bounded by, regardless of dispatch
 /// group, when admission carried no client deadline.
@@ -25,7 +26,7 @@ pub const TOOL_DISPATCH_CEILING: std::time::Duration = std::time::Duration::from
 /// 900 seconds that motivated this wrap. They simply cannot share the
 /// interactive ceiling without failing correct, user-requested work.
 pub const LONG_RUNNING_TOOL_DISPATCH_CEILING: std::time::Duration =
-    std::time::Duration::from_mins(10);
+    std::time::Duration::from_millis(tracedecay_tool_catalog::LONG_RUNNING_CEILING_MILLIS);
 
 /// Tools whose ceiling is [`LONG_RUNNING_TOOL_DISPATCH_CEILING`].
 ///
@@ -35,7 +36,6 @@ pub const LONG_RUNNING_TOOL_DISPATCH_CEILING: std::time::Duration =
 /// inherits [`TOOL_DISPATCH_CEILING`] automatically, so a tool added tomorrow is
 /// bounded without touching this file.
 const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
-    "tracedecay_run_affected_tests",
     "tracedecay_fact_store_curate",
     "tracedecay_admin_cli",
     "tracedecay_admin_project",
@@ -45,7 +45,14 @@ const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
 
 /// The ceiling that applies to `tool_name` in the absence of a shorter carried
 /// deadline.
+///
+/// An owner-served side effect's tool-catalog entry names its own ceiling.
 pub fn tool_dispatch_ceiling(tool_name: &str) -> std::time::Duration {
+    if let Some(entry) = ApplicationSurfaceOperation::from_tool_name(tool_name)
+        .and_then(ApplicationSurfaceOperation::owner_side_effect)
+    {
+        return std::time::Duration::from_millis(entry.ceiling_millis);
+    }
     if LONG_RUNNING_DISPATCH_TOOLS.contains(&tool_name) {
         LONG_RUNNING_TOOL_DISPATCH_CEILING
     } else {
