@@ -76,7 +76,7 @@ pub(super) async fn dispatch_cli_family_tool(
     let handshake =
         tracedecay::daemon::handshake_for_current_client(profile, project, None, false, false)?;
     let executor = FamilyToolExecutor {
-        client: tracedecay_daemon_identity::invocation_client_for_current(handshake)?,
+        client: tracedecay::daemon::invocation_client_for_current_client(handshake)?,
         tool,
         delivery: Mutex::new(None),
         mounting: Mutex::new(false),

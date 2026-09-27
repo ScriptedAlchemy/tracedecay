@@ -504,7 +504,7 @@ fn dispatch_cli_application_surface_inner(
                 if let Ok(handshake) =
                     crate::commands::client_handshake(profile, project.as_deref())
                     && let Ok(client) =
-                        tracedecay_daemon_identity::invocation_client_for_current(handshake)
+                        tracedecay::daemon::invocation_client_for_current_client(handshake)
                 {
                     observe_surface_argument_rejection(
                         Some(&client),
@@ -527,7 +527,7 @@ fn dispatch_cli_application_surface_inner(
             false,
             false,
         )?;
-        let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+        let client = tracedecay::daemon::invocation_client_for_current_client(handshake)?;
         // A cold daemon answers the mounting refusal while the project open
         // still warms in the background. The compatibility tool path rides
         // that state out through its project-open retry loop; the typed
@@ -640,7 +640,7 @@ async fn dispatch_cli_retained(
             message: "could not allocate an application surface request id".to_owned(),
         })?;
     let client =
-        tracedecay_daemon_identity::invocation_client_for_current(dispatch.handshake(profile)?)?;
+        tracedecay::daemon::invocation_client_for_current_client(dispatch.handshake(profile)?)?;
     // The mounting refusal precedes admission; re-send it until the deadline.
     let execution = loop {
         let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
@@ -701,7 +701,7 @@ async fn dispatch_cli_source_edit(
         false,
         false,
     )?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    let client = tracedecay::daemon::invocation_client_for_current_client(handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -805,7 +805,7 @@ async fn invoke_cli_graph_tool(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    let client = tracedecay::daemon::invocation_client_for_current_client(handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -867,7 +867,7 @@ async fn dispatch_cli_profile_registry(
             message: "could not allocate an application surface request id".to_owned(),
         })?;
     let client =
-        tracedecay_daemon_identity::invocation_client_for_current(dispatch.handshake(profile)?)?;
+        tracedecay::daemon::invocation_client_for_current_client(dispatch.handshake(profile)?)?;
     let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
     let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
         tracedecay_tool_catalog::BindingSurface::Cli,

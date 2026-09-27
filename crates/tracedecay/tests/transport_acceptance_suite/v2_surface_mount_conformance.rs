@@ -570,6 +570,23 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                     Some(_) | None => false,
                 }
             }
+            // An internal owner operation is served by name for first-party
+            // CLI commands and host hooks; being listed is the defect.
+            BindingSurface::Mcp | BindingSurface::Cli
+                if ApplicationSurfaceOperation::from_surface_name(*surface, operation)
+                    .is_some_and(ApplicationSurfaceOperation::is_internal) =>
+            {
+                let listed = match surface {
+                    BindingSurface::Mcp => mcp_tools.contains(&format!("tracedecay_{operation}")),
+                    _ => cli_tools.contains(operation.as_str()),
+                };
+                if listed {
+                    failures.push(format!(
+                        "{note}: an internal owner operation is advertised in the {surface:?} listing"
+                    ));
+                }
+                continue;
+            }
             BindingSurface::Mcp => mcp_tools.contains(&format!("tracedecay_{operation}")),
             BindingSurface::Cli => cli_tools.contains(operation.as_str()),
             // The LSP and dashboard adapters have no listing endpoint of their
