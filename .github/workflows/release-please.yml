@@ -87,6 +87,26 @@ jobs:
           manifest-file: .release-please-manifest.json
           release-as: ${{ steps.channel.outputs.release_as }}
 
+      # The runner has no checkout yet. The rewrite script is the one on
+      # master, not the release PR branch: a later release-please update
+      # restores closing keywords, and this step has to run on that update too.
+      - name: Checkout master for the release PR body rewrite
+        if: steps.release.outputs.pr != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          persist-credentials: false
+
+      # Release-please copies commit bodies into the PR body, and GitHub
+      # closes every issue those keywords name when the release PR merges.
+      # The config schema has no keyword rewrite.
+      - name: Neutralize closing keywords in the release PR body
+        if: steps.release.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          RELEASE_PR_JSON: ${{ steps.release.outputs.pr }}
+        run: scripts/neutralize-release-pr-closing-keywords.sh
+
       # Build on the default-branch run ref, not the unique tag ref. The build
       # still checks out and validates the immutable tag, but GitHub permits
       # this run to restore the previous release's dependency cache.
