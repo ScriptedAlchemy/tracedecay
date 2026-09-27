@@ -14,7 +14,7 @@ use tracedecay_mcp::JsonRpcResponse;
 
 use crate::support::{
     ProductionCompositionFixture, extract_first_json_content, harness_wait_for_readiness,
-    production_composition_fixture_with_sources,
+    production_composition_fixture_with_sources, refusal_problem,
 };
 
 const FIXTURE_SOURCE: &str = r#"#[derive(Default)]
@@ -142,26 +142,15 @@ fn json_payload(response: &JsonRpcResponse) -> Value {
 }
 
 fn assert_struct_argument_refused(response: &JsonRpcResponse, detail: &str) {
-    let error = response
-        .error
-        .as_ref()
-        .expect("a call without a struct name is a JSON-RPC error");
-    assert!(response.result.is_none(), "{response:?}");
-    assert_eq!(error.code, -32603);
-    assert_eq!(
-        error.message,
-        format!(
-            "tool execution failed: config error: invalid arguments for tracedecay_constructors: {detail}"
-        )
+    assert!(
+        response.error.is_none(),
+        "a call without a struct name must be an isError refusal: {response:?}"
     );
-    assert_eq!(
-        error
-            .data
-            .as_ref()
-            .and_then(|data| data.get("tool"))
-            .and_then(Value::as_str),
-        Some("tracedecay_constructors")
-    );
+    let problem = refusal_problem(response.result.as_ref().expect("refusal result"));
+    let message = format!("invalid arguments for tracedecay_constructors: {detail}");
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message.as_str());
 }
 
 #[tokio::test]

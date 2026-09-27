@@ -28,10 +28,6 @@ const CRAB_HANDLE: &str = "rh_85646496e4a65bc20aa95627";
 const SHORT: &str = "short";
 const SHORT_HANDLE: &str = "rh_f9b0078b5df596d2ea19010c";
 
-const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool retrieve ...` \
-(`tracedecay tool retrieve --help` for parameters). If MCP calls keep failing or timing out, \
-fall back to that CLI instead of querying .tracedecay databases directly.";
-
 fn tool_text(response: &Value) -> &str {
     response["result"]["content"][0]["text"]
         .as_str()
@@ -177,15 +173,18 @@ async fn retrieve_reports_missing_and_expired_handles() {
     fixture.shutdown().await;
 }
 
-fn config_refusal(detail: &str) -> Value {
-    json!({
-        "code": -32603,
-        "message": format!("tool execution failed: config error: invalid arguments for tracedecay_retrieve: {detail}"),
-        "data": {
-            "tool": "tracedecay_retrieve",
-            "cli_fallback": CLI_FALLBACK
-        }
-    })
+fn assert_invalid_request(response: &Value, message: &str) {
+    let problem = crate::support::refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
+}
+
+fn assert_unavailable(response: &Value, code: &str, message: &str) {
+    let problem = crate::support::refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "unavailable");
+    assert_eq!(problem["code"], code);
+    assert_eq!(problem["message"], message);
 }
 
 #[tokio::test]
@@ -194,72 +193,36 @@ async fn retrieve_rejects_arguments_outside_its_typed_request() {
     let root = response_handle_root(&fixture).await;
     store_response_handle(&root, SHORT, STORED_AT).unwrap();
 
-    assert_eq!(
-        retrieve(&fixture, json!({})).await["error"],
-        json!({
-            "code": -32602,
-            "message": "tracedecay_retrieve requires the `handle` argument copied from a truncated MCP response envelope.",
-            "data": {
-                "tool": "tracedecay_retrieve",
-                "reason_code": "missing_handle_argument",
-                "retryable": false,
-                "retry_instruction": "Call `tracedecay_retrieve` again with the exact `handle` value emitted by the truncated response envelope."
-            }
-        })
+    assert_invalid_request(
+        &retrieve(&fixture, json!({})).await,
+        "invalid arguments for tracedecay_retrieve: missing field `handle`",
     );
-    assert_eq!(
-        retrieve(&fixture, json!({"handle": "bogus"})).await["error"],
-        json!({
-            "code": -32602,
-            "message": "invalid response handle: expected `rh_` followed by 24 hex characters copied from a truncated MCP response envelope",
-            "data": {
-                "tool": "tracedecay_retrieve",
-                "reason_code": "invalid_handle",
-                "retryable": false,
-                "retry_instruction": "Pass the exact `handle` string from a truncated MCP response envelope; do not shorten or edit it."
-            }
-        })
+    assert_invalid_request(
+        &retrieve(&fixture, json!({"handle": "bogus"})).await,
+        "invalid response handle: expected `rh_` followed by 24 hex characters copied from a truncated MCP response envelope",
     );
-    assert_eq!(
-        retrieve(&fixture, json!({"retrieve_handle": SHORT_HANDLE})).await["error"],
-        config_refusal(
-            "unknown field `retrieve_handle`, expected one of `handle`, `offset`, `max_chars`"
-        )
+    assert_invalid_request(
+        &retrieve(&fixture, json!({"retrieve_handle": SHORT_HANDLE})).await,
+        "invalid arguments for tracedecay_retrieve: unknown field `retrieve_handle`, expected one of `handle`, `offset`, `max_chars`",
     );
     // A non-string handle is a type error, not a missing argument.
-    assert_eq!(
-        retrieve(&fixture, json!({"handle": 5})).await["error"],
-        config_refusal("invalid type: integer `5`, expected a string")
+    assert_invalid_request(
+        &retrieve(&fixture, json!({"handle": 5})).await,
+        "invalid arguments for tracedecay_retrieve: invalid type: integer `5`, expected a string",
     );
-    assert_eq!(
-        retrieve(&fixture, json!({"handle": SHORT_HANDLE, "offset": -1})).await["error"],
-        config_refusal("invalid value: integer `-1`, expected u64")
+    assert_invalid_request(
+        &retrieve(&fixture, json!({"handle": SHORT_HANDLE, "offset": -1})).await,
+        "invalid arguments for tracedecay_retrieve: invalid value: integer `-1`, expected u64",
     );
-    assert_eq!(
-        retrieve(&fixture, json!({"handle": SHORT_HANDLE, "max_chars": 0})).await["error"],
-        json!({
-            "code": -32602,
-            "message": "tool project route failed: reason_code=response_handle_invalid_page_size retryable=false: tracedecay_retrieve max_chars must be at least 1",
-            "data": {
-                "tool": "tracedecay_retrieve",
-                "reason_code": "response_handle_invalid_page_size",
-                "retryable": false,
-                "detail": "tracedecay_retrieve max_chars must be at least 1"
-            }
-        })
+    assert_unavailable(
+        &retrieve(&fixture, json!({"handle": SHORT_HANDLE, "max_chars": 0})).await,
+        "response_handle_invalid_page_size",
+        "tracedecay_retrieve max_chars must be at least 1",
     );
-    assert_eq!(
-        retrieve(&fixture, json!({"handle": SHORT_HANDLE, "offset": 6})).await["error"],
-        json!({
-            "code": -32602,
-            "message": "tool project route failed: reason_code=response_handle_offset_out_of_range retryable=false: tracedecay_retrieve offset 6 exceeds stored response length 5",
-            "data": {
-                "tool": "tracedecay_retrieve",
-                "reason_code": "response_handle_offset_out_of_range",
-                "retryable": false,
-                "detail": "tracedecay_retrieve offset 6 exceeds stored response length 5"
-            }
-        })
+    assert_unavailable(
+        &retrieve(&fixture, json!({"handle": SHORT_HANDLE, "offset": 6})).await,
+        "response_handle_offset_out_of_range",
+        "tracedecay_retrieve offset 6 exceeds stored response length 5",
     );
     fixture.shutdown().await;
 }
@@ -315,31 +278,15 @@ async fn retrieve_reports_unreadable_records_as_typed_route_problems() {
     fs::remove_file(&unreadable_path).unwrap();
     fs::create_dir(&unreadable_path).unwrap();
 
-    assert_eq!(
-        retrieve(&fixture, json!({"handle": corrupt.handle})).await["error"],
-        json!({
-            "code": -32603,
-            "message": "tool project route failed: reason_code=corrupt_handle_record retryable=true: corrupt response-handle record: cached payload failed integrity validation",
-            "data": {
-                "tool": "tracedecay_retrieve",
-                "reason_code": "corrupt_handle_record",
-                "retryable": true,
-                "detail": "corrupt response-handle record: cached payload failed integrity validation"
-            }
-        })
+    assert_unavailable(
+        &retrieve(&fixture, json!({"handle": corrupt.handle})).await,
+        "corrupt_handle_record",
+        "corrupt response-handle record: cached payload failed integrity validation",
     );
-    assert_eq!(
-        retrieve(&fixture, json!({"handle": unreadable.handle})).await["error"],
-        json!({
-            "code": -32603,
-            "message": "tool project route failed: reason_code=handle_read_failed retryable=true: response-handle cache is unavailable",
-            "data": {
-                "tool": "tracedecay_retrieve",
-                "reason_code": "handle_read_failed",
-                "retryable": true,
-                "detail": "response-handle cache is unavailable"
-            }
-        })
+    assert_unavailable(
+        &retrieve(&fixture, json!({"handle": unreadable.handle})).await,
+        "handle_read_failed",
+        "response-handle cache is unavailable",
     );
     fixture.shutdown().await;
 }

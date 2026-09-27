@@ -128,8 +128,21 @@ async fn retrieve_tool_returns_full_stored_response() {
         .await
         .expect("production retrieve invocation");
     assert!(
-        alias.result.is_none() && alias.error.is_some(),
-        "tracedecay_retrieve must accept only the canonical `handle` field"
+        alias.error.is_none(),
+        "tracedecay_retrieve refusal is a tool result: {:?}",
+        alias.error.as_ref().map(|error| &error.message)
+    );
+    let problem = refusal_problem(
+        alias
+            .result
+            .as_ref()
+            .expect("tracedecay_retrieve refusal result"),
+    );
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(
+        problem["message"],
+        "invalid arguments for tracedecay_retrieve: unknown field `retrieve_handle`, expected one of `handle`, `offset`, `max_chars`"
     );
     fixture.shutdown().await;
 }

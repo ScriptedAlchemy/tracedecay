@@ -13,12 +13,11 @@ use tracedecay_automation_runtime::automation::managed_skills::{
     set_managed_skill_state,
 };
 
-use crate::support::{ProductionCompositionFixture, production_composition_fixture};
+use crate::support::{
+    ProductionCompositionFixture, production_composition_fixture, refusal_problem,
+};
 
 const ACTOR: &str = "skill-list-proof";
-const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool skill_list ...` \
-(`tracedecay tool skill_list --help` for parameters). If MCP calls keep failing or timing out, fall \
-back to that CLI instead of querying .tracedecay databases directly.";
 
 #[tokio::test]
 async fn skill_list_returns_stored_skills_for_the_requested_state() {
@@ -114,20 +113,15 @@ async fn skill_list_returns_stored_skills_for_the_requested_state() {
         )
         .await
         .expect("production MCP call returns a JSON-RPC response");
+    assert_eq!(rejected.jsonrpc, "2.0");
+    assert_eq!(rejected.id, json!(1));
+    assert!(rejected.error.is_none());
+    let problem = refusal_problem(rejected.result.as_ref().expect("skill list refusal result"));
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
     assert_eq!(
-        serde_json::to_value(&rejected).expect("JSON-RPC response"),
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "error": {
-                "code": -32603,
-                "message": "tool execution failed: config error: invalid arguments for tracedecay_skill_list: unknown variant `retired`, expected one of `active`, `disabled`, `archived`",
-                "data": {
-                    "tool": "tracedecay_skill_list",
-                    "cli_fallback": CLI_FALLBACK,
-                }
-            }
-        })
+        problem["message"],
+        "invalid arguments for tracedecay_skill_list: unknown variant `retired`, expected one of `active`, `disabled`, `archived`"
     );
 }
 

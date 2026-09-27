@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::{context_description, def, def_always_load};
+use super::{CONTEXT_DESCRIPTION, def, def_always_load};
 use crate::ToolDefinition;
 
 // ── alwaysLoad tools (loaded into the model prompt immediately) ─────────
@@ -43,7 +43,7 @@ pub(super) fn def_context(input_schema: Value) -> ToolDefinition {
     def_always_load(
         "tracedecay_context",
         "Task Context",
-        &context_description(0, 3),
+        CONTEXT_DESCRIPTION,
         input_schema,
     )
 }

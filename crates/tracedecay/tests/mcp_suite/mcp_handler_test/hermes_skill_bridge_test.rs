@@ -19,7 +19,9 @@ use tracedecay::mcp::McpServer;
 use crate::mcp_server_test::support::{
     jsonrpc_request, response_with_id, run_client_connection_with_messages, successful_tool_text,
 };
-use crate::support::{TestEnv, TestTraceDecay, canonicalize_test_dir, init_test_project};
+use crate::support::{
+    TestEnv, TestTraceDecay, canonicalize_test_dir, init_test_project, refusal_problem,
+};
 
 const WORKFLOW_BODY: &str =
     "---\nname: workflow\ndescription: Reusable workflow\n---\n\nDo the work.\n";
@@ -386,9 +388,12 @@ async fn hermes_skill_bridge_mcp_returns_standard_install_inventory() {
     );
 
     assert_eq!(omitted, populated_inventory(&isolated.home, false, false));
+    let problem = refusal_problem(&non_bool["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
     assert_eq!(
-        non_bool["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_hermes_skill_bridge: invalid type: integer `1`, expected a boolean"
+        problem["message"],
+        "invalid arguments for tracedecay_hermes_skill_bridge: invalid type: integer `1`, expected a boolean"
     );
     assert_eq!(included, populated_inventory(&isolated.home, true, true));
     assert_eq!(
@@ -469,16 +474,13 @@ async fn hermes_skill_bridge_mcp_rejects_invalid_usage_json() {
     let server = open_server(cg).await;
 
     let response = call_bridge(&server, 9, json!({"format": "json"})).await;
-    assert!(response.get("result").is_none() || response["result"].is_null());
-    assert_eq!(response["error"]["code"], -32603);
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
     assert_eq!(
-        response["error"]["data"]["tool"],
-        "tracedecay_hermes_skill_bridge"
-    );
-    assert_eq!(
-        response["error"]["message"],
+        problem["message"],
         format!(
-            "tool execution failed: config error: Hermes skill usage '{}' is invalid JSON: expected ident at line 1 column 2",
+            "Hermes skill usage '{}' is invalid JSON: expected ident at line 1 column 2",
             usage_path.display()
         )
     );

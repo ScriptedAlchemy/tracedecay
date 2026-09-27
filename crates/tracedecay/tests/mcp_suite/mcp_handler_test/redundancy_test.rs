@@ -20,7 +20,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::identity::{
 
 use crate::support::{
     extract_real_server_text, extract_text, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw, production_composition_fixture_with_sources,
+    handle_real_server_tool_call_raw, production_composition_fixture_with_sources, refusal_problem,
     warm_code_index_search,
 };
 
@@ -850,10 +850,15 @@ async fn redundancy_reports_renames_only_under_the_rename_class_and_refuses_fore
     );
     retired["max_pairs"] = json!(4);
     let retired = handle_real_server_tool_call_raw(&server, "tracedecay_redundancy", retired).await;
-    assert_eq!(retired["error"]["code"], -32603, "{retired}");
+    let retired = refusal_problem(&retired["result"]);
+    assert_eq!(retired["kind"], "invalid_request", "{retired}");
     assert_eq!(
-        retired["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_redundancy: unknown field `max_pairs`, expected one of `project_id`, `repository_id`, `match_classes`, `scope`, `include_generated_paths`, `family_limit`, `member_limit`, `work_limit`, `cursor`",
+        retired["code"], "application.surface.invalid_request",
+        "{retired}"
+    );
+    assert_eq!(
+        retired["message"],
+        "invalid arguments for tracedecay_redundancy: unknown field `max_pairs`, expected one of `project_id`, `repository_id`, `match_classes`, `scope`, `include_generated_paths`, `family_limit`, `member_limit`, `work_limit`, `cursor`",
         "{retired}"
     );
 
@@ -873,20 +878,18 @@ async fn redundancy_reports_renames_only_under_the_rename_class_and_refuses_fore
         }),
     )
     .await;
+    let unauthorized = refusal_problem(&unauthorized["result"]);
+    assert_eq!(unauthorized["kind"], "unavailable", "{unauthorized}");
     assert_eq!(
-        unauthorized["error"],
-        json!({
-            "code": -32602,
-            "message": "tool project route failed: reason_code=redundancy-repository-not-authorized retryable=false: the selected repository is outside the authorized repository scope",
-            "data": {
-                "tool": "tracedecay_redundancy",
-                "reason_code": "redundancy-repository-not-authorized",
-                "retryable": false,
-                "detail": "the selected repository is outside the authorized repository scope",
-            }
-        }),
+        unauthorized["code"], "redundancy-repository-not-authorized",
         "{unauthorized}"
     );
+    assert_eq!(
+        unauthorized["message"],
+        "the selected repository is outside the authorized repository scope",
+        "{unauthorized}"
+    );
+    assert_eq!(unauthorized["retryable"], false, "{unauthorized}");
 
     fixture.harness.shutdown().await;
 }

@@ -7,7 +7,7 @@
 
 use crate::support::{
     ProductionCompositionFixture, extract_real_server_text, handle_real_server_tool_call_raw,
-    production_composition_fixture_with_sources, warm_code_index_search,
+    production_composition_fixture_with_sources, refusal_problem, warm_code_index_search,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -227,15 +227,15 @@ async fn find_exact_symbol_applies_limit_and_rejects_bad_arguments() {
         json!({"format": "json"}),
     )
     .await;
-    assert_eq!(missing["result"], Value::Null);
-    assert_eq!(missing["error"]["code"], -32603);
+    let missing_problem = refusal_problem(&missing["result"]);
+    assert_eq!(missing_problem["kind"], "invalid_request");
     assert_eq!(
-        missing["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_find_exact_symbol: missing field `name`"
+        missing_problem["code"],
+        "application.surface.invalid_request"
     );
     assert_eq!(
-        missing["error"]["data"]["tool"],
-        json!("tracedecay_find_exact_symbol")
+        missing_problem["message"],
+        "invalid arguments for tracedecay_find_exact_symbol: missing field `name`"
     );
 
     let zero = handle_real_server_tool_call_raw(
@@ -244,21 +244,14 @@ async fn find_exact_symbol_applies_limit_and_rejects_bad_arguments() {
         json!({"name": "shared_token", "limit": 0, "format": "json"}),
     )
     .await;
-    assert_eq!(zero["result"], Value::Null);
-    assert_eq!(zero["error"]["code"], -32602);
+    let zero_problem = refusal_problem(&zero["result"]);
+    assert_eq!(zero_problem["kind"], "unavailable");
+    assert_eq!(zero_problem["code"], "code-graph-invalid-request");
     assert_eq!(
-        zero["error"]["message"],
-        "tool project route failed: reason_code=code-graph-invalid-request retryable=false: the code-graph read request is invalid: code graph name resolution limit must be positive"
+        zero_problem["message"],
+        "the code-graph read request is invalid: code graph name resolution limit must be positive"
     );
-    assert_eq!(
-        zero["error"]["data"],
-        json!({
-            "tool": "tracedecay_find_exact_symbol",
-            "reason_code": "code-graph-invalid-request",
-            "retryable": false,
-            "detail": "the code-graph read request is invalid: code graph name resolution limit must be positive",
-        })
-    );
+    assert_eq!(zero_problem["retryable"], false);
 
     fixture.harness.shutdown().await;
 }

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     ProductionCompositionFixture, extract_json, production_composition_fixture_with_sources,
-    wait_for_current_graph,
+    refusal_problem, wait_for_current_graph,
 };
 
 fn write_sources(project: &Path) {
@@ -54,21 +54,27 @@ async fn refusal(
     fixture: &ProductionCompositionFixture,
     tool_name: &str,
     arguments: Value,
-) -> String {
+) -> Value {
     let response = fixture
         .harness
         .call_tool(&fixture.project_root, tool_name, arguments)
         .await
         .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
     assert!(
-        response.result.is_none(),
+        response.error.is_none(),
         "{tool_name}: {:?}",
-        response.result
+        response.error
     );
-    response
-        .error
-        .unwrap_or_else(|| panic!("{tool_name} must refuse the request"))
-        .message
+    let result = response
+        .result
+        .unwrap_or_else(|| panic!("{tool_name} must refuse the request"));
+    refusal_problem(&result).clone()
+}
+
+fn assert_invalid_request(problem: &Value, message: &str) {
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
 }
 
 #[tokio::test]
@@ -94,14 +100,14 @@ async fn analysis_reports_refuse_arguments_outside_their_typed_request() {
             "ranking": [{"file": "src/b.rs", "coupled_files": 1}],
         })
     );
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_coupling",
             json!({"direction": "fan_in", "limit": "1"}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_coupling: invalid type: string \"1\", expected u32"
+        "invalid arguments for tracedecay_coupling: invalid type: string \"1\", expected u32",
     );
 
     assert_eq!(
@@ -124,14 +130,14 @@ async fn analysis_reports_refuse_arguments_outside_their_typed_request() {
             }],
         })
     );
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_unsafe_patterns",
             json!({"kinds": ["unwraps"]}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_unsafe_patterns: unknown variant `unwraps`, expected one of `unwrap`, `expect`, `panic`, `todo`, `unimplemented`, `unsafe_block`"
+        "invalid arguments for tracedecay_unsafe_patterns: unknown variant `unwraps`, expected one of `unwrap`, `expect`, `panic`, `todo`, `unimplemented`, `unsafe_block`",
     );
 
     assert_eq!(
@@ -148,14 +154,14 @@ async fn analysis_reports_refuse_arguments_outside_their_typed_request() {
             "distribution": [{"kind": "function", "count": 1}],
         })
     );
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_distribution",
             json!({"path": "src/b.rs", "summary": "yes"}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_distribution: invalid type: string \"yes\", expected a boolean"
+        "invalid arguments for tracedecay_distribution: invalid type: string \"yes\", expected a boolean",
     );
 
     fixture.harness.shutdown().await;

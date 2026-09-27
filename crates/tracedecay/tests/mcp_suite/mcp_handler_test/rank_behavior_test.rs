@@ -15,7 +15,7 @@ use tracedecay::mcp::McpServer;
 
 use crate::support::{
     ProductionCompositionFixture, handle_real_server_tool_call_raw,
-    production_composition_fixture_with_sources, wait_for_current_graph,
+    production_composition_fixture_with_sources, refusal_problem, wait_for_current_graph,
 };
 
 /// `shared` is called by `left` and `right`. `left` is called only by `right`.
@@ -433,62 +433,66 @@ async fn rank_refuses_missing_invalid_and_unpublished_relationships() {
     let session = open_rank_session().await;
     let server = &session.server;
 
-    let missing = call_rank(server, json!({"format": "json"})).await;
-    assert_eq!(missing["error"]["code"], -32603, "{missing}");
+    let missing_response = call_rank(server, json!({"format": "json"})).await;
+    let missing = refusal_problem(&missing_response["result"]);
+    assert_eq!(missing["kind"], "invalid_request", "{missing}");
     assert_eq!(
-        missing["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_rank: missing field `edge_kind`",
+        missing["code"], "application.surface.invalid_request",
         "{missing}"
     );
     assert_eq!(
-        missing["error"]["data"]["tool"], "tracedecay_rank",
+        missing["message"], "invalid arguments for tracedecay_rank: missing field `edge_kind`",
         "{missing}"
     );
 
-    let invalid_kind = call_rank(server, json!({"edge_kind": "inherits", "format": "json"})).await;
-    assert_eq!(invalid_kind["error"]["code"], -32603, "{invalid_kind}");
+    let invalid_kind_response =
+        call_rank(server, json!({"edge_kind": "inherits", "format": "json"})).await;
+    let invalid_kind = refusal_problem(&invalid_kind_response["result"]);
+    assert_eq!(invalid_kind["kind"], "invalid_request", "{invalid_kind}");
     assert_eq!(
-        invalid_kind["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_rank: unknown variant `inherits`, expected one of `implements`, `extends`, `calls`, `uses`, `contains`, `annotates`, `derives_macro`, `type_of`, `returns`, `receives`",
+        invalid_kind["code"], "application.surface.invalid_request",
+        "{invalid_kind}"
+    );
+    assert_eq!(
+        invalid_kind["message"],
+        "invalid arguments for tracedecay_rank: unknown variant `inherits`, expected one of `implements`, `extends`, `calls`, `uses`, `contains`, `annotates`, `derives_macro`, `type_of`, `returns`, `receives`",
         "{invalid_kind}"
     );
 
-    let invalid_direction = call_rank(
+    let invalid_direction_response = call_rank(
         server,
         json!({"edge_kind": "calls", "direction": "sideways", "format": "json"}),
     )
     .await;
+    let invalid_direction = refusal_problem(&invalid_direction_response["result"]);
     assert_eq!(
-        invalid_direction["error"]["code"], -32603,
+        invalid_direction["kind"], "invalid_request",
         "{invalid_direction}"
     );
     assert_eq!(
-        invalid_direction["error"]["message"],
-        "tool execution failed: config error: invalid arguments for tracedecay_rank: unknown variant `sideways`, expected `incoming` or `outgoing`",
+        invalid_direction["code"], "application.surface.invalid_request",
+        "{invalid_direction}"
+    );
+    assert_eq!(
+        invalid_direction["message"],
+        "invalid arguments for tracedecay_rank: unknown variant `sideways`, expected `incoming` or `outgoing`",
         "{invalid_direction}"
     );
 
-    let derives = call_rank(
+    let derives_response = call_rank(
         server,
         json!({"edge_kind": "derives_macro", "format": "json"}),
     )
     .await;
-    assert_eq!(derives["error"]["code"], -32602, "{derives}");
+    let derives = refusal_problem(&derives_response["result"]);
+    assert_eq!(derives["kind"], "unavailable", "{derives}");
+    assert_eq!(derives["code"], "verified-rank-unavailable", "{derives}");
     assert_eq!(
-        derives["error"]["message"],
-        "tool project route failed: reason_code=verified-rank-unavailable retryable=false: the admitted graph generation does not publish derives_macro relations",
-        "{derives}"
-    );
-    assert_eq!(
-        derives["error"]["data"]["reason_code"], "verified-rank-unavailable",
-        "{derives}"
-    );
-    assert_eq!(derives["error"]["data"]["retryable"], false, "{derives}");
-    assert_eq!(
-        derives["error"]["data"]["detail"],
+        derives["message"],
         "the admitted graph generation does not publish derives_macro relations",
         "{derives}"
     );
+    assert_eq!(derives["retryable"], false, "{derives}");
 
     shutdown(session).await;
 }

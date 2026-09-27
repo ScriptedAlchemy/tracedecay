@@ -14,7 +14,8 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::jsonrpc::JsonRpcResponse;
 
 use crate::support::{
-    extract_text, production_composition_fixture_with_sources, wait_for_current_graph,
+    extract_text, production_composition_fixture_with_sources, refusal_problem,
+    wait_for_current_graph,
 };
 
 /// `src/lib.rs` lines (1-indexed):
@@ -433,12 +434,16 @@ async fn todos_reports_observed_marker_behavior() {
         json!({"not_a_field": true}),
     )
     .await;
-    let error = denied.error.expect("unknown field must be an MCP error");
-    assert!(denied.result.is_none(), "{:?}", denied.result);
-    assert_eq!(error.code, -32603);
+    assert!(denied.error.is_none(), "{:?}", denied.error);
+    let denied = denied
+        .result
+        .expect("unknown field must be a refused tool result");
+    let problem = refusal_problem(&denied);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
     assert_eq!(
-        error.message,
-        "tool execution failed: config error: invalid arguments for tracedecay_todos: unknown field `not_a_field`, expected one of `kinds`, `path`, `limit`"
+        problem["message"],
+        "invalid arguments for tracedecay_todos: unknown field `not_a_field`, expected one of `kinds`, `path`, `limit`"
     );
 
     let after_denial =

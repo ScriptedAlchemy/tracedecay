@@ -1,5 +1,6 @@
 use crate::common::EnvVarGuard;
 use crate::mcp_server_test::support::*;
+use crate::support::refusal_problem;
 use serde_json::json;
 #[cfg(feature = "test-transport")]
 use std::sync::Arc;
@@ -310,10 +311,10 @@ async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
     )
     .await;
 
-    assert!(
-        resp["error"].is_object(),
-        "missing fixture skill should make the tool call fail"
-    );
+    let problem = refusal_problem(&resp["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], "managed skill 'repo-hygiene' not found");
 
     server_handle.ledger_writes_settled().await;
     let event = expect_mcp_runtime_event(

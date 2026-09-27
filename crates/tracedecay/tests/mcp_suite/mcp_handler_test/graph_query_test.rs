@@ -677,12 +677,21 @@ async fn test_grep_context_lines() {
 #[tokio::test]
 async fn test_grep_missing_pattern_errors() {
     let cg = production_graph_query_fixture().await;
-    let err = call_production_tool(&cg, "tracedecay_grep", json!({}), None, None)
-        .await
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("pattern"),
-        "missing pattern should be reported: {err}"
+    let missing_pattern = expect_tool_refusal(
+        call_production_tool(&cg, "tracedecay_grep", json!({}), None, None).await,
+    );
+    assert_eq!(
+        missing_pattern["kind"], "invalid_request",
+        "{missing_pattern}"
+    );
+    assert_eq!(
+        missing_pattern["code"], "application.surface.invalid_request",
+        "{missing_pattern}"
+    );
+    assert_eq!(
+        missing_pattern["message"],
+        "invalid arguments for tracedecay_grep: missing field `pattern`",
+        "{missing_pattern}"
     );
 }
 
@@ -1324,12 +1333,16 @@ async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages(
         None,
         None,
     )
-    .await
-    .expect_err("foreign repository scope must be denied");
-    assert!(
-        unauthorized
-            .to_string()
-            .contains("outside the authorized repository scope"),
+    .await;
+    let unauthorized = expect_tool_refusal(unauthorized);
+    assert_eq!(unauthorized["kind"], "unavailable", "{unauthorized}");
+    assert_eq!(
+        unauthorized["code"], "redundancy-repository-not-authorized",
+        "{unauthorized}"
+    );
+    assert_eq!(
+        unauthorized["message"],
+        "the selected repository is outside the authorized repository scope",
         "{unauthorized}"
     );
     shutdown_graph_fixture(fixture).await;
@@ -1641,19 +1654,17 @@ async fn test_rank_invalid_direction() {
         None,
     )
     .await;
-    match result {
-        Err(err) => {
-            let err_msg = format!("{}", err);
-            assert!(
-                err_msg.contains(
-                    "invalid arguments for tracedecay_rank: unknown variant `sideways`, expected `incoming` or `outgoing`"
-                ),
-                "error should refuse the direction, got: {}",
-                err_msg,
-            );
-        }
-        Ok(_) => panic!("invalid direction should produce an error"),
-    }
+    let refused = expect_tool_refusal(result);
+    assert_eq!(refused["kind"], "invalid_request", "{refused}");
+    assert_eq!(
+        refused["code"], "application.surface.invalid_request",
+        "{refused}"
+    );
+    assert_eq!(
+        refused["message"],
+        "invalid arguments for tracedecay_rank: unknown variant `sideways`, expected `incoming` or `outgoing`",
+        "{refused}"
+    );
 }
 
 #[tokio::test]
@@ -2170,14 +2181,19 @@ async fn tracedecay_by_qualified_name_returns_the_symbol_at_that_exact_name() {
         let response =
             handle_real_server_tool_call_raw(&server, "tracedecay_by_qualified_name", arguments)
                 .await;
+        assert!(
+            response.get("error").is_none() || response["error"].is_null(),
+            "rejection: {response}"
+        );
+        let problem = refusal_problem(&response["result"]);
+        assert_eq!(problem["kind"], "invalid_request", "rejection: {response}");
         assert_eq!(
-            (&response["error"]["code"], &response["error"]["message"]),
-            (
-                &json!(-32603),
-                &json!(format!(
-                    "tool execution failed: config error: invalid arguments for tracedecay_by_qualified_name: {refusal}"
-                )),
-            ),
+            problem["code"], "application.surface.invalid_request",
+            "rejection: {response}"
+        );
+        assert_eq!(
+            problem["message"],
+            format!("invalid arguments for tracedecay_by_qualified_name: {refusal}"),
             "rejection: {response}"
         );
     }

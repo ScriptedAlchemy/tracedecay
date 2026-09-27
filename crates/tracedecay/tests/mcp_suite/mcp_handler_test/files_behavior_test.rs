@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     ProductionCompositionFixture, extract_first_json_content,
-    production_composition_fixture_with_sources,
+    production_composition_fixture_with_sources, refusal_problem,
 };
 
 const TOOL: &str = "tracedecay_files";
@@ -241,9 +241,9 @@ async fn files_lists_the_indexed_census_and_filters() {
 
     assert_tool_error(
         &call(&fixture, json!({"pattern": "["})).await,
-        "tool execution failed: config error: invalid file glob '[': Pattern syntax error near position 0: invalid range pattern",
+        "invalid file glob '[': Pattern syntax error near position 0: invalid range pattern",
     );
-    assert_tool_error(
+    assert_malformed_call(
         &call(&fixture, json!([])).await,
         "tool execution failed: config error: invalid arguments: tracedecay_files expects a JSON object",
     );
@@ -320,6 +320,19 @@ async fn call(
 }
 
 fn assert_tool_error(response: &tracedecay_mcp::JsonRpcResponse, message: &str) {
+    assert!(
+        response.error.is_none(),
+        "{TOOL} refusal must be an isError result: {response:?}"
+    );
+    let problem = refusal_problem(response.result.as_ref().expect("refusal result"));
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message, "{response:?}");
+}
+
+/// A non-object argument list never reaches the owner's typed parser: the
+/// MCP boundary rejects the call itself.
+fn assert_malformed_call(response: &tracedecay_mcp::JsonRpcResponse, message: &str) {
     assert!(response.result.is_none(), "{response:?}");
     let error = response.error.as_ref().expect("tool error");
     assert_eq!(error.code, -32603, "{error:?}");

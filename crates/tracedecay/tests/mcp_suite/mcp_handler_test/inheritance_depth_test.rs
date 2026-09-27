@@ -17,7 +17,7 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::JsonRpcResponse;
 
 use crate::common::fixture::git_run;
-use crate::support::test_temp_dir;
+use crate::support::{refusal_problem, test_temp_dir};
 
 const HIERARCHY: &str = "\
 pub trait Left {}
@@ -432,25 +432,25 @@ async fn inheritance_depth_cycle_is_unavailable() {
         open_project(&[("src/lib.rs", "pub mod cycle;\n"), ("src/cycle.rs", CYCLE)]).await;
 
     let response = call_inheritance_depth(&project, json!({"format": "json"})).await;
-    let error = response
-        .error
+    assert!(
+        response.error.is_none(),
+        "cycle is a tool result: {:?}",
+        response.error
+    );
+    let result = response
+        .result
         .as_ref()
-        .unwrap_or_else(|| panic!("cycle ranked as success: {:?}", response.result));
-    assert_eq!(error.code, -32602);
+        .unwrap_or_else(|| panic!("cycle ranked as success"));
+    let problem = refusal_problem(result);
+    assert_eq!(problem["kind"], "unavailable", "{problem}");
     assert_eq!(
-        error.message,
-        "tool project route failed: reason_code=verified-inheritance-depth-unavailable retryable=false: the admitted extends relation contains a cycle"
+        problem["code"], "verified-inheritance-depth-unavailable",
+        "{problem}"
     );
     assert_eq!(
-        error.data,
-        Some(json!({
-            "tool": "tracedecay_inheritance_depth",
-            "reason_code": "verified-inheritance-depth-unavailable",
-            "retryable": false,
-            "detail": "the admitted extends relation contains a cycle"
-        }))
+        problem["message"], "the admitted extends relation contains a cycle",
+        "{problem}"
     );
-    assert!(response.result.is_none());
 
     project.harness.shutdown().await;
 }

@@ -103,33 +103,19 @@ async fn changelog_rejects_missing_and_non_object_arguments() {
     .await;
 
     let missing_from = call_changelog(&repo, json!({"to_ref": "HEAD", "format": "json"})).await;
-    let missing_from = missing_from
-        .error
-        .expect("missing from_ref is a JSON-RPC error");
-    assert_eq!(missing_from.code, -32603);
-    assert_eq!(
-        missing_from.message,
-        "tool execution failed: config error: invalid arguments for tracedecay_changelog: missing field `from_ref`"
-    );
-    assert_eq!(
-        missing_from.data.as_ref().map(|data| &data["tool"]),
-        Some(&json!("tracedecay_changelog"))
+    assert_changelog_refusal(
+        &missing_from,
+        "invalid arguments for tracedecay_changelog: missing field `from_ref`",
     );
 
     let missing_to = call_changelog(&repo, json!({"from_ref": "HEAD", "format": "json"})).await;
-    let missing_to = missing_to
-        .error
-        .expect("missing to_ref is a JSON-RPC error");
-    assert_eq!(missing_to.code, -32603);
-    assert_eq!(
-        missing_to.message,
-        "tool execution failed: config error: invalid arguments for tracedecay_changelog: missing field `to_ref`"
-    );
-    assert_eq!(
-        missing_to.data.as_ref().map(|data| &data["tool"]),
-        Some(&json!("tracedecay_changelog"))
+    assert_changelog_refusal(
+        &missing_to,
+        "invalid arguments for tracedecay_changelog: missing field `to_ref`",
     );
 
+    // A non-object argument list never reaches the owner's typed parser: the
+    // MCP boundary rejects it as a malformed call.
     let not_object = call_changelog(&repo, json!(["HEAD", "HEAD"])).await;
     let not_object = not_object
         .error
@@ -146,6 +132,20 @@ async fn changelog_rejects_missing_and_non_object_arguments() {
             "cli_fallback": "This tool is also available from the shell: `tracedecay tool changelog ...` (`tracedecay tool changelog --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
         }))
     );
+}
+
+fn assert_changelog_refusal(response: &JsonRpcResponse, message: &str) {
+    assert!(
+        response.error.is_none(),
+        "changelog refusal is a tool result: {:?}",
+        response.error.as_ref().map(|error| &error.message)
+    );
+    let problem = crate::support::refusal_problem(
+        response.result.as_ref().expect("changelog refusal result"),
+    );
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     ProductionCompositionFixture, extract_text, production_composition_fixture_with_sources,
-    wait_for_current_graph,
+    refusal_problem, wait_for_current_graph,
 };
 
 fn write_probe_sources(project: &Path) {
@@ -67,21 +67,27 @@ async fn refusal(
     fixture: &ProductionCompositionFixture,
     tool_name: &str,
     arguments: Value,
-) -> String {
+) -> Value {
     let response = fixture
         .harness
         .call_tool(&fixture.project_root, tool_name, arguments)
         .await
         .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
     assert!(
-        response.result.is_none(),
-        "{tool_name} must refuse the request, answered {:?}",
-        response.result
+        response.error.is_none(),
+        "{tool_name} returned a production MCP error: {:?}",
+        response.error.as_ref().map(|error| &error.message)
     );
-    response
-        .error
-        .unwrap_or_else(|| panic!("{tool_name} must refuse the request"))
-        .message
+    let result = response
+        .result
+        .unwrap_or_else(|| panic!("{tool_name} must refuse the request"));
+    refusal_problem(&result).clone()
+}
+
+fn assert_invalid_request(problem: &Value, message: &str) {
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
 }
 
 #[tokio::test]
@@ -102,14 +108,14 @@ async fn git_context_tools_refuse_arguments_outside_their_typed_request() {
         .await,
         r#"{"changed_files":[],"recent_commits":["production composition fixture"],"suggested_category":null,"summary":"No changes detected.","symbols_by_role":{}}"#
     );
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_commit_context",
-            json!({"staged_only": "yes"})
+            json!({"staged_only": "yes"}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_commit_context: invalid type: string \"yes\", expected a boolean"
+        "invalid arguments for tracedecay_commit_context: invalid type: string \"yes\", expected a boolean",
     );
 
     assert_eq!(
@@ -121,14 +127,14 @@ async fn git_context_tools_refuse_arguments_outside_their_typed_request() {
         .await,
         r#"{"affected_tests":["tests/probe_test.rs"],"changed_files":["tests/probe_test.rs"],"count":1,"ranked_tests":[{"distance":0,"path":"tests/probe_test.rs","proximity":"changed","rank":1}],"ranking_metadata":{"compatibility_field":"affected_tests","distance":"minimum file-dependency hops from the changed files","recommended_proximity":["changed","direct","near"],"strategy":"dependency_distance_then_path"},"recommended_tests":["tests/probe_test.rs"]}"#
     );
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_affected",
             json!({"files": ["tests/probe_test.rs"], "depth": "3"}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_affected: invalid type: string \"3\", expected u32"
+        "invalid arguments for tracedecay_affected: invalid type: string \"3\", expected u32",
     );
 
     let project = fixture.project_root.as_path();
@@ -146,9 +152,9 @@ async fn git_context_tools_refuse_arguments_outside_their_typed_request() {
             r#"{{"examined":1,"limit":5,"next_after":null,"reason":null,"snapshot_count":1,"snapshots":[{{"branch":"{branch}","source_revision":"{commit}","source_tree":"{tree}"}}],"status":"complete"}}"#
         )
     );
-    assert_eq!(
-        refusal(&fixture, "tracedecay_branch_list", json!({"limt": 5})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_branch_list: unknown field `limt`, expected `limit` or `after`"
+    assert_invalid_request(
+        &refusal(&fixture, "tracedecay_branch_list", json!({"limt": 5})).await,
+        "invalid arguments for tracedecay_branch_list: unknown field `limt`, expected `limit` or `after`",
     );
 
     fixture.harness.shutdown().await;

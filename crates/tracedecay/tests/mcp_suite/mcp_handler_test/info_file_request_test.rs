@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     ProductionCompositionFixture, extract_text, production_composition_fixture_with_sources,
-    wait_for_current_graph,
+    refusal_problem, wait_for_current_graph,
 };
 
 fn write_probe_sources(project: &Path) {
@@ -50,25 +50,32 @@ async fn call_json(
     extract_text(&result).to_owned()
 }
 
-async fn refusal(
+async fn assert_refused(
     fixture: &ProductionCompositionFixture,
     tool_name: &str,
     arguments: Value,
-) -> String {
+    message: &str,
+) {
     let response = fixture
         .harness
         .call_tool(&fixture.project_root, tool_name, arguments)
         .await
         .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
     assert!(
-        response.result.is_none(),
-        "{tool_name} must refuse the request, answered {:?}",
-        response.result
+        response.error.is_none(),
+        "{tool_name} returned a production MCP error: {:?}",
+        response.error.as_ref().map(|error| &error.message)
     );
-    response
-        .error
-        .unwrap_or_else(|| panic!("{tool_name} must refuse the request"))
-        .message
+    let result = response
+        .result
+        .unwrap_or_else(|| panic!("{tool_name} returned no production MCP result"));
+    let problem = refusal_problem(&result);
+    assert_eq!(problem["kind"], "invalid_request", "{tool_name}: {problem}");
+    assert_eq!(
+        problem["code"], "application.surface.invalid_request",
+        "{tool_name}: {problem}"
+    );
+    assert_eq!(problem["message"], message, "{tool_name}: {problem}");
 }
 
 #[tokio::test]
@@ -89,14 +96,20 @@ async fn file_inspections_refuse_arguments_outside_their_typed_request() {
         .await,
         r#"{"count":1,"files":[{"bytes":32,"path":"src/lib.rs","symbols":1}],"layout":"flat"}"#
     );
-    assert_eq!(
-        refusal(&fixture, "tracedecay_files", json!({"layout": "tree"})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_files: unknown variant `tree`, expected `flat` or `grouped`"
-    );
-    assert_eq!(
-        refusal(&fixture, "tracedecay_files", json!({"patern": "*.rs"})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_files: unknown field `patern`, expected one of `path`, `pattern`, `layout`"
-    );
+    assert_refused(
+        &fixture,
+        "tracedecay_files",
+        json!({"layout": "tree"}),
+        "invalid arguments for tracedecay_files: unknown variant `tree`, expected `flat` or `grouped`",
+    )
+    .await;
+    assert_refused(
+        &fixture,
+        "tracedecay_files",
+        json!({"patern": "*.rs"}),
+        "invalid arguments for tracedecay_files: unknown field `patern`, expected one of `path`, `pattern`, `layout`",
+    )
+    .await;
 
     assert_eq!(
         call_json(
@@ -107,24 +120,20 @@ async fn file_inspections_refuse_arguments_outside_their_typed_request() {
         .await,
         r#"{"match_count":1,"matches":[{"file":"Cargo.toml","key":"package.version","line":3,"value":"0.4.2"}]}"#
     );
-    assert_eq!(
-        refusal(
-            &fixture,
-            "tracedecay_config",
-            json!({"key": 1, "path": "Cargo.toml"})
-        )
-        .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_config: invalid type: integer `1`, expected a string"
-    );
-    assert_eq!(
-        refusal(
-            &fixture,
-            "tracedecay_config",
-            json!({"key": "package.version", "paths": "Cargo.toml"})
-        )
-        .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_config: unknown field `paths`, expected one of `key`, `path`, `glob`"
-    );
+    assert_refused(
+        &fixture,
+        "tracedecay_config",
+        json!({"key": 1, "path": "Cargo.toml"}),
+        "invalid arguments for tracedecay_config: invalid type: integer `1`, expected a string",
+    )
+    .await;
+    assert_refused(
+        &fixture,
+        "tracedecay_config",
+        json!({"key": "package.version", "paths": "Cargo.toml"}),
+        "invalid arguments for tracedecay_config: unknown field `paths`, expected one of `key`, `path`, `glob`",
+    )
+    .await;
 
     fixture.harness.shutdown().await;
 }

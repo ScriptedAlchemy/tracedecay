@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
 use crate::support::{
-    dispatch_mcp_tool_call, production_composition_fixture_with_sources, warm_code_index_search,
+    dispatch_mcp_tool_call, production_composition_fixture_with_sources, refusal_problem,
+    warm_code_index_search,
 };
 
 const SOURCE: &str = r#"/// Loads the current value.
@@ -153,28 +154,30 @@ async fn tracedecay_signature_returns_the_declared_signature() {
     assert_eq!(unknown_node, json!([]));
 
     let omitted = signature_call(&server, json!({})).await;
-    assert_eq!(omitted["error"]["code"], -32602);
+    assert!(omitted.get("error").is_none(), "{omitted}");
+    let omitted = refusal_problem(&omitted["result"]);
+    assert_eq!(omitted["kind"], "invalid_request", "{omitted}");
     assert_eq!(
-        omitted["error"]["message"],
-        "missing required parameter: qualified_name or node_id"
+        omitted["code"], "application.surface.invalid_request",
+        "{omitted}"
     );
     assert_eq!(
-        omitted["error"]["data"],
-        json!({
-            "tool": "tracedecay_signature",
-            "reason_code": "missing_required_parameter",
-            "retryable": false,
-            "detail": "missing required parameter: qualified_name or node_id"
-        })
+        omitted["message"], "missing required parameter: qualified_name or node_id",
+        "{omitted}"
     );
 
     let blank = signature_call(&server, json!({"node_id": ""})).await;
-    assert_eq!(blank["error"]["code"], -32603);
+    assert!(blank.get("error").is_none(), "{blank}");
+    let blank = refusal_problem(&blank["result"]);
+    assert_eq!(blank["kind"], "invalid_request", "{blank}");
     assert_eq!(
-        blank["error"]["message"],
-        "tool execution failed: config error: invalid parameter: node_id must not be empty"
+        blank["code"], "application.surface.invalid_request",
+        "{blank}"
     );
-    assert_eq!(blank["error"]["data"]["tool"], "tracedecay_signature");
+    assert_eq!(
+        blank["message"], "invalid parameter: node_id must not be empty",
+        "{blank}"
+    );
 
     fixture.harness.shutdown().await;
 }

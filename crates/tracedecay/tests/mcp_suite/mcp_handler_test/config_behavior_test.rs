@@ -11,7 +11,7 @@
 //! omitted, and the scan does not consult gitignore.
 
 use crate::support::{
-    handle_real_server_tool_call_raw, production_composition_fixture_with_sources,
+    handle_real_server_tool_call_raw, production_composition_fixture_with_sources, refusal_problem,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -19,10 +19,6 @@ use std::path::Path;
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
-
-const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool config ...` \
-(`tracedecay tool config --help` for parameters). If MCP calls keep failing or timing out, fall \
-back to that CLI instead of querying .tracedecay databases directly.";
 
 const APP_TOML: &str = r#"name = "top"
 ratio = 1.5
@@ -178,36 +174,15 @@ fn assert_markdown(response: &Value, text: &str, touched: &[usize]) {
     assert_eq!(content.len(), 2, "{response}");
 }
 
-fn invalid_params(message: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "error": {
-            "code": -32602,
-            "message": message,
-            "data": {
-                "tool": "tracedecay_config",
-                "reason_code": "missing_required_parameter",
-                "retryable": false,
-                "detail": message,
-            }
-        }
-    })
-}
-
-fn execution_failed(message: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "error": {
-            "code": -32603,
-            "message": message,
-            "data": {
-                "tool": "tracedecay_config",
-                "cli_fallback": CLI_FALLBACK,
-            }
-        }
-    })
+fn assert_config_refusal(response: &Value, message: &str) {
+    assert!(
+        response.get("error").is_none() || response["error"].is_null(),
+        "config refusal must be an isError result: {response}"
+    );
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message, "{response}");
 }
 
 fn hit(file: &str, key: &str, value: Value, line: Option<u32>) -> Value {
@@ -253,11 +228,9 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
     );
 
     let missing_key = config(&server, json!({"path": "app.toml", "format": "json"})).await;
-    assert_eq!(
-        missing_key,
-        execution_failed(
-            "tool execution failed: config error: invalid arguments for tracedecay_config: missing field `key`"
-        )
+    assert_config_refusal(
+        &missing_key,
+        "invalid arguments for tracedecay_config: missing field `key`",
     );
 
     let non_string_key = config(
@@ -265,17 +238,15 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
         json!({"key": 1, "path": "app.toml", "format": "json"}),
     )
     .await;
-    assert_eq!(
-        non_string_key,
-        execution_failed(
-            "tool execution failed: config error: invalid arguments for tracedecay_config: invalid type: integer `1`, expected a string"
-        )
+    assert_config_refusal(
+        &non_string_key,
+        "invalid arguments for tracedecay_config: invalid type: integer `1`, expected a string",
     );
 
     let missing_locator = config(&server, json!({"key": "package.name", "format": "json"})).await;
-    assert_eq!(
-        missing_locator,
-        invalid_params("missing required parameter: 'path' or 'glob'")
+    assert_config_refusal(
+        &missing_locator,
+        "missing required parameter: 'path' or 'glob'",
     );
 
     let non_string_path = config(
@@ -283,11 +254,9 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
         json!({"key": "package.name", "path": true, "format": "json"}),
     )
     .await;
-    assert_eq!(
-        non_string_path,
-        execution_failed(
-            "tool execution failed: config error: invalid arguments for tracedecay_config: invalid type: boolean `true`, expected a string"
-        )
+    assert_config_refusal(
+        &non_string_path,
+        "invalid arguments for tracedecay_config: invalid type: boolean `true`, expected a string",
     );
 
     let both_locators = config(
@@ -300,11 +269,9 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
         }),
     )
     .await;
-    assert_eq!(
-        both_locators,
-        execution_failed(
-            "tool execution failed: config error: tracedecay_config: 'path' and 'glob' are mutually exclusive"
-        )
+    assert_config_refusal(
+        &both_locators,
+        "tracedecay_config: 'path' and 'glob' are mutually exclusive",
     );
 
     let dotted_path = config(
@@ -312,34 +279,21 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
         json!({"key": "package.name", "path": "./app.toml", "format": "json"}),
     )
     .await;
-    assert_eq!(
-        dotted_path,
-        execution_failed(
-            "tool execution failed: config error: path './app.toml' is not normalized"
-        )
-    );
+    assert_config_refusal(&dotted_path, "path './app.toml' is not normalized");
 
     let parent_path = config(
         &server,
         json!({"key": "token", "path": "../outside.toml", "format": "json"}),
     )
     .await;
-    assert_eq!(
-        parent_path,
-        execution_failed(
-            "tool execution failed: config error: path '../outside.toml' is not normalized"
-        )
-    );
+    assert_config_refusal(&parent_path, "path '../outside.toml' is not normalized");
 
     let bad_glob = config(
         &server,
         json!({"key": "package.name", "glob": "[", "format": "json"}),
     )
     .await;
-    assert_eq!(
-        bad_glob,
-        execution_failed(&invalid_glob_message(&project_root))
-    );
+    assert_config_refusal(&bad_glob, &invalid_glob_message(&project_root));
 
     let missing_file = project_root.join("no-such.toml");
     let absent = config(
@@ -347,12 +301,12 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
         json!({"key": "package.name", "path": "no-such.toml", "format": "json"}),
     )
     .await;
-    assert_eq!(
-        absent,
-        execution_failed(&format!(
-            "tool execution failed: config error: failed to canonicalize project path '{}': {MISSING_OS_ERROR}",
+    assert_config_refusal(
+        &absent,
+        &format!(
+            "failed to canonicalize project path '{}': {MISSING_OS_ERROR}",
             missing_file.display()
-        ))
+        ),
     );
 
     let outside = project_root
@@ -366,12 +320,12 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
         json!({"key": "token", "path": outside_arg, "format": "json"}),
     )
     .await;
-    assert_eq!(
-        absolute_escape,
-        execution_failed(&format!(
-            "tool execution failed: config error: path '{outside_arg}' escapes project root '{}'",
+    assert_config_refusal(
+        &absolute_escape,
+        &format!(
+            "path '{outside_arg}' escapes project root '{}'",
             project_root.display()
-        ))
+        ),
     );
 
     #[cfg(unix)]
@@ -388,12 +342,12 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
             json!({"key": "token", "path": "escape/secret.toml", "format": "json"}),
         )
         .await;
-        assert_eq!(
-            symlink_escape,
-            execution_failed(&format!(
-                "tool execution failed: config error: path 'escape/secret.toml' escapes project root '{}'",
+        assert_config_refusal(
+            &symlink_escape,
+            &format!(
+                "path 'escape/secret.toml' escapes project root '{}'",
                 project_root.display()
-            ))
+            ),
         );
     }
 
@@ -778,6 +732,6 @@ fn invalid_glob_message(project_root: &Path) -> String {
     let pattern = joined.to_string_lossy();
     let position = pattern.len() - 1;
     format!(
-        "tool execution failed: config error: invalid glob '[': Pattern syntax error near position {position}: invalid range pattern"
+        "invalid glob '[': Pattern syntax error near position {position}: invalid range pattern"
     )
 }

@@ -47,21 +47,27 @@ async fn refusal(
     fixture: &ProductionCompositionFixture,
     tool_name: &str,
     arguments: Value,
-) -> String {
+) -> Value {
     let response = fixture
         .harness
         .call_tool(&fixture.project_root, tool_name, arguments)
         .await
         .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
     assert!(
-        response.result.is_none(),
-        "{tool_name} must refuse the request, answered {:?}",
-        response.result
+        response.error.is_none(),
+        "{tool_name} returned a production MCP error: {:?}",
+        response.error.as_ref().map(|error| &error.message)
     );
-    response
-        .error
-        .unwrap_or_else(|| panic!("{tool_name} must refuse the request"))
-        .message
+    let result = response
+        .result
+        .unwrap_or_else(|| panic!("{tool_name} returned no production MCP result"));
+    crate::support::refusal_problem(&result).clone()
+}
+
+fn assert_invalid_request(problem: &Value, message: &str) {
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], message);
 }
 
 /// One project whose automation ledger holds exactly one application run:
@@ -186,14 +192,14 @@ async fn automation_run_list_refuses_a_mistyped_limit() {
     );
     assert_eq!(listed["scope"], "active_project");
     assert_eq!(listed["limit"], 50);
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_automation_run_list",
-            json!({"limit": "5"})
+            json!({"limit": "5"}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_automation_run_list: invalid type: string \"5\", expected u32"
+        "invalid arguments for tracedecay_automation_run_list: invalid type: string \"5\", expected u32",
     );
 
     fixture.shutdown().await;
@@ -215,14 +221,14 @@ async fn automation_run_view_refuses_an_unknown_field() {
     .await;
     assert_eq!(viewed["run"], terminal_row);
     assert_eq!(viewed["run"]["status"], "skipped");
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_automation_run_view",
-            json!({"run_id": run_id, "verbose": true})
+            json!({"run_id": run_id, "verbose": true}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_automation_run_view: unknown field `verbose`, expected `run_id`"
+        "invalid arguments for tracedecay_automation_run_view: unknown field `verbose`, expected `run_id`",
     );
 
     fixture.shutdown().await;
@@ -234,23 +240,23 @@ async fn automation_run_artifact_view_refuses_an_unknown_kind() {
         fixture, run_id, ..
     } = curated_project().await;
 
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_automation_run_artifact_view",
-            json!({"run_id": run_id, "kind": "trace"})
+            json!({"run_id": run_id, "kind": "trace"}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_automation_run_artifact_view: unknown variant `trace`, expected one of `traces`, `feedback`, `generated_evals`, `validation_gate`, `optimizer_diagnosis`, `codex_handoff`"
+        "invalid arguments for tracedecay_automation_run_artifact_view: unknown variant `trace`, expected one of `traces`, `feedback`, `generated_evals`, `validation_gate`, `optimizer_diagnosis`, `codex_handoff`",
     );
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_automation_run_artifact_view",
-            json!({"run_id": run_id, "kind": "traces"})
+            json!({"run_id": run_id, "kind": "traces"}),
         )
         .await,
-        format!("automation run artifact not found: {run_id}/traces")
+        &format!("automation run artifact not found: {run_id}/traces"),
     );
 
     fixture.shutdown().await;
@@ -270,9 +276,9 @@ async fn analytics_refuses_an_unknown_field() {
         analytics["automation"]["by_job"],
         json!([{"job": "memory_curator", "succeeded": 0, "failed": 0, "skipped": 1, "other": 0}])
     );
-    assert_eq!(
-        refusal(&fixture, "tracedecay_analytics", json!({"windowdays": 7})).await,
-        "tool execution failed: config error: invalid arguments for tracedecay_analytics: unknown field `windowdays`, expected one of `scope`, `window_days`, `section`"
+    assert_invalid_request(
+        &refusal(&fixture, "tracedecay_analytics", json!({"windowdays": 7})).await,
+        "invalid arguments for tracedecay_analytics: unknown field `windowdays`, expected one of `scope`, `window_days`, `section`",
     );
 
     fixture.shutdown().await;
@@ -291,14 +297,14 @@ async fn skill_list_refuses_an_unknown_field() {
         .collect();
     assert_eq!(ids, vec![&json!("keeper")]);
     assert_eq!(listed["count"], 1);
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_skill_list",
-            json!({"include_bodies": true})
+            json!({"include_bodies": true}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_skill_list: unknown field `include_bodies`, expected `state` or `include_body`"
+        "invalid arguments for tracedecay_skill_list: unknown field `include_bodies`, expected `state` or `include_body`",
     );
 
     fixture.shutdown().await;
@@ -318,14 +324,14 @@ async fn skill_view_refuses_an_unknown_field() {
     assert_eq!(viewed["skill"]["body_markdown"], "Keep the ledger.");
     assert_eq!(viewed["usage_summary"]["view_count"], 1);
     assert_eq!(viewed["support_files_included"], false);
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_skill_view",
-            json!({"id": "keeper", "include_support": true})
+            json!({"id": "keeper", "include_support": true}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_skill_view: unknown field `include_support`, expected `id` or `include_support_files`"
+        "invalid arguments for tracedecay_skill_view: unknown field `include_support`, expected `id` or `include_support_files`",
     );
 
     fixture.shutdown().await;
@@ -358,14 +364,14 @@ async fn hermes_skill_bridge_refuses_an_unknown_field() {
         bridge["bridge"]["skills"][0]["description"],
         "Keeps the ledger"
     );
-    assert_eq!(
-        refusal(
+    assert_invalid_request(
+        &refusal(
             &fixture,
             "tracedecay_hermes_skill_bridge",
-            json!({"include_skill_body": true})
+            json!({"include_skill_body": true}),
         )
         .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_hermes_skill_bridge: unknown field `include_skill_body`, expected `include_skill_bodies` or `include_pending_payloads`"
+        "invalid arguments for tracedecay_hermes_skill_bridge: unknown field `include_skill_body`, expected `include_skill_bodies` or `include_pending_payloads`",
     );
 
     fixture.shutdown().await;

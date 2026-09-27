@@ -4,7 +4,7 @@
 //! token-verified copy paths and typed denials out.
 
 use crate::support::{
-    handle_real_server_tool_call_raw, production_composition_fixture_with_sources,
+    handle_real_server_tool_call_raw, production_composition_fixture_with_sources, refusal_problem,
     warm_code_index_search,
 };
 use serde_json::{Value, json};
@@ -271,7 +271,6 @@ async fn tracedecay_similar_reports_verified_copy_paths_and_typed_denials() {
     .await;
     assert_similar_denial(
         &unauthorized,
-        "tool project route failed: reason_code=similar-source-not-found retryable=false: the selected source is outside the authorized repository scope",
         "the selected source is outside the authorized repository scope",
     );
 
@@ -293,7 +292,6 @@ async fn tracedecay_similar_reports_verified_copy_paths_and_typed_denials() {
     .await;
     assert_similar_denial(
         &missing,
-        "tool project route failed: reason_code=similar-source-not-found retryable=false: the selected source has no body in the verified clone index",
         "the selected source has no body in the verified clone index",
     );
 
@@ -357,15 +355,11 @@ fn family_paths(family: &Value) -> Vec<&str> {
     paths
 }
 
-fn assert_similar_denial(response: &Value, message: &str, detail: &str) {
-    assert_eq!(response["error"]["code"], -32602, "{response}");
-    assert_eq!(response["error"]["message"], message, "{response}");
-    assert_eq!(response["error"]["data"]["tool"], "tracedecay_similar");
-    assert_eq!(
-        response["error"]["data"]["reason_code"],
-        "similar-source-not-found"
-    );
-    assert_eq!(response["error"]["data"]["retryable"], false);
-    assert_eq!(response["error"]["data"]["detail"], detail);
-    assert!(response["result"].is_null(), "{response}");
+fn assert_similar_denial(response: &Value, message: &str) {
+    assert!(response["error"].is_null(), "{response}");
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "unavailable", "{response}");
+    assert_eq!(problem["code"], "similar-source-not-found", "{response}");
+    assert_eq!(problem["message"], message, "{response}");
+    assert_eq!(problem["retryable"], false, "{response}");
 }
