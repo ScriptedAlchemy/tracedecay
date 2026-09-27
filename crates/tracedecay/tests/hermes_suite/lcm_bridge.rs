@@ -1206,7 +1206,8 @@ fallback.initialize(session_id="session-2", hermes_home="/tmp/hermes")
 fallback.sync_turn("user", "assistant", session_id="session-2")
 assert fallback.project_root is None
 assert "project_root" not in calls[-1][1]
-assert calls[-1][1]["storage_scope"] == "user"
+assert calls[-1][1]["user_scope"] is True
+assert "storage_scope" not in calls[-1][1]
 assert "project_root" not in calls[-1][2]
 "#,
         "sync_turn fallback messages should not collapse repeated identical turns",
@@ -1261,8 +1262,11 @@ provider.sync_turn(
 
 assert len(calls) == 3, calls
 user_call, alpha_call, beta_call = calls
-assert user_call[1]["storage_scope"] == "user"
+assert user_call[1]["user_scope"] is True
+assert "storage_scope" not in user_call[1]
 assert user_call[2] == {}
+assert alpha_call[1]["user_scope"] is False
+assert beta_call[1]["user_scope"] is False
 assert alpha_call[2] == {"project_root": "/repos/alpha"}
 assert beta_call[2] == {"project_root": "/repos/beta"}
 assert "storage_scope" not in alpha_call[1]
