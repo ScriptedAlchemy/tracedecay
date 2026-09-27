@@ -1439,7 +1439,7 @@ fn corrupt_sealed_containers(root: &Path) -> usize {
 /// recovered digest its relational head names.
 ///
 /// This is the graph-db half of the daemon's
-/// `corrupt_graph_restart_repairs_through_canonical_serialized_activation`:
+/// `corrupt_graph_restart_rebuilds_from_the_sealed_segments_without_decoding`:
 /// publish a sealed code generation, restart, and destroy the sealed
 /// container. With no staging rows (the direct-seal shape) recovery has
 /// nothing to serve from, so the canonical serialized activation path

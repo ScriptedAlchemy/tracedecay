@@ -208,6 +208,105 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
     }
 
+    /// Seat the graph head a publication just wrote on its text owner, the
+    /// way a restart recovers it, so graph reads serve from the mapped store
+    /// without the whole-generation decode. `false` leaves the decode and its
+    /// activation to seat the graph.
+    async fn recover_published_graph_head(
+        scheduler: &Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+        shutting_down: &Arc<AtomicBool>,
+        passes: &Arc<super::super::ReconcilePassesV1>,
+        graph_activation: &CodeGraphActivationAuthorityV1,
+        (project_id, repository_id, worktree_id): (
+            &ProjectId,
+            &tracedecay_domain::RepositoryId,
+            &tracedecay_domain::WorktreeId,
+        ),
+        text: &LatestCodeTextGenerationV1,
+    ) -> bool {
+        let generation_id = text.metadata().manifest().generation_id.clone();
+        let binding_scheduler = Arc::clone(scheduler);
+        let binding_shutting_down = Arc::clone(shutting_down);
+        let binding_passes = Arc::clone(passes);
+        let binding = tokio::task::spawn_blocking(move || {
+            Self::lock_scheduler_for_graph_step(
+                &binding_scheduler,
+                &binding_shutting_down,
+                &binding_passes,
+            )?
+            .1
+            .code_graph_replay_binding(&generation_id)
+        })
+        .await;
+        let binding = match binding {
+            Ok(Ok(binding)) => binding,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    event = "code_index_published_graph_head_binding_unavailable",
+                    error = %error,
+                    "the published graph head has no replay binding; the serving decode seats it"
+                );
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "code_index_published_graph_head_binding_task_failed",
+                    error = %error,
+                    "the published graph head binding task failed; the serving decode seats it"
+                );
+                return false;
+            }
+        };
+        match graph_activation
+            .recover_verified_head(
+                project_id,
+                repository_id,
+                worktree_id,
+                text.clone(),
+                binding,
+                Arc::clone(shutting_down),
+            )
+            .await
+        {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                tracing::warn!(
+                    event = "code_index_published_graph_head_recovery_failed",
+                    error = %error,
+                    "the published graph head did not seat from the text owner; the serving \
+                     decode seats it"
+                );
+                false
+            }
+        }
+    }
+
+    /// Drop a seat that no longer names the advertised generation. Search
+    /// serves the text owner while the seat is empty, and holding the
+    /// predecessor's decode would only keep a corpus-sized generation alive.
+    fn release_superseded_serving_seat(
+        serving_generation: &ServingGenerationSlot,
+        serving_generation_epoch: &AtomicU64,
+        serving_source_witness: &RwLock<Option<super::super::ServingSourceWitnessV1>>,
+        serving_seats: &tokio::sync::watch::Sender<u64>,
+        serving_generation_changed: &tokio::sync::watch::Sender<()>,
+    ) {
+        let displaced = serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if displaced.is_none() {
+            return;
+        }
+        serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+        *serving_source_witness
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        drop(displaced);
+        Self::record_serving_seat(serving_seats);
+        serving_generation_changed.send_replace(());
+    }
+
     /// A same-root remount keeps the incumbent owner: it may only refresh the
     /// graph activation policy, and it wakes the worker so a policy change or
     /// an edit that raced the remount is picked up by the next pass.
@@ -1490,8 +1589,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     prepare_graph = serving_empty
                         && worker_complete_generation_requested.load(Ordering::Acquire);
                 }
+                // Recovery installs a fresh graph store on the owner; an owner
+                // that already serves one (a publication seated it) keeps it
+                // and its warm catalog.
                 if prepare_graph
                     && !published_pass
+                    && !graph_already_serves
                     && !retained_graph_head_recovery_attempted
                     && let Some(retained) = graph_text
                         .as_ref()
@@ -1681,6 +1784,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         );
                     }
                 }
+                // A publication's graph build refused while its own text
+                // projection still holds the build memory is sequencing, not
+                // a stall: it runs again as soon as that projection joins.
+                let mut graph_waits_for_text = false;
+                let text_projection_running = published_text_projection.is_some();
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
                         // Publish the graph head from the sealed segments
@@ -1690,7 +1798,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         // together; the activation after the decode recovers
                         // the head published here.
                         let mut graph_publish_refusal = None;
-                        if let Some(text) = graph_text.as_ref() {
+                        let mut graph_head_published = false;
+                        // An owner that already serves this generation's graph
+                        // needs no second build: only the decode is demanded.
+                        if let Some(text) = graph_text.as_ref().filter(|_| !graph_already_serves) {
                             let generation_id = text.metadata().manifest().generation_id.clone();
                             let binding_scheduler = Arc::clone(&worker_scheduler);
                             let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1740,7 +1851,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                         .await;
                                     drop(reservation);
                                     match published {
-                                        Ok(_) => {}
+                                        Ok(published) => graph_head_published = published,
                                         Err(error) if error.is_resident_memory_graph_refusal() => {
                                             graph_publish_refusal = Some(error.to_string());
                                         }
@@ -1766,6 +1877,46 @@ impl CodeIndexSchedulerRegistryV1 {
                                 ),
                             }
                         }
+                        // The head just published serves graph reads from the
+                        // text owner's mapped store, exactly as a restart's
+                        // verified-head recovery does, so the whole-generation
+                        // decode below runs only for a reader that demanded it.
+                        let graph_serves_from_text = match graph_text.as_ref() {
+                            Some(text) if graph_head_published => {
+                                Self::recover_published_graph_head(
+                                    &worker_scheduler,
+                                    &worker_shutting_down,
+                                    &worker_reconcile_in_progress,
+                                    &worker_graph_activation,
+                                    (
+                                        &worker_project_id,
+                                        &worker_repository_id,
+                                        &worker_worktree_id,
+                                    ),
+                                    text,
+                                )
+                                .await
+                            }
+                            _ => false,
+                        };
+                        let defer_serving_decode = graph_serves_from_text
+                            && !worker_complete_generation_requested.load(Ordering::Acquire);
+                        if defer_serving_decode {
+                            clear_graph_resident_memory_park(&worker_convergence_park);
+                            worker_memory_retry.reset();
+                            Self::release_superseded_serving_seat(
+                                &worker_serving_generation,
+                                &worker_serving_generation_epoch,
+                                &worker_serving_source_witness,
+                                &worker_serving_seats,
+                                &worker_serving_generation_changed,
+                            );
+                            tracing::info!(
+                                event = "code_index_serving_decode_deferred",
+                                "the published graph head serves from the text owner; the \
+                                 whole-generation decode waits for a reader that needs it"
+                            );
+                        }
                         let graph_scheduler = Arc::clone(&worker_scheduler);
                         let graph_text = graph_text.clone();
                         let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1778,6 +1929,9 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // parks exactly like a decode that does not fit.
                                 if let Some(detail) = graph_publish_refusal {
                                     return Ok((None, None, false, Some(detail)));
+                                }
+                                if defer_serving_decode {
+                                    return Ok((None, None, false, None));
                                 }
                                 let decoder = Self::lock_scheduler_for_graph_step(
                                     &graph_scheduler,
@@ -1880,17 +2034,32 @@ impl CodeIndexSchedulerRegistryV1 {
                         .await
                         {
                             Ok(Ok((_, _, _, Some(detail)))) => {
-                                park_convergence(
-                                    &worker_convergence_park,
-                                    detail.clone(),
-                                    CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
-                                    Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
-                                    true,
-                                );
-                                worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                                // Once the text owner serves the graph, the
+                                // generation has converged: only the reader
+                                // that demanded the whole decode waits for
+                                // memory, and freshness is not parked for it.
+                                let converged = graph_serves_from_text || graph_already_serves;
+                                // A build that waits for this pass's own text
+                                // projection is rescheduled at its join below.
+                                graph_waits_for_text = published_pass && text_projection_running;
+                                if !graph_waits_for_text {
+                                    if !converged {
+                                        park_convergence(
+                                            &worker_convergence_park,
+                                            detail.clone(),
+                                            CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
+                                            Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                                            true,
+                                        );
+                                    }
+                                    worker_memory_retry
+                                        .schedule(&worker_pending_wake, &worker_wake);
+                                }
                                 tracing::warn!(
                                     event = "code_index_graph_prepare_decode_refused",
                                     published_pass,
+                                    converged,
+                                    graph_waits_for_text,
                                     detail = %detail,
                                     "the sealed generation waits to decode until memory is \
                                      given back; text serving is unaffected"
@@ -1898,7 +2067,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 Ok((outcome, None, None))
                             }
                             Ok(Ok((latest, replay_binding, roster_refusal_rebuild, None))) => {
-                                if latest.is_none() {
+                                if latest.is_none() && !defer_serving_decode {
                                     tracing::warn!(
                                         event = "code_index_graph_prepare_no_servable_generation",
                                         published_pass,
@@ -2103,6 +2272,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     });
                 }
+                if graph_waits_for_text {
+                    Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                }
                 if let Some(outcome) = published_text_projection_outcome.take() {
                     // A clone-fingerprint successor is still `Unfinished` work
                     // after exact and lexical owners are ready. That must not
@@ -2217,6 +2389,9 @@ impl CodeIndexSchedulerRegistryV1 {
                                     ),
                                 }
                             }
+                            // The ready text owner now serves this generation,
+                            // with or without a decoded seat after it.
+                            worker_serving_generation_changed.send_replace(());
                         }
                         PublishedTextProjectionOutcomeV1::Shutdown => {
                             tracing::info!(
@@ -2798,6 +2973,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     };
                     if matches!(outcome, PublishedTextProjectionOutcomeV1::Finished) {
                         worker_memory_retry.reset();
+                        worker_serving_generation_changed.send_replace(());
                     }
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished

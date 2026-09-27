@@ -86,9 +86,6 @@ pub(super) fn spawn_typescript_diagnostics_producer(
                     serving_changes = schedulers
                         .subscribe_serving_generation_changes(&project_root)
                         .await;
-                    if serving_changes.is_some() {
-                        let _ = schedulers.request_complete_generation(&project_root).await;
-                    }
                 }
                 // The sealed generation, not the serving one: tsc reads only
                 // the source the seal proved, so the check starts at the seal

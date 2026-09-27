@@ -34,7 +34,7 @@ use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, DurableFileBatch};
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
     ResidentMemoryReservationV1, ResidentOwnersV1, log_resident_owner_release_v1,
-    release_process_allocator_memory_v1, sampled_process_resident_bytes_v1,
+    release_process_allocator_memory_v1,
 };
 
 use crate::code_index::{
@@ -483,6 +483,24 @@ pub(super) struct GenerationDecodeBudgetV1 {
 const GENERATION_DECODE_RESIDENT_COMPONENT_V1: &str = "code-index-generation-decode-v1";
 const SEALED_GRAPH_BUILD_RESIDENT_COMPONENT_V1: &str = "code-graph-sealed-build-v1";
 
+/// The two corpus-sized passes over the active generation admission charges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ActiveGenerationWorkV1 {
+    /// Materializing the whole generation.
+    Decode,
+    /// Projecting its code graph from the sealed segments.
+    SealedGraphBuild,
+}
+
+/// What each pass over one generation costs, measured on a copy this process
+/// held.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActiveGenerationChargesV1 {
+    generation_id: CodeGenerationId,
+    decode_bytes: u64,
+    graph_build_bytes: u64,
+}
+
 /// The resident cost of materializing the active generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ActiveGenerationDecodeChargeV1 {
@@ -503,7 +521,7 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     active_encoded_bytes: Arc<AtomicU64>,
     /// Resident bytes of the active generation as last installed, kept
     /// after the decode is released: what materializing it again costs.
-    active_decode_charge: Arc<Mutex<Option<(CodeGenerationId, u64)>>>,
+    active_decode_charge: Arc<Mutex<Option<ActiveGenerationChargesV1>>>,
     decode_admission: Arc<Mutex<Option<GenerationDecodeBudgetV1>>>,
     decoded_content: SharedDecodedContentPoolV1,
     pub(super) seal_encoded_segment_bytes: Arc<AtomicU64>,
@@ -2297,6 +2315,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
         hotpath::gauge!("daemon.code_index.generation.decode.bytes").set(encoded_bytes);
+        if let Some(peak_growth) = generation.decode_peak_growth_bytes() {
+            hotpath::gauge!("daemon.code_index.generation.decode.peak_growth_bytes")
+                .set(peak_growth);
+        }
         Ok(Some(Arc::new(generation)))
     }
 
@@ -2317,28 +2339,31 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn admit_active_decode(
         &self,
     ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
-        self.admit_active_generation_work(GENERATION_DECODE_RESIDENT_COMPONENT_V1, "decoding")
+        self.admit_active_generation_work(ActiveGenerationWorkV1::Decode)
     }
 
     /// Charge building the active generation's code graph from its sealed
-    /// segments, the same way and the same bytes as decoding it: the build
-    /// holds the generation's cross-file resolution inputs and then its
+    /// segments the way a decode is charged, with the generation's retained
+    /// bytes: the build holds its cross-file resolution inputs and then its
     /// compact graph store, both bounded by the generation it projects. The
     /// caller holds the reservation for the build.
     pub(super) fn admit_sealed_graph_build(
         &self,
     ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
-        self.admit_active_generation_work(
-            SEALED_GRAPH_BUILD_RESIDENT_COMPONENT_V1,
-            "building the code graph of",
-        )
+        self.admit_active_generation_work(ActiveGenerationWorkV1::SealedGraphBuild)
     }
 
     fn admit_active_generation_work(
         &self,
-        component: &'static str,
-        work: &str,
+        work: ActiveGenerationWorkV1,
     ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
+        let (component, work_label) = match work {
+            ActiveGenerationWorkV1::Decode => (GENERATION_DECODE_RESIDENT_COMPONENT_V1, "decoding"),
+            ActiveGenerationWorkV1::SealedGraphBuild => (
+                SEALED_GRAPH_BUILD_RESIDENT_COMPONENT_V1,
+                "building the code graph of",
+            ),
+        };
         let Some(admission) = self
             .decode_admission
             .lock()
@@ -2347,7 +2372,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         else {
             return Ok(None);
         };
-        let (generation_id, requested) = match self.active_decode_charge()? {
+        let (generation_id, requested) = match self.active_generation_charge(work)? {
             ActiveGenerationDecodeChargeV1::Decoded => return Ok(None),
             ActiveGenerationDecodeChargeV1::Unmeasured => {
                 tracing::debug!(
@@ -2367,19 +2392,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let admissible = || -> Result<(), String> {
             let snapshot = admission.resident_memory.snapshot();
             let pressure = admission.resident_memory.pressure();
-            let observed = sampled_process_resident_bytes_v1().map_or(0, |observed| {
-                pressure
-                    .publish_observed_resident_bytes(observed)
-                    .observed_bytes()
-                    .unwrap_or(observed)
-            });
+            let observed = pressure.measure_admission_bytes();
             let watermark = pressure.high_watermark_bytes().min(snapshot.limit_bytes);
             let available = watermark.saturating_sub(snapshot.used_bytes.max(observed));
             if requested.get() <= available {
                 Ok(())
             } else {
                 Err(format!(
-                    "{work} generation {generation_id} needs {} resident bytes; {available} are \
+                    "{work_label} generation {generation_id} needs {} resident bytes; {available} are \
                      available below the {watermark}-byte admission watermark",
                     requested.get()
                 ))
@@ -2392,16 +2412,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
             for release in &released {
                 log_resident_owner_release_v1(release);
             }
-            if released.is_empty() {
-                return Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
-                    detail,
-                ));
-            }
+            // Freed pages sit in the pool workers' allocator heaps whether or
+            // not an owner was shed, so they are returned before the
+            // re-measure that decides the refusal.
             let trim = release_process_allocator_memory_v1();
             tracing::info!(
                 event = "code_index_generation_decode_shed_retained_state",
                 released_owners = released.len(),
                 trimmed_bytes = trim.released_bytes(),
+                refused = %detail,
                 "generation decode shed retained state before re-measuring headroom"
             );
             admissible().map_err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused)?;
@@ -2424,21 +2443,29 @@ impl DaemonCodeIndexPublicationStoreV1 {
             })
     }
 
+    /// A decoded copy charges its next decode what this decode measured at
+    /// its peak, which covers the pass transients above what it retains; a
+    /// generation built in memory has only its retained bytes to go on.
     fn record_active_decode_charge(&self, generation: &CodeIndexPublishedGenerationV1) {
+        let retained = generation.retained_bytes();
         *self
             .active_decode_charge
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some((
-            generation.manifest().generation_id.clone(),
-            generation.retained_bytes(),
-        ));
+            .unwrap_or_else(PoisonError::into_inner) = Some(ActiveGenerationChargesV1 {
+            generation_id: generation.manifest().generation_id.clone(),
+            decode_bytes: generation
+                .decode_peak_growth_bytes()
+                .map_or(retained, |peak| peak.max(retained)),
+            graph_build_bytes: retained,
+        });
     }
 
     /// What reading the whole active generation into memory costs now:
     /// nothing when it is already decoded, its measured resident bytes when
     /// this process has held it before, unmeasured otherwise.
-    pub(super) fn active_decode_charge(
+    pub(super) fn active_generation_charge(
         &self,
+        work: ActiveGenerationWorkV1,
     ) -> Result<ActiveGenerationDecodeChargeV1, CodeIndexPublicationStoreErrorV1> {
         if self.cache.lock_state()?.active.is_some() {
             return Ok(ActiveGenerationDecodeChargeV1::Decoded);
@@ -2451,8 +2478,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
-            .filter(|(generation, _)| generation.as_str() == pointer.generation_id)
-            .map(|(generation, bytes)| (generation.clone(), *bytes));
+            .filter(|charges| charges.generation_id.as_str() == pointer.generation_id)
+            .map(|charges| {
+                (
+                    charges.generation_id.clone(),
+                    match work {
+                        ActiveGenerationWorkV1::Decode => charges.decode_bytes,
+                        ActiveGenerationWorkV1::SealedGraphBuild => charges.graph_build_bytes,
+                    },
+                )
+            });
         Ok(match charge {
             Some((generation_id, bytes)) => ActiveGenerationDecodeChargeV1::Measured {
                 generation_id,

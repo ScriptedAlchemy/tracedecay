@@ -1048,26 +1048,20 @@ async fn wait_for_production_composition_code_index(
                 .latest_complete_ready_for_scope(scope)
                 .await
                 .is_some();
-            // A clean restart whose retained revision-7 head recovered serves
-            // every read through the text projection and deliberately leaves
-            // the sealed seat empty, because replaying the partitions to seat
-            // a second copy of what already serves is the cost that recovery
-            // exists to avoid. No publication edge follows a quiet checkout,
-            // so waiting for that seat would always exhaust the timeout.
-            //
-            // The native graph is the discriminator, not text readiness
-            // alone: a *publishing* pass activates the graph only after the
-            // serving swap, so an already-serving graph over an empty seat is
-            // the recovered restart and nothing else. Accepting bare text
-            // readiness here would let the first open race ahead of its own
-            // seat, and every consumer that needs the decoded generation
-            // would then find nothing seated.
-            let recovered_text_ready = invocation
+            // A publication and a clean restart both seat the graph head on
+            // the text owner and leave the decoded seat empty until a reader
+            // demands it, so a text owner serving the native graph is ready.
+            // Graph serving installs before its interactive catalog finishes
+            // warming in the background; the composition is handed over only
+            // once catalog-dependent reads answer instead of reporting warming.
+            let text_graph_catalog_warm = invocation
                 .code_index_schedulers
                 .latest_text_serving_for_scope(scope)
                 .await
-                .is_some_and(|text| text.interactive_graph_store().is_ok());
-            if (generation_ready || recovered_text_ready)
+                .and_then(|text| text.interactive_graph_store().ok())
+                .map(|store| store.interactive_catalog_is_warm().unwrap_or(false));
+            if (generation_ready || text_graph_catalog_warm.is_some())
+                && text_graph_catalog_warm != Some(false)
                 && invocation
                     .code_index_schedulers
                     .query_authority_for_scope(scope)

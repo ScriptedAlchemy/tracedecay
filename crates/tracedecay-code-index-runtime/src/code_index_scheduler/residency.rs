@@ -21,7 +21,6 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, DecodedGenerationContentV1,
 };
-use tracedecay_domain::CodeGenerationId;
 use tracedecay_runtime_core::resident_memory::{
     ResidentHoldingV1, ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerRegistrationV1,
     ResidentOwnerReleaseV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1,
@@ -41,10 +40,6 @@ pub(super) struct WorktreeResidencyV1 {
     publication: DaemonCodeIndexPublicationStoreV1,
     text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
     last_used: Mutex<Instant>,
-    /// The generation the seat held when the inventory released it. The
-    /// worktree still serves it from disk, so freshness keeps reporting it
-    /// as seated until a later generation takes the seat.
-    released_seat: Mutex<Option<CodeGenerationId>>,
 }
 
 pub(super) struct WorktreeResidencyPartsV1 {
@@ -68,7 +63,6 @@ impl WorktreeResidencyV1 {
             publication: parts.publication,
             text_generation: parts.text_generation,
             last_used: Mutex::new(Instant::now()),
-            released_seat: Mutex::new(None),
         }
     }
 
@@ -85,13 +79,6 @@ impl WorktreeResidencyV1 {
             .last_used
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    pub(super) fn released_seat(&self) -> Option<CodeGenerationId> {
-        self.released_seat
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
     }
 
     fn seated(&self) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
@@ -258,12 +245,7 @@ impl ResidentOwnerV1 for ServingDecodeOwnerV1 {
         residency
             .complete_generation_requested
             .store(false, Ordering::Release);
-        if let Some(seated) = &seated {
-            *residency
-                .released_seat
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) =
-                Some(seated.manifest().generation_id.clone());
+        if seated.is_some() {
             residency
                 .serving_generation_epoch
                 .fetch_add(1, Ordering::AcqRel);

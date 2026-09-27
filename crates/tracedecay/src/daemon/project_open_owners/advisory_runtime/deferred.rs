@@ -60,20 +60,14 @@ pub(super) fn spawn(
             let mut serving_changes = None;
             let mut partial_publication_retried = false;
             loop {
-                // Sealing announces durable source before the complete serving
-                // owner is installed. Subscribe before probing that owner so a
-                // later serving swap can finish this mount without another edit.
+                // Sealing announces durable source before its text owner is
+                // installed. Subscribe before probing that owner so a later
+                // installation can finish this mount without another edit.
                 if serving_changes.is_none() {
                     serving_changes = invocation
                         .code_index_schedulers
                         .subscribe_serving_generation_changes(&project_root)
                         .await;
-                    if serving_changes.is_some() {
-                        let _ = invocation
-                            .code_index_schedulers
-                            .request_complete_generation(&project_root)
-                            .await;
-                    }
                 }
                 match try_mount(&invocation, &project_root, &mut state).await {
                     Attempt::Terminal => return,
@@ -324,32 +318,14 @@ async fn classify_failure(
         Attempt::RetryPartialPublication
     } else if invocation
         .code_index_schedulers
-        .latest_complete_ready_for_scope(&state.scope)
-        .await
-        .is_none()
-        && invocation
-            .code_index_schedulers
-            .latest_text_serving_for_scope(&state.scope)
-            .await
-            .is_none()
-    {
-        Attempt::AwaitNextPublication
-    } else if invocation
-        .code_index_schedulers
-        .latest_complete_ready(project_root)
+        .latest_feedback_generation_for_scope(project_root, &state.scope)
         .await
         .is_none()
     {
-        // `try_mount` also admits the recovered text-serving level, but the
-        // feedback cycle it then composes mints its provider identity through
-        // `ProductionFeedbackDocumentIdentityPort`, which serves only
-        // `latest_complete_ready` for the exact root. When the text projection
-        // is ahead of that authority the composition fails with "project-open
-        // provider code-index identity is inconsistent with the application
-        // contract", earliness, not a missing composition. Classifying it
-        // terminal abandoned the upgrade for the daemon's whole life: the
-        // project kept the typed-unavailable feedback cycle and the warming
-        // LSP owner that advertises no analyzer method at all.
+        // The feedback cycle mints its provider identity from the same
+        // selection. While it answers nothing for the exact root the
+        // composition failed early, not for want of a composition; a
+        // terminal verdict here abandoned the upgrade for the daemon's life.
         Attempt::AwaitNextPublication
     } else {
         // A serving generation exists and no feedback cycle was published, so

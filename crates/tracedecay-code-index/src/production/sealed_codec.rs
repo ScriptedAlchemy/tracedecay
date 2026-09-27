@@ -1087,8 +1087,41 @@ pub(super) fn restore_file_pages(
         .collect())
 }
 
+/// Unreclaimable process bytes sampled at a decode's pass boundaries. Pages a
+/// pass frees stay with the allocator until it is collected, so the sample
+/// after each pass reads that pass's high-water mark.
+pub(super) struct DecodePeakProbeV1 {
+    start_bytes: Option<u64>,
+    peak_bytes: u64,
+}
+
+impl DecodePeakProbeV1 {
+    pub(super) fn start() -> Self {
+        let start_bytes =
+            tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1();
+        Self {
+            start_bytes,
+            peak_bytes: start_bytes.unwrap_or(0),
+        }
+    }
+
+    pub(super) fn sample(&mut self) {
+        if let Some(bytes) =
+            tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
+        {
+            self.peak_bytes = self.peak_bytes.max(bytes);
+        }
+    }
+
+    fn growth_bytes(&self) -> Option<u64> {
+        self.start_bytes
+            .map(|start| self.peak_bytes.saturating_sub(start))
+    }
+}
+
 pub(super) fn assemble_published_generation(
     generation: StreamingPersistedPublishedGenerationV1,
+    mut probe: DecodePeakProbeV1,
 ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
     let StreamingPersistedPublishedGenerationV1 {
         manifest,
@@ -1136,10 +1169,12 @@ pub(super) fn assemble_published_generation(
                 })
             })?
             .map_err(CodeIndexProductionErrorV1::Increment)?;
+            probe.sample();
             let symbols = hotpath::measure_block!("code_index.sealed_decode.symbol_index", {
                 GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
             })
             .map_err(CodeIndexProductionErrorV1::Lineage)?;
+            probe.sample();
             let imports = hotpath::measure_block!("code_index.sealed_decode.import_evidence", {
                 derive_import_evidence(&files)
             });
@@ -1147,6 +1182,7 @@ pub(super) fn assemble_published_generation(
                 hotpath::measure_block!("code_index.sealed_decode.edge_evidence", {
                     collect_edge_evidence(&files)
                 })?;
+            probe.sample();
             let projection =
                 hotpath::measure_block!("code_index.sealed_decode.projection_handoff", {
                     ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
@@ -1162,7 +1198,8 @@ pub(super) fn assemble_published_generation(
                 projection,
             ))
         })?;
-    let published = CodeIndexPublishedGenerationV1 {
+    probe.sample();
+    let mut published = CodeIndexPublishedGenerationV1 {
         statistics: hotpath::measure_block!(
             "code_index.sealed_decode.statistics",
             CodeIndexGenerationStatisticsV1::from_generation_parts(
@@ -1194,11 +1231,14 @@ pub(super) fn assemble_published_generation(
         attribution: OnceLock::new(),
         chunk_policy: OnceLock::new(),
         retained_bytes: OnceLock::new(),
+        decode_peak_growth_bytes: None,
     };
     hotpath::measure_block!(
         "code_index.sealed_decode.corpus_validation",
         published.validate_fresh()
     )?;
+    probe.sample();
+    published.decode_peak_growth_bytes = probe.growth_bytes();
     Ok(published)
 }
 

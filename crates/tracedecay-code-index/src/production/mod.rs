@@ -801,6 +801,11 @@ pub struct CodeIndexPublishedGenerationV1 {
     chunk_policy: OnceLock<ChunkPolicyRevisionSummaryV1>,
     /// [`Self::retained_bytes`] of the immutable decode, measured once.
     retained_bytes: OnceLock<u64>,
+    /// How far this process's unreclaimable resident bytes rose above their
+    /// starting point while this generation was decoded, sampled at every
+    /// decode pass boundary. `None` for a generation built in memory, or when
+    /// the kernel reports no resident set.
+    decode_peak_growth_bytes: Option<u64>,
 }
 
 /// The chunk policy-revision census of one immutable generation: no chunks at
@@ -997,6 +1002,15 @@ impl CodeIndexPublishedGenerationV1 {
             PublishedGenerationTestAttributionAuthorityV1::retained_bytes,
         );
         decode.saturating_add(attribution)
+    }
+
+    /// What decoding this generation from its sealed bytes cost at its peak,
+    /// as measured when this copy was decoded; `None` for a generation built
+    /// in memory. Admission charges this, not [`Self::retained_bytes`], for
+    /// the next decode of the same generation.
+    #[must_use]
+    pub fn decode_peak_growth_bytes(&self) -> Option<u64> {
+        self.decode_peak_growth_bytes
     }
 
     fn measure_decode_bytes(&self) -> usize {
@@ -2196,6 +2210,7 @@ where
                 attribution: OnceLock::new(),
                 chunk_policy: OnceLock::new(),
                 retained_bytes: OnceLock::new(),
+                decode_peak_growth_bytes: None,
             };
             hotpath::measure_block!(
                 "code_index.build.assemble.validate",

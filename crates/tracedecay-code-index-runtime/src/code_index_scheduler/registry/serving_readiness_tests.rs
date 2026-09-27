@@ -73,8 +73,8 @@ fn graph_rebuild_split_is_not_terminal_freshness() {
         "search served the predecessor while status advertised the head"
     );
     assert!(
-        !serving_seat_matches_advertised_generation(true, None, Some("generation.head")),
-        "a text owner installed before the serving swap is not yet the served generation"
+        serving_seat_matches_advertised_generation(true, None, Some("generation.head")),
+        "with no decoded seat search serves the advertised text owner itself"
     );
     assert!(serving_seat_matches_advertised_generation(
         true,

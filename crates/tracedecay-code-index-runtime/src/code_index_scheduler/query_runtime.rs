@@ -109,16 +109,12 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
     let mut serving_changes = None;
     loop {
         // Subscribe before probing so a seat that lands between subscribe and
-        // the ready check remains observable. Demand a complete generation once
-        // the watch exists so a late subscribe after a silent Noop still gets a
-        // follow-up wake (same contract as the deferred advisory owner).
+        // the ready check remains observable. The mount needs only the text
+        // owner, so it demands no decoded generation.
         if serving_changes.is_none() {
             serving_changes = registry
                 .subscribe_serving_generation_changes(&project_root)
                 .await;
-            if serving_changes.is_some() {
-                let _ = registry.request_complete_generation(&project_root).await;
-            }
         }
         if registry
             .retained_text_owner_for_root(&project_root)

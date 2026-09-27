@@ -366,11 +366,19 @@ pub(crate) fn collect_edge_evidence<T>(
 where
     T: AsRef<FileGenerationArtifactsV1> + Sync,
 {
-    let mut edges = files
+    // Resolution's whole-set indexes are gone before the per-file copies are
+    // made, and the one exact-capacity vector never regrows, so the peak is
+    // the edges this returns plus one sort buffer.
+    let cross_file = resolve_cross_file_references(files)?;
+    let per_file = files
         .iter()
-        .flat_map(|file| file.as_ref().artifacts.edges.clone())
-        .collect::<Vec<_>>();
-    edges.extend(resolve_cross_file_references(files)?);
+        .map(|file| file.as_ref().artifacts.edges.len())
+        .sum::<usize>();
+    let mut edges = Vec::with_capacity(per_file.saturating_add(cross_file.len()));
+    for file in files {
+        edges.extend(file.as_ref().artifacts.edges.iter().cloned());
+    }
+    edges.extend(cross_file);
     edges.sort_by(edge_order);
     let mut abstentions = files
         .iter()
@@ -443,7 +451,11 @@ where
             index,
         )
     })?;
-    let mut edges = per_file.into_iter().flatten().collect::<Vec<_>>();
+    drop((by_simple_name, rust_files, typescript_modules));
+    let mut edges = Vec::with_capacity(per_file.iter().map(Vec::len).sum());
+    for file_edges in per_file {
+        edges.extend(file_edges);
+    }
     hotpath::measure_block!("code_index.seal.edge_materialization", {
         edges.sort_by(edge_order);
         edges.dedup();

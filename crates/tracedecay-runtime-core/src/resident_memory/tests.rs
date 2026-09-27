@@ -250,6 +250,7 @@ fn slice_max_and_service_high_keep_the_reclaim_band_usable() {
     let pressure = Arc::new(ResidentMemoryPressureV1::with_reclaim_line(
         detected.limit_bytes,
         detected.reclaim_watermark_bytes,
+        Arc::new(|| None),
     ));
     let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
         detected.limit_bytes,
@@ -320,6 +321,7 @@ fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
     let pressure = Arc::new(ResidentMemoryPressureV1::with_reclaim_line(
         detected.limit_bytes,
         detected.reclaim_watermark_bytes,
+        Arc::new(|| None),
     ));
     let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
         detected.limit_bytes,
@@ -1057,5 +1059,23 @@ fn allocator_release_runs_the_installed_allocator_release() {
     assert_eq!(
         super::install_process_allocator_release_v1(count_installed_release),
         Err("the process allocator release is already installed".to_owned())
+    );
+}
+
+#[test]
+fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
+    let status = "Name:\ttracedecay\nVmHWM:\t 6553600 kB\nVmRSS:\t 3355444 kB\n\
+                  RssAnon:\t 2528172 kB\nRssFile:\t  807272 kB\nRssShmem:\t   20000 kB\n";
+    assert_eq!(
+        super::process_resident_sample_from_status_v1(status),
+        Some(super::ProcessResidentSampleV1 {
+            resident_bytes: 3_355_444 * 1024,
+            unreclaimable_bytes: 2_548_172 * 1024,
+        })
+    );
+    assert_eq!(
+        super::process_resident_sample_from_status_v1("VmRSS:\t 1024 kB\n"),
+        None,
+        "a kernel without split RSS counters is unobserved, not zero"
     );
 }

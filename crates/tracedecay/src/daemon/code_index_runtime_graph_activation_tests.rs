@@ -711,7 +711,7 @@ async fn restart_status_tracks_immediate_settled_and_stale_graph_serving_states(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn corrupt_graph_restart_repairs_through_canonical_serialized_activation() {
+async fn corrupt_graph_restart_rebuilds_from_the_sealed_segments_without_decoding() {
     restart_status_case(true, false).await;
 }
 
@@ -1115,10 +1115,10 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .sealed_decode_count();
     if corrupt_graph {
-        assert!(
-            sealed_decode_count > 0,
-            "a corrupt retained graph must defer its typed direct-recovery failure to the \
-             canonical serialized activation path"
+        assert_eq!(
+            sealed_decode_count, 0,
+            "a corrupt retained graph is rebuilt from its sealed segments and seated from the \
+             text owner, without decoding the generation"
         );
     } else if !dirty_before_restart {
         assert_eq!(
@@ -1488,6 +1488,154 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
+    registry.shutdown().await;
+    graph_runtime
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join graph reconciliation tasks");
+}
+
+/// A first index reaches `ready` (fresh, graph serving) with the graph head
+/// seated from the sealed manifest and the mapped graph store alone: no
+/// reader asked for the whole decoded generation, so none is decoded, and
+/// graph reads and the generation census answer from the text owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_index_serves_graph_reads_without_decoding_the_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let profile = TempDir::new().expect("profile root");
+    let profile_root = profile.path().join("profile");
+    let project_id = test_project_id();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        fixture.path(),
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        97,
+        "first index graph serving without decode",
+    )
+    .expect("daemon database scope");
+    let graph_runtime = Arc::new(
+        DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("graph runtime registry"),
+    );
+    let project_database = graph_runtime
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+        .await
+        .expect("writable project database");
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &project_database,
+        "bind first index graph runtime",
+    )
+    .await
+    .expect("bound project graph runtime");
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_runtime(
+            project_id.clone(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            graph_runtime.code_graph_seat_port(),
+            project_database,
+            CodeGraphActivationPolicyV1::Enabled,
+        )
+        .await
+        .expect("mount first index");
+    let reached = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("readiness read");
+    assert!(
+        matches!(
+            reached,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached
+        ),
+        "the first index must reach fresh with graph serving: {reached:?}"
+    );
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "no reader demanded the whole generation, so it is never decoded"
+    );
+
+    let text = registry
+        .retained_text_owner_for_root(fixture.path())
+        .await
+        .expect("text owner");
+    let snapshot = text.metadata().snapshot();
+    let scope = ResolvedScope::new(
+        project_id,
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let generation_id = text.metadata().manifest().generation_id.clone();
+    let statistics = text.metadata().generation_statistics().clone();
+    let port = project_code_graph_projection_read_port(
+        registry.clone(),
+        fixture.path().to_path_buf(),
+        scope.clone(),
+    );
+    let context = graph_request_context(scope.clone(), "first-index");
+    let read = port
+        .open(CodeGraphReadRequest::from_context(&context, now_micros()))
+        .await
+        .expect("graph read on the first index");
+    assert_eq!(read.freshness(), CodeGraphReadFreshnessV1::Current);
+    assert_eq!(read.generation(), &generation_id);
+    let page = read
+        .reader(&context, now_micros())
+        .expect("admitted graph reader")
+        .symbols_page(None, 16, request_graph_cancellation(&context))
+        .expect("bounded symbol query");
+    assert_eq!(
+        page.symbols
+            .iter()
+            .filter_map(|symbol| symbol.metadata.as_ref())
+            .map(|metadata| metadata.simple_name.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha"]
+    );
+    let census =
+        project_code_index_generation_census_reader(registry.clone(), fixture.path().into(), scope);
+    assert_eq!(
+        census().await,
+        GenerationCensusSnapshot::Observed {
+            generation_id: generation_id.as_str().to_owned(),
+            freshness: GenerationCensusServingFreshness::Current,
+            statistics: tracedecay_runtime_core::runtime_telemetry::GenerationCensusStatistics {
+                source_total_bytes: 28,
+                symbol_count: statistics.symbol_count,
+                edge_count: statistics.edge_count,
+            },
+        }
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "graph reads and the census do not decode the generation"
+    );
     registry.shutdown().await;
     graph_runtime
         .shutdown_memory_graph_reconciliation_tasks()
