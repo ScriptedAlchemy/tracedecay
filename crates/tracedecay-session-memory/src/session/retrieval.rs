@@ -8,8 +8,8 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_domain::{
-    ContextOmissionReasonV1, CursorManifestLimitKindV1, RetrievalAnchorId, RetrievalGrainV1,
-    SessionId, TemporalModeV1,
+    ContextOmissionReasonV1, CursorBindingV1, CursorManifestLimitKindV1, RetrievalAnchorId,
+    RetrievalGrainV1, SessionId, TemporalModeV1,
 };
 use tracedecay_temporal_query::context::{ContextBudget, ContextError, VersionedTokenEstimator};
 use tracedecay_temporal_query::cursor::CursorError;
@@ -649,6 +649,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | TemporalPortError::Read { .. } => SessionRetrievalOutcome::Unavailable,
         },
         TemporalKernelError::Cursor(error) => match error {
+            CursorError::Binding(mismatch) => SessionRetrievalOutcome::CursorRefused(mismatch),
             CursorError::RootMismatch
             | CursorError::SessionMismatch
             | CursorError::WrongAccess
@@ -926,6 +927,27 @@ fn digest_request(
         ranking_version: configuration.ranking_version,
         configuration_version: encode_lowercase_hex(binding.configuration_digest().as_bytes()),
     })
+}
+
+/// The request parameters a session retrieval continuation is minted for.
+fn session_cursor_binding(
+    query: &SessionTemporalQuery,
+) -> Result<CursorBindingV1, tracedecay_domain::DomainError> {
+    CursorBindingV1::builder("session_retrieval")
+        .parameter("query", &query.query)
+        .parameter("scope", &query.retrieval_scope.kind())
+        .parameter(
+            "session_id",
+            &query.retrieval_scope.session_id().map(SessionId::as_str),
+        )
+        .parameter("provider", &query.provider)
+        .parameter("direct_anchor", &query.direct_anchor)
+        .parameter("filters", &query.semantic_filter)
+        .parameter("compatibility_filter", &query.compatibility_filter_digest)
+        .parameter("temporal_mode", &query.temporal_mode)
+        .parameter("grain", &query.grain)
+        .parameter("limit", &query.limit)
+        .build()
 }
 
 fn digest_filters(query: &SessionTemporalQuery) -> String {

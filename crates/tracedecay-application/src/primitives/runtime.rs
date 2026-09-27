@@ -60,7 +60,8 @@ use crate::diagnostics_producer::{
 };
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
-    ManagedTestRunStaleReason, OperationEventAuthority, current_managed_test_run,
+    ManagedTestRunStaleReason, OperationEventAuthority, OperationEventError,
+    current_managed_test_run,
 };
 use tracedecay_runtime_core::db::Database;
 
@@ -1783,6 +1784,13 @@ async fn recent_test_results(
         .await
     {
         Ok(snapshot) => snapshot,
+        Err(OperationEventError::CursorRefused(mismatch)) => {
+            return problem(
+                context,
+                operation,
+                ApplicationProblem::cursor_refused(&mismatch),
+            );
+        }
         Err(_) => return unavailable(context, operation),
     };
     let current = match runtime.test_run_scope.current_identity().await {

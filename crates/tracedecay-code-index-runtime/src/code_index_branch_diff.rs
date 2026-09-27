@@ -4,14 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    ContentDigest, FileIdentityDigest, FileOccurrenceId, FreshnessVectorDigest, GitOidV1, RefId,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1,
+    ContentDigest, CursorBindingV1, FileIdentityDigest, FileOccurrenceId, FreshnessVectorDigest,
+    GitOidV1, RefId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1,
     SnapshotFileDispositionV1, TemporalModeV1, VectorWatermark, canonical_sha256,
 };
 use tracedecay_query::code_search;
-use tracedecay_query::retrieval::{
-    PreparedQueryBindingV1, PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1,
-};
+use tracedecay_query::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
 
 use crate::code_index_scheduler;
 use crate::mcp_admission::{
@@ -401,16 +399,16 @@ fn branch_diff_scope_digest(
     ))
 }
 
+const BRANCH_DIFF_OPERATION: &str = "branch_diff";
+
 fn branch_diff_query_binding(
     request: &code_search::CodeIndexBranchDiffRequestV1,
-) -> Result<PreparedQueryBindingV1, PreparedQueryErrorV1> {
-    let digest = |value: Option<&str>| {
-        canonical_sha256(&value).map_err(|_| PreparedQueryErrorV1::Unavailable)
-    };
-    PreparedQueryBindingV1::new(vec![
-        ("file_filter", digest(request.file_filter.as_deref())?),
-        ("kind_filter", digest(request.kind_filter.as_deref())?),
-    ])
+) -> Result<CursorBindingV1, PreparedQueryErrorV1> {
+    CursorBindingV1::builder(BRANCH_DIFF_OPERATION)
+        .parameter("file_filter", &request.file_filter)
+        .parameter("kind_filter", &request.kind_filter)
+        .build()
+        .map_err(|_| PreparedQueryErrorV1::Unavailable)
 }
 
 pub fn code_index_branch_diff_executor<A, S>(
@@ -631,7 +629,6 @@ where
                     }
                 };
                 let bindings = match PreparedQueryBindingsV1::new(
-                    "code_index_branch_diff.v1",
                     scope_digest,
                     generations
                         .head

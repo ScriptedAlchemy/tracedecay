@@ -707,6 +707,9 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
         SessionRetrievalServiceOutcome::CursorStale => {
             RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
         }
+        SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+            RetainedSurfaceExecutionErrorV1::cursor_refused(&mismatch)
+        }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
             kind,
             observed,
@@ -760,6 +763,9 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
         LcmDescribeServiceOutcome::CursorStale => {
             RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
         }
+        LcmDescribeServiceOutcome::CursorRefused(mismatch) => {
+            RetainedSurfaceExecutionErrorV1::cursor_refused(&mismatch)
+        }
         LcmDescribeServiceOutcome::CursorManifestLimitExceeded {
             kind,
             observed,
@@ -804,6 +810,9 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
         }
         LcmExpandServiceOutcome::CursorStale => {
             RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
+        }
+        LcmExpandServiceOutcome::CursorRefused(mismatch) => {
+            RetainedSurfaceExecutionErrorV1::cursor_refused(&mismatch)
         }
         LcmExpandServiceOutcome::CursorManifestLimitExceeded {
             kind,

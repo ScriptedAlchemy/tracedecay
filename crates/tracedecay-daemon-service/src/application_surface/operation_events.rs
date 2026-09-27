@@ -826,6 +826,9 @@ pub(super) fn operation_event_problem(
         OperationEventError::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
+        OperationEventError::CursorRefused(mismatch) => {
+            ApplicationProblem::cursor_refused(&mismatch)
+        }
         OperationEventError::FrontierExpired | OperationEventError::ResumeExpired => {
             ApplicationProblem::Stale {
                 diagnostic: SafeDiagnostic {

@@ -166,6 +166,8 @@ where
         .with_execution_control(control);
         let execution = AuthorizedTemporalExecutionRequest::new(
             snapshot_request,
+            session_cursor_binding(query)
+                .map_err(|_| SessionExecutionAdmissionFailure::Unavailable)?,
             query.query.clone(),
             query.cursor.clone(),
             query.limit,
@@ -336,6 +338,7 @@ fn map_task_session_execution_error(
         SessionRetrievalOutcome::ResetRequired => TaskSessionRetrievalOutcomeV1::ResetRequired,
         SessionRetrievalOutcome::Unavailable
         | SessionRetrievalOutcome::CursorStale
+        | SessionRetrievalOutcome::CursorRefused(_)
         | SessionRetrievalOutcome::Complete { .. }
         | SessionRetrievalOutcome::Partial { .. }
         | SessionRetrievalOutcome::CompleteZero { .. }

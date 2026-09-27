@@ -9,9 +9,11 @@ use tracedecay_code_index::graph_projection::{CodeGraphReadCostMeter, CodeGraphS
 use tracedecay_contracts::retrieval::{
     HealthDeltaRequest, HealthDeltaResult, RetrievalPortContext, SymbolPrimitiveRecord,
 };
-use tracedecay_contracts::{EvidenceDomain, OmissionReason};
-use tracedecay_domain::ProjectId;
+use tracedecay_contracts::{
+    ApplicationProblem, EvidenceDomain, OmissionReason, RetrievalPortOutcome,
+};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_domain::{CursorBindingV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::queries::GraphQueryManager;
 use tracedecay_graph_query::{
@@ -34,7 +36,7 @@ use super::{
     AuthenticatedDiagnosticCursorAuthorityV1, DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
     all_code_graph_symbols, completed, completed_unsupported, diagnostics_result,
     diagnostics_unavailable, evidence_unavailable, failed, graph_query_outcome, graph_read_outcome,
-    now_observed, open_code_graph,
+    now_observed, omitted_evidence, open_code_graph,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
@@ -866,15 +868,34 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
                     tracedecay_domain::FileOccurrenceId::as_str,
                 );
+                let Ok(cursor_binding) = CursorBindingV1::builder("diagnostics")
+                    .parameter("scope", &request.scope)
+                    .parameter("maximum_diagnostics", &request.maximum_diagnostics)
+                    .build()
+                else {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                };
                 let cursor = match request.cursor.as_deref() {
                     Some(cursor) => match self.diagnostic_cursors.decode(
                         cursor,
                         context.request,
                         &current_generation,
                         cursor_lane,
+                        &cursor_binding,
                     ) {
                         Ok(cursor) => Some(cursor),
-                        Err(()) => {
+                        Err(Some(mismatch)) => {
+                            return RetrievalPortOutcome::Refused(
+                                omitted_evidence(
+                                    EvidenceDomain::Diagnostic,
+                                    finished_at,
+                                    OmissionReason::Unsupported,
+                                    0,
+                                ),
+                                Box::new(ApplicationProblem::cursor_refused(&mismatch)),
+                            );
+                        }
+                        Err(None) => {
                             return diagnostics_unavailable(
                                 finished_at,
                                 OmissionReason::Unsupported,
@@ -915,6 +936,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                             context.request,
                             &current_generation,
                             cursor_lane,
+                            &cursor_binding,
                         )
                     })
                     .transpose();
