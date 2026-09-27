@@ -339,13 +339,7 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                     definition.name
                 );
                 assert!(
-                    Box::pin(concrete_dispatch_group_accepts(
-                        group,
-                        &definition.name,
-                        &cg,
-                        options.clone()
-                    ))
-                    .await,
+                    Box::pin(concrete_dispatch_group_accepts(group, &definition.name)).await,
                     "{} has no concrete handler-family entry",
                     definition.name
                 );

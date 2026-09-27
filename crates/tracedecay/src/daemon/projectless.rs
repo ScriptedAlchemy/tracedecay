@@ -33,7 +33,6 @@ where
 
 /// Authenticated durable identity pinned once for a projectless connection.
 struct ProjectlessConnectionStateV1 {
-    client_identity: DaemonClientIdentity,
     active_project_root: Option<PathBuf>,
 }
 
@@ -81,12 +80,7 @@ fn admit_projectless_connection(
                 .to_owned(),
         });
     }
-    let pinned_profile_root = profile_identity.profile_root().to_path_buf();
     Ok(ProjectlessConnectionStateV1 {
-        client_identity: DaemonClientIdentity::new(
-            pinned_profile_root.clone(),
-            pinned_profile_root.join("global.db"),
-        ),
         active_project_root: None,
     })
 }
@@ -208,10 +202,7 @@ async fn projectless_response(
 fn projectless_tool_is_discoverable(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "tracedecay_admin_cli"
-            | "tracedecay_project_list"
-            | "tracedecay_project_search"
-            | "tracedecay_project_context"
+        "tracedecay_project_list" | "tracedecay_project_search" | "tracedecay_project_context"
     ) || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
 }
 
@@ -349,32 +340,21 @@ async fn projectless_tools_call_response_with_connection(
         ))
         .await;
     }
-    let response = match tool_name {
-        "tracedecay_admin_cli" => boxed_projectless_phase(projectless_admin_cli_response(
-            id,
-            arguments,
-            connection,
-            store_administration,
-        )),
-        _ => {
-            // `projectless_tool_is_discoverable` admitted the name above,
-            // so any remaining tool is a retained profile operation.
-            let Some(operation) =
-                tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name)
-            else {
-                return requires_project_error(id, tool_name);
-            };
-            boxed_projectless_phase(projectless_profile_retained_response(
-                id,
-                tool_name,
-                operation,
-                arguments,
-                connection,
-                store_administration,
-            ))
-        }
+    // `projectless_tool_is_discoverable` admitted the name above, so any
+    // remaining tool is a retained profile operation.
+    let Some(operation) = tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name)
+    else {
+        return requires_project_error(id, tool_name);
     };
-    response.await
+    boxed_projectless_phase(projectless_profile_retained_response(
+        id,
+        tool_name,
+        operation,
+        arguments,
+        connection,
+        store_administration,
+    ))
+    .await
 }
 
 fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResponse {
@@ -437,41 +417,6 @@ fn profile_executor(
     super::profile_retained::ProfileExecutor {
         store_administration: store_administration.clone(),
         active_project_root: connection.active_project_root.clone(),
-    }
-}
-
-async fn projectless_admin_cli_response(
-    id: serde_json::Value,
-    arguments: serde_json::Value,
-    connection: &ProjectlessConnectionStateV1,
-    store_administration: &StoreAdministration,
-) -> tracedecay_mcp::JsonRpcResponse {
-    let global_db =
-        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
-            Ok(global_db) => global_db,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-    let accounting_db =
-        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
-            Ok(database) => database,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-    match boxed_projectless_phase(
-        tracedecay_mcp::handlers::admin_cli::handle_projectless_admin_cli(
-            arguments,
-            &global_db,
-            tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
-            &connection.client_identity.profile_root,
-        ),
-    )
-    .await
-    {
-        Ok(result) => JsonRpcResponse::success(id, result.value),
-        Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
 }
 

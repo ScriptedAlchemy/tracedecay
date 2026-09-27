@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use serde_json::json;
+use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
 
-use crate::commands::daemon_tool_json;
+use crate::commands::{admin_cli_result, admin_cli_result_mismatch, admin_cli_scope};
 
 fn cli_project_root(profile: &ProfileRoot) -> Option<PathBuf> {
     std::env::current_dir()
@@ -16,17 +16,19 @@ fn cli_project_root(profile: &ProfileRoot) -> Option<PathBuf> {
 /// `analytics_events` table and print what happened.
 pub async fn run_analytics_sync(profile: &ProfileRoot) -> tracedecay_domain::errors::Result<()> {
     let project_root = cli_project_root(profile);
-    let outcome = daemon_tool_json(
+    let outcome = match admin_cli_result(
         profile,
         project_root.as_deref(),
-        "tracedecay_admin_cli",
-        json!({ "action": "analytics_sync" }),
+        AdminCliSurfaceRequestV1::AnalyticsSync {
+            scope: admin_cli_scope(project_root.as_deref()),
+        },
     )
-    .await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&outcome).unwrap_or_default()
-    );
+    .await?
+    {
+        AdminCliResultV1::AnalyticsSync(outcome) => outcome,
+        _ => return Err(admin_cli_result_mismatch("analytics_sync")),
+    };
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
     Ok(())
 }
 /// `tracedecay analytics diagnostics`: the CLI wrapper around the dashboard
@@ -37,20 +39,20 @@ pub async fn run_analytics_diagnostics(
     no_sync: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     let project_root = cli_project_root(profile);
-    let summary = daemon_tool_json(
+    let summary = match admin_cli_result(
         profile,
         project_root.as_deref(),
-        "tracedecay_admin_cli",
-        json!({
-            "action": "analytics_diagnostics",
-            "all": all_projects,
-            "no_sync": no_sync,
-        }),
+        AdminCliSurfaceRequestV1::AnalyticsDiagnostics {
+            scope: admin_cli_scope(project_root.as_deref()),
+            all: all_projects,
+            no_sync,
+        },
     )
-    .await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&summary).unwrap_or_default()
-    );
+    .await?
+    {
+        AdminCliResultV1::AnalyticsDiagnostics(summary) => summary,
+        _ => return Err(admin_cli_result_mismatch("analytics_diagnostics")),
+    };
+    println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
 }

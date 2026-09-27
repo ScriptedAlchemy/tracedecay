@@ -363,8 +363,6 @@ impl SelectorProfile {
 pub(super) async fn concrete_dispatch_group_accepts(
     group: McpToolDispatchGroup,
     tool_name: &str,
-    cg: &TraceDecay,
-    options: ToolCallRegistryOptions<'_>,
 ) -> bool {
     let invalid_args = Value::String("dispatch-metadata-probe".to_owned());
     // The probe args are deliberately invalid, so an accepted tool still fails,
@@ -385,9 +383,6 @@ pub(super) async fn concrete_dispatch_group_accepts(
         | McpToolDispatchGroup::Workflow => false,
         McpToolDispatchGroup::MultiRoot => {
             owned(handle_multi_root(tool_name, invalid_args, None, None, None, None).await)
-        }
-        McpToolDispatchGroup::Admin => {
-            owned(dispatch_admin_tools(tool_name, cg, invalid_args, options).await)
         }
     }
 }

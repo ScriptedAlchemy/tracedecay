@@ -1,8 +1,13 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::time::Instant;
+use tracedecay_contracts::graph_tool::GraphToolResultV1;
+use tracedecay_contracts::retrieval::{
+    AdminCliResultV1, AdminCliScopeV1, AdminCliSurfaceRequestV1,
+};
 use tracedecay_contracts::{ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope};
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Resolves the daemon handshake for the current client. One labeled
 /// boundary so a slow CLI invocation can attribute time to client identity
@@ -113,6 +118,54 @@ fn retained_decode_error(
     tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("daemon tool {tool_name} returned {context}: {error}"),
     }
+}
+
+/// One `tracedecay_admin_cli` action under the shared CLI tool deadline. The
+/// request selects its owner: the profile owner answers the profile's
+/// registry, storage, and savings actions and profile-scoped cost and
+/// analytics; the owner of `project_path` answers the rest. A refusal is the
+/// command's error.
+pub(crate) async fn admin_cli_result(
+    profile: &ProfileRoot,
+    project_path: Option<&std::path::Path>,
+    request: AdminCliSurfaceRequestV1,
+) -> tracedecay_domain::errors::Result<AdminCliResultV1> {
+    let deadline = Instant::now()
+        .checked_add(crate::tool_command::tool_command_deadline()?)
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "the CLI tool deadline exceeds the supported monotonic range".to_owned(),
+        })?;
+    let result = crate::tool_command::owner_operation_result(
+        client_handshake(profile, project_path)?,
+        ApplicationSurfaceOperation::AdminCli,
+        serde_json::to_value(request)?,
+        deadline,
+    )
+    .await?;
+    match result {
+        GraphToolResultV1::AdminCli(result) => Ok(*result),
+        _ => Err(admin_cli_result_mismatch("tracedecay_admin_cli")),
+    }
+}
+
+/// A cost or analytics action reads the project the command runs in, or the
+/// whole profile outside one.
+pub(crate) fn admin_cli_scope(project_path: Option<&std::path::Path>) -> AdminCliScopeV1 {
+    match project_path {
+        Some(_) => AdminCliScopeV1::Project,
+        None => AdminCliScopeV1::Profile,
+    }
+}
+
+/// The owner answered `action` with another action's result.
+pub(crate) fn admin_cli_result_mismatch(
+    action: &str,
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::project_route(
+        "owner_result_mismatch",
+        false,
+        format!("the owner answered {action} with another action's result"),
+    )
 }
 
 /// One-shot daemon tool call using the shared `TRACEDECAY_TOOL_DEADLINE_MS`

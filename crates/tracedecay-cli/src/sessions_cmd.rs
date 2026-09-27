@@ -8,6 +8,9 @@ use crate::{
 };
 use serde_json::{Map, Value, json};
 use tracedecay_contracts::retained_surfaces::{MessageSearchResultV1, RetainedOutcomeStatusV1};
+use tracedecay_contracts::retrieval::{
+    AdminCliResultV1, AdminCliSessionSyncV1, AdminCliSurfaceRequestV1,
+};
 
 mod refresh;
 mod session_sync;
@@ -117,11 +120,10 @@ async fn handle_sessions_import(
     project_path: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
     let project_path = resolve_cli_project_root(profile, None, project_id, project_path).await?;
-    let outcome = call_daemon_tool(
+    let outcome = session_sync_action(
         profile,
         &project_path,
-        "tracedecay_admin_cli",
-        json!({ "action": "sessions_import" }),
+        AdminCliSurfaceRequestV1::SessionsImport {},
     )
     .await?;
     await_session_sync_completion(profile, &project_path, "session import", outcome).await
@@ -214,14 +216,20 @@ async fn handle_sessions_unfinished(
     project_path: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
     let project_path = resolve_cli_project_root(profile, None, project_id, project_path).await?;
-    let payload = call_daemon_tool(
+    let items = match crate::commands::admin_cli_result(
         profile,
-        &project_path,
-        "tracedecay_admin_cli",
-        json!({ "action": "sessions_unfinished", "limit": limit }),
+        Some(&project_path),
+        AdminCliSurfaceRequestV1::SessionsUnfinished { limit },
     )
-    .await?;
-    let items = payload["items"].as_array().cloned().unwrap_or_default();
+    .await?
+    {
+        AdminCliResultV1::SessionsUnfinished(unfinished) => unfinished.items,
+        _ => {
+            return Err(crate::commands::admin_cli_result_mismatch(
+                "sessions_unfinished",
+            ));
+        }
+    };
     if json {
         println!(
             "{}",
@@ -246,6 +254,18 @@ async fn handle_sessions_unfinished(
         }
     }
     Ok(())
+}
+
+/// One session-sync action answered by the project's owner.
+async fn session_sync_action(
+    profile: &ProfileRoot,
+    project_root: &Path,
+    request: AdminCliSurfaceRequestV1,
+) -> tracedecay_domain::errors::Result<AdminCliSessionSyncV1> {
+    match crate::commands::admin_cli_result(profile, Some(project_root), request).await? {
+        AdminCliResultV1::SessionSync(outcome) => Ok(outcome),
+        _ => Err(crate::commands::admin_cli_result_mismatch("session sync")),
+    }
 }
 
 async fn call_daemon_tool(

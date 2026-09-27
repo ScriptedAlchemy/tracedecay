@@ -220,6 +220,7 @@ application_surface_operations! {
     ProjectSearch => "project_search";
     ProjectContext => "project_context";
     AdminSync => "admin_sync";
+    AdminCli => "admin_cli";
     AdminProject => "admin_project";
     HookRuntime => "hook_runtime";
     HealthRead => "health_read";
@@ -356,6 +357,7 @@ impl ApplicationSurfaceOperation {
         Self::RemoteStatus,
         Self::Runtime,
         Self::AdminSync,
+        Self::AdminCli,
         Self::AdminProject,
         Self::HookRuntime,
     ];
@@ -369,8 +371,12 @@ impl ApplicationSurfaceOperation {
     /// Owner-served operations that first-party CLI commands and host hooks
     /// call by name. They are never advertised in `tools/list` or mounted on
     /// HTTP, so an agent cannot discover or select them.
-    pub const INTERNAL_OPERATIONS: &[Self] =
-        &[Self::AdminSync, Self::AdminProject, Self::HookRuntime];
+    pub const INTERNAL_OPERATIONS: &[Self] = &[
+        Self::AdminSync,
+        Self::AdminCli,
+        Self::AdminProject,
+        Self::HookRuntime,
+    ];
 
     pub fn is_graph_tool(self) -> bool {
         Self::GRAPH_TOOL_OPERATIONS.contains(&self)
@@ -396,6 +402,23 @@ impl ApplicationSurfaceOperation {
                 argument("action") == Some("automation_reconcile")
                     && argument("scope") == Some("profile")
             }
+            // Registry, storage, and savings actions read only the profile;
+            // cost and analytics name the profile when run outside a project.
+            Self::AdminCli => match argument("action") {
+                Some(
+                    "registry_list"
+                    | "registry_context"
+                    | "registry_empty"
+                    | "registry_project_tokens"
+                    | "registry_gc"
+                    | "storage_report"
+                    | "gain_query",
+                ) => true,
+                Some("cost_summary" | "analytics_sync" | "analytics_diagnostics") => {
+                    argument("scope") == Some("profile")
+                }
+                _ => false,
+            },
             // A hook with no project route lands in the profile's stores.
             Self::HookRuntime => match argument("action") {
                 Some("user_review" | "hermes_receipt" | "hook_v2_profile_admit") => true,
@@ -460,6 +483,22 @@ mod tests {
         assert!(!owner(
             ApplicationSurfaceOperation::AdminSync,
             profile_reconcile
+        ));
+        assert!(owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "registry_list", "limit": 10})
+        ));
+        assert!(owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "cost_summary", "range": "7d", "scope": "profile"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "cost_summary", "range": "7d", "scope": "project"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "sessions_import"})
         ));
         for (arguments, profile) in [
             (

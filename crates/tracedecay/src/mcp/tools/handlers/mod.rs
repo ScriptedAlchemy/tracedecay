@@ -166,7 +166,7 @@ use tracedecay_contracts::{InvocationTarget, RetainedSurfaceOperation};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use super::LegacyToolCompatibilityOwner;
-use dispatch_groups::{dispatch_admin_tools, dispatch_application_surface_tools};
+use dispatch_groups::dispatch_application_surface_tools;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
@@ -595,9 +595,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
         let served_code_graph = options.served_code_graph.clone();
         let dispatched = async {
             match dispatch_group {
-                Some(McpToolDispatchGroup::Admin) => {
-                    boxed_send(dispatch_admin_tools(tool_name, cg, args, options)).await
-                }
                 // Typed daemon surface tools already returned above, and the daemon
                 // serves the internal branch-add tool before MCP dispatch; reaching
                 // here means the name resolves to no reachable dispatch entry.

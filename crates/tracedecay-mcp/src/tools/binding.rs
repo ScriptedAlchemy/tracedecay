@@ -34,15 +34,13 @@ pub use workflow::workflow_operation_for_tool;
 
 /// Tools the daemon serves itself; they carry no application-catalog
 /// contract and never enter the advertised dispatch catalog.
-pub const INTERNAL_DAEMON_TOOL_NAMES: &[&str] =
-    &["tracedecay_admin_branch_add", "tracedecay_admin_cli"];
+pub const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &["tracedecay_admin_branch_add"];
 
 /// Which dispatch family owns a tool once the surface predicates decline it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum McpToolDispatchGroup {
     ApplicationSurface,
     MultiRoot,
-    Admin,
     Git,
     Work,
     Workflow,
@@ -73,8 +71,7 @@ pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
     }
     match dispatch_group_for_tool(tool_name) {
         Some(
-            McpToolDispatchGroup::Admin
-            | McpToolDispatchGroup::Git
+            McpToolDispatchGroup::Git
             | McpToolDispatchGroup::MultiRoot
             | McpToolDispatchGroup::ApplicationSurface,
         ) => BranchSensitivity::Sensitive,
@@ -295,6 +292,7 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::ProjectSearch
         | ApplicationSurfaceOperation::ProjectContext
         | ApplicationSurfaceOperation::AdminSync
+        | ApplicationSurfaceOperation::AdminCli
         | ApplicationSurfaceOperation::AdminProject
         | ApplicationSurfaceOperation::HookRuntime
         | HealthRead
@@ -346,8 +344,6 @@ macro_rules! binding_groups {
 /// access are one slice; a different access starts a new slice.
 #[rustfmt::skip]
 const BINDING_GROUPS: &[BindingGroup] = binding_groups![
-    [Some(McpToolDispatchGroup::Admin), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_admin_cli"],
     [Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_admin_branch_add"],
     [Some(McpToolDispatchGroup::MultiRoot), RegisteredProjectAccess::ActiveProjectOnly,
@@ -748,7 +744,7 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
             })
         || multi_root_operation_for_tool(tool_name).is_some()
         || compute_tool_dispatches_source_edit_effect(tool_name)
-        || matches!(tool_name, "tracedecay_admin_cli" | "tracedecay_search")
+        || tool_name == "tracedecay_search"
 }
 
 pub fn tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
@@ -1283,7 +1279,6 @@ mod tests {
         // One Sensitive representative per remaining dispatch family.
         ("tracedecay_search", BranchSensitivity::Sensitive),
         ("tracedecay_status", BranchSensitivity::Sensitive),
-        ("tracedecay_admin_cli", BranchSensitivity::Sensitive),
         ("tracedecay_dead_code", BranchSensitivity::Sensitive),
         ("tracedecay_affected", BranchSensitivity::Sensitive),
         ("tracedecay_str_replace", BranchSensitivity::Sensitive),

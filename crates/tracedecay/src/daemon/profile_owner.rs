@@ -5,10 +5,11 @@
 //! servers, and projectless connections. `tracedecay_project_list`,
 //! `tracedecay_project_search`, and `tracedecay_project_context` read the
 //! profile's registry; `tracedecay_admin_project` reconciles every cached
-//! automation scheduler of the profile; `tracedecay_hook_runtime` records the
-//! session evidence of a hook with no project route. The caller's project,
-//! when it has one, only marks that project active in registry reads and is
-//! the context read's default.
+//! automation scheduler of the profile; `tracedecay_admin_cli` answers the
+//! registry, storage, savings, and profile-wide cost and analytics actions;
+//! `tracedecay_hook_runtime` records the session evidence of a hook with no
+//! project route. The caller's project, when it has one, only marks that
+//! project active in registry reads and is the context read's default.
 //!
 //! An operation joins by naming the requests the profile owner answers in
 //! `ApplicationSurfaceOperation::is_profile_owner_request` and computing its
@@ -21,8 +22,9 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    AdminProjectResultV1, AdminProjectSurfaceRequestV1, AutomationReconcileScope,
-    HookRuntimeResultV1, ProfileAutomationReconcileReport, UncachedProjectReconcileOutcome,
+    AdminCliSurfaceRequestV1, AdminProjectResultV1, AdminProjectSurfaceRequestV1,
+    AutomationReconcileScope, HookRuntimeResultV1, ProfileAutomationReconcileReport,
+    UncachedProjectReconcileOutcome,
 };
 use tracedecay_contracts::{
     ApplicationProblem, CancellationContext, CancellationStage, CancellationState, Deadline,
@@ -127,6 +129,24 @@ async fn compute_profile_owner_operation(
                             UncachedProjectReconcileOutcome::DeferredUntilProjectStartup,
                     },
                 ),
+            ))
+        }
+        ApplicationSurfaceOperation::AdminCli => {
+            let request: AdminCliSurfaceRequestV1 =
+                decode_primitive_request(&Value::Object(arguments), operation.mcp_tool_name())?;
+            let registry = Box::pin(store_administration.registered_profile_database()).await?;
+            GraphToolResultV1::AdminCli(Box::new(
+                Box::pin(
+                    tracedecay_mcp::handlers::admin_cli::compute_projectless_admin_cli(
+                        request,
+                        &registry,
+                        tracedecay_global_db::global_accounting_enabled()
+                            .then_some(registry.as_ref()),
+                        profile_identity.profile_root(),
+                        active_project_root,
+                    ),
+                )
+                .await?,
             ))
         }
         ApplicationSurfaceOperation::HookRuntime => GraphToolResultV1::HookRuntime(

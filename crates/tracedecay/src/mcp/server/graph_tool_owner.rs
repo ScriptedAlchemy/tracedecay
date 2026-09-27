@@ -53,6 +53,10 @@ impl McpServer {
             ApplicationSurfaceOperation::Status => Some(self.server_stats_json().await),
             _ => None,
         };
+        let session_sync_service = self
+            .session_sync_service
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
         let options = ToolCallRegistryOptions {
             global_db: self.registry_db.as_ref(),
             accounting_db: self.accounting_db.as_deref(),
@@ -64,6 +68,7 @@ impl McpServer {
             .with_profile_identity(self.profile_identity.clone())
             .with_background_cpu(self.background_cpu.clone())
             .with_project_lcm_authority(self.project_lcm_authority.as_deref()),
+            session_sync_service: session_sync_service.as_deref(),
             server_stats,
             code_index_readiness_waiter: self.code_index_readiness_waiter.clone(),
             generation_census_reader: self.generation_census_reader(),

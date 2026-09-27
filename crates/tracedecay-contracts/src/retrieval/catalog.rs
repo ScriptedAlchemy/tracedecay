@@ -1,3 +1,4 @@
+use crate::retrieval::admin_cli_surface::{AdminCliResultV1, AdminCliSurfaceRequestV1};
 use crate::retrieval::admin_project_surface::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use crate::retrieval::hook_runtime_surface::{HookRuntimeResultV1, HookRuntimeSurfaceRequestV1};
 use crate::retrieval::owner_effect_surface::{
@@ -281,6 +282,7 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("project_search"),
     graph_report_spec("project_context"),
     owner_side_effect_spec(ApplicationSurfaceOperation::AdminSync),
+    owner_side_effect_spec(ApplicationSurfaceOperation::AdminCli),
     owner_side_effect_spec(ApplicationSurfaceOperation::AdminProject),
     owner_side_effect_spec(ApplicationSurfaceOperation::HookRuntime),
     git_context_spec("affected"),
@@ -391,6 +393,7 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "project_search"
         | "project_context"
         | "admin_sync"
+        | "admin_cli"
         | "admin_project"
         | "hook_runtime" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
@@ -642,6 +645,9 @@ fn primitive_read_description(operation: &str) -> &'static str {
         "admin_sync" => {
             "Queue the operator's code-index reconcile of the served project and report the scheduler's admission."
         }
+        "admin_cli" => {
+            "Run one first-party CLI profile action: registry, accounting, storage, analytics, or session-sync maintenance."
+        }
         "admin_project" => {
             "Maintain the served project's daemon bookkeeping: its usage counter, registry token accounting, gitignore status, bench report, automatic-fact receipts, and automation scheduler reconcile."
         }
@@ -696,8 +702,9 @@ const fn graph_report_spec(operation: &'static str) -> PrimitiveReadSpec {
 }
 
 /// A read observes cancellation until it answers. A spawned process is killed
-/// when its call is cancelled; binding a server or queueing scheduler work is
-/// not interruptible.
+/// and profile maintenance (a session import) stops when its call is
+/// cancelled; binding a server or queueing scheduler work is not
+/// interruptible.
 fn primitive_cancellation(
     spec: &PrimitiveReadSpec,
 ) -> Result<CancellationContract, ApplicationContractError> {
@@ -707,7 +714,7 @@ fn primitive_cancellation(
             CancellationPoint::BeforeRead,
             CancellationPoint::DuringRead,
         ],
-        Some(EffectClass::SpawnsProcess) => vec![
+        Some(EffectClass::SpawnsProcess | EffectClass::MaintainsProfileState) => vec![
             CancellationPoint::BeforeAdmission,
             CancellationPoint::EffectInFlight,
         ],
@@ -720,7 +727,7 @@ fn primitive_terminal_states(spec: &PrimitiveReadSpec) -> Vec<TerminalState> {
     let mut states = vec![TerminalState::Completed];
     if matches!(
         spec.side_effect.map(|entry| entry.effect),
-        None | Some(EffectClass::SpawnsProcess)
+        None | Some(EffectClass::SpawnsProcess | EffectClass::MaintainsProfileState)
     ) {
         states.push(TerminalState::Cancelled);
     }
@@ -1207,6 +1214,7 @@ fn primitive_executable_schemas(
         ProjectContextResultV1
     );
     add!("admin_sync", AdminSyncSurfaceRequestV1, AdminSyncResultV1);
+    add!("admin_cli", AdminCliSurfaceRequestV1, AdminCliResultV1);
     add!(
         "admin_project",
         AdminProjectSurfaceRequestV1,

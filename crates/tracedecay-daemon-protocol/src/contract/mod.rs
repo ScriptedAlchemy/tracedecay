@@ -1087,6 +1087,7 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::ProjectSearch
             | ApplicationSurfaceOperation::ProjectContext
             | ApplicationSurfaceOperation::AdminSync
+            | ApplicationSurfaceOperation::AdminCli
             | ApplicationSurfaceOperation::AdminProject
             | ApplicationSurfaceOperation::HookRuntime => {
                 unreachable!("graph-tool operations use their typed constructor")

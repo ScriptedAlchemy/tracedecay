@@ -4,24 +4,24 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_project::project::TraceDecay;
 
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
-use tracedecay_contracts::retrieval::{AdminSyncAdmissionV1, AdminSyncResultV1};
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryEmptyV1, AdminCliResultV1, AdminCliSurfaceRequestV1, AdminSyncAdmissionV1,
+    AdminSyncResultV1,
+};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use super::daemon::daemon_tool_json;
+use super::daemon::admin_cli_result;
 
-/// True when the global DB has zero registered projects (or can't be opened
-/// at all), i.e. the user has not run `tracedecay init` anywhere yet.
+/// True when the profile registry has zero registered projects, i.e. the user
+/// has not run `tracedecay init` anywhere yet. An unreadable registry is not
+/// a fresh install: the offer to initialize is only made on a known-empty one.
 async fn is_fresh_install(profile: &ProfileRoot) -> bool {
-    daemon_tool_json(
-        profile,
-        None,
-        "tracedecay_admin_cli",
-        serde_json::json!({ "action": "registry_empty" }),
+    matches!(
+        admin_cli_result(profile, None, AdminCliSurfaceRequestV1::RegistryEmpty {}).await,
+        Ok(AdminCliResultV1::RegistryEmpty(AdminCliRegistryEmptyV1 {
+            empty: true
+        }))
     )
-    .await
-    .ok()
-    .and_then(|value| value.get("empty").and_then(serde_json::Value::as_bool))
-    .unwrap_or(false)
 }
 
 /// When invoked with no subcommand, offer to create the index if none exists.

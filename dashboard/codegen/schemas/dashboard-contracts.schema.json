@@ -11238,8 +11238,8 @@
           "type": "string"
         },
         {
-          "const": "records_host_evidence",
-          "description": "Records a host's session evidence (transcripts, hook admissions,\nreceipts) in daemon-owned session stores.",
+          "const": "maintains_profile_state",
+          "description": "Reads and rewrites the daemon profile's own state: its project\nregistry, accounting ledgers, and session stores. Unlike bookkeeping,\nit includes long work, a registry collection or a transcript import,\nthat a cancelled call stops.",
           "type": "string"
         }
       ]
