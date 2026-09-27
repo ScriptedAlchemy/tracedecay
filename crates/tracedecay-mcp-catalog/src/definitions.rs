@@ -700,7 +700,12 @@ static FORMAT_CAPABLE_TOOL_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(||
     FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES
         .iter()
         .copied()
-        .chain(ApplicationSurfaceOperation::MCP_TOOL_NAMES)
+        .chain(
+            ApplicationSurfaceOperation::ALL
+                .into_iter()
+                .filter(|operation| !operation.is_internal())
+                .map(ApplicationSurfaceOperation::mcp_tool_name),
+        )
         .collect()
 });
 

@@ -24,14 +24,6 @@ macro_rules! application_surface_operations {
                 $(Self::$variant,)+
             ];
 
-            pub const MCP_TOOL_NAMES: [&'static str; [$(stringify!($variant)),+].len()] = [
-                $(
-                    application_surface_operations!(
-                        @mcp_tool_name $catalog_name $(, $mcp_name)?
-                    ),
-                )+
-            ];
-
             pub fn from_catalog_name(name: &str) -> Option<Self> {
                 Self::ALL
                     .into_iter()
