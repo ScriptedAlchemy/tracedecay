@@ -295,7 +295,6 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         &latest
             .text_projection_metadata()
             .expect("restart projection metadata"),
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &UninterruptibleCodeIndexControlV1,
         |completed, total| authentication_progress.push((completed, total)),
     )

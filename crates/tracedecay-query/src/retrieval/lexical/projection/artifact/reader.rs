@@ -447,8 +447,9 @@ impl CodeLexicalArtifactReaderV1 {
     }
 
     /// Restore a publisher-verified immutable artifact with bounded
-    /// authentication progress. The six checks are fixed-cost with respect to
-    /// corpus size; no artifact bytes or section rows are streamed.
+    /// authentication progress under the query cache budget. The six checks
+    /// are fixed-cost with respect to corpus size; no artifact bytes or
+    /// section rows are streamed.
     #[hotpath::measure(label = "query.artifact.open_content_addressed_bounded")]
     pub fn restore_content_addressed_with_progress(
         path: impl AsRef<Path>,
@@ -456,14 +457,12 @@ impl CodeLexicalArtifactReaderV1 {
         expected_file_size_bytes: u64,
         witness: &CodeLexicalArtifactRestoreWitnessV1,
         authority: &super::super::CodeLexicalProjectionMetadataV1,
-        cache_budget_bytes: usize,
         control: &dyn CodeIndexExecutionControlV1,
         mut progress: impl FnMut(u64, u64),
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         const TOTAL_RESTORE_CHECKS: u64 = 6;
         progress(0, TOTAL_RESTORE_CHECKS);
         checkpoint(control)?;
-        validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
         // A durable content address names only a private, no-follow file made
         // by the artifact publisher. Keep that exact handle through the open;
@@ -506,7 +505,12 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
         hotpath::measure_block!("query.artifact.open.head_schema_verify", {
-            configure_reader_window(&connection, cache_budget_bytes, 0, expected_file_size_bytes)?;
+            configure_reader_window(
+                &connection,
+                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                0,
+                expected_file_size_bytes,
+            )?;
             connection
                 .pragma_update(None, "query_only", true)
                 .map_err(sqlite_error)?;
@@ -548,7 +552,7 @@ impl CodeLexicalArtifactReaderV1 {
                 connection,
                 &receipt,
                 authority,
-                cache_budget_bytes,
+                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
                 expected_file_size_bytes,
                 control,
                 ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
@@ -741,7 +745,7 @@ impl CodeLexicalArtifactReaderV1 {
                 "query.artifact.open.section_digest_verify",
                 compute_section_digests(&connection, control)
             )?;
-            if &sections != stored.section_digests() {
+            if sections != stored.section_digests() {
                 return Err(CodeLexicalArtifactErrorV1::Corrupt(
                     "lexical artifact section digests do not verify".to_owned(),
                 ));
@@ -3359,7 +3363,6 @@ mod tests {
             size,
             &witness,
             &opener(),
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
             &AlwaysActiveControl,
             |_, _| {},
         )
@@ -3407,7 +3410,6 @@ mod tests {
             size,
             &witness,
             &opener(),
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
             &AlwaysActiveControl,
             |_, _| {},
         )
@@ -3646,7 +3648,7 @@ mod tests {
         assert!(matches!(
             &error,
             CodeLexicalArtifactErrorV1::Corrupt(message)
-                if message.contains("the durable head names")
+                if message == "artifact file does not match the durable head size"
         ));
     }
 

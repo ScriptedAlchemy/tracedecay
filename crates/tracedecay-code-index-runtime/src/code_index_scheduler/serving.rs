@@ -1789,7 +1789,6 @@ impl LatestCodeTextGenerationV1 {
                     descriptor.artifact_size_bytes,
                     &witness,
                     authority,
-                    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
                     control,
                     self.restore_publisher(&descriptor.artifact_digest),
                 )
