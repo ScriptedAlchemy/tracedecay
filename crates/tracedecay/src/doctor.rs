@@ -90,7 +90,8 @@ impl DoctorTestRuntime {
 #[derive(Clone, Copy)]
 pub struct AdmittedDoctorNetworkProbes {
     pub fetch_worldwide_total: fn() -> Option<u64>,
-    pub fetch_latest_version: fn() -> Option<String>,
+    pub fetch_latest_version:
+        fn() -> Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
 }
 
 /// What a doctor run that found no issue concluded.
@@ -1212,10 +1213,9 @@ fn check_network(
             "Worldwide counter check skipped because canonical configuration is unavailable: {error}"
         )),
     }
-    if (network.fetch_latest_version)().is_some() {
-        dc.pass("GitHub releases API reachable");
-    } else {
-        dc.warn("GitHub releases API unreachable (offline or timeout)");
+    match (network.fetch_latest_version)() {
+        Ok(latest) => dc.pass(&format!("GitHub releases API reachable (latest v{latest})")),
+        Err(error) => dc.warn(&format!("GitHub release lookup failed, {error}")),
     }
 }
 

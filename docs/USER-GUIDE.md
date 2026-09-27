@@ -609,7 +609,8 @@ It verifies:
 - **User config**, `~/.tracedecay/config.toml` and upload settings
 - **Agent integrations**. MCP server registration, hook installation, tool permissions, prompt rules
 - **Network**, the configured worldwide counter and GitHub releases API; each
-  reports its own available or unavailable state
+  reports its own available or unavailable state, and a failed release lookup
+  names its outcome (see [Updating TraceDecay](#updating-tracedecay))
 
 If any tool permissions are missing after an upgrade, Doctor reports the missing
 capability and the supported install/update operation. Doctor only reports
@@ -958,6 +959,21 @@ tracedecay upgrade
 ```
 
 Beta and stable are separate update channels, a beta build only sees beta releases and vice versa. Any attached MCP servers will continue running with the previous binary until you restart your agent.
+
+Release lookups send the same GitHub credential as project reads (`GH_TOKEN`,
+then `gh auth token`, then the git credential helper), which raises GitHub's
+quota from 60 to 5000 requests per hour. When a lookup fails, `upgrade` and
+`doctor` name the outcome and its remedy:
+
+| Outcome | Meaning |
+|---|---|
+| `rate_limited` | GitHub's API quota is exhausted; authenticate, or retry after the reported reset time. |
+| `unauthorized` | GitHub refused the credential; refresh it with `gh auth login` or fix `GH_TOKEN`. |
+| `network_unreachable` | No connection to GitHub (DNS, connect, TLS, or proxy). |
+| `timed_out` | GitHub did not answer in time. |
+| `malformed_response` | GitHub answered with a body that is not release metadata. |
+| `unexpected_status` | GitHub answered with an HTTP status the lookup cannot interpret. |
+| `no_asset_for_platform` | No release on your channel publishes your platform's asset yet; release CI may still be uploading. |
 
 After upgrading, re-run install if the host integration reports a missing
 capability, then inspect the daemon-owned status/coverage:

@@ -5991,6 +5991,7 @@ dependencies = [
  "clru",
  "futures-util",
  "hotpath",
+ "httpdate",
  "schemars",
  "semver",
  "serde",

@@ -22,6 +22,7 @@ use tempfile::TempDir;
 
 use crate::cloud::{self, InstallMethod};
 use crate::macos_codesign::stabilize_installed_executable;
+use tracedecay_dashboard_api::cloud::ReleaseLookupError;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
 use tracedecay_session_memory::user_config::UserConfig;
@@ -108,7 +109,13 @@ struct ReleaseDownload {
 /// Resolves both the platform archive and its checksum manifest from one
 /// GitHub release. An archive without `SHA256SUMS` is not installable.
 #[hotpath::measure(label = "cli.upgrade.fetch_release")]
-fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload> {
+fn fetch_release_download(
+    api_base: &str,
+    authorization: Option<&str>,
+    tag: &str,
+    asset_name: &str,
+    is_beta: bool,
+) -> Result<ReleaseDownload> {
     #[derive(serde::Deserialize)]
     struct Asset {
         name: String,
@@ -120,24 +127,15 @@ fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload
         assets: Vec<Asset>,
     }
 
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{tag}");
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(30)))
-        .build()
-        .into();
-
-    let release: Release = agent
-        .get(&url)
-        .header("User-Agent", "tracedecay")
-        .call()
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to reach GitHub: {e}"),
-        })?
-        .body_mut()
-        .read_json()
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to parse release info: {e}"),
-        })?;
+    let url = format!("{}/tags/{tag}", cloud::releases_url(api_base));
+    let release: Release = cloud::get_release_json(&url, authorization, Duration::from_secs(30))
+        .and_then(|release| {
+            release.ok_or(ReleaseLookupError::NoAssetForPlatform {
+                channel: if is_beta { "beta" } else { "stable" },
+                platform: cloud::current_platform(),
+            })
+        })
+        .map_err(release_lookup_failed)?;
 
     let archive = release
         .assets
@@ -783,18 +781,9 @@ impl PackageManager {
     }
 }
 
-fn latest_upgrade_version(is_beta: bool) -> Result<String> {
-    cloud::fetch_latest_version().ok_or_else(|| github_latest_unavailable_error(is_beta))
-}
-
-fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
-    let channel = if is_beta { "beta" } else { "stable" };
+fn release_lookup_failed(error: ReleaseLookupError) -> TraceDecayError {
     TraceDecayError::Config {
-        message: format!(
-            "failed to check for updates, no installable GitHub release asset is available for \
-             the current platform on the {channel} channel.\n  \
-             GitHub may be reachable, but release CI may still be uploading binaries."
-        ),
+        message: format!("failed to check for updates, {error}"),
     }
 }
 
@@ -809,7 +798,7 @@ fn run_versioned_upgrade(
     is_beta: bool,
 ) -> Result<UpgradeOutcome> {
     eprintln!("Checking GitHub releases...");
-    let latest = latest_upgrade_version(is_beta)?;
+    let latest = cloud::fetch_latest_channel_version(is_beta).map_err(release_lookup_failed)?;
     let latest = match classify_upgrade(current, &latest) {
         UpgradeStatus::AlreadyCurrent => {
             eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
@@ -881,7 +870,13 @@ fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload
     let tag = release_tag(version);
     let asset = asset_name(version, is_beta);
     eprintln!("  Asset: {asset}");
-    fetch_release_download(&tag, &asset)
+    fetch_release_download(
+        cloud::GITHUB_API_URL,
+        cloud::github_authorization().as_deref(),
+        &tag,
+        &asset,
+        is_beta,
+    )
 }
 
 /// Record the *currently running* binary's version in user config just before
@@ -1199,14 +1194,8 @@ fn switch_channel_for(
 
     eprintln!("Switching from {current_channel} to {target_channel}...");
 
-    let latest = if target_is_beta {
-        cloud::fetch_latest_beta_version()
-    } else {
-        cloud::fetch_latest_stable_version()
-    }
-    .ok_or_else(|| TraceDecayError::Config {
-        message: format!("failed to find latest {target_channel} release, could not reach GitHub"),
-    })?;
+    let latest =
+        cloud::fetch_latest_channel_version(target_is_beta).map_err(release_lookup_failed)?;
 
     eprintln!("  Target: v{latest}");
 
