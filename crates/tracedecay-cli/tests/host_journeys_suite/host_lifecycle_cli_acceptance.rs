@@ -19,7 +19,8 @@ mod native_plugin_fixture;
 mod sweep_outcomes;
 #[cfg(unix)]
 use native_plugin_fixture::{
-    install_current_claude_cli, install_current_codex_cli, recorded_claude_invocations,
+    install_current_claude_cli, install_current_codex_cli, install_current_droid_cli,
+    recorded_claude_invocations,
 };
 
 const VERIFY_FAILURE_ENV: &str = "TRACEDECAY_TEST_FAIL_HOST_REGISTRATION_VERIFY";
@@ -1231,6 +1232,161 @@ fn codex_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
         installed_config,
         "re-driving the converged Codex activation rewrote config.toml"
     );
+}
+
+/// Every directory and file under the isolated home, with file bytes, except
+/// the TraceDecay profile that keeps the lifecycle receipts.
+#[cfg(unix)]
+fn home_tree(cli: &IsolatedCli) -> BTreeMap<String, Option<Vec<u8>>> {
+    let mut tree = BTreeMap::new();
+    let mut pending = vec![cli.home.path().to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path == cli.profile {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(cli.home.path())
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if fs::symlink_metadata(&path).unwrap().is_dir() {
+                tree.insert(format!("{relative}/"), None);
+                pending.push(path);
+            } else {
+                tree.insert(relative, Some(fs::read(&path).unwrap()));
+            }
+        }
+    }
+    tree
+}
+
+#[cfg(unix)]
+fn tree_paths(tree: &BTreeMap<String, Option<Vec<u8>>>) -> Vec<&str> {
+    tree.keys().map(String::as_str).collect()
+}
+
+/// Uninstall returns the home to exactly the tree it had before install:
+/// every directory the install created is gone along with its files.
+#[cfg(unix)]
+#[test]
+fn codex_uninstall_restores_the_exact_pre_install_tree() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::Codex);
+    seed_host(case, &cli);
+    install_current_codex_cli(&cli.bin_dir);
+    let before = home_tree(&cli);
+
+    assert_success(
+        case.id,
+        "install",
+        cli.run(&["install", "--agent", case.id]),
+    );
+    let installed = home_tree(&cli);
+    for created in [
+        ".agents/plugins/marketplace.json",
+        ".codex/plugins/cache/personal/",
+        ".codex/plugins/tracedecay/skills/exploring-code/references/",
+    ] {
+        assert!(
+            installed.contains_key(created),
+            "install did not create {created}"
+        );
+    }
+    assert_success(
+        case.id,
+        "uninstall",
+        cli.run(&["uninstall", "--agent", case.id]),
+    );
+
+    let after = home_tree(&cli);
+    assert_eq!(tree_paths(&after), tree_paths(&before));
+    assert_eq!(after, before, "uninstall changed file bytes");
+}
+
+#[cfg(unix)]
+#[test]
+fn droid_uninstall_restores_the_exact_pre_install_tree() {
+    let cli = IsolatedCli::new();
+    let registry = cli.home.path().join(".factory/mcp.json");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(
+        &registry,
+        b"{\n  \"mcpServers\": {\n    \"foreign\": {\n      \"type\": \"stdio\",\n      \"command\": \"foreign-bin\",\n      \"args\": []\n    }\n  }\n}\n",
+    )
+    .unwrap();
+    install_current_droid_cli(&cli.bin_dir);
+    let before = home_tree(&cli);
+
+    assert_success(
+        "droid",
+        "install",
+        cli.run(&["install", "--agent", "droid"]),
+    );
+    let installed = home_tree(&cli);
+    for created in [
+        ".factory/hooks.json",
+        ".factory/tracedecay/",
+        ".factory/tracedecay/core.json",
+    ] {
+        assert!(
+            installed.contains_key(created),
+            "install did not create {created}"
+        );
+    }
+    assert_success(
+        "droid",
+        "uninstall",
+        cli.run(&["uninstall", "--agent", "droid"]),
+    );
+
+    let after = home_tree(&cli);
+    assert_eq!(tree_paths(&after), tree_paths(&before));
+    assert_eq!(after, before, "uninstall changed file bytes");
+}
+
+/// Uninstall removes only directories its install created: a directory that
+/// existed before install stays even once empty, and an install-created
+/// directory that now holds an operator file stays with that file.
+#[cfg(unix)]
+#[test]
+fn uninstall_keeps_preexisting_and_foreign_occupied_directories() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::Codex);
+    seed_host(case, &cli);
+    install_current_codex_cli(&cli.bin_dir);
+    let home = cli.home.path();
+    fs::create_dir_all(home.join(".codex/plugins/tracedecay/hooks")).unwrap();
+    let before = home_tree(&cli);
+
+    assert_success(
+        case.id,
+        "install",
+        cli.run(&["install", "--agent", case.id]),
+    );
+    assert!(
+        home.join(".codex/plugins/tracedecay/hooks/hooks.json")
+            .is_file()
+    );
+    let operator_note = ".codex/plugins/tracedecay/skills/exploring-code/operator-notes.md";
+    fs::write(home.join(operator_note), b"keep me\n").unwrap();
+    assert_success(
+        case.id,
+        "uninstall",
+        cli.run(&["uninstall", "--agent", case.id]),
+    );
+
+    let mut expected = before;
+    expected.insert(".codex/plugins/tracedecay/skills/".to_string(), None);
+    expected.insert(
+        ".codex/plugins/tracedecay/skills/exploring-code/".to_string(),
+        None,
+    );
+    expected.insert(operator_note.to_string(), Some(b"keep me\n".to_vec()));
+    let after = home_tree(&cli);
+    assert_eq!(tree_paths(&after), tree_paths(&expected));
+    assert_eq!(after, expected);
 }
 
 /// Claude's marketplace source is receipt-owned from the first install: the

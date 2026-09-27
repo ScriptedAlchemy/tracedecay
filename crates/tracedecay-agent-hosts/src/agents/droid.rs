@@ -144,7 +144,8 @@ fn install_droid_hooks(hooks_path: &Path, tracedecay_bin: &str) -> Result<bool> 
 }
 
 /// Remove every TraceDecay hook group from the host-owned hooks document and
-/// drop event keys that become empty. Returns true when the document changed.
+/// drop event keys that become empty, removing the file once nothing remains.
+/// Returns true when the document changed.
 fn remove_droid_hooks(hooks_path: &Path) -> Result<bool> {
     update_json_config_transactionally(hooks_path, JsonConfigDialect::Json, |mut config| {
         let Some(object) = config.as_object_mut() else {
@@ -162,7 +163,9 @@ fn remove_droid_hooks(hooks_path: &Path) -> Result<bool> {
                 object.remove(event);
             }
         }
-        if changed {
+        if changed && object.is_empty() {
+            Ok((true, JsonConfigMutation::Remove))
+        } else if changed {
             Ok((true, JsonConfigMutation::Write(config)))
         } else {
             Ok((false, JsonConfigMutation::Unchanged))

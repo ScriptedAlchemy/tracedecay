@@ -188,6 +188,16 @@ pub trait HostComponentSetRegistrationV1 {
         Ok(())
     }
 
+    /// Absolute host paths the registration surface may create or remove.
+    /// Their ancestor directories that the transaction creates become
+    /// receipt-owned, so uninstall can remove them once they are empty.
+    fn registration_paths(
+        &self,
+        _component_set: &HostComponentSetV1,
+    ) -> Result<Vec<PathBuf>, HostBundleError> {
+        Ok(Vec::new())
+    }
+
     fn preflight(
         &mut self,
         _component_set: &HostComponentSetV1,

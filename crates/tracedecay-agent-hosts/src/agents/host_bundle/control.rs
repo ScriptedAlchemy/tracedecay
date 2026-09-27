@@ -178,6 +178,15 @@ pub(super) fn validate_receipt(
             return Err(HostBundleError::ReceiptCorrupted);
         }
     }
+    for directory in &receipt.created_directories {
+        validate_relative_install_path(Path::new(directory))?;
+    }
+    if !receipt
+        .created_directories
+        .is_sorted_by(|left, right| left < right)
+    {
+        return Err(HostBundleError::ReceiptCorrupted);
+    }
     Ok(())
 }
 

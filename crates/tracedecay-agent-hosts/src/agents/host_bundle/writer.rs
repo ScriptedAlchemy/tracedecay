@@ -1,7 +1,7 @@
 //! Atomic, capability-rooted single-component writer with in-memory rollback,
 //! and the no-follow filesystem primitives.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -161,6 +161,20 @@ impl HostBundleWriterV1 {
         let owned_receipt = previous_receipt
             .as_ref()
             .filter(|receipt| receipt.operation != HostBundleLifecycleOpV1::Uninstall);
+        // Observation opens artifact parents, so the directories this
+        // operation will create are captured before anything is observed.
+        let missing_before = self.missing_directories(&ancestor_directories(
+            manifest
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.relative_path.as_str())
+                .chain(
+                    owned_receipt
+                        .into_iter()
+                        .flat_map(|receipt| &receipt.artifacts)
+                        .map(|owned| owned.relative_path.as_str()),
+                ),
+        ));
         let manifest_observed = if request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall
         {
             Vec::new()
@@ -204,8 +218,18 @@ impl HostBundleWriterV1 {
             Ok(())
         });
         if let Err(error) = applied {
-            return Err(self.undo_after_failure(error, &undo));
+            return Err(self.undo_after_failure(error, &undo, &missing_before));
         }
+        let mut recorded = self.created_directories(&missing_before);
+        recorded.extend(
+            previous_receipt
+                .iter()
+                .flat_map(|receipt| receipt.created_directories.iter().cloned()),
+        );
+        let created_directories = match self.prune_created_directories(&recorded) {
+            Ok(kept) => kept.into_iter().collect(),
+            Err(error) => return Err(self.undo_after_failure(error, &undo, &missing_before)),
+        };
 
         let receipt = HostBundleInstallReceiptV1 {
             schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
@@ -227,9 +251,10 @@ impl HostBundleWriterV1 {
                     })
                     .collect()
             },
+            created_directories,
         };
         if let Err(error) = self.write_receipt(&receipt) {
-            return Err(self.undo_after_failure(error, &undo));
+            return Err(self.undo_after_failure(error, &undo, &missing_before));
         }
         Ok(receipt)
     }
@@ -318,9 +343,16 @@ impl HostBundleWriterV1 {
         conflict.map_or(Ok(()), Err)
     }
 
-    fn undo_after_failure(&self, error: HostBundleError, undo: &[ArtifactUndo]) -> HostBundleError {
-        match self.undo_artifact_mutations(undo) {
-            Ok(()) => error,
+    fn undo_after_failure(
+        &self,
+        error: HostBundleError,
+        undo: &[ArtifactUndo],
+        missing_before: &BTreeSet<String>,
+    ) -> HostBundleError {
+        match self.undo_artifact_mutations(undo).and_then(|()| {
+            self.prune_created_directories(&self.created_directories(missing_before))
+        }) {
+            Ok(_) => error,
             Err(undo_error) => undo_error,
         }
     }
@@ -453,6 +485,120 @@ impl HostBundleWriterV1 {
                 .ok_or(HostBundleError::UnsafeInstallPath)?
                 .to_owned(),
         ))
+    }
+
+    /// The candidate directories that do not exist yet. Only a definite
+    /// `NotFound` counts: a directory this writer cannot observe is never
+    /// claimed, so it can never be removed later.
+    pub(super) fn missing_directories(&self, candidates: &BTreeSet<String>) -> BTreeSet<String> {
+        candidates
+            .iter()
+            .filter(|directory| {
+                self.root
+                    .symlink_metadata(directory.as_str())
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The previously missing directories that now exist as real directories:
+    /// the ones this operation created.
+    pub(super) fn created_directories(
+        &self,
+        missing_before: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        missing_before
+            .iter()
+            .filter(|directory| {
+                self.root
+                    .symlink_metadata(directory.as_str())
+                    .is_ok_and(|metadata| metadata.is_dir())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Remove every recorded directory that is now empty, children before
+    /// parents, and return the recorded directories that still exist. A
+    /// directory holding anything, or replaced by a non-directory, is kept or
+    /// released; nothing is ever removed recursively.
+    pub(super) fn prune_created_directories(
+        &self,
+        recorded: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, HostBundleError> {
+        let mut kept = BTreeSet::new();
+        // A child path always sorts after its parent, so reverse order
+        // empties children first.
+        for directory in recorded.iter().rev() {
+            let relative = Path::new(directory);
+            validate_relative_install_path(relative)?;
+            let (Some(parent), Some(name)) = (
+                relative.parent(),
+                relative.file_name().and_then(|name| name.to_str()),
+            ) else {
+                return Err(HostBundleError::UnsafeInstallPath);
+            };
+            let Some(parent) = self.open_existing_dir_nofollow(parent)? else {
+                continue;
+            };
+            match parent.symlink_metadata(name) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(host_bundle_storage_failure!()),
+            }
+            match parent.remove_dir(name) {
+                Ok(()) => sync_cap_dir(&parent)?,
+                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
+                    kept.insert(directory.clone());
+                }
+                Err(_) => return Err(host_bundle_storage_failure!()),
+            }
+        }
+        Ok(kept)
+    }
+
+    /// Open an existing directory below the root without following a symlink
+    /// at any component; `None` when a component is missing or is not a real
+    /// directory.
+    fn open_existing_dir_nofollow(&self, relative: &Path) -> Result<Option<Dir>, HostBundleError> {
+        let mut directory = self
+            .root
+            .open_dir_nofollow(".")
+            .map_err(|_| HostBundleError::UnsafeInstallPath)?;
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(HostBundleError::UnsafeInstallPath);
+            };
+            match directory.symlink_metadata(name) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(_) => return Err(host_bundle_storage_failure!()),
+            }
+            directory = directory
+                .open_dir_nofollow(name)
+                .map_err(|_| host_bundle_storage_failure!())?;
+        }
+        Ok(Some(directory))
+    }
+
+    /// Install-root-relative form of an absolute host path, when it lies
+    /// below this writer's root and is a valid install path.
+    pub(super) fn root_relative(&self, path: &Path) -> Option<String> {
+        let relative = path.strip_prefix(&self.root_path).ok()?;
+        let components = relative
+            .components()
+            .map(|component| match component {
+                Component::Normal(name) => name.to_str(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let relative = components.join("/");
+        validate_relative_install_path(Path::new(&relative))
+            .is_ok()
+            .then_some(relative)
     }
 
     pub(super) fn load_receipt(
@@ -599,6 +745,23 @@ impl HostBundleLifecycleStorageV1 for HostBundleWriterV1 {
     ) -> Result<HostBundleInstallReceiptV1, HostBundleError> {
         self.execute(manifest, request, contents, verifier)
     }
+}
+
+/// Every strict ancestor directory of each root-relative path.
+pub(super) fn ancestor_directories<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<String> {
+    let mut directories = BTreeSet::new();
+    for path in paths {
+        let mut ancestor = path.rsplit_once('/').map(|(parent, _)| parent);
+        while let Some(directory) = ancestor.filter(|directory| !directory.is_empty()) {
+            if !directories.insert(directory.to_owned()) {
+                break;
+            }
+            ancestor = directory.rsplit_once('/').map(|(parent, _)| parent);
+        }
+    }
+    directories
 }
 
 fn validate_artifact_contents(
