@@ -1235,6 +1235,18 @@ impl CodeLexicalArtifactBuilderV1 {
         page_batch_ledger_charge_bytes(&self.metadata, pages)
     }
 
+    /// Exact memory charge used to admit already-prepared pages, including
+    /// the fixed builder ledger and both posting insertion plans.
+    pub fn prepared_batch_ledger_charge_bytes(
+        &self,
+        pages: &[PreparedCodeLexicalArtifactPageV1],
+    ) -> Result<usize, CodeLexicalArtifactErrorV1> {
+        prepared_batch_memory_with_posting_plans_required_bytes(
+            self.fixed_ledger_charge_bytes,
+            pages,
+        )
+    }
+
     /// Return the largest contiguous input prefix whose complete retained,
     /// prepared-output, and active-worker scratch claims fit the memory
     /// authority. Exact prepared-row and SQLite-write prefix selection occurs
