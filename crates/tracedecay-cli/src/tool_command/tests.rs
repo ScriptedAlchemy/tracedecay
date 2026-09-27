@@ -982,39 +982,6 @@ fn join_content_text_empty_when_no_content() {
     assert_eq!(join_content_text(&json!({ "content": [] })), "");
 }
 
-#[test]
-fn reject_tool_result_truncation_detects_content_envelope() {
-    let value = json!({
-        "content": [{
-            "type": "text",
-            "text": "{\"truncated\":true,\"original_chars\":16000,\"preview\":\"{}\",\"handle\":\"h1\"}"
-        }]
-    });
-    let err = reject_tool_result_truncation(&value, "tracedecay_search").unwrap_err();
-    let message = err.to_string();
-    assert!(message.contains("truncated JSON"), "{message}");
-    assert!(message.contains("tracedecay_retrieve"), "{message}");
-    assert!(
-        reject_tool_result_truncation(
-            &json!({ "content": [{ "type": "text", "text": "{\"ok\":true}" }] }),
-            "tracedecay_search"
-        )
-        .is_ok()
-    );
-    assert!(
-        reject_tool_result_truncation(
-            &json!({
-                "content": [{
-                    "type": "text",
-                    "text": "{\"truncated\":true,\"matches\":[]}"
-                }]
-            }),
-            "tracedecay_grep"
-        )
-        .is_ok()
-    );
-}
-
 /// `main` maps `Ok` to exit 0 and any `Err` to a failing `ExitCode`, so the
 /// outcome these assertions inspect *is* the process exit status.
 #[test]

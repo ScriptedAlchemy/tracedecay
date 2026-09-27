@@ -6,12 +6,6 @@
 
 pub(crate) mod handlers;
 
-use std::collections::HashSet;
-use std::sync::LazyLock;
-
-use tracedecay_mcp::get_tool_definitions;
-use tracedecay_mcp::tools::dispatch::McpDispatchMetadataError;
-
 pub use handlers::{
     GraphToolOutcome, RetainedSurfaceExecution, ToolCallRegistryOptions,
     execute_graph_tool_surface, execute_retained_surface_tool, execute_work_tool_surface,
@@ -20,32 +14,3 @@ pub use handlers::{
     run_retained_surface_tool,
 };
 pub(crate) use handlers::{compute_graph_tool_for_owner, graph_tool_error_problem};
-
-/// Explicit owner for advertised tools awaiting typed application contracts.
-///
-/// These tools retain their existing root handlers, but they are no longer an
-/// unclassified dispatch fallback: definition admission is mandatory, and any
-/// application-catalog binding is resolved before this owner is entered.
-pub struct LegacyToolCompatibilityOwner;
-
-impl LegacyToolCompatibilityOwner {
-    pub fn admits(tool_name: &str) -> std::result::Result<bool, McpDispatchMetadataError> {
-        // Every dispatched compatibility tool call asks this, and rebuilding
-        // the full schema catalog per call was the dominant per-dispatch cost.
-        // The advertised name set is process-stable: the definitions are
-        // static and the only host gate (`ast_grep_available`) is resolved
-        // once per process, so membership is answered from a cached set.
-        static ADVERTISED_TOOL_NAMES: LazyLock<std::result::Result<HashSet<String>, String>> =
-            LazyLock::new(|| {
-                Ok(get_tool_definitions()
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .map(|definition| definition.name)
-                    .collect())
-            });
-        match &*ADVERTISED_TOOL_NAMES {
-            Ok(names) => Ok(names.contains(tool_name)),
-            Err(error) => Err(McpDispatchMetadataError::Initialization(error.clone())),
-        }
-    }
-}
