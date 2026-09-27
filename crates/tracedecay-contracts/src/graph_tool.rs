@@ -17,9 +17,9 @@ use crate::retrieval::{
     GrepSearchResultV1, HealthResultV1, HermesSkillBridgeResultV1, HotspotsResultV1,
     ImpactResultV1, InheritanceDepthResultV1, LargestResultV1, NodeResultV1, PortOrderResultV1,
     PortStatusResultV1, PrContextResultV1, RankResultV1, RecursionResultV1, RedundancyResultV1,
-    RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, SignatureResultV1, SimilarResultV1,
-    SkillListResultV1, SkillViewResultV1, TestMapResultV1, TestRiskResultV1, TodosResultV1,
-    UnmountedFilesResultV1, UnsafePatternsResultV1,
+    RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, SearchResultV1, SignatureResultV1,
+    SimilarResultV1, SkillListResultV1, SkillViewResultV1, TestMapResultV1, TestRiskResultV1,
+    TodosResultV1, UnmountedFilesResultV1, UnsafePatternsResultV1,
 };
 
 /// One graph read's typed result, tagged by its operation.
@@ -82,6 +82,7 @@ pub enum GraphToolResultV1 {
     SkillView(Box<SkillViewResultV1>),
     HermesSkillBridge(Box<HermesSkillBridgeResultV1>),
     Analytics(Box<AnalyticsResultV1>),
+    Search(Box<SearchResultV1>),
 }
 
 impl GraphToolResultV1 {
@@ -150,6 +151,7 @@ impl GraphToolResultV1 {
             Operation::SkillView => Self::SkillView(serde_json::from_value(value)?),
             Operation::HermesSkillBridge => Self::HermesSkillBridge(serde_json::from_value(value)?),
             Operation::Analytics => Self::Analytics(serde_json::from_value(value)?),
+            Operation::Search => Self::Search(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -218,6 +220,7 @@ impl GraphToolResultV1 {
             Self::SkillView(result) => serde_json::to_value(result),
             Self::HermesSkillBridge(result) => serde_json::to_value(result),
             Self::Analytics(result) => serde_json::to_value(result),
+            Self::Search(result) => serde_json::to_value(result),
         }
     }
 }

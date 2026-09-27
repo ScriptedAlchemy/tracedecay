@@ -17,7 +17,14 @@ use crate::tools::render;
 /// than treated as "start from the beginning", which would silently restart
 /// a page walk instead of reporting the tampered envelope.
 pub fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
-    let Some(encoded) = args.get("cursor").and_then(Value::as_str) else {
+    decode_retrieval_cursor(args.get("cursor").and_then(Value::as_str))
+}
+
+/// Decodes and validates one encoded authenticated retrieval continuation.
+pub fn decode_retrieval_cursor(
+    encoded: Option<&str>,
+) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
+    let Some(encoded) = encoded else {
         return Ok(None);
     };
     if encoded.len() > 4_096 {

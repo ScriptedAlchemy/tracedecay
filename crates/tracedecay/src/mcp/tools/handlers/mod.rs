@@ -165,8 +165,8 @@ use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use super::LegacyToolCompatibilityOwner;
 use dispatch_groups::{
-    dispatch_admin_tools, dispatch_application_surface_tools, dispatch_graph_tools,
-    dispatch_health_tools, dispatch_info_tools, dispatch_session_workflow_tools,
+    dispatch_admin_tools, dispatch_application_surface_tools, dispatch_health_tools,
+    dispatch_info_tools, dispatch_session_workflow_tools,
 };
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
@@ -517,7 +517,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 "registered project selection was not resolved before handler dispatch",
             ));
         }
-        let selected_scope_prefix = scope_prefix;
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks.
         let dispatch_group = classify_mcp_tool_dispatch_group(tool_name);
@@ -609,16 +608,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
         let served_code_graph = options.served_code_graph.clone();
         let dispatched = async {
             match dispatch_group {
-                Some(McpToolDispatchGroup::Graph) => {
-                    boxed_send(dispatch_graph_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        selected_scope_prefix,
-                        options,
-                    ))
-                    .await
-                }
                 Some(McpToolDispatchGroup::Info) => {
                     boxed_send(dispatch_info_tools(
                         tool_name,

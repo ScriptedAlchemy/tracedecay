@@ -147,7 +147,7 @@ async fn tracedecay_search_preserves_lexical_results_when_graph_admission_is_mis
     let mut options = lexical_search_options(&cg);
     options.verified_graph_query_port = None;
 
-    let result = handle_tool_call_with_registry_options(
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({
@@ -155,8 +155,6 @@ async fn tracedecay_search_preserves_lexical_results_when_graph_admission_is_mis
             "limit": 5,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -210,7 +208,7 @@ async fn tracedecay_search_refuses_foreign_generation_graph_evidence_without_era
     .await
     .expect("registered mismatch fixture");
 
-    let result = handle_tool_call_with_registry_options(
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({
@@ -218,8 +216,6 @@ async fn tracedecay_search_refuses_foreign_generation_graph_evidence_without_era
             "limit": 5,
             "format": "json",
         }),
-        None,
-        None,
         lexical_search_options(&cg),
     )
     .await
@@ -272,7 +268,7 @@ async fn tracedecay_search_does_not_wait_for_slow_graph_admission() {
     options.verified_graph_query_port = Some(Arc::new(PendingVerifiedGraphQueryPort));
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        handle_tool_call_with_registry_options(
+        crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
             &cg,
             "tracedecay_search",
             json!({
@@ -280,8 +276,6 @@ async fn tracedecay_search_does_not_wait_for_slow_graph_admission() {
                 "limit": 1,
                 "format": "json",
             }),
-            None,
-            None,
             options,
         ),
     )
@@ -318,7 +312,7 @@ async fn tracedecay_search_does_not_wait_for_slow_graph_admission() {
     markdown_options.verified_graph_query_port = Some(Arc::new(PendingVerifiedGraphQueryPort));
     let markdown = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        handle_tool_call_with_registry_options(
+        crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
             &cg,
             "tracedecay_search",
             json!({
@@ -326,8 +320,6 @@ async fn tracedecay_search_does_not_wait_for_slow_graph_admission() {
                 "limit": 1,
                 "format": "markdown",
             }),
-            None,
-            None,
             markdown_options,
         ),
     )

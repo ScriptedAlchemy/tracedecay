@@ -164,7 +164,8 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::SkillList
         | ApplicationSurfaceOperation::SkillView
         | ApplicationSurfaceOperation::HermesSkillBridge
-        | ApplicationSurfaceOperation::Analytics) => {
+        | ApplicationSurfaceOperation::Analytics
+        | ApplicationSurfaceOperation::Search) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList

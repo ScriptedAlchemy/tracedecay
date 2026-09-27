@@ -29,7 +29,7 @@ fn search_displays(payload: &Value) -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn search_returns_the_named_symbol_and_rejects_a_missing_query() {
+async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed_request() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("search fixture sources");
         fs::write(project.join("src/ledger.rs"), LEDGER_SOURCE).expect("write ledger source");
@@ -40,21 +40,48 @@ async fn search_returns_the_named_symbol_and_rejects_a_missing_query() {
         .server(&fixture.project_root)
         .expect("production search server");
 
+    let refusal = |detail: &str| {
+        json!({
+            "code": -32603,
+            "message": format!("tool execution failed: config error: invalid arguments for tracedecay_search: {detail}"),
+            "data": {
+                "tool": "tracedecay_search",
+                "cli_fallback": "This tool is also available from the shell: `tracedecay tool search ...` (`tracedecay tool search --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
+            },
+        })
+    };
     let missing = handle_real_server_tool_call_raw(&server, "tracedecay_search", json!({})).await;
-    assert_eq!(missing["error"]["code"], -32602, "{missing}");
     assert_eq!(
-        missing["error"]["message"], "missing required parameter: query",
+        missing["error"],
+        refusal("missing field `query`"),
         "{missing}"
     );
+    // Arguments outside the typed request are refused, not silently ignored.
+    let unknown = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_search",
+        json!({"query": "ledger_post_entry", "semantic_mode": "hybrid"}),
+    )
+    .await;
     assert_eq!(
-        missing["error"]["data"],
-        json!({
-            "tool": "tracedecay_search",
-            "reason_code": "missing_required_parameter",
-            "retryable": false,
-            "detail": "missing required parameter: query",
-        }),
-        "{missing}"
+        unknown["error"],
+        refusal(
+            "unknown field `semantic_mode`, expected one of `query`, `limit`, `cursor`, \
+             `lexical_anchors`, `prefer_symbol`, `lexical_aliases`, `lexical_phrases`, \
+             `lexical_proximities`, `lexical_field_filters`, `lazy_index_ignored_dependencies`"
+        ),
+        "{unknown}"
+    );
+    let untyped_limit = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_search",
+        json!({"query": "ledger_post_entry", "limit": "5"}),
+    )
+    .await;
+    assert_eq!(
+        untyped_limit["error"],
+        refusal("invalid type: string \"5\", expected u64"),
+        "{untyped_limit}"
     );
 
     warm_code_index_search(&server, "ledger_post_entry").await;

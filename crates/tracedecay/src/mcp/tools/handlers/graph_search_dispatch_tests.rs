@@ -160,7 +160,7 @@ async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
         });
     let options = search_test_options(&cg, executor);
 
-    let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({
@@ -168,8 +168,6 @@ async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
             "limit": 5,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -230,7 +228,7 @@ async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case() 
         });
     let options = search_test_options(&cg, executor);
 
-    let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({
@@ -238,8 +236,6 @@ async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case() 
             "limit": 5,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -365,12 +361,10 @@ async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
         )),
         ..search_test_options(&cg, executor.clone())
     };
-    let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({"query": "SparseLexicalWidget", "limit": 5}),
-        None,
-        None,
         settled,
     )
     .await
@@ -390,12 +384,10 @@ async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
         )),
         ..search_test_options(&cg, executor.clone())
     };
-    let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({"query": "SparseLexicalWidget", "limit": 5, "format": "json"}),
-        None,
-        None,
         rebuilding,
     )
     .await
@@ -412,12 +404,10 @@ async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
     );
     assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
 
-    let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({"query": "SparseLexicalWidget", "limit": 5}),
-        None,
-        None,
         crate::mcp::tools::handlers::ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(
                 Some("generation.mcp-verified-graph-fixture.1"),
@@ -478,7 +468,7 @@ async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
         )),
         ..search_test_options(&cg, executor.clone())
     };
-    let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({
@@ -487,8 +477,6 @@ async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
             "prefer_symbol": true,
             "limit": 5,
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -510,7 +498,7 @@ async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
         "{text}"
     );
 
-    let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({
@@ -518,8 +506,6 @@ async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
             "lexical_anchors": ["SparseLexicalWidget"],
             "format": "json",
         }),
-        None,
-        None,
         search_test_options(&cg, executor.clone()),
     )
     .await
@@ -541,23 +527,19 @@ async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
     let too_many: Vec<String> = (0..=tracedecay_query::retrieval::lexical::MAX_LEXICAL_ANCHORS_V1)
         .map(|index| format!("anchor_{index}"))
         .collect();
-    let error = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+    let error = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({"query": "sparse widget", "lexical_anchors": too_many}),
-        None,
-        None,
         search_test_options(&cg, executor.clone()),
     )
     .await
     .expect_err("anchor bounds are enforced before any lane runs");
     assert!(error.to_string().contains("at most 8 anchors"), "{error}");
-    let error = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+    let error = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({"query": "sparse widget", "lexical_anchors": [""]}),
-        None,
-        None,
         search_test_options(&cg, executor),
     )
     .await

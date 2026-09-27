@@ -940,7 +940,8 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::SkillList
         | ApplicationSurfaceOperation::SkillView
         | ApplicationSurfaceOperation::HermesSkillBridge
-        | ApplicationSurfaceOperation::Analytics => match value {
+        | ApplicationSurfaceOperation::Analytics
+        | ApplicationSurfaceOperation::Search => match value {
             Value::Object(arguments) => Ok(ApplicationSurfaceRequest::GraphTool(arguments)),
             _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(
                 "invalid arguments: {} expects a JSON object",

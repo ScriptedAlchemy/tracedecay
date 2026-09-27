@@ -308,12 +308,16 @@ async fn open_search_server(
     )
     .await
     .expect("mcp host graph");
-    let server = McpServer::new_with_context(
-        McpServerConstructionContext::direct(cg, None)
-            .with_code_index_search_executor(executor)
-            .with_code_index_search_authority(authority),
-    )
-    .await;
+    // Search is answered by the project's graph-tool owner, so the server
+    // mounts the daemon invocation service in process, as project open does.
+    let server =
+        crate::daemon::retained_test_support::mcp_server_with_project_retained_owner_for_test(
+            McpServerConstructionContext::direct(cg, None)
+                .with_code_index_search_executor(executor)
+                .with_code_index_search_authority(authority),
+        )
+        .await
+        .expect("graph-tool owner MCP server");
     HeldServer {
         server,
         _profile: profile,

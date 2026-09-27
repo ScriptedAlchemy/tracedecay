@@ -1805,12 +1805,10 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     .await
     .unwrap();
 
-    let stale = handle_tool_call_with_registry_options(
+    let stale = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({ "query": "probe" }),
-        None,
-        None,
         verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
     )
     .await
@@ -1829,16 +1827,15 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
         "a rebuild-in-flight serve must state the seat age and the rebuild: {rendered}",
     );
 
-    let unverified = handle_tool_call_with_registry_options(
-        &cg,
-        "tracedecay_search",
-        json!({ "query": "probe" }),
-        None,
-        None,
-        verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
-    )
-    .await
-    .expect("an unverified stale serve still answers");
+    let unverified =
+        crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+            &cg,
+            "tracedecay_search",
+            json!({ "query": "probe" }),
+            verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
+        )
+        .await
+        .expect("an unverified stale serve still answers");
     let rendered = serde_json::to_string(&unverified.value).unwrap();
     assert!(
         rendered.contains("source freshness remains unverified"),
@@ -1849,12 +1846,10 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
         "an unverified route must not present itself as a rebuild: {rendered}",
     );
 
-    let current = handle_tool_call_with_registry_options(
+    let current = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
         "tracedecay_search",
         json!({ "query": "probe" }),
-        None,
-        None,
         verified_graph_options(&cg, ToolCallRegistryOptions::default()),
     )
     .await
