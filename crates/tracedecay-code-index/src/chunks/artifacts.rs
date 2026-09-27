@@ -10,7 +10,7 @@ use tracedecay_code_extraction::{
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, EdgeKind, FileOccurrenceId, ManifestDigest,
-    RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
+    RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId, UnmodeledImportShapeV1,
 };
 
 use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key, symbol_occurrence_id};
@@ -155,6 +155,10 @@ pub struct CodeIndexUnresolvedReferenceV1 {
     /// Extraction-attested reference token span when the parser coordinates
     /// identify it; otherwise the referencing symbol's enclosing span.
     pub evidence_span: SourceSpan,
+    /// The import shape the extractor could not model for this call site.
+    /// While the reference stays unbound it is a disclosed caller gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmodeled_import: Option<UnmodeledImportShapeV1>,
 }
 
 impl CodeIndexUnresolvedReferenceV1 {

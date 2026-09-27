@@ -216,6 +216,7 @@ application_surface_operations! {
     SkillView => "skill_view";
     HermesSkillBridge => "hermes_skill_bridge";
     Analytics => "analytics";
+    Search => "search";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -342,6 +343,7 @@ impl ApplicationSurfaceOperation {
         Self::SkillView,
         Self::HermesSkillBridge,
         Self::Analytics,
+        Self::Search,
     ];
 
     pub fn is_graph_tool(self) -> bool {

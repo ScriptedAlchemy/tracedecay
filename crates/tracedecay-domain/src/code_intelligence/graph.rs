@@ -278,6 +278,31 @@ pub struct UnresolvedRef {
     pub line: u32,
     pub column: u32,
     pub file_path: String,
+    /// The import shape this call site sits under when the extractor could
+    /// not model its binding exactly; the resolver keeps such a site as a
+    /// disclosed gap while it stays unbound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmodeled_import: Option<UnmodeledImportShapeV1>,
+}
+
+/// A `use` whose binding the extractor cannot decide from one file: a glob
+/// names every public item of a module the file cannot see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnmodeledImportShapeV1 {
+    /// A glob `use` declared in a block.
+    BlockGlob,
+    /// A glob `use` declared in an inline `mod` body.
+    InlineModuleGlob,
+}
+
+impl UnmodeledImportShapeV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BlockGlob => "block_glob",
+            Self::InlineModuleGlob => "inline_module_glob",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

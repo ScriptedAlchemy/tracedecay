@@ -71,6 +71,7 @@ pub(crate) fn emit_annotation_usage<S: AnnotationEmitterState>(
         line: start_line,
         column: start_column,
         file_path: state.file_path().to_string(),
+        unmodeled_import: None,
     });
 
     state.push_edge(Edge {

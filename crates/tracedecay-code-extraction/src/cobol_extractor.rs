@@ -503,6 +503,7 @@ impl CobolExtractor {
                             line: node.start_position().row as u32,
                             column: node.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                     }
                 }
@@ -529,6 +530,7 @@ impl CobolExtractor {
                                     line: node.start_position().row as u32,
                                     column: node.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
                             }
                         }

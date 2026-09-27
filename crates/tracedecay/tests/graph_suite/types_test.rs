@@ -90,6 +90,7 @@ fn extraction_result_sanitize_no_empty_names() {
         line: 1,
         column: 0,
         file_path: "src/lib.rs".to_string(),
+        unmodeled_import: None,
     };
 
     let mut result = ExtractionResult {

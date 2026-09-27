@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1031,5 +1032,30 @@ fn psi_some_avg10_reads_the_memory_stall_share() {
     assert_eq!(
         super::psi_some_avg10_v1("full avg10=4.00 avg60=1.00\n"),
         None
+    );
+}
+
+thread_local! {
+    static INSTALLED_RELEASES: Cell<usize> = const { Cell::new(0) };
+}
+
+fn count_installed_release() {
+    INSTALLED_RELEASES.with(|count| count.set(count.get() + 1));
+}
+
+/// The allocator the composition root installed is the one released: a
+/// mimalloc daemon asked glibc's `malloc_trim`, which returns nothing from
+/// mimalloc's pages. Installation happens once; a second is refused.
+#[test]
+fn allocator_release_runs_the_installed_allocator_release() {
+    super::install_process_allocator_release_v1(count_installed_release)
+        .expect("first installation");
+    let before = INSTALLED_RELEASES.with(Cell::get);
+    let trim = super::release_process_allocator_memory_v1();
+    assert_eq!(INSTALLED_RELEASES.with(Cell::get), before + 1);
+    assert!(trim.trimmed);
+    assert_eq!(
+        super::install_process_allocator_release_v1(count_installed_release),
+        Err("the process allocator release is already installed".to_owned())
     );
 }

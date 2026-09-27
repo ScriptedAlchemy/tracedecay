@@ -2077,17 +2077,6 @@ mod store_runtime_event_level_tests {
     }
 }
 
-pub fn release_process_allocator_memory() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        // SAFETY: `malloc_trim` is a process-wide, thread-safe glibc allocator
-        // maintenance operation. It does not invalidate live allocations.
-        unsafe {
-            libc::malloc_trim(0);
-        }
-    }
-}
-
 impl DaemonSessionRuntimeRegistryV1 {
     pub fn profile_id(&self) -> &tracedecay_domain::configuration::UserProfileId {
         self.identity.profile_id()

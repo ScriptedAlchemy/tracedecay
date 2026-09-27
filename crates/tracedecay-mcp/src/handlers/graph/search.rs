@@ -1,48 +1,31 @@
-//! Graph leftover handlers that read the admitted project/request authorities:
-//! `search`, `context`, `similar`, `find_exact_symbol`, `rename_preview`.
+//! `tracedecay_search`: exact and lexical code search over the served code
+//! generation.
+//!
+//! The graph-tool owner decodes the typed request and computes the typed
+//! result; every surface renders that result through [`render_search`].
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 
-use serde_json::{Value, json};
-use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use serde_json::Value;
+use tracedecay_contracts::ApplicationProblemDetailV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextResultV1,
-    ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1,
-    FindExactSymbolMatchV1, FindExactSymbolResultV1, FindExactSymbolSurfaceRequestV1,
-    LexicalAnchorDropReasonV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
-    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
-    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
-    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
-    SimilarSurfaceRequestV1, SimilarTargetV1,
+    PrimitiveLaneCompleteV1, PrimitiveRecallV1, PrimitiveSearchFreshnessV1,
+    PrimitiveUnavailableStatusV1, SearchCompleteV1, SearchCoverageV1, SearchLaneStateV1,
+    SearchLaneStatusV1, SearchResultDisplayV1, SearchResultRowV1, SearchResultV1,
+    SearchSurfaceRequestV1, SearchUnavailableV1,
 };
-use tracedecay_contracts::{ApplicationProblemDetailV1, InvocationAnalyticsV1};
-use tracedecay_domain::ExactClass;
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_query::retrieval::lexical::LexicalAnchorOutcomeV1;
-#[cfg(test)]
-use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
+use tracedecay_domain::errors::Result;
+use tracedecay_query::code_search::{CodeIndexLaneStatusV1, CodeIndexSearchCoverageV1};
 
-#[cfg(test)]
-use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
 use crate::handlers::dependency_hints;
 use crate::handlers::support::{
-    decode_primitive_request, rendered_tool_result as support_rendered, retrieval_cursor,
-    unique_file_paths,
+    decode_primitive_request, decode_retrieval_cursor, rendered_tool_result, unique_file_paths,
 };
 use crate::tools::render::{self, Md};
 use crate::{McpToolContext, ToolResult};
 
-use super::context_markdown::verified_plan_context;
-use super::context_support::{
-    ContextMemoryOutcome, context_memory_analytics, context_memory_options, context_memory_outcome,
-    context_memory_read_control, context_memory_stage,
-};
-use super::primitive_surface::{
-    search_coverage as primitive_search_coverage, symbol_location as primitive_symbol_location,
-};
 use super::search_evidence::{
     SearchGraphEvidence, bind_verified_graph_to_search, race_primary_search_with_graph,
 };
@@ -50,17 +33,10 @@ use super::search_freshness::{
     ServedGenerationV1, freshness_lines, search_freshness, worktree_freshness_from_payload,
 };
 use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
-use super::{
-    graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
-    graph_tool_completion, line_for_byte_offset, node_not_found_result, required_graph_file_path,
-    required_graph_metadata, single_graph_adjacency_batch, user_line,
-};
+use super::{graph_occurrence_id, graph_tool_completion};
 use super::{lexical_routing, search_evidence};
 
-#[cfg(test)]
-use super::context_support::{context_markdown_lane_preview, context_memory_section};
-
-async fn execute_code_index_search(
+pub(super) async fn execute_code_index_search(
     executor: Option<&tracedecay_query::code_search::CodeIndexSearchExecutor>,
     request: tracedecay_query::code_search::CodeIndexSearchRequestV1,
 ) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
@@ -97,64 +73,47 @@ fn preserve_complete_search_after_lazy_admission(result: Result<()>) -> Result<(
     }
 }
 
-/// Renders the per-lane recall marker so a caller can tell a full-recall
-/// answer from one produced while a lane was down. Emitted on every search
-/// response, including the successful ones, because "no matches" and "the
-/// matching lane was not running" are otherwise indistinguishable.
-fn coverage_value(coverage: &tracedecay_query::code_search::CodeIndexSearchCoverageV1) -> Value {
-    fn lane(status: &tracedecay_query::code_search::CodeIndexLaneStatusV1) -> Value {
+/// The per-lane recall marker every search response carries, so "no
+/// matches" is told apart from "the matching lane was not running".
+fn search_coverage(coverage: &CodeIndexSearchCoverageV1) -> SearchCoverageV1 {
+    fn lane(status: &CodeIndexLaneStatusV1) -> SearchLaneStatusV1 {
         match status {
-            tracedecay_query::code_search::CodeIndexLaneStatusV1::Complete => json!("complete"),
-            tracedecay_query::code_search::CodeIndexLaneStatusV1::Stale { generation } => json!({
-                "status": "stale",
-                "generation": generation,
-            }),
-            tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial {
-                generation,
-                reason,
-            } => {
-                json!({
-                    "status": "partial",
-                    "generation": generation,
-                    "reason": reason,
+            CodeIndexLaneStatusV1::Complete => {
+                SearchLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete)
+            }
+            CodeIndexLaneStatusV1::Stale { generation } => {
+                SearchLaneStatusV1::State(SearchLaneStateV1::Stale {
+                    generation: generation.clone(),
                 })
             }
-            tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable { reason } => json!({
-                "status": "unavailable",
-                "reason": reason,
-            }),
+            CodeIndexLaneStatusV1::Partial { generation, reason } => {
+                SearchLaneStatusV1::State(SearchLaneStateV1::Partial {
+                    generation: generation.clone(),
+                    reason: reason.map(str::to_owned),
+                })
+            }
+            CodeIndexLaneStatusV1::Unavailable { reason } => {
+                SearchLaneStatusV1::State(SearchLaneStateV1::Unavailable {
+                    reason: (*reason).to_owned(),
+                })
+            }
         }
     }
-
-    json!({
-        "exact": lane(&coverage.exact),
-        "lexical": lane(&coverage.lexical),
-        "graph": lane(&coverage.graph),
-        "recall": if coverage.is_degraded() { "partial" } else { "full" },
-    })
+    SearchCoverageV1 {
+        exact: lane(&coverage.exact),
+        lexical: lane(&coverage.lexical),
+        graph: lane(&coverage.graph),
+        recall: if coverage.is_degraded() {
+            PrimitiveRecallV1::Partial
+        } else {
+            PrimitiveRecallV1::Full
+        },
+    }
 }
 
-fn rendered_tool_result<F>(
-    ctx: &McpToolContext<'_>,
-    args: &Value,
-    value: &Value,
-    touched_files: Vec<String>,
-    md: F,
-) -> ToolResult
-where
-    F: FnOnce() -> String,
-{
-    support_rendered(
-        Some(&ctx.store_layout().response_handle_root),
-        args,
-        value,
-        touched_files,
-        md,
-    )
-}
-
+/// Computes one `tracedecay_search` page on the graph-tool owner's side.
 #[hotpath::measure(label = "mcp.graph.search.total")]
-pub async fn handle_search<F>(
+pub async fn compute_search<F>(
     ctx: &McpToolContext<'_>,
     graph: F,
     args: Value,
@@ -162,29 +121,21 @@ pub async fn handle_search<F>(
     ignored_dependency_admission: Option<
         &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
     >,
-) -> Result<ToolResult>
+) -> Result<GraphToolCompletionV1>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
+    let request: SearchSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_search")?;
     let search_executor = ctx.code_index_search_executor();
     let search_authority = ctx.code_index_search_authority();
     let deadline = ctx.deadline().cloned();
     let cancellation = ctx.cancellation().cloned();
-    let query =
-        args.get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: query".to_string(),
-            })?;
-
-    let lexical_routing = lexical_routing::routing_from_args(&args)?;
-    let lazy_indexing_requested = dependency_hints::lazy_indexing_requested(&args);
-    let cursor = retrieval_cursor(&args)?;
+    let lexical_routing = lexical_routing::routing_from_request(&request)?;
+    let lazy_indexing_requested = request.lazy_index_ignored_dependencies.unwrap_or(false);
+    let cursor = decode_retrieval_cursor(request.cursor.as_deref())?;
     let include_graph_node_ids = render::wants_json(&args);
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(10, |v| v.min(500) as usize);
+    let limit = request.limit.map_or(10, |v| v.min(500) as usize);
+    let query = request.query.as_str();
     // A scope prefix cannot be applied as a post-filter here the way the
     // sibling handlers do it: the retrieval pipeline returns anchor-keyed
     // candidates that carry no file path. Refusing to search at all would make
@@ -281,105 +232,78 @@ where
             );
             hotpath::measure_block!("mcp.graph.search.graph", {
                 for ranked in &complete.ordered_candidates {
-                    let mut result = json!(ranked);
                     let anchor = ranked.candidate.anchor_id.as_str();
-                    if anchor.starts_with(CODE_SYMBOL_EVIDENCE_PREFIX) {
-                        result["node_id"] = json!(graph_occurrence_id(anchor)?);
-                    }
-                    if let Some(display) =
-                        complete.display_by_anchor.get(&ranked.candidate.anchor_id)
+                    let mut node_id = if anchor.starts_with(CODE_SYMBOL_EVIDENCE_PREFIX) {
+                        Some(graph_occurrence_id(anchor)?.as_str().to_owned())
+                    } else {
+                        None
+                    };
+                    let display = complete.display_by_anchor.get(&ranked.candidate.anchor_id);
+                    if include_graph_node_ids
+                        && node_id.is_none()
+                        && let Some(display) = display
                     {
-                        result["display"] = json!({
-                            "name": display.name,
-                            "qualified_name": display.qualified_name,
-                            "kind": display.kind,
-                            "path": display.path,
-                        });
-                        if include_graph_node_ids && result.get("node_id").is_none() {
-                            graph_evidence.enrich_node_id(&mut result, display);
-                        }
+                        node_id = graph_evidence.node_id_for(display);
                     }
-                    results.push(result);
+                    results.push(SearchResultRowV1 {
+                        candidate: ranked.candidate.clone(),
+                        final_ordinal: ranked.final_ordinal,
+                        node_id,
+                        display: display.map(|display| SearchResultDisplayV1 {
+                            name: display.name.clone(),
+                            qualified_name: display.qualified_name.clone(),
+                            kind: display.kind.clone(),
+                            path: display.path.clone(),
+                        }),
+                        lexical_routes: None,
+                    });
                 }
             });
             let result_count = results.len();
-            let freshness = search_freshness(
-                ServedGenerationV1::Served(&complete.code_generation),
-                &complete.coverage,
-                &worktree_freshness,
-            );
-            let mut output = hotpath::measure_block!(
-                "mcp.graph.search.serialize",
-                json!({
-                "freshness": freshness,
-                "code_generation": complete.code_generation,
-                "query_fallback_digest": &complete.query_fallback.digest,
-                "next_cursor": complete.next_cursor
+            let (lexical_routes, lexical_anchors) =
+                lexical_routing::route_evidence(&mut results, &complete.lexical_routes);
+            let external_import_hint = if scope_prefix.is_some()
+                || dependency_hints::should_check_external_import_hint(result_count, limit)
+            {
+                graph_evidence.external_import_hint(ctx, query, limit, scope_prefix)
+            } else {
+                None
+            };
+            let result = SearchCompleteV1 {
+                freshness: search_freshness(
+                    ServedGenerationV1::Served(&complete.code_generation),
+                    &complete.coverage,
+                    &worktree_freshness,
+                ),
+                query_fallback_digest: complete.query_fallback.digest.as_str().to_owned(),
+                next_cursor: complete
+                    .next_cursor
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
-                "coverage": coverage_value(&complete.coverage),
-                })
-            );
-            lexical_routing::attach_route_evidence(
-                &mut output,
-                &mut results,
-                &complete.lexical_routes,
-            )?;
-            output["results"] = Value::Array(results);
-            if let Some(scope) = scope_prefix {
-                output["scope_prefix"] = json!(scope);
-                output["scope_prefix_applied"] = json!(false);
-            }
-            if let Some(unavailable) = graph_evidence.unavailable() {
-                output["verified_graph_evidence"] = unavailable.clone();
-            }
-            if (scope_prefix.is_some()
-                || dependency_hints::should_check_external_import_hint(result_count, limit))
-                && let Some(hint) =
-                    graph_evidence.external_import_hint(ctx, query, limit, scope_prefix)
-            {
-                output["external_import_hint"] = hint;
-            }
-            let output = output;
-            Ok(rendered_tool_result(
-                ctx,
-                &args,
-                &output,
+                coverage: search_coverage(&complete.coverage),
+                code_generation: complete.code_generation,
+                results,
+                lexical_routes,
+                lexical_anchors,
+                scope_prefix: scope_prefix.map(str::to_owned),
+                scope_prefix_applied: scope_prefix.map(|_| false),
+                verified_graph_evidence: graph_evidence.unavailable().cloned(),
+                external_import_hint,
+            };
+            Ok(graph_tool_completion(
+                GraphToolResultV1::Search(Box::new(SearchResultV1::Complete(result))),
                 touched_files,
-                || {
-                    format!(
-                        "{}{}",
-                        freshness_lines(&freshness),
-                        render_search_md(&output)
-                    )
-                },
             ))
         }
         tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
             let reason = unavailable.reason.as_str();
-            let graph_evidence = SearchGraphEvidence::new(graph.as_ref());
             let freshness = search_freshness(
                 ServedGenerationV1::Unavailable { reason },
                 &unavailable.coverage,
                 &worktree_freshness,
             );
-            let mut output = hotpath::measure_block!(
-                "mcp.graph.search.serialize",
-                json!({
-                    "freshness": freshness,
-                    "results": [],
-                    "code_generation": unavailable.code_generation,
-                    "query_fallback_digest": Value::Null,
-                    "status": "unavailable",
-                    "reason": reason,
-                    "coverage": coverage_value(&unavailable.coverage),
-                })
-            );
-            if let Some(unavailable_graph) = graph_evidence.unavailable() {
-                output["verified_graph_evidence"] = unavailable_graph.clone();
-            }
-            let parked = freshness
+            let detail = freshness
                 .indexing
                 .as_ref()
                 .and_then(|indexing| indexing.parked.as_ref())
@@ -388,23 +312,52 @@ where
                     remedy: parked.remediation.clone(),
                     retries_on_wake: parked.retries_on_wake,
                 });
-            let failure = match &parked {
-                Some(detail) => detail.message(),
-                None => format!("code-index search unavailable: {reason}"),
+            let result = SearchUnavailableV1 {
+                freshness,
+                results: Vec::new(),
+                code_generation: unavailable.code_generation,
+                query_fallback_digest: None,
+                status: PrimitiveUnavailableStatusV1::Unavailable,
+                reason: reason.to_owned(),
+                coverage: search_coverage(&unavailable.coverage),
+                verified_graph_evidence: SearchGraphEvidence::new(graph.as_ref())
+                    .unavailable()
+                    .cloned(),
+                detail,
             };
-            if let Some(detail) = parked {
-                output["detail"] = serde_json::to_value(detail)?;
-            }
-            Ok(rendered_tool_result(ctx, &args, &output, Vec::new(), || {
-                format!(
-                    "{}{}",
-                    freshness_lines(&freshness),
-                    render_search_md(&output)
-                )
-            })
-            .with_failure_message(failure))
+            Ok(graph_tool_completion(
+                GraphToolResultV1::Search(Box::new(SearchResultV1::Unavailable(result))),
+                Vec::new(),
+            ))
         }
     }
+}
+
+/// Renders a search result as its tool result: the `freshness:` verdict line
+/// ahead of the markdown body, or the typed JSON. An unavailable search names
+/// its failure, parked indexing by its cause and remedy.
+pub(crate) fn render_search(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+    result: &SearchResultV1,
+) -> Result<ToolResult> {
+    let value = serde_json::to_value(result)?;
+    let freshness: &PrimitiveSearchFreshnessV1 = match result {
+        SearchResultV1::Complete(complete) => &complete.freshness,
+        SearchResultV1::Unavailable(unavailable) => &unavailable.freshness,
+    };
+    let rendered = rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+        format!("{}{}", freshness_lines(freshness), render_search_md(&value))
+    });
+    Ok(match result {
+        SearchResultV1::Complete(_) => rendered,
+        SearchResultV1::Unavailable(unavailable) => {
+            rendered.with_failure_message(match &unavailable.detail {
+                Some(detail) => detail.message(),
+                None => format!("code-index search unavailable: {}", unavailable.reason),
+            })
+        }
+    })
 }
 
 /// Warns, in the human-facing body, that a result list is short because a lane
@@ -536,1160 +489,13 @@ fn render_search_md(value: &Value) -> String {
     md.render()
 }
 
-/// Related-symbol assembly is a page, not a complete fan-out. The callers
-/// tool uses a 50k refuse budget; context used to keep that budget, hydrate
-/// every edge, then discard all but `max_nodes`. That walk is CPU-bound and
-/// shows no warm benefit. Cap examination at a small multiple of the kept
-/// page. The page admits every edge kind: the same neighborhood a complete
-/// walk returns, cut to a prefix in store order.
-fn context_related_relation_budget(max_nodes: usize) -> usize {
-    max_nodes.saturating_mul(4).clamp(16, 64)
-}
-
-#[derive(Default)]
-struct ContextGraphProjection {
-    selected: Vec<CodeGraphSymbolSummaryV1>,
-    related: Vec<CodeGraphSymbolSummaryV1>,
-    /// A relation walk or the `max_nodes` cap stopped the related symbols.
-    related_truncated: bool,
-    code_blocks: Vec<ContextCodeBlockV1>,
-    touched_files: Vec<String>,
-}
-
-fn context_search_matches(
-    complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
-    scope_prefix: Option<&str>,
-) -> Vec<ContextSearchMatchV1> {
-    complete
-        .ordered_candidates
-        .iter()
-        .filter_map(|ranked| {
-            let display = complete
-                .display_by_anchor
-                .get(&ranked.candidate.anchor_id)?;
-            if scope_prefix.is_some_and(|prefix| !display.path.starts_with(prefix)) {
-                return None;
-            }
-            let exact_class = match ranked.candidate.exact_class {
-                ExactClass::ExactMessage => "exact_message",
-                ExactClass::ExactLiteralPhrase => "exact_literal_phrase",
-                ExactClass::Approximate => "approximate",
-            };
-            Some(ContextSearchMatchV1 {
-                anchor_id: ranked.candidate.anchor_id.as_str().to_owned(),
-                name: display.name.clone(),
-                qualified_name: display.qualified_name.clone(),
-                kind: display.kind.clone(),
-                file: display.path.clone(),
-                exact_class: exact_class.to_owned(),
-                rank: ranked.final_ordinal.saturating_add(1),
-                utility_micros: ranked.candidate.utility_micros,
-            })
-        })
-        .collect()
-}
-
-/// The kernel's per-anchor receipts in the context wire shape, counted
-/// against the search matches this context carries: a served site outside
-/// `scope_prefix` is dropped as out of scope.
-fn context_lexical_anchors(
-    complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
-    scope_prefix: Option<&str>,
-) -> Vec<ContextLexicalAnchorV1> {
-    let mut receipt = complete.lexical_routes.clone();
-    if let Some(prefix) = scope_prefix {
-        receipt.reconcile_served(|site| {
-            complete
-                .display_by_anchor
-                .get(site)
-                .filter(|display| !display.path.starts_with(prefix))
-                .map(|_| LexicalAnchorDropReasonV1::OutOfScope)
-        });
-    }
-    receipt
-        .anchors
-        .into_iter()
-        .map(|receipt| {
-            let anchor = receipt.anchor.as_str().to_owned();
-            match receipt.outcome {
-                LexicalAnchorOutcomeV1::Matched {
-                    matched,
-                    admitted,
-                    dropped,
-                } => ContextLexicalAnchorV1::Matched {
-                    anchor,
-                    matched,
-                    admitted,
-                    dropped,
-                },
-                LexicalAnchorOutcomeV1::Unmatched => ContextLexicalAnchorV1::Unmatched { anchor },
-                LexicalAnchorOutcomeV1::NotServed => ContextLexicalAnchorV1::NotServed { anchor },
-            }
-        })
-        .collect()
-}
-
-fn context_graph_projection(
-    ctx: &McpToolContext<'_>,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
-    scope_prefix: Option<&str>,
-    max_nodes: usize,
-    include_code: bool,
-    max_code_blocks: usize,
-) -> Result<ContextGraphProjection> {
-    let mut selected = Vec::new();
-    for ranked in &complete.ordered_candidates {
-        let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) else {
-            continue;
-        };
-        if scope_prefix.is_some_and(|prefix| !display.path.starts_with(prefix)) {
-            continue;
-        }
-        let candidates =
-            graph.resolve_qualified_name(&display.qualified_name, Some(&display.kind), 16)?;
-        for candidate in candidates {
-            if required_graph_file_path(&candidate)? == display.path.as_str()
-                && !selected.iter().any(|existing: &CodeGraphSymbolSummaryV1| {
-                    existing.occurrence == candidate.occurrence
-                })
-            {
-                selected.push(candidate);
-                break;
-            }
-        }
-    }
-    let seeds = selected
-        .iter()
-        .map(|symbol| symbol.occurrence.clone())
-        .collect::<Vec<_>>();
-    let mut related = Vec::new();
-    let mut related_truncated = false;
-    if !seeds.is_empty() {
-        let related_budget = context_related_relation_budget(max_nodes);
-        for batches in [
-            graph.callers_truncated(&seeds, &[], related_budget)?,
-            graph.callees_truncated(&seeds, &[], related_budget)?,
-        ] {
-            related_truncated |= batches.iter().map(Vec::len).sum::<usize>() >= related_budget;
-            for edge in batches.into_iter().flatten() {
-                if !seeds.contains(&edge.neighbor.occurrence)
-                    && !related.iter().any(|existing: &CodeGraphSymbolSummaryV1| {
-                        existing.occurrence == edge.neighbor.occurrence
-                    })
-                {
-                    related.push(edge.neighbor);
-                }
-            }
-        }
-    }
-    related_truncated |= related.len() > max_nodes;
-    related.truncate(max_nodes);
-
-    let mut all_symbols = selected.clone();
-    all_symbols.extend(related.iter().cloned());
-    let touched_files = graph_symbol_paths(&all_symbols)?;
-    let mut code_blocks = Vec::new();
-    if include_code {
-        // Context snippets are filesystem windows, not the mmap'd sealed
-        // lexical artifact (that path serves n-gram search). Cache by path
-        // so five symbols in one file do not re-read the whole source.
-        let mut source_by_path = HashMap::<String, String>::new();
-        for symbol in selected.iter().take(max_code_blocks) {
-            let metadata = required_graph_metadata(symbol)?;
-            let file_path = required_graph_file_path(symbol)?;
-            if !source_by_path.contains_key(file_path) {
-                source_by_path.insert(
-                    file_path.to_owned(),
-                    tracedecay_runtime_core::sync::read_source_file(
-                        &ctx.project_root().join(file_path),
-                    )?,
-                );
-            }
-            let Some(source) = source_by_path.get(file_path) else {
-                return Err(TraceDecayError::Config {
-                    message: format!("context source window missing for '{file_path}'"),
-                });
-            };
-            code_blocks.push(ContextCodeBlockV1 {
-                node_id: symbol.occurrence.as_str().to_owned(),
-                file: file_path.to_owned(),
-                start_line: user_line(metadata.start_line),
-                end_line: user_line(graph_symbol_end_line(metadata)?),
-                code: extract_lines(
-                    source,
-                    metadata.start_line,
-                    graph_symbol_end_line(metadata)?,
-                ),
-            });
-        }
-    }
-    Ok(ContextGraphProjection {
-        selected,
-        related,
-        related_truncated,
-        code_blocks,
-        touched_files,
-    })
-}
-
-/// Extract the source spanning tree-sitter rows `start_line..=end_line`
-/// (0-based, inclusive) from `source`. Node line fields are stored as the
-/// raw tree-sitter row index, so the caller passes them through unchanged.
-/// Returns the empty string if the range is out of bounds.
-fn extract_lines(source: &str, start_line: u32, end_line: u32) -> String {
-    let start = start_line as usize;
-    let end_exclusive = (end_line as usize).saturating_add(1);
-    if start >= end_exclusive {
-        return String::new();
-    }
-    let mut selected = source.lines().skip(start).take(end_exclusive - start);
-    let Some(first) = selected.next() else {
-        return String::new();
-    };
-    let mut body = String::with_capacity(first.len());
-    body.push_str(first);
-    for line in selected {
-        body.push('\n');
-        body.push_str(line);
-    }
-    body
-}
-
-#[hotpath::measure(label = "mcp.graph.context.total")]
-pub async fn compute_context<F>(
-    ctx: &McpToolContext<'_>,
-    graph: F,
-    args: Value,
-    scope_prefix: Option<&str>,
-) -> Result<GraphToolCompletionV1>
-where
-    F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
-{
-    let search_executor = ctx.code_index_search_executor();
-    let search_authority = ctx.code_index_search_authority();
-    let deadline = ctx.deadline().cloned();
-    let cancellation = ctx.cancellation().cloned();
-    let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
-    let task = request.task.as_str();
-    let mode = request.mode.unwrap_or(ContextModeV1::Explore);
-    let max_nodes = request
-        .max_nodes
-        .map_or(20, |value| value.clamp(1, 200) as usize);
-    let include_code = request.include_code.unwrap_or(false);
-    let max_code_blocks = request
-        .max_code_blocks
-        .map_or(5, |value| value.clamp(1, 20) as usize);
-    let requested_anchors = request.lexical_anchors.clone().unwrap_or_default();
-    let lexical_routing = lexical_routing::routing_from_parts(
-        requested_anchors.clone(),
-        request.prefer_symbol.unwrap_or(false),
-    )?;
-    let memory_options = context_memory_options(&args);
-    let memory_read_control =
-        context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
-    // Graph enrichment is optional unless the caller asks for source bodies.
-    // That request waits for graph admission under the same deadline and
-    // cancellation as search; ordinary lexical/exact retrieval stays independent.
-    let search = execute_code_index_search(
-        search_executor,
-        tracedecay_query::code_search::CodeIndexSearchRequestV1 {
-            project_root: ctx.project_root().to_path_buf(),
-            query: task.to_owned(),
-            source_revision: None,
-            source_tree: None,
-            source_reference: None,
-            limit: max_nodes,
-            cursor: None,
-            lexical_routing,
-            authority: search_authority.cloned(),
-            deadline,
-            cancellation,
-        },
-    );
-    let memory = context_memory_outcome(ctx, task, &memory_options, memory_read_control.as_ref());
-    let search_and_graph = race_primary_search_with_graph(search, graph, false, None, include_code);
-    let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
-    // Read after the search settles: the verdict must describe the scheduler
-    // state at serve time, not a snapshot taken before the lanes ran.
-    let freshness_payload = ctx.freshness().await;
-    let worktree_freshness = worktree_freshness_from_payload(freshness_payload.as_ref());
-    let (complete, code_generation, coverage, freshness, search_matches, lexical_anchors) =
-        match outcome {
-            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
-                let search_matches = context_search_matches(&complete, scope_prefix);
-                let lexical_anchors = context_lexical_anchors(&complete, scope_prefix);
-                let code_generation = Some(complete.code_generation.clone());
-                let coverage = primitive_search_coverage(&complete.coverage);
-                let freshness = search_freshness(
-                    ServedGenerationV1::Served(&complete.code_generation),
-                    &complete.coverage,
-                    &worktree_freshness,
-                );
-                (
-                    Some(complete),
-                    code_generation,
-                    coverage,
-                    freshness,
-                    search_matches,
-                    lexical_anchors,
-                )
-            }
-            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
-                None,
-                unavailable.code_generation,
-                primitive_search_coverage(&unavailable.coverage),
-                search_freshness(
-                    ServedGenerationV1::Unavailable {
-                        reason: unavailable.reason.as_str(),
-                    },
-                    &unavailable.coverage,
-                    &worktree_freshness,
-                ),
-                Vec::new(),
-                requested_anchors
-                    .iter()
-                    .map(|anchor| ContextLexicalAnchorV1::NotServed {
-                        anchor: anchor.clone(),
-                    })
-                    .collect(),
-            ),
-        };
-    let graph = match complete.as_ref() {
-        Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
-        None => graph,
-    };
-    let (graph, projection, verified_graph_evidence, graph_stage) = match (graph, complete.as_ref())
-    {
-        (Ok(graph), Some(complete)) => match hotpath::measure_block!(
-            "mcp.graph.context.graph",
-            context_graph_projection(
-                ctx,
-                &graph,
-                complete,
-                scope_prefix,
-                max_nodes,
-                include_code,
-                max_code_blocks,
-            )
-        ) {
-            Ok(projection) => {
-                let stage = ContextStageV1::ran(max_nodes, projection.selected.len(), false);
-                (Some(graph), projection, None, stage)
-            }
-            Err(error) => (
-                None,
-                ContextGraphProjection::default(),
-                Some(dependency_hints::unavailable_evidence(&error)),
-                ContextStageV1::Unavailable,
-            ),
-        },
-        (Ok(graph), None) => (
-            Some(graph),
-            ContextGraphProjection::default(),
-            None,
-            ContextStageV1::Skipped,
-        ),
-        (Err(error), _) => (
-            None,
-            ContextGraphProjection::default(),
-            Some(dependency_hints::unavailable_evidence(&error)),
-            ContextStageV1::Unavailable,
-        ),
-    };
-    let retrieval = ContextRetrievalPlanV1 {
-        search: match complete.as_ref() {
-            Some(complete) => ContextStageV1::ran(
-                max_nodes,
-                search_matches.len(),
-                complete.next_cursor.is_some(),
-            ),
-            None => ContextStageV1::Unavailable,
-        },
-        graph: graph_stage,
-        related: if projection.selected.is_empty() {
-            ContextStageV1::Skipped
-        } else {
-            ContextStageV1::ran(
-                max_nodes,
-                projection.related.len(),
-                projection.related_truncated,
-            )
-        },
-        code: if !include_code {
-            ContextStageV1::NotRequested
-        } else if projection.selected.is_empty() {
-            ContextStageV1::Skipped
-        } else {
-            ContextStageV1::ran(
-                max_code_blocks,
-                projection.code_blocks.len(),
-                projection.selected.len() > max_code_blocks,
-            )
-        },
-        memory: ContextStageV1::NotRequested,
-    };
-    let ContextMemoryOutcome {
-        hits: memory_matches,
-        graph_coverage: memory_graph_coverage,
-        error: memory_matches_error,
-    } = memory_outcome;
-    let symbols = projection
-        .selected
-        .iter()
-        .map(primitive_symbol_location)
-        .collect::<Result<Vec<_>>>()?;
-    let related_symbols = projection
-        .related
-        .iter()
-        .map(primitive_symbol_location)
-        .collect::<Result<Vec<_>>>()?;
-    let plan = match (mode, graph.as_ref()) {
-        (ContextModeV1::Plan, Some(graph)) => {
-            Some(verified_plan_context(graph, &projection.selected)?)
-        }
-        _ => None,
-    };
-    let touched_files = unique_file_paths(
-        projection.touched_files.iter().map(String::as_str).chain(
-            search_matches
-                .iter()
-                .map(|search_match| search_match.file.as_str()),
-        ),
-    );
-    let analytics = InvocationAnalyticsV1 {
-        context_memory: Some(context_memory_analytics(
-            &memory_options,
-            &memory_matches,
-            memory_matches_error.as_deref(),
-        )),
-        pr_context: None,
-    };
-    let retrieval = ContextRetrievalPlanV1 {
-        memory: context_memory_stage(
-            &memory_options,
-            &memory_matches,
-            memory_matches_error.as_deref(),
-        ),
-        ..retrieval
-    };
-    let result = ContextResultV1 {
-        task: request.task,
-        mode,
-        freshness,
-        code_generation,
-        search_matches,
-        lexical_anchors,
-        symbols,
-        related_symbols,
-        code: projection.code_blocks,
-        coverage,
-        memory_matches,
-        memory_graph_coverage,
-        memory_matches_error,
-        verified_graph_evidence,
-        plan,
-        retrieval,
-    };
-    Ok(GraphToolCompletionV1 {
-        result: GraphToolResultV1::Context(Box::new(result)),
-        touched_files,
-        code_graph: None,
-        analytics: Some(analytics),
-        cost: None,
-    })
-}
-
-/// Bare-name lookup against `idx_nodes_name`, no BM25 scoring, no fuzzy
-/// match, no qualified-name suffix walk. Returns every node whose `name`
-/// column equals the query exactly. Useful when you already know the symbol
-/// and want the apples-to-apples cost of an index hit instead of
-/// `tracedecay_search`'s ranked query.
-#[hotpath::measure(label = "mcp.graph.find_exact_symbol.total")]
-pub async fn compute_find_exact_symbol(
-    ctx: &McpToolContext<'_>,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    args: Value,
-    scope_prefix: Option<&str>,
-    ignored_dependency_admission: Option<
-        &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
-    >,
-) -> Result<GraphToolCompletionV1> {
-    let request: FindExactSymbolSurfaceRequestV1 =
-        decode_primitive_request(&args, "tracedecay_find_exact_symbol")?;
-    let name = request.name.as_str();
-    let limit = request.limit.map_or(20, |v| v.min(200) as usize);
-
-    let mut nodes = hotpath::measure_block!("mcp.graph.find_exact_symbol.graph", {
-        let nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
-        graph_symbols_in_scope(nodes, scope_prefix)?
-    });
-    if nodes.is_empty() && request.lazy_index_ignored_dependencies.unwrap_or(false) {
-        hotpath::future!(
-            dependency_hints::admit_verified_ignored_dependency(
-                ctx,
-                ignored_dependency_admission,
-                graph,
-                name,
-                scope_prefix,
-            ),
-            label = "mcp.graph.find_exact_symbol.admit"
-        )
-        .await?;
-    }
-    if nodes.len() > limit {
-        nodes.truncate(limit);
-    }
-
-    let touched_files = graph_symbol_paths(&nodes)?;
-    let matches = nodes
-        .iter()
-        .map(|node| {
-            let metadata = required_graph_metadata(node)?;
-            let file_path = required_graph_file_path(node)?;
-            Ok(FindExactSymbolMatchV1 {
-                id: node.occurrence.as_str().to_owned(),
-                name: metadata.simple_name.clone(),
-                qualified_name: metadata.qualified_name.clone(),
-                kind: metadata.kind.clone(),
-                file: file_path.to_owned(),
-                line: user_line(metadata.start_line),
-                signature: metadata.signature.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(graph_tool_completion(
-        GraphToolResultV1::FindExactSymbol(FindExactSymbolResultV1 {
-            name: request.name.clone(),
-            count: matches.len() as u64,
-            matches,
-        }),
-        touched_files,
-    ))
-}
-
-#[hotpath::measure(label = "mcp.graph.similar.total")]
-pub async fn compute_similar(
-    ctx: &McpToolContext<'_>,
-    args: Value,
-) -> Result<GraphToolCompletionV1> {
-    let request: SimilarSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_similar")?;
-    let project_id = request.project_id;
-    let repository_id = request.repository_id;
-    let target = match request.target {
-        SimilarTargetV1::SymbolOccurrence {
-            symbol_occurrence_id,
-        } => tracedecay_query::code_search::CodeIndexSimilarTargetV1::SymbolOccurrence(
-            symbol_occurrence_id,
-        ),
-        SimilarTargetV1::SourceRange { path, span } => {
-            tracedecay_query::code_search::CodeIndexSimilarTargetV1::SourceRange { path, span }
-        }
-    };
-    let match_classes = request
-        .match_classes
-        .iter()
-        .map(|class| match class {
-            SimilarMatchClassV1::ConservativeExact => {
-                tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative
-            }
-            SimilarMatchClassV1::RenameNormalizedExact => {
-                tracedecay_code_index::clones::CloneNormalizationClassV1::Rename
-            }
-        })
-        .collect();
-    let cursor = request
-        .cursor
-        .as_deref()
-        .map(tracedecay_query::retrieval::lexical::CloneArtifactCursorV1::decode)
-        .transpose()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("invalid tracedecay_similar cursor: {error}"),
-        })?;
-    let executor = ctx.code_index_similar_executor().ok_or_else(|| {
-        clone_lane_unavailable_error(
-            "similarity",
-            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
-        )
-    })?;
-    let similar = match executor(tracedecay_query::code_search::CodeIndexSimilarRequestV1 {
-        project_root: ctx.project_root().to_path_buf(),
-        target,
-        match_classes,
-        result_limit: request.result_limit as usize,
-        work_limit: request.work_limit as usize,
-        cursor,
-        authority: ctx.code_index_search_authority().cloned(),
-        deadline: ctx.deadline().cloned(),
-        cancellation: ctx.cancellation().cloned(),
-    })
-    .await
-    {
-        tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Complete(similar) => *similar,
-        tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::NotFound => {
-            return Err(TraceDecayError::ProjectRoute {
-                reason_code: "similar-source-not-found".to_owned(),
-                retryable: false,
-                detail: "the selected source has no body in the verified clone index".to_owned(),
-                typed_detail: None,
-            });
-        }
-        tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason) => {
-            return Err(clone_lane_unavailable_error("similarity", reason));
-        }
-    };
-    if similar.source.occurrence.project_id != project_id
-        || similar.source.occurrence.repository_id != repository_id
-    {
-        return Err(TraceDecayError::ProjectRoute {
-            reason_code: "similar-source-not-found".to_owned(),
-            retryable: false,
-            detail: "the selected source is outside the authorized repository scope".to_owned(),
-            typed_detail: None,
-        });
-    }
-    let source = similar_occurrence(&similar.source.occurrence);
-    let mut touched_files = vec![source.path.clone()];
-    let mut complete = true;
-    let families = similar
-        .exact_groups
-        .into_iter()
-        .map(|group| -> Result<SimilarFamilyV1> {
-            complete &= group.complete;
-            let match_class = match group.key.class {
-                tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative => {
-                    SimilarMatchClassV1::ConservativeExact
-                }
-                tracedecay_code_index::clones::CloneNormalizationClassV1::Rename => {
-                    SimilarMatchClassV1::RenameNormalizedExact
-                }
-            };
-            let members = group
-                .members
-                .into_iter()
-                .filter(|member| {
-                    member.occurrence.project_id == project_id
-                        && member.occurrence.repository_id == repository_id
-                })
-                .map(|member| {
-                    let occurrence = similar_occurrence(&member.occurrence);
-                    touched_files.push(occurrence.path.clone());
-                    occurrence
-                })
-                .collect::<Vec<_>>();
-            let next_cursor = group
-                .next_cursor
-                .as_ref()
-                .map(tracedecay_query::retrieval::lexical::CloneArtifactCursorV1::encode)
-                .transpose()
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("failed to encode tracedecay_similar cursor: {error}"),
-                })?;
-            Ok(SimilarFamilyV1 {
-                match_class,
-                normalization_revision: group.key.normalization_revision,
-                family_digest: group.key.digest,
-                representative_payload_digest: similar.source.payload.payload_digest.clone(),
-                member_count: members.len(),
-                members,
-                complete: group.complete,
-                next_cursor,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    touched_files.sort();
-    touched_files.dedup();
-    let coverage = match similar.source.occurrence.eligibility {
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::Eligible if complete => {
-            SimilarCoverageV1::Complete
-        }
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::Eligible => {
-            SimilarCoverageV1::Partial
-        }
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedTooSmall {
-            minimum_tokens,
-        } => SimilarCoverageV1::ExcludedTooSmall { minimum_tokens },
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedTooLarge {
-            maximum_tokens,
-            maximum_bytes,
-        } => SimilarCoverageV1::ExcludedTooLarge {
-            maximum_tokens,
-            maximum_bytes,
-        },
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedIncompleteTokenization => {
-            SimilarCoverageV1::ExcludedIncompleteTokenization
-        }
-    };
-    let result = SimilarResultV1 {
-        source_generation: source.source_generation.clone(),
-        source,
-        families,
-        coverage,
-    };
-    Ok(graph_tool_completion(
-        GraphToolResultV1::Similar(result),
-        touched_files,
-    ))
-}
-
-/// The one clone-family unavailable wire shape. `tracedecay_similar` and
-/// `tracedecay_redundancy` read the same executor vocabulary, so they report
-/// the same `reason_code` and the same retry verdict; only the human lane name
-/// in `detail` differs.
-///
-/// Deliberately does **not** re-emit retired opaque tokens
-/// (`verified-code-similarity-unavailable` /
-/// `verified-code-redundancy-unavailable`). Those never shipped on master; the
-/// shared `reason.as_str()` vocabulary is the sole consumer-visible code.
-fn clone_lane_unavailable_error(
-    lane: &str,
-    reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
-) -> TraceDecayError {
-    TraceDecayError::ProjectRoute {
-        reason_code: reason.as_str().to_owned(),
-        retryable: reason.is_retryable(),
-        detail: format!(
-            "the maintained clone {lane} lane is unavailable: {}",
-            reason.as_str()
-        ),
-        typed_detail: None,
-    }
-}
-
-#[hotpath::measure(label = "mcp.graph.redundancy.total")]
-pub async fn compute_redundancy(
-    ctx: &McpToolContext<'_>,
-    args: Value,
-) -> Result<GraphToolCompletionV1> {
-    let request: RedundancySurfaceRequestV1 =
-        decode_primitive_request(&args, "tracedecay_redundancy")?;
-    if request.project_id != ctx.admitted_scope().project_id
-        || request.repository_id != ctx.admitted_scope().repository_id
-    {
-        return Err(TraceDecayError::ProjectRoute {
-            reason_code: "redundancy-repository-not-authorized".to_owned(),
-            retryable: false,
-            detail: "the selected repository is outside the authorized repository scope".to_owned(),
-            typed_detail: None,
-        });
-    }
-    let match_classes = request
-        .match_classes
-        .iter()
-        .map(|class| match class {
-            SimilarMatchClassV1::ConservativeExact => {
-                tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative
-            }
-            SimilarMatchClassV1::RenameNormalizedExact => {
-                tracedecay_code_index::clones::CloneNormalizationClassV1::Rename
-            }
-        })
-        .collect();
-    let scope = match request.scope {
-        RedundancyScopeV1::Repository => {
-            tracedecay_query::code_search::CodeIndexRedundancyScopeV1::Repository
-        }
-        RedundancyScopeV1::Path { path } => {
-            tracedecay_query::code_search::CodeIndexRedundancyScopeV1::Path(path)
-        }
-        RedundancyScopeV1::PullRequest {
-            provider,
-            pull_request_id,
-            head_commit_id,
-            mut changed_paths,
-        } => {
-            changed_paths.sort();
-            changed_paths.dedup();
-            let pull_request_id = tracedecay_domain::feedback::GitHubPullRequestIdV1::new(
-                pull_request_id,
-            )
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("invalid arguments for tracedecay_redundancy: {error}"),
-            })?;
-            tracedecay_query::code_search::CodeIndexRedundancyScopeV1::PullRequest {
-                provider,
-                pull_request_id,
-                head_commit_id,
-                changed_paths,
-            }
-        }
-    };
-    let executor = ctx.code_index_redundancy_executor().ok_or_else(|| {
-        clone_lane_unavailable_error(
-            "family",
-            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
-        )
-    })?;
-    let outcome = executor(tracedecay_query::code_search::CodeIndexRedundancyQueryV1 {
-        project_root: ctx.project_root().to_path_buf(),
-        project_id: request.project_id,
-        repository_id: request.repository_id,
-        match_classes,
-        scope,
-        include_generated_paths: request.include_generated_paths,
-        family_limit: request.family_limit as usize,
-        member_limit: request.member_limit as usize,
-        work_limit: request.work_limit as usize,
-        cursor: request.cursor,
-        authority: ctx.code_index_search_authority().cloned(),
-        deadline: ctx.deadline().cloned(),
-        cancellation: ctx.cancellation().cloned(),
-    })
-    .await
-    .map_err(|reason| clone_lane_unavailable_error("family", reason))?;
-    let mut touched_files = outcome
-        .families
-        .iter()
-        .flat_map(|group| group.family.members.iter())
-        .map(|member| member.path.clone())
-        .collect::<Vec<_>>();
-    touched_files.sort();
-    touched_files.dedup();
-    Ok(graph_tool_completion(
-        GraphToolResultV1::Redundancy(outcome),
-        touched_files,
-    ))
-}
-
-fn similar_occurrence(
-    occurrence: &tracedecay_code_index::clones::CloneBodyOccurrenceV1,
-) -> SimilarOccurrenceV1 {
-    SimilarOccurrenceV1 {
-        project_id: occurrence.project_id.clone(),
-        repository_id: occurrence.repository_id.clone(),
-        worktree_id: occurrence.worktree_id.clone(),
-        source_generation: occurrence.source_generation.clone(),
-        snapshot_digest: occurrence.snapshot_digest.clone(),
-        symbol_occurrence_id: occurrence.symbol_occurrence_id.clone(),
-        path: occurrence.path.clone(),
-        body_span: occurrence.body_span,
-    }
-}
-
-/// Reads a file's lines (0-based) for snippet extraction, memoizing by path so
-/// a file with many references is read once. `None` when the file cannot be
-/// read (e.g. deleted since indexing).
-fn cached_file_lines<'a>(
-    project_root: &Path,
-    cache: &'a mut HashMap<String, Option<Vec<String>>>,
-    file_path: &str,
-) -> Option<&'a [String]> {
-    if !cache.contains_key(file_path) {
-        let abs = project_root.join(file_path);
-        let lines = std::fs::read_to_string(&abs)
-            .ok()
-            .map(|source| source.lines().map(str::to_string).collect::<Vec<_>>());
-        cache.insert(file_path.to_string(), lines);
-    }
-    cache
-        .get(file_path)
-        .and_then(Option::as_ref)
-        .map(Vec::as_slice)
-}
-
-/// Trims and length-caps a source line for use as a preview snippet.
-fn snippet_text(line: &str) -> String {
-    tracedecay_runtime_core::text::utf8_prefix_at_or_before(line.trim(), 160).to_string()
-}
-
-/// Picks a current-text snippet near `approx_line` (0-based; edge line bases are
-/// approximate, so neighbors are tried) that actually contains `name`, falling
-/// back to the line itself. `None` when no line is available.
-fn reference_line_snippet(
-    lines: &[String],
-    approx_line: Option<u32>,
-    name: &str,
-) -> Option<String> {
-    let approx = approx_line? as usize;
-    let candidates = [approx, approx.saturating_sub(1), approx + 1];
-    let idx = candidates
-        .into_iter()
-        .find(|&i| lines.get(i).is_some_and(|line| line.contains(name)))
-        .unwrap_or(approx);
-    lines.get(idx).map(|line| snippet_text(line))
-}
-
-/// True for bytes that can appear inside an identifier. Non-ASCII bytes count so
-/// multi-byte unicode identifiers are not falsely split at a boundary.
-fn is_ident_byte(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphanumeric() || b >= 0x80
-}
-
-/// Counts occurrences of `name` in `haystack` bounded as a whole identifier
-/// (neither neighbouring byte is an identifier byte). Used to estimate the
-/// literal textual matches a rename would touch, independent of the graph.
-fn count_identifier_occurrences(haystack: &str, name: &str) -> usize {
-    if name.is_empty() {
-        return 0;
-    }
-    let bytes = haystack.as_bytes();
-    let name_len = name.len();
-    let mut count = 0;
-    let mut start = 0;
-    while let Some(pos) = haystack[start..].find(name) {
-        let abs = start + pos;
-        let before_ok = abs == 0 || !is_ident_byte(bytes[abs - 1]);
-        let after_idx = abs + name_len;
-        let after_ok = after_idx >= bytes.len() || !is_ident_byte(bytes[after_idx]);
-        if before_ok && after_ok {
-            count += 1;
-        }
-        start = abs + name_len;
-    }
-    count
-}
-
-/// Graph-derived inputs for one rename-preview reference site, extracted
-/// before the blocking file walk so the worker needs no graph access.
-struct RenameReferenceSiteInput {
-    from_node_id: String,
-    from_name: String,
-    from_kind: String,
-    edge_kind: String,
-    file: String,
-    evidence_start_byte: u64,
-}
-
-/// READ-ONLY: reports what a rename of the given symbol WOULD touch, the
-/// declaration site and every graph reference site (incoming edges; outgoing
-/// edges reference other symbols and so are excluded), each with a
-/// current-text snippet, plus a per-file count of literal name occurrences
-/// that are NOT backed by a graph edge ("text-only matches, review
-/// manually"). Nothing is rewritten.
-#[hotpath::measure(label = "mcp.graph.rename_preview.total")]
-pub async fn compute_rename_preview(
-    ctx: &McpToolContext<'_>,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    args: Value,
-) -> Result<GraphToolCompletionV1> {
-    let request: RenamePreviewPrimitiveRequestV1 =
-        decode_primitive_request(&args, "tracedecay_rename_preview")?;
-
-    let occurrence = graph_occurrence_id(&request.node_id)?;
-    // Graph occurrences per file (declaration + reference sites), subtracted
-    // from the literal textual count to isolate the text-only matches.
-    let mut graph_counts: HashMap<String, usize> = HashMap::new();
-    let mut touched: Vec<String> = Vec::new();
-    // Graph phase: extract owned declaration fields and per-reference-site
-    // inputs so the blocking file walk below needs no graph value at all.
-    let (mut declaration, declaration_line, symbol_name, reference_inputs) =
-        hotpath::measure_block!("mcp.graph.rename_preview.graph", {
-            let Some(node) = graph.symbol_summary(&occurrence)? else {
-                return Ok(graph_tool_completion(
-                    GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(
-                        node_not_found_result(&request.node_id),
-                    )),
-                    Vec::new(),
-                ));
-            };
-            let node_metadata = required_graph_metadata(&node)?;
-            let node_file = required_graph_file_path(&node)?;
-            let symbol_name = node_metadata.simple_name.clone();
-
-            touched.push(node_file.to_owned());
-            *graph_counts.entry(node_file.to_owned()).or_default() += 1;
-            let declaration = RenamePreviewNodeV1 {
-                id: node.occurrence.as_str().to_owned(),
-                name: node_metadata.simple_name.clone(),
-                qualified_name: node_metadata.qualified_name.clone(),
-                kind: node_metadata.kind.clone(),
-                file: node_file.to_owned(),
-                line: user_line(node_metadata.start_line),
-                snippet: None,
-            };
-
-            // Reference sites: incoming edges are the callers/users that name this
-            // symbol. NOTE: call-edge coverage improves as the resolver improves;
-            // the text-only counts below catch what the graph currently misses.
-            let incoming = single_graph_adjacency_batch(graph.callers(
-                std::slice::from_ref(&node.occurrence),
-                &[],
-                2_000_000,
-            )?)?;
-            let mut reference_inputs =
-                Vec::<RenameReferenceSiteInput>::with_capacity(incoming.len());
-            for edge in incoming {
-                let source_node = edge.neighbor;
-                let source_metadata = required_graph_metadata(&source_node)?;
-                let source_file = required_graph_file_path(&source_node)?;
-                touched.push(source_file.to_owned());
-                *graph_counts.entry(source_file.to_owned()).or_default() += 1;
-                reference_inputs.push(RenameReferenceSiteInput {
-                    from_node_id: source_node.occurrence.as_str().to_owned(),
-                    from_name: source_metadata.simple_name.clone(),
-                    from_kind: source_metadata.kind.clone(),
-                    edge_kind: edge.edge.kind.as_str().to_owned(),
-                    file: source_file.to_owned(),
-                    evidence_start_byte: edge.edge.evidence_span.start_byte,
-                });
-            }
-            (
-                declaration,
-                node_metadata.start_line,
-                symbol_name,
-                reference_inputs,
-            )
-        });
-
-    let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
-
-    // File-walk phase: every referenced source file is read from disk, so it
-    // runs on a blocking worker like the sibling analysis scans instead of
-    // holding the async dispatch thread through the reads.
-    let project_root = ctx.project_root().to_path_buf();
-    let declaration_file = declaration.file.clone();
-    let walk_symbol_name = symbol_name.clone();
-    let walk_graph_counts = graph_counts;
-    let walk_touched_files = touched_files.clone();
-    let (decl_snippet, references, text_only_matches) = hotpath::future!(
-        tokio::task::spawn_blocking(
-        move || -> Result<(
-            Option<String>,
-            Vec<RenamePreviewReferenceV1>,
-            Vec<RenamePreviewTextOnlyMatchV1>,
-        )> {
-            let mut lines_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
-            let decl_snippet =
-                cached_file_lines(&project_root, &mut lines_cache, &declaration_file).and_then(
-                    |lines| {
-                        lines
-                            .get(declaration_line as usize)
-                            .map(|line| snippet_text(line))
-                    },
-                );
-
-            let mut references =
-                Vec::<RenamePreviewReferenceV1>::with_capacity(reference_inputs.len());
-            for input in reference_inputs {
-                let source = tracedecay_runtime_core::sync::read_source_file(&project_root.join(&input.file))?;
-                let line = line_for_byte_offset(&source, input.evidence_start_byte)?;
-                let snippet = cached_file_lines(&project_root, &mut lines_cache, &input.file)
-                    .and_then(|lines| reference_line_snippet(lines, Some(line), &walk_symbol_name));
-                references.push(RenamePreviewReferenceV1 {
-                    from_node_id: input.from_node_id,
-                    from_name: input.from_name,
-                    from_kind: input.from_kind,
-                    edge_kind: input.edge_kind,
-                    file: input.file,
-                    line: user_line(line),
-                    snippet,
-                });
-            }
-
-            // Text-only matches per touched file: literal identifier occurrences
-            // of the name minus the graph occurrences already accounted for.
-            // These are the comments/strings/dynamic-dispatch/unresolved sites a
-            // graph-only rename would miss, the scan is bounded to files that
-            // already appear in the preview, so occurrences in wholly unrelated
-            // files are not counted.
-            let mut text_only_matches = Vec::<RenamePreviewTextOnlyMatchV1>::new();
-            for file in &walk_touched_files {
-                let total =
-                    cached_file_lines(&project_root, &mut lines_cache, file).map_or(0, |lines| {
-                        lines
-                            .iter()
-                            .map(|line| count_identifier_occurrences(line, &walk_symbol_name))
-                            .sum::<usize>()
-                    });
-                let graph = walk_graph_counts.get(file).copied().unwrap_or(0);
-                let text_only = total.saturating_sub(graph);
-                if text_only > 0 {
-                    text_only_matches.push(RenamePreviewTextOnlyMatchV1 {
-                        file: file.clone(),
-                        text_only_count: text_only,
-                        note: "text-only matches, review manually".to_owned(),
-                    });
-                }
-            }
-            Ok((decl_snippet, references, text_only_matches))
-        }
-        ),
-        label = "mcp.graph.rename_preview.walk"
-    )
-    .await
-    .map_err(|join_error| TraceDecayError::Config {
-        message: format!("rename preview file scan task failed: {join_error}"),
-    })??;
-    declaration.snippet = decl_snippet;
-
-    let result = RenamePreviewPrimitiveResultV1 {
-        read_only: true,
-        note: "Preview only. Nothing is edited. 'references' are graph reference sites \
-               (the declaration is reported separately in 'node'); 'text_only_matches' are \
-               literal name occurrences NOT backed by a graph edge (comments, strings, \
-               dynamic dispatch, unresolved refs) and must be reviewed by hand. Graph \
-               call-edge coverage improves as the resolver does."
-            .to_owned(),
-        symbol: symbol_name,
-        new_name: request.new_name,
-        node: declaration,
-        reference_count: references.len(),
-        references,
-        text_only_matches,
-    };
-    Ok(graph_tool_completion(
-        GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::Preview(result)),
-        touched_files,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+    use tracedecay_domain::errors::TraceDecayError;
+    use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
+
     use super::*;
-    use tracedecay_contracts::memory::FactSearchHitV1;
-
-    #[test]
-    fn clone_lanes_report_one_unavailable_wire_protocol() {
-        use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1 as Reason;
-
-        for (reason, code, retryable) in [
-            (
-                Reason::CapabilityUnavailable,
-                "code_index_unavailable",
-                false,
-            ),
-            (Reason::AuthorityUnavailable, "authority_unavailable", false),
-            (
-                Reason::LinkedWorktreeDisabled,
-                "linked_worktree_disabled",
-                false,
-            ),
-            (Reason::Cancelled, "cancelled", true),
-            (Reason::TimedOut, "timed_out", true),
-            (
-                Reason::CapacityUnavailable,
-                "search_capacity_unavailable",
-                true,
-            ),
-            (
-                Reason::GenerationUnavailable,
-                "generation_unavailable",
-                true,
-            ),
-            (Reason::GenerationUnverified, "generation_unverified", true),
-            (Reason::InvalidRequest, "invalid_request", false),
-            (
-                Reason::CorruptionResetRequired,
-                "index_corruption_reset_required",
-                false,
-            ),
-            (Reason::Internal, "search_failed", false),
-        ] {
-            for lane in ["similarity", "family"] {
-                let error = clone_lane_unavailable_error(lane, reason);
-                assert_eq!(
-                    error
-                        .project_route_context()
-                        .expect("clone lane failures are typed project-route errors"),
-                    (
-                        code,
-                        retryable,
-                        format!("the maintained clone {lane} lane is unavailable: {code}").as_str(),
-                    )
-                );
-            }
-        }
-    }
 
     #[test]
     fn complete_search_preserves_generation_advance_but_not_stale_admission() {
@@ -1723,312 +529,12 @@ mod tests {
     #[test]
     fn schema_anchor_bound_matches_the_retrieval_kernel_bound() {
         assert_eq!(
-            tracedecay_mcp_catalog::SEARCH_MAX_LEXICAL_ANCHORS,
+            tracedecay_contracts::retrieval::SEARCH_MAX_LEXICAL_ANCHORS,
             tracedecay_query::retrieval::lexical::MAX_LEXICAL_ANCHORS_V1
         );
         assert_eq!(
-            tracedecay_mcp_catalog::SEARCH_MAX_LEXICAL_ANCHOR_BYTES,
+            tracedecay_contracts::retrieval::SEARCH_MAX_LEXICAL_ANCHOR_BYTES,
             tracedecay_query::retrieval::lexical::MAX_LEXICAL_ANCHOR_BYTES_V1
-        );
-    }
-
-    #[tokio::test]
-    async fn similar_unavailable_wire_preserves_reason_and_retryability() {
-        let temp = tempfile::tempdir().expect("temp root");
-        let admitted = crate::tool_context::tests::scope("similar-unavailable");
-        let project = crate::tool_context::tests::project_bundle(temp.path(), &admitted, None);
-        let authority = tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
-            principal: tracedecay_domain::PrincipalId::new("principal.similar-unavailable")
-                .expect("principal"),
-            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
-                "revision.similar-unavailable",
-            )
-            .expect("revision"),
-        };
-
-        for (reason, reason_code, retryable) in [
-            (
-                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-                "generation_unavailable",
-                true,
-            ),
-            (
-                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
-                "index_corruption_reset_required",
-                false,
-            ),
-        ] {
-            let executor: tracedecay_query::code_search::CodeIndexSimilarExecutor =
-                std::sync::Arc::new(move |_| {
-                    Box::pin(async move {
-                        tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason)
-                    })
-                });
-            let code_index =
-                crate::AdmittedCodeIndex::new(&authority, None, Some(&executor), None, None)
-                    .expect("similar executor admits");
-            let ctx = crate::McpToolContext::bind(crate::McpToolBinding {
-                project: &project,
-                request: crate::McpRequestAuthoritiesV1 {
-                    code_index: Some(code_index),
-                    ..crate::McpRequestAuthoritiesV1::default()
-                },
-            })
-            .expect("admitted similar binding");
-            let result = compute_similar(
-                &ctx,
-                json!({
-                    "project_id": admitted.project_id,
-                    "repository_id": admitted.repository_id,
-                    "target": {
-                        "kind": "symbol_occurrence",
-                        "symbol_occurrence_id": "symbol.similar-unavailable",
-                    },
-                    "match_classes": ["conservative_exact"],
-                    "result_limit": 10,
-                    "work_limit": 20,
-                }),
-            )
-            .await;
-            let Err(error) = result else {
-                panic!("unavailable similar executor must remain a transport failure");
-            };
-            let response =
-                crate::tool_error_response(json!(1), "tracedecay_similar", &error);
-            let wire: Value = serde_json::from_str(&crate::serialize_response_line(&response))
-                .expect("JSON-RPC response");
-
-            assert_eq!(wire["error"]["data"]["reason_code"], reason_code);
-            assert_eq!(wire["error"]["data"]["retryable"], retryable);
-        }
-    }
-
-    #[tokio::test]
-    async fn redundancy_unavailable_wire_preserves_reason_and_retryability() {
-        let temp = tempfile::tempdir().expect("temp root");
-        let admitted = crate::tool_context::tests::scope("redundancy-unavailable");
-        let project = crate::tool_context::tests::project_bundle(temp.path(), &admitted, None);
-        let authority = tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
-            principal: tracedecay_domain::PrincipalId::new("principal.redundancy-unavailable")
-                .expect("principal"),
-            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
-                "revision.redundancy-unavailable",
-            )
-            .expect("revision"),
-        };
-
-        for (reason, reason_code, retryable) in [
-            (
-                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-                "generation_unavailable",
-                true,
-            ),
-            (
-                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
-                "index_corruption_reset_required",
-                false,
-            ),
-        ] {
-            let executor: tracedecay_query::code_search::CodeIndexRedundancyExecutor =
-                std::sync::Arc::new(move |_| {
-                    Box::pin(async move { Err(reason) })
-                });
-            let code_index =
-                crate::AdmittedCodeIndex::new(&authority, None, None, Some(&executor), None)
-                    .expect("redundancy executor admits");
-            let ctx = crate::McpToolContext::bind(crate::McpToolBinding {
-                project: &project,
-                request: crate::McpRequestAuthoritiesV1 {
-                    code_index: Some(code_index),
-                    ..crate::McpRequestAuthoritiesV1::default()
-                },
-            })
-            .expect("admitted redundancy binding");
-            let result = compute_redundancy(
-                &ctx,
-                json!({
-                    "project_id": admitted.project_id,
-                    "repository_id": admitted.repository_id,
-                    "match_classes": ["conservative_exact"],
-                    "scope": {"kind": "repository"},
-                    "include_generated_paths": false,
-                    "family_limit": 10,
-                    "member_limit": 10,
-                    "work_limit": 20,
-                }),
-            )
-            .await;
-            let Err(error) = result else {
-                panic!("unavailable redundancy executor must remain a transport failure");
-            };
-            let response =
-                crate::tool_error_response(json!(1), "tracedecay_redundancy", &error);
-            let wire: Value = serde_json::from_str(&crate::serialize_response_line(&response))
-                .expect("JSON-RPC response");
-
-            assert_eq!(wire["error"]["data"]["reason_code"], reason_code);
-            assert_eq!(wire["error"]["data"]["retryable"], retryable);
-            assert_ne!(
-                wire["error"]["data"]["reason_code"],
-                "verified-code-redundancy-unavailable"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn missing_clone_lane_executors_emit_shared_capability_unavailable() {
-        let temp = tempfile::tempdir().expect("temp root");
-        let admitted = crate::tool_context::tests::scope("clone-missing-executor");
-        let project = crate::tool_context::tests::project_bundle(temp.path(), &admitted, None);
-        let authority = tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
-            principal: tracedecay_domain::PrincipalId::new("principal.clone-missing-executor")
-                .expect("principal"),
-            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
-                "revision.clone-missing-executor",
-            )
-            .expect("revision"),
-        };
-        let shared_code = tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable
-            .as_str();
-
-        // Admit the sibling lane so the request is authorized, then omit the
-        // lane under test, the Codex P2 gap (opaque missing-executor tokens).
-        let similar_stub: tracedecay_query::code_search::CodeIndexSimilarExecutor =
-            std::sync::Arc::new(|_| {
-                Box::pin(async {
-                    tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::NotFound
-                })
-            });
-        let redundancy_only =
-            crate::AdmittedCodeIndex::new(&authority, None, Some(&similar_stub), None, None)
-                .expect("similar executor admits without redundancy");
-        let redundancy_ctx = crate::McpToolContext::bind(crate::McpToolBinding {
-            project: &project,
-            request: crate::McpRequestAuthoritiesV1 {
-                code_index: Some(redundancy_only),
-                ..crate::McpRequestAuthoritiesV1::default()
-            },
-        })
-        .expect("admitted similar-only binding");
-        let redundancy_err = compute_redundancy(
-            &redundancy_ctx,
-            json!({
-                "project_id": admitted.project_id,
-                "repository_id": admitted.repository_id,
-                "match_classes": ["conservative_exact"],
-                "scope": {"kind": "repository"},
-                "include_generated_paths": false,
-                "family_limit": 10,
-                "member_limit": 10,
-                "work_limit": 20,
-            }),
-        )
-        .await
-        .expect_err("missing redundancy executor must be typed unavailable");
-        let redundancy_wire: Value = serde_json::from_str(&crate::serialize_response_line(
-            &crate::tool_error_response(json!(1), "tracedecay_redundancy", &redundancy_err),
-        ))
-        .expect("JSON-RPC response");
-        assert_eq!(redundancy_wire["error"]["data"]["reason_code"], shared_code);
-        assert_eq!(redundancy_wire["error"]["data"]["retryable"], false);
-        assert_ne!(
-            redundancy_wire["error"]["data"]["reason_code"],
-            "verified-code-redundancy-unavailable"
-        );
-
-        let redundancy_stub: tracedecay_query::code_search::CodeIndexRedundancyExecutor =
-            std::sync::Arc::new(|_| {
-                Box::pin(async {
-                    Err(tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Internal)
-                })
-            });
-        let similar_only =
-            crate::AdmittedCodeIndex::new(&authority, None, None, Some(&redundancy_stub), None)
-                .expect("redundancy executor admits without similar");
-        let similar_ctx = crate::McpToolContext::bind(crate::McpToolBinding {
-            project: &project,
-            request: crate::McpRequestAuthoritiesV1 {
-                code_index: Some(similar_only),
-                ..crate::McpRequestAuthoritiesV1::default()
-            },
-        })
-        .expect("admitted redundancy-only binding");
-        let similar_err = compute_similar(
-            &similar_ctx,
-            json!({
-                "project_id": admitted.project_id,
-                "repository_id": admitted.repository_id,
-                "target": {
-                    "kind": "symbol_occurrence",
-                    "symbol_occurrence_id": "symbol.clone-missing-executor",
-                },
-                "match_classes": ["conservative_exact"],
-                "result_limit": 10,
-                "work_limit": 20,
-            }),
-        )
-        .await
-        .expect_err("missing similar executor must be typed unavailable");
-        let similar_wire: Value = serde_json::from_str(&crate::serialize_response_line(
-            &crate::tool_error_response(json!(1), "tracedecay_similar", &similar_err),
-        ))
-        .expect("JSON-RPC response");
-        assert_eq!(similar_wire["error"]["data"]["reason_code"], shared_code);
-        assert_eq!(similar_wire["error"]["data"]["retryable"], false);
-        assert_ne!(
-            similar_wire["error"]["data"]["reason_code"],
-            "verified-code-similarity-unavailable"
-        );
-    }
-
-    fn context_memory_hit(content: &str) -> FactSearchHitV1 {
-        serde_json::from_value(json!({
-            "fact": {
-                "owner": {"kind": "profile"},
-                "fact_id": "fact.0000000000000000000000000000000000000000000000000000000000000000.1111111111111111111111111111111111111111111111111111111111111111",
-                "content": content,
-                "category": "project",
-                "tags": [],
-                "entities": [],
-                "trust_score_millionths": 900_000,
-                "source": {"kind": "application", "operation_id": "operation.context-memory"},
-                "source_label": "context-test",
-                "active_assertion_id": "assertion.context-memory",
-                "last_event_id": "event.context-memory",
-                "projected_as_of": 1,
-                "telemetry": {
-                    "retrieval_count": 0,
-                    "access_count": 0,
-                    "helpful_count": 0,
-                    "unhelpful_count": 0,
-                    "created_at": 1,
-                    "updated_at": 1,
-                    "last_retrieved_at": null,
-                    "last_recalled_at": null,
-                    "last_feedback_at": null
-                },
-                "metadata": {}
-            },
-            "scores": {
-                "score_millionths": 500_000,
-                "fts_score_millionths": 250_000,
-                "jaccard_score_millionths": 250_000,
-                "holographic_score_millionths": 0,
-                "trust_score_millionths": 900_000
-            },
-            "why": null
-        }))
-        .expect("canonical context memory hit")
-    }
-
-    #[test]
-    fn context_related_relation_budget_is_a_page_not_a_complete_walk() {
-        assert_eq!(context_related_relation_budget(1), 16);
-        assert_eq!(context_related_relation_budget(20), 64);
-        assert_eq!(context_related_relation_budget(200), 64);
-        assert!(
-            context_related_relation_budget(20) < 50_000,
-            "context must not reuse the callers complete-walk budget"
         );
     }
 
@@ -2036,8 +542,10 @@ mod tests {
     /// every lane complete, no coverage section, no added lines.
     #[test]
     fn warm_coverage_leaves_the_rendered_body_unchanged() {
-        let coverage =
-            coverage_value(&tracedecay_query::code_search::CodeIndexSearchCoverageV1::warm());
+        let coverage = serde_json::to_value(search_coverage(
+            &tracedecay_query::code_search::CodeIndexSearchCoverageV1::warm(),
+        ))
+        .expect("coverage JSON");
         assert_eq!(coverage["recall"], json!("full"));
         assert_eq!(coverage["exact"], json!("complete"));
 
@@ -2147,7 +655,7 @@ mod tests {
         })
         .expect("admitted search binding");
 
-        handle_search(
+        compute_search(
             &ctx,
             async {
                 Err(TraceDecayError::project_route(
@@ -2161,7 +669,7 @@ mod tests {
             None,
         )
         .await
-        .expect("search renders without a graph");
+        .expect("search answers without a graph");
 
         assert_eq!(
             *order.lock().expect("order"),
@@ -2250,99 +758,5 @@ mod tests {
                 }
             )
         ));
-    }
-
-    #[test]
-    fn context_markdown_lane_preview_keeps_all_lanes_visible() {
-        let full = format!(
-            "## Code Context\n**Query:** q\n\n### Memory Matches\n{}\n### Entry Points\n{}\n### Related Symbols\n{}\n### Code\n{}\n### Index Coverage Hint\n{}\n### Extension Points\n{}\n### Test Coverage\n{}\nseen_node_ids: [{}]\n",
-            "memory fact with unicode caf\u{e9}\n".repeat(300),
-            "- **entry** src/lib.rs:1\n".repeat(300),
-            "- related\n".repeat(500),
-            "```rust\nfn demo() {}\n```\n".repeat(500),
-            "hint\n".repeat(500),
-            "- trait\n".repeat(400),
-            "- tests/context_test.rs\n".repeat(400),
-            "\"node-id\",".repeat(400)
-        );
-
-        let preview = context_markdown_lane_preview(&full);
-
-        for heading in [
-            "## Code Context",
-            "### Memory Matches",
-            "### Entry Points",
-            "### Related Symbols",
-            "### Code",
-            "### Index Coverage Hint",
-            "### Extension Points",
-            "### Test Coverage",
-            "seen_node_ids:",
-        ] {
-            assert!(preview.contains(heading), "missing {heading}: {preview}");
-        }
-        assert!(preview.len() < full.len());
-        assert!(preview.contains("lane truncated"));
-        assert!(preview.is_char_boundary(preview.len()));
-    }
-
-    #[test]
-    fn context_lane_preview_keeps_seen_node_ids_parseable() {
-        let ids: Vec<String> = (0..100).map(|i| format!("function:{i:032x}")).collect();
-        let markdown = format!(
-            "{} {}\n",
-            CONTEXT_SEEN_NODE_IDS_LABEL,
-            serde_json::to_string(&ids)
-                .unwrap_or_else(|err| panic!("failed to serialize seen node ids: {err}"))
-        );
-
-        let preview = context_markdown_lane_preview(&markdown);
-        let json = match preview.strip_prefix(CONTEXT_SEEN_NODE_IDS_LABEL) {
-            Some(json) => json.trim(),
-            None => panic!("preview should keep seen_node_ids label: {preview}"),
-        };
-        let parsed: Vec<String> = serde_json::from_str(json)
-            .unwrap_or_else(|err| panic!("failed to parse seen node ids: {err}: {json}"));
-
-        assert_eq!(parsed, ids);
-        assert!(!preview.contains("lane truncated"));
-    }
-
-    #[test]
-    fn context_memory_section_keeps_full_content_for_retrieval_handle() {
-        let content = format!("{}tail-marker", "long memory body ".repeat(100));
-        let hit = context_memory_hit(&content);
-
-        let Some(section) = context_memory_section(&[hit], None) else {
-            panic!("memory hit should render");
-        };
-
-        assert!(section.contains(&content));
-        assert!(section.contains("tail-marker"));
-        assert!(!section.contains("..."));
-        assert!(section.contains("tracedecay_fact_feedback"));
-    }
-
-    #[test]
-    fn context_lane_preview_closes_open_code_fence_before_truncation_note() {
-        let markdown = format!("### Code\n```rust\n{}\n", "fn demo() {}\n".repeat(1_000));
-
-        let preview = context_markdown_lane_preview(&markdown);
-
-        assert!(preview.contains("```\n\n... lane truncated"));
-    }
-
-    #[test]
-    fn context_lane_preview_ignores_heading_markers_inside_code_fences() {
-        let markdown = format!(
-            "### Code\n```markdown\n{}\n```\n### Test Coverage\n- real lane\n",
-            "### not a lane\n".repeat(1_000)
-        );
-
-        let preview = context_markdown_lane_preview(&markdown);
-
-        assert!(preview.contains("### Code"));
-        assert!(preview.contains("### Test Coverage"));
-        assert_eq!(preview.matches("lane truncated").count(), 1);
     }
 }

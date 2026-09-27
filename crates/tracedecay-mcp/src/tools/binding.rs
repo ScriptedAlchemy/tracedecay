@@ -47,7 +47,6 @@ pub const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
 pub enum McpToolDispatchGroup {
     ApplicationSurface,
     MultiRoot,
-    Graph,
     Info,
     Admin,
     Git,
@@ -82,8 +81,7 @@ pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
     }
     match dispatch_group_for_tool(tool_name) {
         Some(
-            McpToolDispatchGroup::Graph
-            | McpToolDispatchGroup::Info
+            McpToolDispatchGroup::Info
             | McpToolDispatchGroup::Admin
             | McpToolDispatchGroup::Git
             | McpToolDispatchGroup::Health
@@ -297,6 +295,7 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::Files
         | ApplicationSurfaceOperation::Config
         | ApplicationSurfaceOperation::Retrieve
+        | ApplicationSurfaceOperation::Search
         | HealthRead
         | HealthDelta
         | DiagnosticsRead
@@ -346,9 +345,6 @@ macro_rules! binding_groups {
 /// access are one slice; a different access starts a new slice.
 #[rustfmt::skip]
 const BINDING_GROUPS: &[BindingGroup] = binding_groups![
-    [Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_search", "tracedecay_context", "tracedecay_impact",
-        "tracedecay_node", "tracedecay_similar", "tracedecay_redundancy", "tracedecay_rename_preview"],
     [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_status", "tracedecay_remote_status", "tracedecay_active_project",
         "tracedecay_project_list", "tracedecay_project_search"],

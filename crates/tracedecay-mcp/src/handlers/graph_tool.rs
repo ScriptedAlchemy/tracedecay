@@ -25,8 +25,8 @@ use crate::handlers::git::{
 };
 use crate::handlers::graph::{
     compute_by_qualified_name, compute_context, compute_derives, compute_find_exact_symbol,
-    compute_impact, compute_node, compute_redundancy, compute_rename_preview, compute_signature,
-    compute_similar, not_found_tool_result, render_context,
+    compute_impact, compute_node, compute_redundancy, compute_rename_preview, compute_search,
+    compute_signature, compute_similar, not_found_tool_result, render_context, render_search,
 };
 use crate::handlers::grep::{compute_grep, render_grep};
 use crate::handlers::health::{
@@ -180,6 +180,16 @@ pub async fn compute_graph_tool(
             compute_files(&open(operation).await?, request, scope_prefix).await
         }
         ApplicationSurfaceOperation::Config => compute_config(ctx.project_root(), args).await,
+        ApplicationSurfaceOperation::Search => {
+            compute_search(
+                ctx,
+                open(read("code_symbol_search")?),
+                args,
+                scope_prefix,
+                ignored_dependency_admission,
+            )
+            .await
+        }
         ApplicationSurfaceOperation::Retrieve => {
             compute_retrieve(&ctx.store_layout().response_handle_root, &args).await
         }
@@ -284,6 +294,7 @@ pub fn render_graph_tool(
             Vec::new(),
             || render_files_md(files),
         ),
+        GraphToolResultV1::Search(search) => render_search(response_handle_root, args, search)?,
         GraphToolResultV1::Retrieve(RetrieveResultV1::Page(page)) => {
             render_retrieved_page(args, page)?
         }
@@ -473,6 +484,7 @@ mod tests {
                 unavailable_fields: Vec::new(),
             }],
             related_symbols: Vec::new(),
+            related_omission: None,
             code: Vec::new(),
             coverage: PrimitiveSearchCoverageV1 {
                 exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),

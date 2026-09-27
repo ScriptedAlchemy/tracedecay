@@ -82,6 +82,7 @@ const HANDWRITTEN_DEFINITION_OPERATIONS: &[ApplicationSurfaceOperation] = &[
     ApplicationSurfaceOperation::SkillView,
     ApplicationSurfaceOperation::HermesSkillBridge,
     ApplicationSurfaceOperation::Analytics,
+    ApplicationSurfaceOperation::Search,
     ApplicationSurfaceOperation::StrReplace,
     ApplicationSurfaceOperation::MultiStrReplace,
     ApplicationSurfaceOperation::InsertAt,

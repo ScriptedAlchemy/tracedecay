@@ -10,6 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use gix::bstr::ByteSlice as _;
+
+/// Threads one status call may spawn for its tracked-file modification check.
+/// gix spawns these per call and lets them exit when it returns; left
+/// unlimited it starts one per logical core on every status, which on a
+/// 96-core host created roughly 90 short-lived threads per call during an
+/// index. Four keeps the check parallel on large indexes.
+pub const GIT_STATUS_MODIFICATION_CHECK_THREADS: usize = 4;
 use tracedecay_domain::git::{
     GitChangeKindV1, GitDegradationV1, GitFileModeV1, GitHeadStateV1, GitObjectFormatV1, GitOidV1,
     GitOperationStateV1, GitStatusEntryV1, GitTrackedStatusV1,
@@ -928,7 +935,10 @@ impl GitRepositoryAuthority {
             .status(gix::progress::Discard)
             .map_err(|error| operation("status", error))?
             .untracked_files(gix::status::UntrackedFiles::Files)
-            .index_worktree_rewrites(None);
+            .index_worktree_rewrites(None)
+            .index_worktree_options_mut(|options| {
+                options.thread_limit = Some(GIT_STATUS_MODIFICATION_CHECK_THREADS);
+            });
         platform.dirwalk_options_mut(|options| {
             options.set_emit_ignored(Some(gix::dir::walk::EmissionMode::Matching));
         });

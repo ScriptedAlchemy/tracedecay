@@ -272,6 +272,7 @@ mod tests {
                 reason_code,
                 retryable,
                 detail,
+                ..
             } => {
                 assert_eq!(reason_code, "code-graph-stale");
                 assert!(retryable, "a rebuild in flight resolves itself: {detail}");

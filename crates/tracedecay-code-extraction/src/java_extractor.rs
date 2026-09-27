@@ -335,6 +335,7 @@ impl JavaExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
         });
     }
 
@@ -1069,6 +1070,7 @@ impl JavaExtractor {
                                     line: inner_child.start_position().row as u32,
                                     column: inner_child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
                                 });
                                 break;
                             }
@@ -1123,6 +1125,7 @@ impl JavaExtractor {
                         line: child.start_position().row as u32,
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
                     });
                 } else if child.kind() == "type_list" {
                     Self::extract_type_list_as_implements(state, child, class_id);
@@ -1320,6 +1323,7 @@ impl JavaExtractor {
                     line: node.start_position().row as u32,
                     column: node.start_position().column as u32,
                     file_path: state.file_path.clone(),
+                    unmodeled_import: None,
                 });
             }
             return;
@@ -1352,6 +1356,7 @@ impl JavaExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
@@ -1364,6 +1369,7 @@ impl JavaExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }

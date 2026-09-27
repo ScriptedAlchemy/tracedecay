@@ -72,6 +72,7 @@ use crate::retrieval::requests::{
     StorageStatusPrimitiveResult,
 };
 use crate::retrieval::response_handle_surface::{RetrieveResultV1, RetrieveSurfaceRequestV1};
+use crate::retrieval::search_surface::{SearchResultV1, SearchSurfaceRequestV1};
 use crate::retrieval::symbol_graph::{
     ImplementationRecord, SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord,
     TypeHierarchyRecord,
@@ -253,6 +254,7 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("skill_view"),
     graph_report_spec("hermes_skill_bridge"),
     graph_report_spec("analytics"),
+    graph_report_spec("search"),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
     git_context_spec("changelog"),
@@ -349,7 +351,8 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "skill_list"
         | "skill_view"
         | "hermes_skill_bridge"
-        | "analytics" => &CLI_MCP_PRIMITIVE_SURFACES,
+        | "analytics"
+        | "search" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -567,6 +570,9 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "analytics" => {
             "Roll up tool, hint, fact-funnel and automation-run analytics for the resolved project."
+        }
+        "search" => {
+            "Rank symbols by name, identifier fragment, signature, path, or phrase through exact and lexical routes."
         }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
@@ -1033,6 +1039,7 @@ fn primitive_executable_schemas(
         HermesSkillBridgeResultV1
     );
     add!("analytics", AnalyticsSurfaceRequestV1, AnalyticsResultV1);
+    add!("search", SearchSurfaceRequestV1, SearchResultV1);
     Ok(schemas)
 }
 

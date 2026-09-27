@@ -1,11 +1,12 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_application::code_index::{
     CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionPortV1,
     CodeIndexIgnoredDependencyAdmissionRequestV1,
 };
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_contracts::retrieval::{
-    PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
+    PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1, SearchExternalImportCandidatesV1,
+    SearchExternalImportV1,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -17,12 +18,6 @@ use crate::tools::render::{self, Md};
 
 pub fn should_check_external_import_hint(result_count: usize, limit: usize) -> bool {
     result_count == 0 || result_count < limit.clamp(1, 20)
-}
-
-pub fn lazy_indexing_requested(args: &Value) -> bool {
-    args.get("lazy_index_ignored_dependencies")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
 }
 
 /// Advisory external-import evidence for a sparse search.
@@ -37,25 +32,28 @@ pub fn external_import_hint(
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
-) -> Result<Option<Value>> {
+) -> Result<Option<SearchExternalImportCandidatesV1>> {
     let candidates = hotpath::measure_block!("mcp.search.import_hint.scan", {
         ignored_dependency_candidates(ctx, graph, query, limit, scope_prefix)?
     });
     if candidates.is_empty() {
         return Ok(None);
     }
-    Ok(Some(json!({
-        "message": "Search results were sparse, and parser-backed imports contain matching external-module specifiers. Module resolution and ignored-source status are not verified by this advisory read.",
-        "evidence": "parser_external_module_specifier",
-        "resolution_status": "unverified",
-        "candidates": candidates.into_iter().map(|candidate| json!({
-            "module": candidate.module_specifier,
-            "symbol": candidate.imported_name,
-            "import_file": candidate.logical_path,
-            "line": user_line(candidate.start_line),
-        })).collect::<Vec<_>>(),
-        "suggested_action": "verify_external_import_before_lazy_indexing",
-    })))
+    Ok(Some(SearchExternalImportCandidatesV1 {
+        message: "Search results were sparse, and parser-backed imports contain matching external-module specifiers. Module resolution and ignored-source status are not verified by this advisory read.".to_owned(),
+        evidence: "parser_external_module_specifier".to_owned(),
+        resolution_status: "unverified".to_owned(),
+        candidates: candidates
+            .into_iter()
+            .map(|candidate| SearchExternalImportV1 {
+                module: candidate.module_specifier,
+                symbol: candidate.imported_name,
+                import_file: candidate.logical_path,
+                line: user_line(candidate.start_line),
+            })
+            .collect(),
+        suggested_action: "verify_external_import_before_lazy_indexing".to_owned(),
+    }))
 }
 
 pub fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvidenceV1 {
@@ -77,10 +75,6 @@ pub fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvid
         retryable,
         detail,
     }
-}
-
-pub fn unavailable_hint(error: &TraceDecayError) -> Value {
-    json!(unavailable_evidence(error))
 }
 
 #[hotpath::measure(label = "mcp.search.import_admit.total")]

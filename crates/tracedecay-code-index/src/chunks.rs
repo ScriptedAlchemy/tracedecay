@@ -2396,6 +2396,7 @@ fn cross_file_reference_candidate(
         kind,
         evidence_span: reference_evidence_span(source, offsets, references_by_site, reference)
             .unwrap_or(from.span),
+        unmodeled_import: reference.unmodeled_import,
     })
 }
 
@@ -4881,6 +4882,7 @@ pub fn real_symbol() {}
                 line: 0,
                 column: site,
                 file_path: "src/lib.rs".to_owned(),
+                unmodeled_import: None,
             },
             UnresolvedRef {
                 from_node_id: caller.node_id.clone(),
@@ -4889,6 +4891,7 @@ pub fn real_symbol() {}
                 line: 0,
                 column: site,
                 file_path: "src/lib.rs".to_owned(),
+                unmodeled_import: None,
             },
         ];
 
@@ -4960,6 +4963,7 @@ pub fn real_symbol() {}
             line: 3,
             column: 5,
             file_path: "src/lib.rs".to_owned(),
+            unmodeled_import: None,
         };
         let trait_occurrence = trait_target.occurrence.clone();
 
@@ -5094,6 +5098,7 @@ pub fn real_symbol() {}
             line: 2,
             column: 24,
             file_path: "src/settings.ts".to_owned(),
+            unmodeled_import: None,
         };
 
         let right_occurrence = right.occurrence.clone();

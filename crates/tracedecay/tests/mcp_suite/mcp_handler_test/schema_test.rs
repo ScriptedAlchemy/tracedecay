@@ -13,13 +13,13 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         .expect("production project server");
     wait_for_current_graph(&server).await;
 
-    // Direct `args.get(...).ok_or(...)` parser style.
+    // Typed request decode.
     assert_schema_requires(&tools, "tracedecay_search", &["query"]);
     expect_real_server_missing_argument_error(
         &server,
         "tracedecay_search",
         json!({}),
-        "missing required parameter: query",
+        "invalid arguments for tracedecay_search: missing field `query`",
     )
     .await;
 

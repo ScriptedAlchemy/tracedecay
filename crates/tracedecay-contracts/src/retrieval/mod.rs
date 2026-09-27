@@ -15,6 +15,7 @@ mod primitive_surface;
 mod project_file_surface;
 mod requests;
 mod response_handle_surface;
+mod search_surface;
 mod service;
 mod source_read;
 mod symbol_graph;
@@ -180,19 +181,20 @@ pub use ports::{
 };
 pub use primitive_surface::{
     ContextCodeBlockV1, ContextExtensionPointV1, ContextLexicalAnchorV1, ContextModeV1,
-    ContextPlanV1, ContextResultV1, ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1,
-    ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1, LexicalAnchorDropReasonV1,
-    LexicalAnchorDropV1, MAX_REDUNDANCY_FAMILIES_V1, MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1,
-    MAX_REDUNDANCY_WORK_V1, NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1,
-    NodeResultV1, NodeSurfaceRequestV1, PortCycleAnchorV1, PortCycleFileV1, PortCycleSymbolV1,
-    PortCycleV1, PortMatchedSymbolV1, PortOrderLevelV1, PortOrderResultV1,
-    PortOrderSurfaceRequestV1, PortOrderSymbolV1, PortStatusResultV1, PortStatusSurfaceRequestV1,
-    PortTargetOnlySymbolV1, PortUnmatchedSymbolV1, PrimitiveFreshnessStateV1,
-    PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1,
-    PrimitiveNotFoundV1, PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
-    PrimitiveSymbolLocationV1, PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
-    RedundancyCoverageV1, RedundancyFamilyV1, RedundancyPartialReasonV1, RedundancyRankingV1,
-    RedundancyResultV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
+    ContextPlanV1, ContextRelatedOmissionV1, ContextResultV1, ContextRetrievalPlanV1,
+    ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1,
+    LexicalAnchorDropReasonV1, LexicalAnchorDropV1, MAX_REDUNDANCY_FAMILIES_V1,
+    MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1, MAX_REDUNDANCY_WORK_V1, NodeDepthSurfaceRequestV1,
+    NodeDetailsV1, NodeExpansionCostV1, NodeResultV1, NodeSurfaceRequestV1, PortCycleAnchorV1,
+    PortCycleFileV1, PortCycleSymbolV1, PortCycleV1, PortMatchedSymbolV1, PortOrderLevelV1,
+    PortOrderResultV1, PortOrderSurfaceRequestV1, PortOrderSymbolV1, PortStatusResultV1,
+    PortStatusSurfaceRequestV1, PortTargetOnlySymbolV1, PortUnmatchedSymbolV1,
+    PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1,
+    PrimitiveLaneStateV1, PrimitiveLaneStatusV1, PrimitiveNotFoundV1, PrimitiveRecallV1,
+    PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1, PrimitiveSymbolLocationV1,
+    PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1, RedundancyCoverageV1,
+    RedundancyFamilyV1, RedundancyPartialReasonV1, RedundancyRankingV1, RedundancyResultV1,
+    RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
     RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
     SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
@@ -221,6 +223,16 @@ pub use requests::{
 pub use response_handle_surface::{
     RetrieveHandleExpiredV1, RetrieveHandleMissingV1, RetrieveResultV1, RetrieveSurfaceRequestV1,
     RetrievedPageV1,
+};
+pub use search_surface::{
+    SEARCH_MAX_LEXICAL_ALIASES, SEARCH_MAX_LEXICAL_ANCHOR_BYTES, SEARCH_MAX_LEXICAL_ANCHORS,
+    SEARCH_MAX_LEXICAL_PHRASES, SEARCH_MAX_LEXICAL_PROXIMITIES, SEARCH_MAX_LEXICAL_PROXIMITY_GAP,
+    SEARCH_MAX_LEXICAL_PROXIMITY_TERMS, SearchCompleteV1, SearchCoverageV1,
+    SearchExternalImportCandidatesV1, SearchExternalImportHintV1, SearchExternalImportV1,
+    SearchLaneStateV1, SearchLaneStatusV1, SearchLexicalAliasV1, SearchLexicalAlternativeReasonV1,
+    SearchLexicalFieldFilterV1, SearchLexicalFieldV1, SearchLexicalProximityV1,
+    SearchLexicalRouteV1, SearchResultDisplayV1, SearchResultRowV1, SearchResultV1,
+    SearchRouteMatchV1, SearchSpellingVariantV1, SearchSurfaceRequestV1, SearchUnavailableV1,
 };
 pub use source_read::{
     MAX_SOURCE_READ_PATH_BYTES, SourceReadModeV1, SourceReadPortContext, SourceReadPortFuture,

@@ -3280,12 +3280,12 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     }
                 }
             }
-            let unsupported = match prepared.reader.has_unresolved_callers(
+            let unresolved = match prepared.reader.unresolved_caller_gaps(
                 &traversed,
                 request.scope.path_prefix.as_deref(),
                 Arc::clone(&cancellation),
             ) {
-                Ok(unsupported) => unsupported,
+                Ok(unresolved) => unresolved,
                 Err(_) => {
                     return unavailable_for_generation(
                         query_finished_at(),
@@ -3307,17 +3307,25 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             match outcome {
                 RetrievalPortOutcome::Completed(mut evidence)
                 | RetrievalPortOutcome::Partial(mut evidence)
-                    if unsupported =>
+                    if !unresolved.is_empty() =>
                 {
                     evidence.coverage.completeness = CoverageCompleteness::Partial;
                     for domain in &mut evidence.coverage.domains {
                         domain.completeness = CoverageCompleteness::Partial;
                     }
-                    evidence.omissions.push(Omission {
+                    let reasons = unresolved
+                        .exact_target_unavailable
+                        .then_some(OmissionReason::Unsupported)
+                        .into_iter()
+                        .chain(
+                            (!unresolved.unmodeled_imports.is_empty())
+                                .then_some(OmissionReason::ImportUnmodeled),
+                        );
+                    evidence.omissions.extend(reasons.map(|reason| Omission {
                         domain: EvidenceDomain::Symbol,
                         count: 1,
-                        reason: OmissionReason::Unsupported,
-                    });
+                        reason,
+                    }));
                     RetrievalPortOutcome::Partial(evidence)
                 }
                 outcome => outcome,

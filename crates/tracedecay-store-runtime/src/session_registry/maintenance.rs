@@ -19,9 +19,9 @@ use super::retained_hook_tasks::RetainedHookTaskJoin;
 
 use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, RegisteredGlobalDbLeaseV1,
-    RegisteredGlobalDbOwnerV1, Result, StoreRuntimeClientLease, release_process_allocator_memory,
-    session_registry_error,
+    RegisteredGlobalDbOwnerV1, Result, StoreRuntimeClientLease, session_registry_error,
 };
+use tracedecay_runtime_core::resident_memory::release_process_allocator_memory_v1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegisteredSchemaConvergenceStatus {
@@ -355,7 +355,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                     ],
                 );
             }
-            release_process_allocator_memory();
+            let _ = release_process_allocator_memory_v1();
             drop(permit);
             let status = match result {
                 Ok(()) => {

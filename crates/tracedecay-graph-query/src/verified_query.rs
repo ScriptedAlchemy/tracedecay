@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphReadCostMeter,
-    CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1, CodeGraphSymbolPredicate,
-    CodeGraphSymbolSummaryV1,
+    CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphRankedNeighborsV1,
+    CodeGraphReadCostMeter, CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1,
+    CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestCostReceiptV1,
@@ -486,6 +486,26 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callees_truncated(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    #[hotpath::measure(label = "usecases.graph.verified.ranked_neighbors")]
+    pub fn ranked_neighbors(
+        &self,
+        seeds: &[SymbolOccurrenceId],
+        kind_rank: fn(RelationEdgeKindV1) -> u8,
+        max_relations: usize,
+        limit: usize,
+    ) -> Result<CodeGraphRankedNeighborsV1> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .ranked_neighbors(
+                seeds,
+                kind_rank,
+                max_relations,
+                limit,
+                Arc::clone(&self.cancellation),
+            )
             .map_err(graph_projection_error)
     }
 

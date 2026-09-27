@@ -12,7 +12,6 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
 };
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
-use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::info as portable_info;
 use tracedecay_mcp::handlers::{
     VerifiedGraphOpenFuture, unknown_tool_error, verified_read_operation,
@@ -105,46 +104,6 @@ async fn admitted_graph_query_for_operation(
         },
     );
     Ok(query)
-}
-
-/// Dispatch code-graph navigation and lookup tools (`tracedecay_search`,
-/// `tracedecay_callers`, ...). Returns `None` when `tool_name` belongs to a
-/// different domain so the caller can try the next dispatch group.
-#[hotpath::measure(future = true, label = "mcp.dispatch.graph")]
-pub(super) async fn dispatch_graph_tools(
-    tool_name: &str,
-    cg: &TraceDecay,
-    args: Value,
-    selected_scope_prefix: Option<&str>,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    dispatch_graph_tools_inner(tool_name, cg, args, selected_scope_prefix, options).await
-}
-
-fn dispatch_graph_tools_inner<'a>(
-    tool_name: &'a str,
-    cg: &'a TraceDecay,
-    args: Value,
-    selected_scope_prefix: Option<&'a str>,
-    options: ToolCallRegistryOptions<'a>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    // Erase the deeply nested match-arm futures before they reach the
-    // measured wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        let project = admitted_project_authorities(cg, &options)?;
-        let snapshots = AdmittedRequestSnapshotsV1::default();
-        let freshness = graph_freshness_reader(tool_name, &options);
-        let ctx = admitted_tool_context(&options, &project, &snapshots, freshness)?;
-        portable_graph::dispatch_tool(
-            &ctx,
-            &verified_graph_open(&options),
-            tool_name,
-            args,
-            selected_scope_prefix,
-            options.code_index_ignored_dependency_admission.as_deref(),
-        )
-        .await
-    })
 }
 
 /// Dispatch project-info, registry, and file-inspection tools

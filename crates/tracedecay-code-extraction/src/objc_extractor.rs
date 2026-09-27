@@ -653,6 +653,7 @@ impl ObjcExtractor {
                         line,
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
                     });
                 }
                 if !cursor.goto_next_sibling() {
@@ -733,6 +734,7 @@ impl ObjcExtractor {
                 line: start_line,
                 column: superclass.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
         }
 
@@ -769,6 +771,7 @@ impl ObjcExtractor {
                         line,
                         column: type_id.start_position().column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
                     });
                 }
                 if !cursor.goto_next_sibling() {
@@ -1246,6 +1249,7 @@ impl ObjcExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1291,6 +1295,7 @@ impl ObjcExtractor {
                 line: node.start_position().row as u32,
                 column: node.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
         }
     }

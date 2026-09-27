@@ -464,12 +464,13 @@ mod tests {
         assert!(
             definitions
                 .iter()
-                .any(|definition| definition.name == "tracedecay_search"),
+                .any(|definition| definition.name == "tracedecay_dashboard"),
             "legacy production tools remain discoverable until cataloged"
         );
         assert!(
             definitions.iter().all(|definition| {
-                definition.name != "tracedecay_context"
+                definition.name != "tracedecay_search"
+                    && definition.name != "tracedecay_context"
                     && definition.name != "tracedecay_git_preview"
             }),
             "catalog-bound tools require explicit capability authority"

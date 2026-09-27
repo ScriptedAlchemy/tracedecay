@@ -563,6 +563,7 @@ impl HlslExtractor {
                 line,
                 column,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
             });
         }
     }
