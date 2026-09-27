@@ -1975,6 +1975,29 @@ fn codex_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// A marketplace holding nothing but the identity
+/// [`install_codex_marketplace_entry`] writes and no plugins carries no
+/// operator content, so removing the last entry removes the file.
+fn codex_marketplace_is_empty_skeleton(marketplace: &serde_json::Value) -> bool {
+    let Some(object) = marketplace.as_object() else {
+        return false;
+    };
+    object
+        .keys()
+        .all(|key| matches!(key.as_str(), "name" | "interface" | "plugins"))
+        && object
+            .get("plugins")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+        && match object.get("interface") {
+            None => true,
+            Some(serde_json::Value::Object(interface)) => {
+                interface.keys().all(|key| key == "displayName")
+            }
+            Some(_) => false,
+        }
+}
+
 fn remove_codex_marketplace_entry_at(marketplace_path: &Path, label: &str) -> Result<()> {
     if !marketplace_path.exists() {
         return Ok(());
@@ -1998,6 +2021,9 @@ fn remove_codex_marketplace_entry_at(marketplace_path: &Path, label: &str) -> Re
             });
             if plugins.len() == before {
                 return Ok((false, JsonConfigMutation::Unchanged));
+            }
+            if codex_marketplace_is_empty_skeleton(&marketplace) {
+                return Ok((true, JsonConfigMutation::Remove));
             }
             Ok((true, JsonConfigMutation::Write(marketplace)))
         },

@@ -114,7 +114,9 @@ pub fn recorded_claude_invocations(path: &Path) -> Vec<String> {
 }
 
 /// A stock-grammar `codex` whose `plugin add` enables the plugin and copies
-/// the catalog-deployed source into its versioned cache, as Codex does.
+/// the catalog-deployed source into its versioned cache, and whose `plugin
+/// remove` drops both again while leaving the marketplace cache directory, as
+/// Codex 0.156 does.
 #[cfg(unix)]
 pub fn install_current_codex_cli(bin_dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -144,9 +146,57 @@ if args[:2] == ["plugin", "add"] and len(args) >= 3 and args[2].startswith("trac
     if header not in config:
         config_path.write_text(config + "\n" + header + "\nenabled = true\n")
     print(json.dumps({"pluginId": args[2], "enabled": True}))
+elif args[:2] == ["plugin", "remove"] and len(args) >= 3 and args[2].startswith("tracedecay@") and args[3:] in ([], ["--json"]):
+    marketplace = args[2].split("@", 1)[1]
+    shutil.rmtree(home / ".codex/plugins/cache" / marketplace / "tracedecay", ignore_errors=True)
+    config_path = home / ".codex/config.toml"
+    block = '\n[plugins."' + args[2] + '"]\nenabled = true\n'
+    config_path.write_text(config_path.read_text().replace(block, ""))
+    print(json.dumps({"pluginId": args[2], "enabled": False}))
 else:
     print("unsupported fake Codex lifecycle command: " + " ".join(args), file=sys.stderr)
     sys.exit(2)
+"##,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&cli).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&cli, permissions).unwrap();
+}
+
+/// A stock-grammar `droid` whose `mcp add` / `mcp remove` edit its own
+/// `~/.factory/mcp.json` registry, as Factory Droid does.
+#[cfg(unix)]
+pub fn install_current_droid_cli(bin_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cli = bin_dir.join("droid");
+    fs::write(
+        &cli,
+        r##"#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+home = pathlib.Path(os.environ["HOME"])
+path = home / ".factory/mcp.json"
+args = sys.argv[1:]
+registry = json.loads(path.read_text()) if path.exists() else {"mcpServers": {}}
+if args[:2] == ["mcp", "add"] and len(args) == 6 and args[4:] == ["--type", "stdio"]:
+    command = args[3].split(" ")
+    registry.setdefault("mcpServers", {})[args[2]] = {
+        "type": "stdio",
+        "command": command[0],
+        "args": command[1:],
+    }
+elif args[:2] == ["mcp", "remove"] and len(args) == 3:
+    registry.get("mcpServers", {}).pop(args[2], None)
+else:
+    print("unsupported fake Droid lifecycle command: " + " ".join(args), file=sys.stderr)
+    sys.exit(2)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(registry, indent=2) + "\n")
 "##,
     )
     .unwrap();

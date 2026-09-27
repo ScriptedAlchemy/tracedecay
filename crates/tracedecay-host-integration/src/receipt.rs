@@ -27,6 +27,12 @@ pub struct HostBundleInstallReceiptV1 {
     pub operation: HostBundleLifecycleOpV1,
     pub manifest_digest: [u8; 32],
     pub artifacts: Vec<HostBundleReceiptArtifactV1>,
+    /// Directories below the install root that a lifecycle operation created
+    /// and that still exist, sorted. Only these may be removed once empty; a
+    /// directory that existed before install is never listed. Receipts written
+    /// before this record existed list none, so their directories are kept.
+    #[serde(default)]
+    pub created_directories: Vec<String>,
 }
 
 /// Durable aggregate commit marker for a complete host component set. The root

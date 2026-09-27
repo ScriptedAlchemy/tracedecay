@@ -141,6 +141,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
                 ownership_marker: artifact.ownership_marker.clone(),
             })
             .collect(),
+        created_directories: Vec::new(),
     };
     let control = lifecycle_root.path().join(".tracedecay-host-bundle-v1");
     fs::create_dir_all(&control).unwrap();
@@ -244,6 +245,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
                 ownership_marker: artifact.ownership_marker.clone(),
             })
             .collect(),
+        created_directories: Vec::new(),
     };
     let extension_prefix = format!(
         ".cursor/extensions/tracedecay.cursor-native-{}/",

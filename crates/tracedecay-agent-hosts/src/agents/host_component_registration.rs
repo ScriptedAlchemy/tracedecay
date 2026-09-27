@@ -674,6 +674,13 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
         Ok(())
     }
 
+    fn registration_paths(
+        &self,
+        component_set: &crate::agents::host_bundle::HostComponentSetV1,
+    ) -> Result<Vec<PathBuf>, crate::agents::host_bundle::HostBundleError> {
+        CatalogHostComponentRegistrationAuthority::registration_paths(self, component_set)
+    }
+
     #[hotpath::measure(label = "hosts.agent.host_bundle.registration_preflight")]
     fn preflight(
         &mut self,

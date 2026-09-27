@@ -1,7 +1,7 @@
 //! Aggregate component-set transaction: one registration adapter and one
 //! in-memory rollback boundary spanning every component of a host.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -20,7 +20,9 @@ use super::planner::{
     dry_run_host_component_set_lifecycle_with_lifecycle_root_at, observe_artifact_at,
     plan_verified_complete_lifecycle_mutation, validate_artifact_contents_for_operation,
 };
-use super::writer::{ArtifactUndo, HostBundleWriterV1, read_regular_nofollow};
+use super::writer::{
+    ArtifactUndo, HostBundleWriterV1, ancestor_directories, read_regular_nofollow,
+};
 use super::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleError, HostBundleInstallReceiptV1,
     HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleReceiptArtifactV1,
@@ -229,6 +231,30 @@ impl HostBundleWriterV1 {
             .collect::<Vec<_>>();
         registration.declare_artifact_writes(component_set, request, &declared_writes)?;
         registration.preflight(component_set, request)?;
+        let registration_paths = registration
+            .registration_paths(component_set)?
+            .iter()
+            .filter_map(|path| self.root_relative(path))
+            .collect::<Vec<_>>();
+        let missing_before = self.missing_directories(&ancestor_directories(
+            prepared
+                .iter()
+                .flat_map(|component| {
+                    component
+                        .manifest
+                        .artifacts
+                        .iter()
+                        .map(|artifact| artifact.relative_path.as_str())
+                        .chain(
+                            component
+                                .plan
+                                .mutations
+                                .iter()
+                                .map(|mutation| mutation.relative_path.as_str()),
+                        )
+                })
+                .chain(registration_paths.iter().map(String::as_str)),
+        ));
 
         let mut undo = Vec::new();
         let result = (|| {
@@ -246,8 +272,20 @@ impl HostBundleWriterV1 {
             self.verify_component_set_artifacts(&prepared)?;
             registration.verify(component_set, request)?;
 
-            let receipt =
-                component_set_receipt_from_prepared(&prepared, request, confirmed_preview)?;
+            let mut recorded = self.created_directories(&missing_before);
+            recorded.extend(
+                prepared
+                    .iter()
+                    .filter_map(|component| component.previous_receipt.as_ref())
+                    .flat_map(|receipt| receipt.created_directories.iter().cloned()),
+            );
+            let created_directories = self.prune_created_directories(&recorded)?;
+            let receipt = component_set_receipt_from_prepared(
+                &prepared,
+                request,
+                confirmed_preview,
+                &created_directories,
+            )?;
             for component_receipt in &receipt.component_receipts {
                 self.write_receipt(component_receipt)?;
             }
@@ -267,6 +305,7 @@ impl HostBundleWriterV1 {
                     registration,
                     &prepared,
                     &undo,
+                    &missing_before,
                 ) {
                     Ok(()) => error,
                     Err(rollback_error) => rollback_error,
@@ -432,9 +471,11 @@ impl HostBundleWriterV1 {
         registration: &mut R,
         prepared: &[PreparedHostComponentSetComponentV1],
         undo: &[ArtifactUndo],
+        missing_before: &BTreeSet<String>,
     ) -> Result<(), HostBundleError> {
         registration.rollback(component_set, request)?;
         self.undo_artifact_mutations(undo)?;
+        self.prune_created_directories(&self.created_directories(missing_before))?;
         for component in prepared.iter().rev() {
             match &component.previous_receipt {
                 Some(receipt) => self.write_receipt(receipt)?,
@@ -449,7 +490,30 @@ fn component_set_receipt_from_prepared(
     prepared: &[PreparedHostComponentSetComponentV1],
     request: &HostComponentSetExecutionRequestV1,
     confirmed_preview: Option<&HostComponentSetLifecyclePreviewV1>,
+    created_directories: &BTreeSet<String>,
 ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
+    // Each created directory is recorded once, on the first component with an
+    // artifact beneath it; registration-only directories go to the first
+    // component.
+    let owner_of = |directory: &str| {
+        prepared
+            .iter()
+            .position(|component| {
+                component.manifest.artifacts.iter().any(|artifact| {
+                    artifact
+                        .relative_path
+                        .strip_prefix(directory)
+                        .is_some_and(|rest| rest.starts_with('/'))
+                })
+            })
+            .unwrap_or(0)
+    };
+    let mut owned_directories = vec![Vec::new(); prepared.len()];
+    for directory in created_directories {
+        if let Some(owned) = owned_directories.get_mut(owner_of(directory)) {
+            owned.push(directory.clone());
+        }
+    }
     // Provenance is preserved only for a *companion*: a component an incremental
     // Update left untouched while it did real work on a sibling. Two gates bound
     // this:
@@ -472,7 +536,8 @@ fn component_set_receipt_from_prepared(
         });
     let component_receipts = prepared
         .iter()
-        .map(|component| {
+        .zip(owned_directories)
+        .map(|(component, created_directories)| {
             // An unchanged companion, one whose plan writes nothing and whose
             // manifest is byte-identical to its durable receipt, keeps its
             // original operation provenance. "Writes nothing" must be read from
@@ -488,7 +553,10 @@ fn component_set_receipt_from_prepared(
                 && let Some(previous_receipt) = &component.previous_receipt
                 && previous_receipt.manifest_digest == component.manifest.canonical_digest()?
             {
-                return Ok(previous_receipt.clone());
+                return Ok(HostBundleInstallReceiptV1 {
+                    created_directories,
+                    ..previous_receipt.clone()
+                });
             }
             Ok(HostBundleInstallReceiptV1 {
                 schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
@@ -511,6 +579,7 @@ fn component_set_receipt_from_prepared(
                         })
                         .collect()
                 },
+                created_directories,
             })
         })
         .collect::<Result<Vec<_>, HostBundleError>>()?;
