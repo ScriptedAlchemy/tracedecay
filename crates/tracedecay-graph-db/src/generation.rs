@@ -58,7 +58,10 @@ pub use replay::{
 pub(crate) use replay::{
     checked_decode_replay_source, metadata_manifest_from_source, validate_supplied_rows_binding,
 };
-pub use spill::{GraphGenerationRowSpill, GraphGenerationRows, SpilledGraphGeneration};
+pub use spill::{
+    GRAPH_ROW_SPILL_RUN_BYTES, GraphGenerationRowSpill, GraphGenerationRows,
+    GraphSpillRowFootprint, SpilledGraphGeneration,
+};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
