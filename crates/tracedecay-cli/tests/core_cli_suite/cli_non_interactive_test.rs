@@ -2503,12 +2503,34 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
         "branch list must read durable admission\nstdout:\n{}\nstderr:\n{pending_stderr}",
         String::from_utf8_lossy(&pending.stdout)
     );
-    assert!(
-        pending_stderr
-            .lines()
-            .any(|line| line.contains("feature/new") && line.contains("indexing")),
-        "admitted branch must be durably visible as indexing: {pending_stderr}"
-    );
+    // The one-file publication may seal before this listing runs, so the
+    // admitted branch reads either as pending or as synced, and a synced
+    // branch serves only once the daemon switches to it. A synced listing
+    // must already rest on sealed provenance; sealing never reverts.
+    let admitted = pending_stderr
+        .lines()
+        .find(|line| line.starts_with("  feature/new "))
+        .unwrap_or_else(|| panic!("admitted branch must be durably listed: {pending_stderr}"));
+    let listed_pending = admitted.contains("indexing");
+    if listed_pending {
+        assert!(
+            admitted.ends_with(", exact index pending"),
+            "a pending branch must name its pending exact index: {admitted}"
+        );
+    } else {
+        assert!(
+            (admitted.starts_with("  feature/new [current], ")
+                || admitted.starts_with("  feature/new [current, serving], "))
+                && admitted.contains(" (from main), synced "),
+            "admitted branch must read as pending or synced: {admitted}"
+        );
+        assert!(
+            tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
+                .and_then(|meta| meta.branches.get("feature/new").cloned())
+                .is_some_and(|entry| entry.graph_source.is_some()),
+            "a synced listing must rest on sealed provenance: {admitted}"
+        );
+    }
     let started = Instant::now();
     let meta = loop {
         if let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
@@ -2525,6 +2547,18 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
         );
         std::thread::sleep(Duration::from_millis(100));
     };
+    let mut sealed = tracedecay_command_without_daemon(home.path(), &project_root);
+    sealed.args(["branch", "list"]);
+    let sealed = run_with_timeout(sealed, cli_timeout());
+    let sealed_stderr = String::from_utf8_lossy(&sealed.stderr);
+    assert!(
+        sealed_stderr
+            .lines()
+            .any(|line| line.starts_with("  feature/new [current")
+                && !line.contains("indexing")
+                && line.contains(" (from main), synced ")),
+        "a sealed branch must list as synced: {sealed_stderr}"
+    );
     let entry = meta
         .branches
         .get("feature/new")
