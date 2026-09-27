@@ -157,19 +157,24 @@ fn queued_repository_mutation_observes_live_cancellation() {
         waiter_result_tx.send(result).expect("waiter result");
     });
 
+    let polling = std::time::Instant::now() + Duration::from_secs(5);
     while checks.load(Ordering::SeqCst) < 2 {
+        assert!(
+            std::time::Instant::now() < polling,
+            "queued waiter never polled its cancellation"
+        );
         thread::yield_now();
     }
+    // The waiter returns only from a check that observed the cancellation, so
+    // its result is the signal to wait for; a check count read after the store
+    // can already include that final check.
     cancellation.store(true, Ordering::SeqCst);
-    let checks_before_cancellation = checks.load(Ordering::SeqCst);
-    while checks.load(Ordering::SeqCst) == checks_before_cancellation {
-        thread::yield_now();
-    }
     assert!(
         waiter_result_rx
-            .recv_timeout(Duration::from_millis(100))
+            .recv_timeout(Duration::from_secs(5))
             .expect("cancelled waiter exits before repository holder")
     );
+    assert!(checks.load(Ordering::SeqCst) > 2);
     release_tx.send(()).expect("release holder");
 
     holder.join().expect("holder joins");

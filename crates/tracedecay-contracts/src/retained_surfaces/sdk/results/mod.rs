@@ -12,20 +12,21 @@ mod session;
 pub use automation::{
     AutomationCommittedReceiptV1, AutomationExternalEffectReceiptV1, AutomationRunProblemV1,
     AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
-    MemoryAutomationCurationAddDispositionV1, MemoryAutomationCurationLinkDispositionV1,
-    MemoryAutomationCurationMergeV1, MemoryAutomationCurationOperationEffectV1,
-    MemoryAutomationCurationReceiptV1, MemoryAutomationCurationRelationKindV1,
-    MemoryAutomationCurationRelationProvenanceV1, MemoryAutomationCurationRelationV1,
-    MemoryAutomationCurationRemoveDispositionV1, MemoryAutomationCurationResultV1,
-    MemoryAutomationFactConflictSourceV1, MemoryAutomationFactConflictValidationV1,
-    MemoryAutomationFactDedupeValidationV1, MemoryAutomationFactDispositionV1,
-    MemoryAutomationFactEffectV1, MemoryAutomationFactEvidenceItemV1,
-    MemoryAutomationFactEvidenceSourceSpanV1, MemoryAutomationFactEvidenceTrustBucketV1,
-    MemoryAutomationFactEvidenceTrustV1, MemoryAutomationFactEvidenceV1,
-    MemoryAutomationFactInputDigestError, MemoryAutomationFactInputDigestV1,
-    MemoryAutomationFactNearestMatchV1, MemoryAutomationFactReceiptV1,
-    MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1, MemoryAutomationFactTargetV1,
-    MemoryAutomationFactValidationStatusV1, MemoryAutomationFactValidationV1,
+    FactStoreCurateResultV1, FactStoreCurateStateV1, MemoryAutomationCurationAddDispositionV1,
+    MemoryAutomationCurationLinkDispositionV1, MemoryAutomationCurationMergeV1,
+    MemoryAutomationCurationOperationEffectV1, MemoryAutomationCurationReceiptV1,
+    MemoryAutomationCurationRelationKindV1, MemoryAutomationCurationRelationProvenanceV1,
+    MemoryAutomationCurationRelationV1, MemoryAutomationCurationRemoveDispositionV1,
+    MemoryAutomationCurationResultV1, MemoryAutomationFactConflictSourceV1,
+    MemoryAutomationFactConflictValidationV1, MemoryAutomationFactDedupeValidationV1,
+    MemoryAutomationFactDispositionV1, MemoryAutomationFactEffectV1,
+    MemoryAutomationFactEvidenceItemV1, MemoryAutomationFactEvidenceSourceSpanV1,
+    MemoryAutomationFactEvidenceTrustBucketV1, MemoryAutomationFactEvidenceTrustV1,
+    MemoryAutomationFactEvidenceV1, MemoryAutomationFactInputDigestError,
+    MemoryAutomationFactInputDigestV1, MemoryAutomationFactNearestMatchV1,
+    MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
+    MemoryAutomationFactTargetV1, MemoryAutomationFactValidationStatusV1,
+    MemoryAutomationFactValidationV1,
 };
 pub use lcm::{
     CompactLineageEdgeV1, LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmContentRangeV1,
@@ -122,7 +123,7 @@ pub struct RetainedErrorV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(untagged)]
 pub enum RetainedSurfaceResultV1 {
-    FactStoreCurate(AutomationRunResultV1),
+    FactStoreCurate(FactStoreCurateResultV1),
     FactStoreAdd(FactStoreAddResultV1),
     FactStoreSearch(FactStoreSearchResultV1),
     FactStoreProbe(FactStoreProbeResultV1),
@@ -246,8 +247,23 @@ mod tests {
     }
 
     #[test]
-    fn automation_terminal_selects_only_its_exact_result_variant() {
+    fn curate_receipt_selects_only_its_exact_result_variant() {
+        let request = automation_request("run.memory.zero", AutomationTaskV1::MemoryCurator);
         let result = serde_json::from_value::<RetainedSurfaceResultV1>(with_request_digest(
+            json!({
+                "run_id": "run.memory.zero",
+                "task": "memory_curator",
+                "state": "started"
+            }),
+            &request,
+        ))
+        .expect("canonical curate receipt");
+        let RetainedSurfaceResultV1::FactStoreCurate(receipt) = result else {
+            panic!("the receipt decoded as a sibling operation: {result:?}");
+        };
+        assert!(receipt.matches_admission(&request));
+
+        let terminal = with_request_digest(
             json!({
                 "run_id": "run.memory.zero",
                 "task": "memory_curator",
@@ -262,13 +278,15 @@ mod tests {
                 },
                 "committed_receipts": []
             }),
-            &automation_request("run.memory.zero", AutomationTaskV1::MemoryCurator),
-        ))
-        .expect("canonical automation terminal");
-
-        assert!(matches!(
-            result,
-            RetainedSurfaceResultV1::FactStoreCurate(_)
-        ));
+            &request,
+        );
+        assert!(
+            RetainedSurfaceResultV1::from_operation_value(
+                RetainedSurfaceOperation::FactStoreCurate,
+                terminal
+            )
+            .is_err(),
+            "the run terminal is read from the run ledger, not returned by fact_store_curate"
+        );
     }
 }

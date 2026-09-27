@@ -8,8 +8,8 @@ use tracedecay_contracts::retained_surfaces::{
     AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
     AutomationTaskRequestV1, AutomationTaskV1, MemoryAutomationCurationReceiptV1,
     MemoryCuratorRunInputV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
-    RetainedSurfaceResultV1, SessionReflectorRunInputV1, UserJobRunInputV1,
-    retained_surface_application_operation, retained_surface_execution_problem,
+    SessionReflectorRunInputV1, UserJobRunInputV1, retained_surface_application_operation,
+    retained_surface_execution_problem,
 };
 
 use tracedecay_contracts::{
@@ -554,7 +554,7 @@ fn result_terminal(
         .expect("execution"),
         ReconciliationState::Reconciled,
         receipt,
-        Some(RetainedSurfaceResultV1::FactStoreCurate(result)),
+        Some(result),
     )
     .expect("effect result");
     AutomationSettledTerminal::Outcome {
@@ -3550,5 +3550,50 @@ async fn refused_pending_index_shape_rebuilds_from_journals_and_converges() {
         recover_without_memory_reads(dashboard_root).await,
         recovery_index::AutomationEffectRecoveryReport::default(),
         "a converged recovery has nothing left to inspect"
+    );
+}
+
+/// A settled run commits each journal phase once: the reservation, the
+/// prepared terminal with its sidecar, and the promotion. Reads between phases
+/// observe exactly what their owner just made durable and publish nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settled_run_commits_each_journal_phase_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let run_id = "run.one-commit-per-phase";
+    let job_id = "one-commit-per-phase";
+    let retained = retained_disabled_user_job_run(dashboard_root, run_id, job_id).await;
+    let admission = external_admission_for_job(run_id, "request.one-commit-per-phase", job_id);
+    let (authority, journal_path, expected_admission) =
+        retained_external_authority(dashboard_root, admission);
+    recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
+        .expect("retain the reserved authority");
+    assert_eq!(
+        durable_write_census::counts(&journal_path),
+        (1, 0),
+        "the reservation is one journal commit"
+    );
+
+    let outcome = authority
+        .start_retained_automation_settlement(retained, None, |run| {
+            (run.ledger_record, run.committed_receipt)
+        })
+        .wait()
+        .await
+        .expect("retained settlement");
+    let super::RetainedAutomationSettlementOutcome::Run { record, .. } = outcome else {
+        panic!("the settled run must publish its terminal");
+    };
+    assert_eq!(record.run_id, run_id);
+    assert_eq!(
+        durable_write_census::counts(&journal_path),
+        (3, 1),
+        "(journal, sidecar) durable writes for reserve, prepare, and promote"
+    );
+    assert!(
+        read_indexed_record_blocking(&journal_path)
+            .expect("settled journal read")
+            .expect("settled journal")
+            .is_terminal()
     );
 }

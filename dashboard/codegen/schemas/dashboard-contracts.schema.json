@@ -13178,6 +13178,41 @@
       ],
       "type": "object"
     },
+    "FactStoreCurateResultV1": {
+      "additionalProperties": false,
+      "description": "Receipt of one admitted automatic curation.\n\nThe curator runs on the daemon after this receipt is returned. Its terminal\nis the automation run ledger record for `run_id`, read with\n`automation_run_view`.",
+      "properties": {
+        "request_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "state": {
+          "$ref": "#/$defs/FactStoreCurateStateV1"
+        },
+        "task": {
+          "$ref": "#/$defs/AutomationTaskV1"
+        }
+      },
+      "required": [
+        "run_id",
+        "task",
+        "request_digest",
+        "state"
+      ],
+      "type": "object"
+    },
+    "FactStoreCurateStateV1": {
+      "description": "Lifecycle state a `fact_store_curate` receipt reports.",
+      "oneOf": [
+        {
+          "const": "started",
+          "description": "The run was admitted and continues on the daemon.",
+          "type": "string"
+        }
+      ]
+    },
     "FeedbackCoverageV1": {
       "enum": [
         "known",
@@ -34952,6 +34987,9 @@
     "fact_store_curate_request": {
       "$ref": "#/$defs/FactStoreCurateRequestV1"
     },
+    "fact_store_curate_result": {
+      "$ref": "#/$defs/FactStoreCurateResultV1"
+    },
     "feedback_proximity": {
       "$ref": "#/$defs/FeedbackProximityReadResultV1"
     },
@@ -35436,6 +35474,7 @@
     "automation_run_artifact",
     "automation_outcomes",
     "fact_store_curate_request",
+    "fact_store_curate_result",
     "automation_run",
     "automation_problem"
   ],

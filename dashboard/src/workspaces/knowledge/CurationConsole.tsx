@@ -1,6 +1,7 @@
 /** Agent-managed curation control plus automation-owned run observability. */
-import type { AutomationOutcomesPayloadV1 } from "../../contracts/generated.ts";
-import { useAutomaticCurator, useAutomationOutcomes, type AutomaticCuratorRun, type AutomaticCuratorResult } from "../../data/query/automation.ts";
+import type { AutomationOutcomesPayloadV1, AutomationRunsPayloadV1 } from "../../contracts/generated.ts";
+import type { PayloadResult } from "../../data/query/payload.ts";
+import { useAutomaticCurator, useAutomationOutcomes, useAutomationRuns, type AutomaticCuratorReceipt, type AutomaticCuratorResult } from "../../data/query/automation.ts";
 import { PayloadBoundary } from "../../ui/ReadSection.tsx";
 import { Panel, Readout } from "../../ui/instrument.tsx";
 import { RunHistory } from "../automations/RunHistory.tsx";
@@ -91,18 +92,8 @@ function AutomaticCuratorSettlement({
   result: AutomaticCuratorResult;
 }) {
   switch (result.outcome) {
-    case "ok":
-      return (
-        <div role="status" className="flex flex-col gap-1 text-2xs leading-relaxed text-state-ready">
-          <p>
-            automatic curator run {result.run.run_id} settled {result.run.terminal.status}
-            {result.run.committed_receipts.length > 0
-              ? ` · ${result.run.committed_receipts.length.toLocaleString()} committed receipt`
-              : " · no committed effects"}
-          </p>
-          <CommittedCurationEffects run={result.run} />
-        </div>
-      );
+    case "started":
+      return <StartedCuratorRun receipt={result.receipt} />;
     case "partial_effect": {
       const receipt = result.problem.problem.committed_receipt;
       if (receipt === null) {
@@ -142,70 +133,54 @@ function AutomaticCuratorSettlement({
   }
 }
 
-function CommittedCurationEffects({
-  run,
-}: {
-  run: Pick<AutomaticCuratorRun, "committed_receipts">;
-}) {
-  const effects = run.committed_receipts.flatMap((committed) =>
-    committed.kind === "curation"
-      ? committed.receipt.receipt.operation_effects.flatMap(committedCurationEffect)
-      : [],
-  );
-  if (effects.length === 0) return null;
-  return (
-    <ol aria-label="Committed curator effects" className="flex flex-col gap-1 border-l border-edge-subtle pl-2">
-      {effects.map((effect) => (
-        <li key={effect.key} className="text-3xs text-text-secondary">
-          {effect.label}
-        </li>
-      ))}
-    </ol>
-  );
+const STARTED_RUN_POLL_MILLIS = 1_000;
+
+/** The started run's ledger row, or `undefined` while it is still running. */
+function settledRow(
+  latest: PayloadResult<AutomationRunsPayloadV1> | undefined,
+  runId: string,
+) {
+  if (latest?.outcome !== "ok") return undefined;
+  const row = latest.data.runs.find((run) => run.run_id === runId);
+  return row !== undefined &&
+    (row.status === "succeeded" || row.status === "failed" || row.status === "skipped")
+    ? row
+    : undefined;
 }
 
-type CurationEffect = Extract<
-  AutomaticCuratorRun["committed_receipts"][number],
-  { kind: "curation" }
->["receipt"]["receipt"]["operation_effects"][number];
-
-function committedCurationEffect(
-  effect: CurationEffect,
-): { key: string; label: string }[] {
-  switch (effect.kind) {
-    case "add":
-      return effect.commit === null ? [] : [{
-        key: `add:${effect.commit.last_event_id}`,
-        label: `add fact · fact ${effect.fact_id} · ${effect.disposition} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
-      }];
-    case "link_facts":
-      return effect.commit === null ? [] : [{
-        key: `link_facts:${effect.commit.last_event_id}`,
-        label: `link facts · ${effect.source_fact_id} → ${effect.target_fact_id} · ${effect.relation.kind} · ${effect.disposition} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
-      }];
-    case "merge": {
-      const commit = effect.outcome.commit_receipts.at(-1);
-      return commit === undefined ? [] : [{
-        key: `merge:${effect.outcome.operation_id}:${commit.last_event_id}`,
-        label: `merge facts · winner ${effect.outcome.winner_fact_id} · ${effect.outcome.deleted_loser_fact_ids.length.toLocaleString()} removed · ${commit.disposition} · event ${commit.last_event_id}`,
-      }];
-    }
-    case "normalize_tags":
-      return [{
-        key: `normalize_tags:${effect.commit.last_event_id}`,
-        label: `normalize tags · fact ${effect.fact_id} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
-      }];
-    case "remove":
-      return effect.commit === null ? [] : [{
-        key: `remove:${effect.commit.last_event_id}`,
-        label: `remove fact · fact ${effect.target_fact_id} · ${effect.disposition} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
-      }];
-    case "update":
-      return [{
-        key: `update:${effect.commit.last_event_id}`,
-        label: `update fact · fact ${effect.fact_id} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
-      }];
+/**
+ * `fact_store_curate` answers when the run is admitted. The run settles on the
+ * daemon; this follows its ledger row, the same read the run history renders,
+ * until the row is terminal.
+ */
+function StartedCuratorRun({ receipt }: { receipt: AutomaticCuratorReceipt }) {
+  const runs = useAutomationRuns({
+    refetchInterval: (latest) =>
+      settledRow(latest, receipt.run_id) === undefined ? STARTED_RUN_POLL_MILLIS : false,
+  });
+  const settled = settledRow(runs.data, receipt.run_id);
+  if (settled === undefined) {
+    return (
+      <p role="status" className="text-2xs leading-relaxed text-text-secondary">
+        automatic curator run {receipt.run_id} started · waiting for it to settle
+      </p>
+    );
   }
+  return (
+    <p
+      role="status"
+      className={
+        settled.status === "failed"
+          ? "text-2xs leading-relaxed text-state-error"
+          : "text-2xs leading-relaxed text-state-ready"
+      }
+    >
+      automatic curator run {receipt.run_id} settled {settled.status}
+      {settled.error ? ` · ${settled.error}` : ""} ·{" "}
+      {settled.accepted_count.toLocaleString()} accepted of{" "}
+      {settled.reviewed_count.toLocaleString()} reviewed
+    </p>
+  );
 }
 
 function OutcomesBody({ data }: { data: AutomationOutcomesPayloadV1 }) {

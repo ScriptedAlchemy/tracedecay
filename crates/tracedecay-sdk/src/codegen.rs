@@ -699,7 +699,7 @@ fn render_operations(
          \x20 readonly operation: Name; readonly operationId: string;\n\
          \x20 readonly effect: string; readonly idempotency: string;\n\
          \x20 readonly requestIdControl: \"server_minted\" | \"required\";\n\
-         \x20 readonly resultSemantics: \"schema_only\" | \"fact_store_curate_terminal\";\n\
+         \x20 readonly resultSemantics: \"schema_only\" | \"fact_store_curate_receipt\";\n\
          \x20 readonly bindingId: string;\n\
          \x20 readonly requestSchema: { schemaId: string; revision: number };\n\
          \x20 readonly resultSchema: { schemaId: string; revision: number };\n\
@@ -1513,7 +1513,7 @@ mod tests {
         assert_eq!(curate.request_id_control, SdkRequestIdControlV1::Required);
         assert_eq!(
             curate.result_semantics,
-            SdkResultSemanticsV1::FactStoreCurateTerminal
+            SdkResultSemanticsV1::FactStoreCurateReceipt
         );
     }
 

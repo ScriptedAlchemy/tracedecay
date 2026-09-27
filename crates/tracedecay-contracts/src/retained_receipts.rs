@@ -15,7 +15,7 @@ use crate::{
     ApplicationOutcome, AuthorityReceipt, CancellationStage, CoverageDomainState, Deadline,
     EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
     EvidenceIdentity, EvidencePacket, IdempotencyKey, Omission, OperationBudgetUsage,
-    OperationReceipt, PageState, PolicyDecisionRef, ReconciliationState,
+    OperationReceipt, OperationTermination, PageState, PolicyDecisionRef, ReconciliationState,
     RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1, TemporalState, now_micros,
 };
 
@@ -348,26 +348,26 @@ impl PreparedRetainedEffect {
         self.partial_with_digest(committed_state, reason_code, detail)
     }
 
-    pub fn complete<C: Serialize + ?Sized>(
+    pub fn complete<C: Serialize + ?Sized, T: Serialize>(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
         committed_state_material: &C,
         reconciliation: ReconciliationState,
-        result: RetainedSurfaceResultV1,
+        result: T,
         partial: Option<(&str, &str)>,
-    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    ) -> Result<ApplicationOutcome<T>, RetainedSurfaceExecutionErrorV1> {
         let committed_state = self.material_committed_state_digest(committed_state_material)?;
         self.complete_with_digest(context, &committed_state, reconciliation, result, partial)
     }
 
-    pub fn complete_with_digest(
+    pub fn complete_with_digest<T: Serialize>(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
         committed_state: &ManifestDigest,
         reconciliation: ReconciliationState,
-        result: RetainedSurfaceResultV1,
+        result: T,
         partial: Option<(&str, &str)>,
-    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    ) -> Result<ApplicationOutcome<T>, RetainedSurfaceExecutionErrorV1> {
         let finished_at = now_micros();
         self.complete_at(
             context.observed_at,
@@ -381,16 +381,16 @@ impl PreparedRetainedEffect {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn complete_at(
+    fn complete_at<T: Serialize>(
         &self,
         observed_at: tracedecay_domain::UtcMicros,
         finished_at: tracedecay_domain::UtcMicros,
         effective_deadline: Deadline,
         committed_state: &ManifestDigest,
         reconciliation: ReconciliationState,
-        result: RetainedSurfaceResultV1,
+        result: T,
         partial: Option<(&str, &str)>,
-    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    ) -> Result<ApplicationOutcome<T>, RetainedSurfaceExecutionErrorV1> {
         let partial_receipt = self.partial_receipt(committed_state);
         if let Some((reason_code, detail)) = partial {
             return Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
@@ -454,6 +454,48 @@ impl PreparedRetainedEffect {
             });
         }
         Ok(ApplicationOutcome::Effect(effect))
+    }
+
+    /// The receipt for an admitted effect whose commit settles after the
+    /// request returns: nothing is committed yet, so the outcome is
+    /// `effect_unknown` and reconciliation stays pending.
+    pub fn started(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        result: RetainedSurfaceResultV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let unavailable =
+            |detail: &'static str| RetainedSurfaceExecutionErrorV1::unavailable(detail);
+        let finished_at = now_micros();
+        let execution = OperationReceipt {
+            started_at: context.observed_at,
+            ended_at: finished_at,
+            effective_deadline: effective_memory_deadline(context),
+            cancellation: None,
+            budget: measured_budget(context.observed_at, finished_at, &result)?,
+            termination: OperationTermination::EffectUnknown,
+        };
+        execution
+            .validate()
+            .map_err(|_| unavailable("the started effect execution receipt is invalid"))?;
+        let mut receipt = self.receipt_template.clone();
+        receipt.outcome = EffectTermination::EffectUnknown;
+        receipt
+            .validate()
+            .map_err(|_| unavailable("the started effect receipt is invalid"))?;
+        EffectResult::new(
+            self.effect_id.clone(),
+            EffectClass::Administrative,
+            self.idempotency_key.clone(),
+            self.authority.clone(),
+            self.expected_state.clone(),
+            execution,
+            ReconciliationState::Pending,
+            receipt,
+            Some(result),
+        )
+        .map(ApplicationOutcome::Effect)
+        .map_err(|_| unavailable("the started effect result could not be assembled"))
     }
 
     fn expiry_partial(&self) -> (&'static str, &'static str) {

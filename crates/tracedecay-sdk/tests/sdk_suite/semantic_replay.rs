@@ -62,8 +62,21 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
     let accepted = execute_curate(&client, &request, &request_id)
         .unwrap_or_else(|error| panic!("valid public curate request must succeed: {error}"));
     assert_eq!(accepted.request_id, VALID_REQUEST_ID);
-    assert_eq!(accepted.result.run_id.as_str(), VALID_REQUEST_ID);
-    assert!(accepted.result.matches_terminal());
+    assert_eq!(
+        serde_json::to_value(&accepted.result).expect("receipt json"),
+        serde_json::json!({
+            "run_id": VALID_REQUEST_ID,
+            "task": "memory_curator",
+            "request_digest": accepted.result.request_digest.as_str(),
+            "state": "started",
+        })
+    );
+    // The receipt returns at admission; the run settles on the daemon.
+    let settled = Instant::now() + Duration::from_secs(60);
+    while application_run_record_count(&profile, VALID_REQUEST_ID) == 0 {
+        assert!(Instant::now() < settled, "the admitted run never settled");
+        thread::sleep(Duration::from_millis(50));
+    }
     assert_eq!(application_run_record_count(&profile, VALID_REQUEST_ID), 1);
 
     let first_daemon_epoch = authority["epoch"].as_u64().expect("daemon authority epoch");
@@ -83,10 +96,10 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
     let client = sdk_client(&authority, &project_id);
 
     let replay = curate_once_mounted(&client, &request, &request_id)
-        .unwrap_or_else(|error| panic!("same-identity replay must return its terminal: {error}"));
+        .unwrap_or_else(|error| panic!("same-identity replay must return its receipt: {error}"));
     assert_eq!(
-        replay, accepted,
-        "durable replay must return the exact settled response"
+        replay.result, accepted.result,
+        "durable replay must return the same run receipt"
     );
     assert_eq!(
         application_run_record_count(&profile, VALID_REQUEST_ID),
@@ -160,7 +173,7 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
 
     let final_replay = execute_curate(&client, &request, &request_id)
         .unwrap_or_else(|error| panic!("rejected traffic must not disturb replay: {error}"));
-    assert_eq!(final_replay, accepted);
+    assert_eq!(final_replay, replay);
     assert_eq!(application_run_record_count(&profile, VALID_REQUEST_ID), 1);
 }
 
@@ -218,7 +231,7 @@ fn execute_curate(
     request: &tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1,
     request_id: &RequestId,
 ) -> Result<
-    TypedResponse<tracedecay_contracts::retained_surfaces::AutomationRunResultV1>,
+    TypedResponse<tracedecay_contracts::retained_surfaces::FactStoreCurateResultV1>,
     ClientError,
 > {
     client.execute_with_options::<ApplicationFactStoreCurate>(
@@ -240,7 +253,7 @@ fn curate_once_mounted(
     request: &tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1,
     request_id: &RequestId,
 ) -> Result<
-    TypedResponse<tracedecay_contracts::retained_surfaces::AutomationRunResultV1>,
+    TypedResponse<tracedecay_contracts::retained_surfaces::FactStoreCurateResultV1>,
     ClientError,
 > {
     let deadline = Instant::now() + Duration::from_secs(60);

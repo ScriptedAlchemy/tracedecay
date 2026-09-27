@@ -12,8 +12,10 @@ project before mutation. A read-only inspection must not launch another run,
 and the dashboard opens only when the user asks for visual curation.
 
 Broad curation uses `tracedecay_fact_store_curate`; the daemon owns its task,
-validation, and supported effects. Preserve the returned run id and inspect
-terminal state and only advertised artifacts through the automation run views.
+validation, and supported effects. It answers at admission with the run's
+receipt (`run_id`, `state: started`); the run continues on the daemon. Read its
+terminal with `tracedecay_automation_run_view` once it settles (the view reports
+an unsettled run as not found), and inspect only advertised artifacts.
 If a failed run records applied operations, report them and the required
 reconciliation before considering a retry.
 

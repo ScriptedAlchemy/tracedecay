@@ -1199,59 +1199,78 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         String::from_utf8_lossy(&disable_output.stderr)
     );
 
+    // `tracedecay tool` answers with the MCP tool-result envelope; the
+    // retained document travels in its content block under `format: "json"`.
+    let tool_document = |arguments: &str, tool: &str| {
+        let mut command = tracedecay_command(home.path(), project.path());
+        command.args(["tool", tool, "--json", "--args", arguments]);
+        let output = run_with_timeout(command, cli_timeout());
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "{tool} should print JSON ({error})\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+        let text = envelope["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{tool} returned no content text: {envelope}"))
+            .to_owned();
+        (
+            output.status.success() && envelope["isError"] != serde_json::json!(true),
+            serde_json::from_str::<serde_json::Value>(&text)
+                .unwrap_or(serde_json::Value::String(text)),
+        )
+    };
+
     // The project's own automation scheduler runs beside this manual call and
-    // takes the same curator lock. While it holds it the manual run reports the
-    // legal transient `scheduler_lock_active` terminal instead of the
+    // takes the same curator lock. While it holds it the run settles with the
+    // legal transient `scheduler_lock_active` skip instead of the
     // backend-disabled skip under test, so retry until the lock is free.
-    let payload = {
+    let (run, settled) = {
         let mut attempts = 0;
         loop {
-            let mut run = tracedecay_command(home.path(), project.path());
-            // `tracedecay tool` reaches a retained operation over the MCP
-            // compatibility binding, which answers with the tool-result
-            // envelope; `format: "json"` is what makes the retained document
-            // travel inside the content block instead of its elided markdown
-            // rendering. `--json` only decides whether the CLI prints that
-            // envelope or joins its text.
-            run.args([
-                "tool",
-                "fact_store_curate",
-                "--json",
-                "--args",
-                r#"{"format":"json"}"#,
-            ]);
-            let run_output = run_with_timeout(run, cli_timeout());
+            let (admitted, payload) = tool_document(r#"{"format":"json"}"#, "fact_store_curate");
             assert!(
-                run_output.status.success(),
-                "manual automation run should skip cleanly when its backend is disabled\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&run_output.stdout),
-                String::from_utf8_lossy(&run_output.stderr)
+                admitted,
+                "manual automation run should be admitted: {payload}"
             );
-            let envelope: serde_json::Value = serde_json::from_slice(&run_output.stdout)
-                .expect("fact_store_curate should print JSON");
-            let document = envelope["content"][0]["text"]
+            let run = payload["outcome"]["value"]["payload"].clone();
+            assert_eq!(run["state"], "started", "{payload}");
+            let run_id = run["run_id"]
                 .as_str()
-                .unwrap_or_else(|| panic!("fact_store_curate returned no content text: {envelope}"))
+                .expect("curate receipt run_id")
                 .to_owned();
-            let payload: serde_json::Value =
-                serde_json::from_str(&document).expect("content block should carry the document");
-            if payload["outcome"]["value"]["payload"]["terminal"]["reason"]
-                != "scheduler_lock_active"
-            {
-                break payload;
+            let settled_by = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let settled = loop {
+                let (found, view) = tool_document(
+                    &serde_json::json!({"run_id": run_id, "format": "json"}).to_string(),
+                    "automation_run_view",
+                );
+                if found {
+                    break view["run"].clone();
+                }
+                assert!(
+                    std::time::Instant::now() < settled_by,
+                    "run {run_id} never settled: {view}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            };
+            if settled["error"] != "scheduler_lock_active" {
+                break (run, settled);
             }
             attempts += 1;
             assert!(
                 attempts < 10,
-                "the automation scheduler held the curator lock for every manual attempt: {payload}"
+                "the automation scheduler held the curator lock for every manual attempt: {settled}"
             );
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     };
-    let run = &payload["outcome"]["value"]["payload"];
     assert_eq!(run["task"], "memory_curator");
-    assert_eq!(run["terminal"]["status"], "skipped");
-    assert_eq!(run["terminal"]["reason"], "backend_disabled");
+    assert_eq!(settled["status"], "skipped");
+    assert_eq!(settled["error"], "backend_disabled");
 
     let ledger_paths = std::fs::read_dir(profile_root(home.path()).join("projects"))
         .unwrap()

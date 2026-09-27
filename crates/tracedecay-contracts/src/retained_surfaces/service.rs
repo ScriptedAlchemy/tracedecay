@@ -412,7 +412,7 @@ pub(super) fn outcome_matches_operation(
     if let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = result {
         return operation == RetainedSurfaceOperation::FactStoreCurate
             && class_matches
-            && result.matches_terminal();
+            && result.is_valid();
     }
     class_matches
         && matches!(

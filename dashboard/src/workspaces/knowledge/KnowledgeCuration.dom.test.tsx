@@ -4,14 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AutomationCommittedReceiptV1 } from "../../contracts/generated.ts";
 import { useScope } from "../../data/scope/store.ts";
 import { CurationConsole } from "./CurationConsole.tsx";
-
-type CurationReceipt = Extract<
-  AutomationCommittedReceiptV1,
-  { kind: "curation" }
->;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -56,16 +50,23 @@ describe("curation console", () => {
   });
 
   it("starts the policy-owned automatic curator with closed review bounds", async () => {
-    const fetchMock = stubRoutes({
-      runResponse: { run: automaticRun("run-dashboard") },
-    });
+    const fetchMock = stubRoutes({ settlesAfterRunReads: 2 });
     renderConsole();
 
     fireEvent.click(
       await screen.findByRole("button", { name: "Run automatic curator now" }),
     );
 
-    expect(await screen.findByText(/run run-dashboard settled completed/)).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "automatic curator run request.dashboard.run started · waiting for it to settle",
+      ),
+    ).toBeTruthy();
+    expect(
+      (
+        await screen.findByText(/run request\.dashboard\.run settled/, {}, { timeout: 5_000 })
+      ).textContent?.replace(/\s+/g, " "),
+    ).toBe("automatic curator run request.dashboard.run settled succeeded · 1 accepted of 1 reviewed");
     const dispatch = fetchMock.mock.calls.find(
       ([input, init]) =>
         String(input) === "/api/application/retained/fact_store_curate" &&
@@ -78,45 +79,9 @@ describe("curation console", () => {
     });
   });
 
-  it.each(["idempotent_replay", "committed"] as const)(
-    "renders exact effect rows for the %s commit disposition",
-    async (disposition) => {
-      stubRoutes({
-        runResponse: {
-          run: automaticRunWithReceipt(
-            "run-dashboard-effects",
-            committedEffectsReceipt("run-dashboard-effects", disposition),
-          ),
-        },
-      });
-      renderConsole();
-
-      fireEvent.click(
-        await screen.findByRole("button", {
-          name: "Run automatic curator now",
-        }),
-      );
-
-      const effects = await screen.findByLabelText("Committed curator effects");
-      const rows = Array.from(effects.querySelectorAll("li"), (row) =>
-        (row.textContent ?? "").replace(/\s+/g, " ").trim(),
-      );
-      const expected = committedEffectRows(disposition);
-      expect(rows).toHaveLength(expected.length);
-      for (const [index, row] of rows.entries()) {
-        expect(row).toEqual(expected[index]);
-      }
-    },
-  );
-
-  it("suppresses effects whose canonical commit is absent", async () => {
+  it("rejects a receipt for a run the request did not admit", async () => {
     stubRoutes({
-      runResponse: {
-        run: automaticRunWithReceipt(
-          "run-dashboard-nullable-effects",
-          nullableEffectsReceipt("run-dashboard-nullable-effects"),
-        ),
-      },
+      runResponse: curatorSuccess(startedRun("request.dashboard.other"), "request.dashboard.run"),
     });
     renderConsole();
 
@@ -125,39 +90,8 @@ describe("curation console", () => {
     );
 
     expect(
-      await screen.findByText(
-        /run run-dashboard-nullable-effects settled completed/,
-      ),
+      await screen.findByText("the automatic curator result does not match this build"),
     ).toBeTruthy();
-    expect(screen.queryByLabelText("Committed curator effects")).toBeNull();
-  });
-
-  it("rejects an empty merge receipt before the effect renderer", async () => {
-    const receipt = committedEffectsReceipt("run-dashboard-empty-merge");
-    const merge = receipt.receipt.receipt.operation_effects.find(
-      (effect) => effect.kind === "merge",
-    );
-    if (merge?.kind !== "merge") throw new Error("merge fixture drifted");
-    merge.outcome.commit_receipts = [];
-    refreshCurationDigest(receipt);
-
-    stubRoutes({
-      runResponse: {
-        run: automaticRunWithReceipt("run-dashboard-empty-merge", receipt),
-      },
-    });
-    renderConsole();
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Run automatic curator now" }),
-    );
-
-    expect(
-      await screen.findByText(
-        "the automatic curator result does not match this build",
-      ),
-    ).toBeTruthy();
-    expect(screen.queryByLabelText("Committed curator effects")).toBeNull();
   });
 
   it("preserves a committed partial-effect receipt and reconcile action", async () => {
@@ -219,7 +153,7 @@ describe("curation console", () => {
     );
 
     expect(
-      await screen.findByText(/run run-dashboard settled completed/),
+      await screen.findByText(/run request\.dashboard\.run started/),
     ).toBeTruthy();
     expect(
       fetchMock.mock.calls.some(
@@ -265,7 +199,7 @@ describe("curation console", () => {
     expect(screen.queryByText("Running automatic curator…")).toBeNull();
 
     act(() => {
-      settleRun({ run: automaticRun("run-project-a") });
+      settleRun({ run: startedRun("request.dashboard.project-a") });
     });
 
     await waitFor(() =>
@@ -273,7 +207,7 @@ describe("curation console", () => {
         screen.getByRole("button", { name: "Run automatic curator now" }),
       ).toBeTruthy(),
     );
-    expect(screen.queryByText(/run run-project-a settled/)).toBeNull();
+    expect(screen.queryByText(/request\.dashboard\.project-a/)).toBeNull();
     expect(screen.getByText(/target: Project B/)).toBeTruthy();
   });
 });
@@ -289,286 +223,13 @@ function renderConsole() {
   );
 }
 
-function automaticRun(runId: string) {
+function startedRun(runId: string) {
   return {
     run_id: runId,
-    request_digest: automaticRequestDigest(),
     task: "memory_curator",
-    terminal: {
-      status: "completed",
-      summary: {
-        reviewed_count: 0,
-        accepted_count: 0,
-        rejected_count: 0,
-        skipped_count: 0,
-      },
-    },
-    committed_receipts: [] as CurationReceipt[],
+    request_digest: automaticRequestDigest(),
+    state: "started",
   };
-}
-
-function automaticRunWithReceipt(
-  runId: string,
-  receipt: CurationReceipt,
-) {
-  const run = automaticRun(runId);
-  run.terminal.summary.reviewed_count =
-    receipt.receipt.receipt.accepted_operations;
-  run.terminal.summary.accepted_count = run.terminal.summary.reviewed_count;
-  run.committed_receipts = [receipt];
-  return run;
-}
-
-function committedEffectsReceipt(
-  runId: string,
-  disposition: "committed" | "idempotent_replay" = "idempotent_replay",
-): CurationReceipt {
-  const addFact = factId("1");
-  const linkSource = factId("2");
-  const linkTarget = factId("3");
-  const mergeWinner = factId("5");
-  const mergeLoser = factId("6");
-  const normalizedFact = factId("7");
-  const removedFact = factId("8");
-  const updatedFact = factId("9");
-  const receipt: CurationReceipt = {
-    kind: "curation",
-    receipt: {
-      canonical_digest: "",
-      receipt: {
-        owner: { kind: "project", project_id: "project.dashboard" },
-        operation_id: "operation.dashboard.effects",
-        input_digest: "c".repeat(64),
-        automation_run_id: runId,
-        operation_effects: [
-          {
-            kind: "add",
-            fact_id: addFact,
-            closest_fact_id: null,
-            similarity_millionths: null,
-            disposition: "added",
-            commit: factCommit(
-              addFact,
-              "add",
-              1,
-              "assertion.dashboard.add",
-              disposition,
-            ),
-          },
-          {
-            kind: "link_facts",
-            source_fact_id: linkSource,
-            target_fact_id: linkTarget,
-            relation: {
-              kind: "supports",
-              evidence_fact_ids: [factId("4")],
-              confidence_millionths: 800_000,
-              provenance: {
-                source_label: "automation:memory-curator",
-                sanitization_receipt: {
-                  receipt: {
-                    receipt_id: "receipt.dashboard.relation",
-                    sanitizer_version: "sanitizer.dashboard.v1",
-                  },
-                  disposition: "accepted",
-                  sensitivity: "non_sensitive",
-                  payload: { digest: sha("9"), byte_len: 128 },
-                },
-              },
-            },
-            disposition: "linked",
-            commit: factCommit(
-              linkSource,
-              "link",
-              1,
-              "assertion.dashboard.link",
-              disposition,
-            ),
-          },
-          {
-            kind: "merge",
-            outcome: {
-              operation_id: "operation.dashboard.merge",
-              input_digest: "d".repeat(64),
-              winner_fact_id: mergeWinner,
-              deleted_loser_fact_ids: [mergeLoser],
-              content_updated: false,
-              commit_receipts: [
-                factCommit(mergeLoser, "merge", 2, null, disposition),
-              ],
-            },
-          },
-          {
-            kind: "normalize_tags",
-            fact_id: normalizedFact,
-            commit: factCommit(
-              normalizedFact,
-              "normalize",
-              2,
-              "assertion.dashboard.normalize",
-              disposition,
-            ),
-          },
-          {
-            kind: "remove",
-            target_fact_id: removedFact,
-            disposition: "removed",
-            remaining_fact_count: 8,
-            commit: factCommit(removedFact, "remove", 1, null, disposition),
-          },
-          {
-            kind: "update",
-            fact_id: updatedFact,
-            trust_delta_millionths: 100_000,
-            commit: factCommit(
-              updatedFact,
-              "update",
-              1,
-              "assertion.dashboard.update",
-              disposition,
-            ),
-          },
-        ],
-        replay_fact_id: addFact,
-        replay_event_id: "event.dashboard.add.1",
-        changed_fact_ids: [
-          addFact,
-          linkSource,
-          linkTarget,
-          mergeLoser,
-          normalizedFact,
-          removedFact,
-          updatedFact,
-        ],
-        accepted_operations: 6,
-        facts_added: 1,
-        facts_updated: 1,
-        facts_merged: 1,
-        facts_removed: 1,
-        normalized_tags: 1,
-        facts_linked: 1,
-      },
-    },
-  };
-  return refreshCurationDigest(receipt);
-}
-
-function committedEffectRows(
-  disposition: "committed" | "idempotent_replay",
-): string[] {
-  return [
-    `add fact · fact ${factId("1")} · added · ${disposition} · event event.dashboard.add.1`,
-    `link facts · ${factId("2")} → ${factId("3")} · supports · linked · ${disposition} · event event.dashboard.link.1`,
-    `merge facts · winner ${factId("5")} · 1 removed · ${disposition} · event event.dashboard.merge.2`,
-    `normalize tags · fact ${factId("7")} · ${disposition} · event event.dashboard.normalize.2`,
-    `remove fact · fact ${factId("8")} · removed · ${disposition} · event event.dashboard.remove.1`,
-    `update fact · fact ${factId("9")} · ${disposition} · event event.dashboard.update.1`,
-  ];
-}
-
-function nullableEffectsReceipt(runId: string): CurationReceipt {
-  const existingFact = factId("a");
-  const receipt: CurationReceipt = {
-    kind: "curation",
-    receipt: {
-      canonical_digest: "",
-      receipt: {
-        owner: { kind: "project", project_id: "project.dashboard" },
-        operation_id: "operation.dashboard.nullable-effects",
-        input_digest: "e".repeat(64),
-        automation_run_id: runId,
-        operation_effects: [
-          {
-            kind: "add",
-            fact_id: existingFact,
-            closest_fact_id: existingFact,
-            similarity_millionths: 1_000_000,
-            disposition: "near_duplicate",
-            commit: null,
-          },
-          {
-            kind: "link_facts",
-            source_fact_id: factId("b"),
-            target_fact_id: factId("c"),
-            relation: {
-              kind: "supports",
-              evidence_fact_ids: [factId("d")],
-              confidence_millionths: 800_000,
-              provenance: {
-                source_label: "automation:memory-curator",
-                sanitization_receipt: {
-                  receipt: {
-                    receipt_id: "receipt.dashboard.nullable-relation",
-                    sanitizer_version: "sanitizer.dashboard.v1",
-                  },
-                  disposition: "accepted",
-                  sensitivity: "non_sensitive",
-                  payload: { digest: sha("8"), byte_len: 128 },
-                },
-              },
-            },
-            disposition: "already_linked",
-            commit: null,
-          },
-          {
-            kind: "remove",
-            target_fact_id: factId("e"),
-            disposition: "not_found",
-            remaining_fact_count: 9,
-            commit: null,
-          },
-        ],
-        replay_fact_id: null,
-        replay_event_id: null,
-        changed_fact_ids: [],
-        accepted_operations: 3,
-        facts_added: 0,
-        facts_updated: 0,
-        facts_merged: 0,
-        facts_removed: 0,
-        normalized_tags: 0,
-        facts_linked: 0,
-      },
-    },
-  };
-  return refreshCurationDigest(receipt);
-}
-
-function factCommit(
-  fact: string,
-  eventLabel: string,
-  eventCount: number,
-  activeAssertionId: string | null,
-  disposition: "committed" | "idempotent_replay" = "idempotent_replay",
-) {
-  const committedEventIds = Array.from(
-    { length: eventCount },
-    (_, index) => `event.dashboard.${eventLabel}.${index + 1}`,
-  );
-  return {
-    disposition,
-    fact_id: fact,
-    owner: { kind: "project" as const, project_id: "project.dashboard" },
-    committed_event_ids: committedEventIds,
-    last_event_id: committedEventIds.at(-1)!,
-    active_assertion_id: activeAssertionId,
-  };
-}
-
-function refreshCurationDigest(receipt: CurationReceipt): CurationReceipt {
-  receipt.receipt.canonical_digest = canonicalSha([
-    "tracedecay.automation-run.curation-receipt.v1",
-    receipt.receipt.receipt,
-  ]);
-  return receipt;
-}
-
-function factId(seed: string): string {
-  const ownerBinding = canonicalSha([
-    "fact-owner.v1",
-    { kind: "project", project_id: "project.dashboard" },
-  ]).slice("sha256:".length);
-  return `fact.v1.${ownerBinding}.${seed.padStart(64, "0")}`;
 }
 
 function automaticRequestDigest(): string {
@@ -685,7 +346,7 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
   };
 }
 
-function curatorSuccess(run: unknown) {
+function curatorSuccess(run: { run_id: string }, requestId = run.run_id) {
   return {
     kind: "success",
     value: {
@@ -694,7 +355,7 @@ function curatorSuccess(run: unknown) {
         schema_id: "schema.application.retained.fact-store-curate.result",
         schema_revision: 1,
       },
-      request_id: "request.dashboard.success",
+      request_id: requestId,
       scope: {
         project_id: "project.dashboard",
         repository_id: "repository.dashboard",
@@ -717,7 +378,11 @@ function stubRoutes(options?: {
   status?: number;
   runResponse?: unknown | Promise<unknown>;
   outcomesError?: string;
+  /** Runs-history reads after dispatch before the started run is terminal. */
+  settlesAfterRunReads?: number;
 }) {
+  let dispatched = false;
+  let runReadsAfterDispatch = 0;
   const runs = {
     runs: [
       {
@@ -785,14 +450,16 @@ function stubRoutes(options?: {
           )) &&
         init?.method === "POST";
       const rawRunResponse = isRunDispatch
-        ? await (options?.runResponse ?? { run: automaticRun("run-dashboard") })
+        ? await (options?.runResponse ?? { run: startedRun("request.dashboard.run") })
         : undefined;
+      if (isRunDispatch) dispatched = true;
+      if (url.endsWith("/automation/runs") && dispatched) runReadsAfterDispatch += 1;
       const body = isRunDispatch
         ? options?.status === undefined &&
           typeof rawRunResponse === "object" &&
           rawRunResponse !== null &&
           "run" in rawRunResponse
-          ? curatorSuccess((rawRunResponse as { run: unknown }).run)
+          ? curatorSuccess((rawRunResponse as { run: { run_id: string } }).run)
           : rawRunResponse
         : url.endsWith("/automation/runs/run-1/artifacts/traces")
           ? {
@@ -838,7 +505,24 @@ function stubRoutes(options?: {
                 error: "",
               }
             : url.endsWith("/automation/runs")
-              ? runs
+              ? options?.settlesAfterRunReads !== undefined &&
+                runReadsAfterDispatch >= options.settlesAfterRunReads
+                ? {
+                    ...runs,
+                    runs: [
+                      {
+                        ...runs.runs[0]!,
+                        run_id: "request.dashboard.run",
+                        trigger: "application",
+                        reviewed_count: 1,
+                        accepted_count: 1,
+                        rejected_count: 0,
+                      },
+                      ...runs.runs,
+                    ],
+                    count: 2,
+                  }
+                : runs
           : url.includes("/automation/outcomes")
             ? outcomes
             : {};

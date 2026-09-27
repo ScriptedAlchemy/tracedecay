@@ -8,6 +8,7 @@ use tracedecay_contracts::feedback::{
 };
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
+    FactStoreCurateResultV1,
 };
 use tracedecay_contracts::retrieval::{AnalyticsHintsPayloadV1, SimilarResultV1};
 use tracedecay_contracts::{
@@ -235,6 +236,7 @@ struct DashboardContractCatalogV1 {
     automation_run_artifact: AutomationRunArtifactPayloadV1,
     automation_outcomes: AutomationOutcomesPayloadV1,
     fact_store_curate_request: FactStoreCurateRequestV1,
+    fact_store_curate_result: FactStoreCurateResultV1,
     automation_run: AutomationRunResultV1,
     automation_problem: AutomationRunProblemV1,
 }
@@ -364,6 +366,7 @@ mod tests {
         );
         assert!(!definitions.contains_key("AutomationRunRequestV1"));
         assert!(definitions.contains_key("AutomationRunResultV1"));
+        assert!(definitions.contains_key("FactStoreCurateResultV1"));
         assert!(definitions.contains_key("AutomationRunProblemV1"));
     }
 

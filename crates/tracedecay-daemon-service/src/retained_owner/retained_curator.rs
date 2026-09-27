@@ -115,6 +115,8 @@ pub async fn execute_retained_memory_curator(
             ));
         }
     };
+    // The run outlives this request, so it answers to the request's own
+    // cancellation and deadline, which bound the effect's settlement too.
     let control = AutomationRunControl::from_interrupted(Arc::new({
         let cancellation = context.cancellation_signal.clone();
         let deadline = context.request_context.deadline().clone();
@@ -133,45 +135,60 @@ pub async fn execute_retained_memory_curator(
             "fact_store_curate",
         )
     });
-    let retained_run = run_memory_curator_with_backend_for_retained_settlement(
-        &automation_context,
-        &config,
-        pinned.revision_id(),
-        &backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::Application,
-            run_id: Some(run_id),
-            fact_review_limit: request.fact_review_limit as usize,
-            min_confidence,
-        },
-        &control,
-    )
-    .await;
-    let waiter = effect.start_retained_automation_settlement(retained_run, observer, |run| {
-        (run.ledger_record, run.committed_receipt)
-    });
-    let settlement = waiter.wait().await.map_err(|error| {
-        RetainedSurfaceExecutionErrorV1::unavailable(format!(
-            "the automation run settlement could not be observed: {error}"
-        ))
-    })?;
+    let started = effect.started_outcome()?;
+    let configuration_revision_id = pinned.revision_id().clone();
+    let options = MemoryCuratorAutomationOptions {
+        trigger: AutomationTrigger::Application,
+        run_id: Some(run_id.clone()),
+        fact_review_limit: request.fact_review_limit as usize,
+        min_confidence,
+    };
+    drop(tokio::spawn(async move {
+        let retained_run = run_memory_curator_with_backend_for_retained_settlement(
+            &automation_context,
+            &config,
+            &configuration_revision_id,
+            &backend,
+            options,
+            &control,
+        )
+        .await;
+        let waiter = effect.start_retained_automation_settlement(retained_run, observer, |run| {
+            (run.ledger_record, run.committed_receipt)
+        });
+        log_curator_settlement(&run_id, waiter.wait().await);
+    }));
+    Ok(started)
+}
+
+/// A settled run is durable in the effect journal and the run ledger; only a
+/// settlement that could not be observed, or that settled a problem, is
+/// reported here.
+fn log_curator_settlement(
+    run_id: &str,
+    settlement: tracedecay_domain::errors::Result<
+        tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome,
+    >,
+) {
     match settlement {
-        tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Run {
-            terminal,
-            record: _record,
-        } => terminal.into_outcome().map_err(automation_problem),
-        tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Problem {
+        Ok(tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Run { .. }) => {}
+        Ok(tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Problem {
             problem,
-            record: _record,
-        } => Err(automation_problem(problem)),
-        tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Reused {
-            record: _record,
+            ..
+        }) => tracing::warn!(
+            run_id,
+            problem_code = %problem.problem.problem.code,
+            "memory curator run settled with an application problem"
+        ),
+        Ok(tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Reused { .. }
+        | tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::AbandonedObserved { .. }) => {
+            tracing::warn!(run_id, "memory curator run settled without a retained terminal");
         }
-        | tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::AbandonedObserved {
-            record: _record,
-        } => Err(RetainedSurfaceExecutionErrorV1::unavailable(
-            "the automation run settled without a retained terminal (reused or abandoned)",
-        )),
+        Err(error) => tracing::warn!(
+            run_id,
+            error = %error,
+            "memory curator run settlement could not be observed"
+        ),
     }
 }
 
