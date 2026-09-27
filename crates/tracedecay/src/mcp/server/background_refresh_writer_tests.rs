@@ -296,3 +296,94 @@ async fn concurrent_startup_catchups_use_injected_writer_authority() {
     first.shutdown().await;
     second.shutdown().await;
 }
+
+/// A freshness probe refused by a parked worktree logs the park's cause and
+/// remedy as fields; the route message would cut a long cause at its bound.
+#[tokio::test]
+async fn parked_freshness_probe_logs_cause_and_remedy_as_fields() {
+    let (cg, _dir, _authority) = init_indexed_repo().await;
+    let log_dir = tempfile::tempdir().expect("log directory");
+    let log_path = log_dir.path().join("refresh.log");
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_writer(Arc::new(
+            std::fs::File::create(&log_path).expect("log file"),
+        ))
+        .finish();
+    // This current-thread runtime also polls the spawned refresh task.
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let cause = format!("publication manifest is corrupt: {}", "x".repeat(600));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let cause = cause.clone();
+        let armed = Arc::clone(&armed);
+        Arc::new(move |mut request: BackgroundRefreshRequest| {
+            let cause = cause.clone();
+            let armed = armed.load(Ordering::Acquire);
+            Box::pin(async move {
+                if !armed {
+                    return Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None));
+                }
+                request.freshness_probe_sink = Some(Arc::new(move |_root| {
+                    let cause = cause.clone();
+                    Box::pin(async move {
+                        super::CodeIndexDemandAdmissionV1::Terminal(
+                            tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+                                reason: cause,
+                                blocked_reason: None,
+                                remediation: "run `tracedecay daemon restart`".to_owned(),
+                                parked_at_micros: 1,
+                                observed_passes: 1,
+                                retries_on_wake: false,
+                            },
+                        )
+                    })
+                }));
+                super::hook_writes::execute_background_refresh_direct(request).await
+            })
+        })
+    };
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(cg, None)
+            .with_background_refresh_writer(refresh_writer),
+    )
+    .await;
+    assert!(
+        server
+            .wait_for_startup_catch_up(Duration::from_secs(5))
+            .await,
+        "startup catch-up settles before the probe"
+    );
+    armed.store(true, Ordering::Release);
+    let snapshot = server.cg_snapshot().await;
+    server
+        .background_refresh_running
+        .store(true, Ordering::Release);
+
+    server.spawn_read_refresh_task(&snapshot);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while server.background_refresh_running.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("refused probe settles");
+    server.shutdown().await;
+
+    let log = std::fs::read_to_string(&log_path).expect("read log");
+    let line = log
+        .lines()
+        .find(|line| line.contains("background read reconciliation was not admitted"))
+        .unwrap_or_else(|| panic!("probe refusal must be logged: {log}"));
+    let (_, fields) = line
+        .split_once("was not admitted ")
+        .unwrap_or_else(|| panic!("structured fields follow the message: {line}"));
+    assert_eq!(
+        fields,
+        format!(
+            "reason_code=\"code_index_publication_authority_corrupt\" cause=\"{cause}\" \
+             remedy=\"run `tracedecay daemon restart`\" retries_on_wake=false"
+        )
+    );
+}

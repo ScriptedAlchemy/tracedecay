@@ -2102,24 +2102,25 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
     .await
     .expect_err("terminal publication corruption must refuse sync");
 
-    let (reason_code, retryable, detail) =
-        error.project_route_context().expect("typed project route");
+    let wire = tracedecay_mcp::tool_error_response(json!(1), "tracedecay_admin_sync", &error)
+        .error
+        .expect("JSON-RPC refusal")
+        .data;
     assert_eq!(
-        reason_code,
-        tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT
-    );
-    assert!(!retryable, "publication corruption requires reset");
-    assert!(
-        detail.contains("injected sync refusal"),
-        "sync must report the terminal cause: {detail}"
-    );
-    assert_eq!(
-        error.project_route_typed_detail(),
-        Some(&tracedecay_domain::ApplicationProblemDetailV1::Parked {
-            cause: "the publication authority is corrupt and requires an index reset: injected sync refusal".to_owned(),
-            remedy: "reset the code-index publication authority".to_owned(),
-            retries_on_wake: false,
-        })
+        wire,
+        Some(json!({
+            "tool": "tracedecay_admin_sync",
+            "kind": "unavailable",
+            "code": "code_index_publication_authority_corrupt",
+            "reason_code": "code_index_publication_authority_corrupt",
+            "retryable": false,
+            "detail": {
+                "kind": "parked",
+                "cause": "the publication authority is corrupt and requires an index reset: injected sync refusal",
+                "remedy": "reset the code-index publication authority",
+                "retries_on_wake": false,
+            },
+        }))
     );
     cg.close();
 }

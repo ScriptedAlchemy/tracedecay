@@ -2,9 +2,29 @@
 //! sync-on-read, branch-drift reopen, and version-update checks.
 
 use super::*;
+use tracedecay_domain::ApplicationProblemDetailV1;
 
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
+
+/// A parked index logs its cause and remedy as fields; the bounded route
+/// message would cut the cause.
+fn warn_reconcile_not_admitted(error: &TraceDecayError, message: &str) {
+    match (
+        error.project_route_context(),
+        error.project_route_typed_detail(),
+    ) {
+        (
+            Some((reason_code, _, _)),
+            Some(ApplicationProblemDetailV1::Parked {
+                cause,
+                remedy,
+                retries_on_wake,
+            }),
+        ) => tracing::warn!(reason_code, cause, remedy, retries_on_wake, "{message}"),
+        _ => tracing::warn!(error = %error, "{message}"),
+    }
+}
 
 struct ReadRefreshRunningGuard(Arc<AtomicBool>);
 
@@ -278,7 +298,7 @@ impl McpServer {
                 );
             }
             Err(e) => {
-                tracing::warn!(error = %e, "startup catch-up admission failed");
+                warn_reconcile_not_admitted(&e, "startup catch-up admission failed");
                 self.startup_catch_up.settle();
                 return;
             }
@@ -470,9 +490,9 @@ impl McpServer {
                     );
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "background read reconciliation was not admitted"
+                    warn_reconcile_not_admitted(
+                        &e,
+                        "background read reconciliation was not admitted",
                     );
                 }
             }

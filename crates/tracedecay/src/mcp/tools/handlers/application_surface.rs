@@ -575,8 +575,9 @@ fn settle_graph_tool_result(
 }
 
 /// The graph-tool owner reports handler argument errors as invalid requests,
-/// a lock that missed its deadline as its typed detail, and every other
-/// refusal under its own reason code.
+/// a typed route detail or a lock that missed its deadline as that detail, a
+/// route refusal as unavailable under its own reason code, and any other
+/// handler failure as an internal execution failure.
 pub(crate) fn graph_tool_error_problem(
     error: &TraceDecayError,
 ) -> tracedecay_contracts::ApplicationProblem {
@@ -601,7 +602,15 @@ pub(crate) fn graph_tool_error_problem(
             detail,
             ..
         } => graph_tool_unavailable(reason_code, *retryable, detail),
-        error => graph_tool_unavailable("graph_tool.failed", false, &error.to_string()),
+        error => tracedecay_contracts::ApplicationProblem::ExecutionFailed {
+            classification: tracedecay_contracts::ApplicationExecutionFailureClassV1::Permanent,
+            diagnostic: tracedecay_contracts::SafeDiagnostic {
+                code: "graph_tool.failed".to_owned(),
+                message: safe_diagnostic_message(&error.to_string()),
+            },
+            retry: tracedecay_contracts::RetryDirective::Never,
+            legal_actions: vec![tracedecay_contracts::LegalAction::ContactAdministrator],
+        },
     }
 }
 
@@ -656,6 +665,7 @@ mod tests {
         ResolvedScope, ResultContractRef,
     };
     use tracedecay_daemon_protocol::RequestedOutputFormat;
+    use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_domain::{ProjectId, RepositoryId, UtcMicros, WorktreeId};
     use tracedecay_mcp::tools::response_trailers::account_tool_result;
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
@@ -888,5 +898,63 @@ mod tests {
             serde_json::to_value(refusal.problem.problem.as_ref()).unwrap(),
             expected
         );
+    }
+
+    /// Every handler error the owner maps carries a kind of its own, so the
+    /// surface renders the whole record as an `isError` result.
+    #[test]
+    fn every_graph_tool_handler_error_renders_as_a_kinded_problem() {
+        let operation = ApplicationSurfaceOperation::Signature;
+        let binding = BindingId::new("binding.mcp.signature.v1").unwrap();
+        for (error, kind, code, retry, legal_actions) in [
+            (
+                TraceDecayError::Config {
+                    message: "invalid arguments for tracedecay_signature: missing field `symbol`"
+                        .to_owned(),
+                },
+                "invalid_request",
+                "application.surface.invalid_request",
+                "never",
+                json!([]),
+            ),
+            (
+                TraceDecayError::project_route(
+                    "code-graph-unavailable",
+                    true,
+                    "the verified code graph is not ready",
+                ),
+                "unavailable",
+                "code-graph-unavailable",
+                "after_delay",
+                json!(["retry"]),
+            ),
+            (
+                TraceDecayError::Io(std::io::Error::other("generation file vanished")),
+                "execution_failed",
+                "graph_tool.failed",
+                "never",
+                json!(["contact_administrator"]),
+            ),
+        ] {
+            let problem = tracedecay_contracts::ApplicationProblemEnvelope::new(
+                ResultContractRef::new(SchemaId::new("schema.test.graph-problem.v1").unwrap(), 1)
+                    .unwrap(),
+                RequestId::new("request.mcp.graph-problem").unwrap(),
+                super::graph_tool_error_problem(&error),
+            )
+            .unwrap();
+            let refusal = settle_graph_tool_result(operation, binding.clone(), Err(problem))
+                .unwrap()
+                .expect_err("a handler error is a refusal record");
+            let mut rendered = refusal.render(None, &json!({"format": "json"})).unwrap();
+            tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut rendered);
+
+            assert_eq!(rendered.value["isError"], true, "{error}");
+            let problem = &rendered.value["problem"];
+            assert_eq!(problem["kind"], kind, "{error}");
+            assert_eq!(problem["code"], code, "{error}");
+            assert_eq!(problem["retry"], retry, "{error}");
+            assert_eq!(problem["legal_actions"], legal_actions, "{error}");
+        }
     }
 }

@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::ApplicationProblemDetailV1;
+use tracedecay_domain::errors::TraceDecayError;
 
 /// The durable build phase whose committed boundary the dashboard is reading.
 ///
@@ -142,6 +144,23 @@ pub struct CodeIndexConvergenceParkedV1 {
     /// place; false for an abnormal task failure that only changed input (a
     /// new sealed generation) retries.
     pub retries_on_wake: bool,
+}
+
+impl CodeIndexConvergenceParkedV1 {
+    /// The route refusal of a worktree parked on a corrupt publication
+    /// authority. The park travels as its typed detail, so every adapter
+    /// renders `cause` and `remedy` as fields rather than one bounded sentence.
+    pub fn publication_authority_corrupt_error(self) -> TraceDecayError {
+        TraceDecayError::project_route_with_detail(
+            CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
+            false,
+            ApplicationProblemDetailV1::Parked {
+                cause: self.reason,
+                remedy: self.remediation,
+                retries_on_wake: self.retries_on_wake,
+            },
+        )
+    }
 }
 
 /// Recovery state for a durable generation sealed under a different production

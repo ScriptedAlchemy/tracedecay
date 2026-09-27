@@ -326,14 +326,15 @@ fn project_route_error_messages_keep_retry_authority_when_clients_hide_error_dat
 
 #[test]
 fn publication_corruption_keeps_park_facts_typed_at_the_rpc_boundary() {
-    let error = super::code_index_publication_corrupt(CodeIndexConvergenceParkedV1 {
+    let error = CodeIndexConvergenceParkedV1 {
         reason: "source mode is not owner-private".to_owned(),
         blocked_reason: None,
         remediation: "restore mode 0600".to_owned(),
         parked_at_micros: 1,
         observed_passes: 2,
         retries_on_wake: true,
-    });
+    }
+    .publication_authority_corrupt_error();
     let response = tool_error_response(serde_json::json!(10), "tracedecay_sync", &error);
     let data = response
         .error

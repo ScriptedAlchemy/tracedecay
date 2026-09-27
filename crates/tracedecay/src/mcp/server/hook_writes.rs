@@ -101,7 +101,7 @@ pub(crate) async fn execute_background_refresh_direct(
             Ok(BackgroundRefreshOutcome::LinkedWorktreeDisabled)
         }
         CodeIndexDemandAdmissionV1::Terminal(parked) => {
-            Err(super::code_index_publication_corrupt(parked))
+            Err(parked.publication_authority_corrupt_error())
         }
         CodeIndexDemandAdmissionV1::Unavailable(cause) => {
             Err(super::code_index_unavailable_error(cause))

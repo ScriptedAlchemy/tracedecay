@@ -633,8 +633,9 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             };
             // A typed reset refusal from any command ends with the refused
-            // authority and the exact command that resets it.
-            eprintln!("Error: {}", commands::annotate_reset_required(e, None));
+            // authority and the exact command that resets it; a typed route
+            // detail prints as fields.
+            eprintln!("Error: {}", commands::process_error_text(e));
             code
         }
     }

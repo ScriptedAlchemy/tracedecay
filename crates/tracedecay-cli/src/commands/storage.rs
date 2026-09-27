@@ -504,6 +504,24 @@ pub(crate) fn annotate_reset_required(
     }
 }
 
+/// The text the process boundary prints after `Error: `. A route refusal
+/// with typed detail prints its reason code and one line per detail field, so
+/// a parked index shows its whole cause and remedy rather than the bounded
+/// sentence its message folds them into.
+pub(crate) fn process_error_text(error: tracedecay_domain::errors::TraceDecayError) -> String {
+    if let (Some((reason_code, _, _)), Some(detail)) = (
+        error.project_route_context(),
+        error.project_route_typed_detail(),
+    ) {
+        let mut text = format!("project route error ({reason_code})");
+        for (label, value) in detail.labelled_fields() {
+            text.push_str(&format!("\n{label}: {value}"));
+        }
+        return text;
+    }
+    annotate_reset_required(error, None).to_string()
+}
+
 /// Combines a destructive command's outcome with the daemon-restore outcome
 /// so neither failure can shadow the other.
 pub(crate) fn join_outcome_and_restore(
