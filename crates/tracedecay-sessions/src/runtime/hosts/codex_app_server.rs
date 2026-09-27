@@ -1183,6 +1183,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn child_guard_drop_synchronously_reaps_the_launched_pid() {
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty()
+        );
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let child = spawn_codex_app_server(&mut command, "sh").expect("spawn child");
+        let process_group = child.id();
+        assert_eq!(unsafe { kill(process_group as i32, 0) }, 0);
+
+        drop(ChildGuard {
+            child,
+            cancellation: None,
+        });
+
+        assert_ne!(
+            unsafe { kill(process_group as i32, 0) },
+            0,
+            "ChildGuard::drop must synchronously reap the process it launched"
+        );
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty(),
+            "the launched process group must be removed before the timeout returns"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn shutdown_guard_terminates_active_child_and_rejects_new_spawns() {
         let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
             .lock()

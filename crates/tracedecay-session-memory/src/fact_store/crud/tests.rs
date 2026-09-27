@@ -615,10 +615,8 @@ async fn normalized_equivalent_add_is_the_only_no_write_near_duplicate() {
 async fn add_succeeds_past_ten_thousand_eligible_facts() {
     let (_directory, database) = database().await;
     let owner = FactOwnerV1::Profile;
-    // This fixture only has to cross the former 10,000-row materialization
-    // boundary. Commit bounded chunks so it never turns setup into one
-    // production-sized transaction that can exhaust the ordinary write lease
-    // under parallel test load.
+    // Stay within the ordinary write lease while crossing the former
+    // 10,000-row materialization boundary.
     const FIXTURE_CHUNK: usize = 250;
     for chunk_start in (0..10_001).step_by(FIXTURE_CHUNK) {
         let transaction = database

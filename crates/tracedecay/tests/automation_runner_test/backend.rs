@@ -562,8 +562,8 @@ fn codex_app_server_backend_uses_configured_executable_model_when_unpinned() {
 }
 
 #[test]
-fn codex_app_server_backend_propagates_timeout_errors_without_child_readiness_polling() {
-    let err = backend_error_for_behavior_without_pid("timeout", Duration::from_millis(300));
+fn codex_app_server_backend_propagates_timeout_errors_and_reaps_child() {
+    let (err, pid) = backend_error_for_behavior("timeout", Duration::from_millis(300));
 
     assert!(
         err.contains("timed out waiting for codex app-server"),
@@ -573,6 +573,7 @@ fn codex_app_server_backend_propagates_timeout_errors_without_child_readiness_po
         classify_agent_task_error_message(&err),
         AgentTaskFailureClass::Timeout
     );
+    assert_process_gone(pid);
 }
 
 #[test]
@@ -708,10 +709,6 @@ fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32
     let (err, fake) = run_backend_for_behavior(behavior, timeout);
     let pid = fake.child_pid();
     (err, pid)
-}
-
-fn backend_error_for_behavior_without_pid(behavior: &str, timeout: Duration) -> String {
-    run_backend_for_behavior(behavior, timeout).0
 }
 
 fn run_backend_for_behavior(behavior: &str, timeout: Duration) -> (String, FakeCodexAppServer) {
