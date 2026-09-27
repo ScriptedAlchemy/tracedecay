@@ -18,6 +18,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
+use tracedecay_automation_runtime::automation::effect_runtime::pending_automation_effect_resets_blocking;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
@@ -131,6 +132,7 @@ pub async fn run_doctor(
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     check_inert_project_config(&mut dc, &project_path);
     check_pr_autotrack_state(&mut dc, profile.data_dir(), &project_path);
+    check_automation_effect_resets(&mut dc, profile.data_dir(), &project_path);
     let daemon_status = daemon_project_status(profile, &project_path).await;
     let storage_health = match daemon_status.as_ref() {
         Ok(None) => {
@@ -957,6 +959,51 @@ fn check_pr_autotrack_state(dc: &mut DoctorCounters, profile_root: &Path, projec
         return;
     };
     match pr_autotrack_state_findings(&layout.data_root) {
+        Ok(warnings) => {
+            for warning in warnings {
+                dc.warn(&warning);
+            }
+        }
+        Err(failure) => dc.fail(&failure),
+    }
+}
+
+/// One warning per refused automation effect journal, named by its run id,
+/// that project-open recovery resets; the error names an unreadable journal
+/// directory.
+fn automation_effect_reset_findings(
+    dashboard_root: &Path,
+) -> std::result::Result<Vec<String>, String> {
+    let resets = pending_automation_effect_resets_blocking(dashboard_root)
+        .map_err(|error| format!("Automation effect journals could not be read: {error}"))?;
+    Ok(resets
+        .into_iter()
+        .map(|reset| match reset.run_id {
+            Some(run_id) => format!(
+                "Automation run {} requires reset: its effect journal shape is refused ({}); project-open recovery removes the journal and the run id can run again",
+                run_id.as_str(),
+                reset.reason
+            ),
+            None => format!(
+                "Automation effect journal {} requires reset: its shape is refused ({}); project-open recovery removes it",
+                reset.journal.display(),
+                reset.reason
+            ),
+        })
+        .collect())
+}
+
+fn check_automation_effect_resets(
+    dc: &mut DoctorCounters,
+    profile_root: &Path,
+    project_path: &Path,
+) {
+    let Ok(Some(layout)) =
+        tracedecay_runtime_core::storage::resolve_persisted_layout(project_path, profile_root)
+    else {
+        return;
+    };
+    match automation_effect_reset_findings(&layout.dashboard_root) {
         Ok(warnings) => {
             for warning in warnings {
                 dc.warn(&warning);

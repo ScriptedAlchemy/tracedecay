@@ -21,7 +21,8 @@ pub use input::{
 };
 pub use recovery_index::{
     AutomationEffectRecoveryPreparation, AutomationEffectRecoveryReport,
-    PreparedAutomationEffectRecovery, add_pending_blocking, effect_authority_digest,
+    PendingAutomationEffectReset, PreparedAutomationEffectRecovery, add_pending_blocking,
+    effect_authority_digest, pending_automation_effect_resets_blocking,
     prepare_reserved_automation_effect_recovery, reconcile_prepared_automation_effects_for_project,
     recovered_partial_terminal, remove_pending_blocking,
 };

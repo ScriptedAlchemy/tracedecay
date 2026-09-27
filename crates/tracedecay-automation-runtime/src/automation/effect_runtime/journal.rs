@@ -15,7 +15,7 @@ use tracedecay_contracts::{
     ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
-use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
+use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest, RunId};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
@@ -1049,8 +1049,7 @@ fn stabilize_bound_record_after_visibility_with(
 }
 }
 
-test_helpers_pub! {
-fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
+fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     let Some(file) = open_regular_nofollow(path)? else {
         return Ok(None);
     };
@@ -1069,6 +1068,41 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
             "automation terminal grew beyond its durable byte bound",
         ));
     }
+    Ok(Some(bytes))
+}
+
+/// A journal whose persisted shape no current reader accepts.
+pub struct RefusedJournalShape {
+    pub reason: String,
+    /// The run id the journal's admission names, when it still parses as one.
+    /// It is only a claim until checked against the journal's filename digest.
+    pub claimed_run_id: Option<RunId>,
+}
+
+/// Read-only shape probe for diagnostics: takes no journal lock and changes
+/// nothing, so it never stands in for the locked recovery read.
+pub fn refused_journal_shape_blocking(path: &Path) -> Result<Option<RefusedJournalShape>> {
+    let Some(bytes) = read_journal_bytes(path)? else {
+        return Ok(None);
+    };
+    let Err(error) = serde_json::from_slice::<DurableAutomationRecord>(&bytes) else {
+        return Ok(None);
+    };
+    let claimed_run_id = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|journal| journal.pointer("/admission/request/run_id").cloned())
+        .and_then(|run_id| serde_json::from_value::<RunId>(run_id).ok());
+    Ok(Some(RefusedJournalShape {
+        reason: error.to_string(),
+        claimed_run_id,
+    }))
+}
+
+test_helpers_pub! {
+fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
+    let Some(bytes) = read_journal_bytes(path)? else {
+        return Ok(None);
+    };
     {
         let record = serde_json::from_slice::<DurableAutomationRecord>(&bytes).map_err(|error| {
             TraceDecayError::reset_required("automation effect journal", error.to_string())

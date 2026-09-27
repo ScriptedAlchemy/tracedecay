@@ -134,6 +134,47 @@ fn pr_autotrack_state_findings_name_stale_entries_and_blocking_state() {
 }
 
 #[test]
+fn automation_effect_reset_findings_name_each_refused_journal_by_run_id() {
+    let dashboard_root = tempfile::tempdir().expect("dashboard root");
+    assert_eq!(
+        automation_effect_reset_findings(dashboard_root.path()),
+        Ok(Vec::new())
+    );
+    let journals = dashboard_root.path().join("automation_effects");
+    std::fs::create_dir_all(&journals).expect("journal directory");
+    let journal_file = |run_id: &str| {
+        let run_id = tracedecay_domain::RunId::new(run_id).expect("run id");
+        let key = tracedecay_domain::canonical_sha256(&(
+            "tracedecay.automation-run.terminal-key.v1",
+            &run_id,
+        ))
+        .expect("journal key");
+        journals.join(format!(
+            "{}.json",
+            key.as_str().trim_start_matches("sha256:")
+        ))
+    };
+    let legacy = br#"{"retirement":null,"admission":{"request":{"run_id":"run.legacy-memory"}}}"#;
+    std::fs::write(journal_file("run.legacy-memory"), legacy).expect("legacy journal");
+    // A journal whose admission names a run id that does not own its filename.
+    let misfiled = journal_file("run.other");
+    std::fs::write(&misfiled, legacy).expect("misfiled journal");
+    std::fs::write(journals.join("pending-index.json"), b"{}").expect("index");
+
+    let mut findings = automation_effect_reset_findings(dashboard_root.path()).expect("findings");
+    findings.sort();
+    assert_eq!(
+        findings,
+        vec![
+            "Automation effect journal ".to_owned()
+                + &misfiled.display().to_string()
+                + " requires reset: its shape is refused (unknown field `retirement`, expected `admission` or `state` at line 1 column 13); project-open recovery removes it",
+            "Automation run run.legacy-memory requires reset: its effect journal shape is refused (unknown field `retirement`, expected `admission` or `state` at line 1 column 13); project-open recovery removes the journal and the run id can run again".to_owned(),
+        ]
+    );
+}
+
+#[test]
 fn daemon_runtime_parser_extracts_storage_health_and_owner() {
     let parsed = super::daemon_runtime_status(&serde_json::json!({
         "content": [
