@@ -183,6 +183,54 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     fixture.harness.shutdown().await;
 }
 
+/// A diagnostics read holds no metered graph lease, so its receipt's elapsed
+/// time is the measured wall time of the read, which falls inside the
+/// caller's own measurement of the whole request.
+#[tokio::test]
+async fn published_diagnostics_receipt_reports_the_measured_read_time() {
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production diagnostics server");
+    wait_for_current_graph(&server).await;
+    let published = handle_real_server_tool_call(
+        &server,
+        "tracedecay_diagnose",
+        json!({
+            "cargo_output": "warning: unused variable: `result`\n --> src/main.rs:5:9\n  |\n5 |     let result = helper();\n  |         ^^^^^^\n",
+            "include_callers": false,
+        }),
+    )
+    .await;
+    let published: Value = serde_json::from_str(extract_real_server_text(&published))
+        .unwrap_or_else(|error| panic!("diagnose JSON ({error}): {published}"));
+    assert_eq!(published["published"]["status"], "published", "{published}");
+
+    let started = std::time::Instant::now();
+    let read = call_diagnostics(
+        &server,
+        json!({"scope": "workspace", "maximum_diagnostics": 5, "format": "json"}),
+    )
+    .await;
+    let request_micros = u64::try_from(started.elapsed().as_micros()).unwrap();
+    let payload: Value = serde_json::from_str(extract_real_server_text(&read))
+        .unwrap_or_else(|error| panic!("diagnostics JSON ({error}): {read}"));
+    assert_eq!(
+        payload["outcome"]["value"]["payload"]["diagnostics"][0]["logical_path"], "src/main.rs",
+        "{payload:#}"
+    );
+    let elapsed = payload["outcome"]["value"]["execution"]["budget"]["elapsed_micros"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("receipt elapsed time: {payload:#}"));
+    assert!(
+        (1..=request_micros).contains(&elapsed),
+        "elapsed_micros={elapsed} must be measured within the {request_micros}us request"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
 async fn call_diagnostics(server: &McpServer, arguments: Value) -> Value {
     handle_real_server_tool_call(server, "tracedecay_diagnostics", arguments).await
 }

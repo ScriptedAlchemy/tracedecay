@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_code_index::graph_projection::{CodeGraphReadCostMeter, CodeGraphSymbolSummaryV1};
 use tracedecay_contracts::retrieval::{
     HealthDeltaRequest, HealthDeltaResult, RetrievalPortContext, SymbolPrimitiveRecord,
 };
@@ -470,12 +470,13 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return graph_read_outcome(&error, EvidenceDomain::Graph, observed_at);
                     }
                 };
+                let cost = CodeGraphReadCostMeter::start();
                 let reader = match verified.reader_with_cancellation(
                     context.request,
                     observed_at,
                     Arc::clone(&cancellation),
                 ) {
-                    Ok(reader) => reader,
+                    Ok(reader) => reader.metered(&cost),
                     Err(error) => {
                         return graph_read_outcome(&error, EvidenceDomain::Graph, observed_at);
                     }
@@ -487,17 +488,19 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         now_observed(),
                         OmissionReason::Unavailable,
                         0,
-                    );
+                    )
+                    .with_cost(cost.receipt());
                 };
                 let payload = FileDependentsPrimitiveResult {
                     file: request.file.clone(),
                     dependent_files: dependents.files,
                 };
-                if dependents.unresolved_callers {
+                let outcome = if dependents.unresolved_callers {
                     completed_unsupported(payload, EvidenceDomain::Graph, now_observed())
                 } else {
                     completed(payload, EvidenceDomain::Graph, now_observed())
-                }
+                };
+                outcome.with_cost(cost.receipt())
             },
             label = "usecases.primitives.file_dependents"
         ))
