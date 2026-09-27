@@ -5,7 +5,7 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
 
-use crate::commands::{admin_cli_result, admin_cli_result_mismatch};
+use crate::commands::{admin_cli_result, admin_cli_result_mismatch, admin_cli_scope};
 
 fn cli_project_root(profile: &ProfileRoot) -> Option<PathBuf> {
     std::env::current_dir()
@@ -19,7 +19,9 @@ pub async fn run_analytics_sync(profile: &ProfileRoot) -> tracedecay_domain::err
     let outcome = match admin_cli_result(
         profile,
         project_root.as_deref(),
-        AdminCliSurfaceRequestV1::AnalyticsSync {},
+        AdminCliSurfaceRequestV1::AnalyticsSync {
+            scope: admin_cli_scope(project_root.as_deref()),
+        },
     )
     .await?
     {
@@ -41,6 +43,7 @@ pub async fn run_analytics_diagnostics(
         profile,
         project_root.as_deref(),
         AdminCliSurfaceRequestV1::AnalyticsDiagnostics {
+            scope: admin_cli_scope(project_root.as_deref()),
             all: all_projects,
             no_sync,
         },

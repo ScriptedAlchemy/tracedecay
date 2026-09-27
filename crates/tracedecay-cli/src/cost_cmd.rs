@@ -5,7 +5,7 @@ use tracedecay_session_memory::provider_usage::{
 };
 
 use crate::{
-    commands::{admin_cli_result, admin_cli_result_mismatch},
+    commands::{admin_cli_result, admin_cli_result_mismatch, admin_cli_scope},
     cost_summary::{CostAdminPayload, CostSummaryPayload},
 };
 
@@ -23,6 +23,7 @@ pub(crate) async fn handle_cost(
         project_root.as_deref(),
         AdminCliSurfaceRequestV1::CostSummary {
             range: range.clone(),
+            scope: admin_cli_scope(project_root.as_deref()),
         },
     )
     .await?

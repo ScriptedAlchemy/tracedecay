@@ -27,12 +27,22 @@ const fn default_storage_report_page_limit() -> usize {
     8
 }
 
+/// What a cost or analytics action reads: the served project's ledgers and
+/// sessions, or the whole profile's.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminCliScopeV1 {
+    Project,
+    Profile,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AdminCliSurfaceRequestV1 {
     /// Savings and provider-usage cost over `range` (`today`, `7d`, ...).
     CostSummary {
         range: String,
+        scope: AdminCliScopeV1,
     },
     /// Import every host's transcripts into the project's session store.
     SessionsImport {},
@@ -52,8 +62,11 @@ pub enum AdminCliSurfaceRequestV1 {
         limit: usize,
     },
     /// Import hook analytics JSONL into the accounting ledger.
-    AnalyticsSync {},
+    AnalyticsSync {
+        scope: AdminCliScopeV1,
+    },
     AnalyticsDiagnostics {
+        scope: AdminCliScopeV1,
         all: bool,
         no_sync: bool,
     },
@@ -64,11 +77,12 @@ pub enum AdminCliSurfaceRequestV1 {
     RegistryList {
         limit: usize,
         query: Option<String>,
-        /// Checkout to mark active when the call names no project.
+        /// Checkout to mark active when the caller's connection names no
+        /// project.
         project_arg: Option<PathBuf>,
     },
     RegistryContext {
-        /// Project path or alias; the served project when omitted.
+        /// Project path or alias; the caller's project when omitted.
         project_arg: Option<PathBuf>,
     },
     RegistryEmpty {},
@@ -96,22 +110,6 @@ pub enum AdminCliSurfaceRequestV1 {
         since: i64,
         history: bool,
     },
-}
-
-impl AdminCliSurfaceRequestV1 {
-    /// Whether the action reads or writes the served project and so cannot
-    /// run without one.
-    pub const fn requires_project(&self) -> bool {
-        matches!(
-            self,
-            Self::SessionsImport {}
-                | Self::SessionsGitSync { .. }
-                | Self::SessionsSyncStatus { .. }
-                | Self::SessionsSyncCancel { .. }
-                | Self::SessionsUnfinished { .. }
-                | Self::RegistryUpdate { .. }
-        )
-    }
 }
 
 /// One action's answer.
@@ -285,7 +283,7 @@ pub enum AdminCliRegistryContextV1 {
         /// Store rows exactly as the registry serializes them.
         stores: Vec<Value>,
     },
-    /// The call named no project and none is served.
+    /// The call named no project and its connection has none.
     Invalid {
         project: (),
     },
@@ -546,6 +544,10 @@ mod tests {
         assert_eq!(
             refused(json!({"action": "registry_empty", "project_root": "/elsewhere"})),
             "unknown field `project_root`, there are no fields"
+        );
+        assert_eq!(
+            refused(json!({"action": "cost_summary", "range": "7d"})),
+            "missing field `scope`"
         );
         assert_eq!(
             refused(json!({"action": "vacuum"})),

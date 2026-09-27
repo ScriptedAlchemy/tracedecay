@@ -641,6 +641,7 @@ async fn projectless_admin_cli_response(
             &global_db,
             tracedecay_global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
             &connection.client_identity.profile_root,
+            connection.active_project_root.as_deref(),
         ),
     )
     .await

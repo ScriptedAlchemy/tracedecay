@@ -9,8 +9,8 @@ use tracedecay_contracts::retrieval::{
     AdminCliCostSummaryV1, AdminCliCostTodayV1, AdminCliCostTotalsV1, AdminCliGainDayV1,
     AdminCliGainHistoryV1, AdminCliGainTotalV1, AdminCliProjectTokenTotalV1,
     AdminCliProjectTokensV1, AdminCliRegistryContextV1, AdminCliRegistryEmptyV1,
-    AdminCliRegistryListV1, AdminCliRegistryUpdateV1, AdminCliResultV1, AdminCliSessionSyncV1,
-    AdminCliSurfaceRequestV1, AdminCliUnfinishedSessionsV1,
+    AdminCliRegistryListV1, AdminCliRegistryUpdateV1, AdminCliResultV1, AdminCliScopeV1,
+    AdminCliSessionSyncV1, AdminCliSurfaceRequestV1, AdminCliUnfinishedSessionsV1,
 };
 use tracedecay_contracts::session_sync::{
     SessionGitSyncV1, SessionSyncCommandV1, SessionSyncControlV1, SessionSyncOutcomeV1,
@@ -34,6 +34,9 @@ struct AdminCliContext<'a> {
     accounting_db: Option<&'a RegisteredGlobalDb>,
     profile_root: Option<&'a Path>,
     project: Option<&'a TraceDecay>,
+    /// The caller's checkout: the served project, or the project a profile
+    /// owner's caller is connected to. It only marks registry rows active.
+    active_checkout: Option<&'a Path>,
     registered_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     registered_user_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     profile_identity: Option<std::sync::Arc<dyn tracedecay_contracts::ProfileIdentityReadPort>>,
@@ -64,6 +67,7 @@ impl<'a> AdminCliContext<'a> {
             accounting_db,
             profile_root,
             project: Some(cg),
+            active_checkout: Some(cg.project_root()),
             registered_project_session_db: session_authorities.project,
             registered_user_session_db: session_authorities.user,
             profile_identity: session_authorities.profile_identity,
@@ -78,12 +82,14 @@ impl<'a> AdminCliContext<'a> {
         global_db: &'a RegisteredGlobalDbLeaseV1,
         accounting_db: Option<&'a RegisteredGlobalDb>,
         profile_root: &'a Path,
+        active_checkout: Option<&'a Path>,
     ) -> Self {
         Self {
             global_db,
             accounting_db,
             profile_root: Some(profile_root),
             project: None,
+            active_checkout,
             registered_project_session_db: None,
             registered_user_session_db: None,
             profile_identity: None,
@@ -112,50 +118,32 @@ impl<'a> AdminCliContext<'a> {
         })
     }
 
-    fn project_root(&self) -> Option<&'a Path> {
-        self.project.map(TraceDecay::project_root)
+    /// The project a cost or analytics action reads under `scope`: the served
+    /// one, or none for the whole profile.
+    fn scoped_project(&self, scope: AdminCliScopeV1) -> Result<Option<&'a TraceDecay>> {
+        match scope {
+            AdminCliScopeV1::Project => self.require_project().map(Some),
+            AdminCliScopeV1::Profile => Ok(None),
+        }
     }
 
-    fn provider_usage_scope(&self) -> Result<Option<ObservationScopeV1>> {
-        let Some(project) = self.project else {
-            return Ok(None);
-        };
-        let project_id = project
-            .store_layout()
-            .identity
-            .project_id
-            .as_deref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "daemon project identity is unavailable".to_string(),
-            })
-            .and_then(|value| {
-                ProjectId::new(value).map_err(|error| TraceDecayError::Config {
-                    message: error.to_string(),
-                })
-            })?;
-        Ok(Some(ObservationScopeV1::Project { project_id }))
+    /// The served project's session store, when `project` is the served one.
+    fn scoped_project_sessions(
+        &self,
+        project: Option<&TraceDecay>,
+    ) -> Option<&'a RegisteredGlobalDb> {
+        project
+            .and(self.registered_project_session_db)
+            .map(std::convert::AsRef::as_ref)
     }
 
     async fn registered_project_session_db(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let project = self.require_project()?;
-        let project_id = project
-            .store_layout()
-            .identity
-            .project_id
-            .as_deref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "daemon project identity is unavailable".to_owned(),
-            })
-            .and_then(|value| {
-                ProjectId::new(value).map_err(|error| TraceDecayError::Config {
-                    message: error.to_string(),
-                })
-            })?;
         // Core servers do not retain session clients. The registered runtime
         // issues an exact project lease and enforces recovery/retirement fences.
         project
             .store_runtime_registry()
-            .mount_registered_project_sessions(project_id)
+            .mount_registered_project_sessions(served_project_id(project)?)
             .await
     }
 
@@ -168,6 +156,30 @@ impl<'a> AdminCliContext<'a> {
                 message: "daemon durable profile identity is unavailable".to_string(),
             })
     }
+}
+
+fn served_project_id(project: &TraceDecay) -> Result<ProjectId> {
+    let project_id = project
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "daemon project identity is unavailable".to_owned(),
+        })?;
+    ProjectId::new(project_id).map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })
+}
+
+fn provider_usage_scope(project: Option<&TraceDecay>) -> Result<Option<ObservationScopeV1>> {
+    project
+        .map(|project| {
+            Ok(ObservationScopeV1::Project {
+                project_id: served_project_id(project)?,
+            })
+        })
+        .transpose()
 }
 
 #[allow(
@@ -211,9 +223,10 @@ pub async fn compute_projectless_admin_cli(
     global_db: &RegisteredGlobalDbLeaseV1,
     accounting_db: Option<&RegisteredGlobalDb>,
     profile_root: &Path,
+    active_checkout: Option<&Path>,
 ) -> Result<AdminCliResultV1> {
     dispatch_admin_cli(
-        AdminCliContext::projectless(global_db, accounting_db, profile_root),
+        AdminCliContext::projectless(global_db, accounting_db, profile_root, active_checkout),
         request,
     )
     .await
@@ -233,17 +246,16 @@ async fn dispatch_admin_cli(
 ) -> Result<AdminCliResultV1> {
     let global_db = context.global_db;
     Ok(match request {
-        AdminCliSurfaceRequestV1::CostSummary { range } => {
-            let provider_scope = context.provider_usage_scope()?;
+        AdminCliSurfaceRequestV1::CostSummary { range, scope } => {
+            let project = context.scoped_project(scope)?;
+            let provider_scope = provider_usage_scope(project)?;
             AdminCliResultV1::CostSummary(
                 hotpath::future!(
                     cost_summary(
                         context.require_accounting_db()?,
-                        context
-                            .registered_project_session_db
-                            .map(std::convert::AsRef::as_ref),
+                        context.scoped_project_sessions(project),
                         provider_scope.as_ref(),
-                        context.project_root(),
+                        project.map(TraceDecay::project_root),
                         range,
                     ),
                     label = "mcp.admin.cli.cost"
@@ -288,28 +300,32 @@ async fn dispatch_admin_cli(
             let database = context.registered_project_session_db().await?;
             AdminCliResultV1::SessionsUnfinished(sessions_unfinished(&database, limit).await?)
         }
-        AdminCliSurfaceRequestV1::AnalyticsSync {} => {
+        AdminCliSurfaceRequestV1::AnalyticsSync { scope } => {
+            let project = context.scoped_project(scope)?;
             AdminCliResultV1::AnalyticsSync(serde_json::from_value(
                 tracedecay_application::analytics_bridge::analytics_sync_with_db(
                     context.require_accounting_db()?,
                     context.require_profile_root()?,
-                    context.project_root(),
+                    project.map(TraceDecay::project_root),
                 )
                 .await?,
             )?)
         }
-        AdminCliSurfaceRequestV1::AnalyticsDiagnostics { all, no_sync } => {
+        AdminCliSurfaceRequestV1::AnalyticsDiagnostics {
+            scope,
+            all,
+            no_sync,
+        } => {
+            let project = context.scoped_project(scope)?;
             AdminCliResultV1::AnalyticsDiagnostics(
                 tracedecay_application::analytics_bridge::analytics_diagnostics_with_db(
                     context.require_accounting_db()?,
                     context.require_profile_root()?,
-                    context
-                        .registered_project_session_db
-                        .map(std::convert::AsRef::as_ref),
+                    context.scoped_project_sessions(project),
                     context
                         .registered_user_session_db
                         .map(std::convert::AsRef::as_ref),
-                    context.project_root(),
+                    project.map(TraceDecay::project_root),
                     all,
                     no_sync,
                 )
@@ -341,7 +357,7 @@ async fn dispatch_admin_cli(
             project_arg,
         } => AdminCliResultV1::RegistryList(
             registry_list(
-                context.project,
+                context.active_checkout,
                 global_db,
                 limit,
                 query,
@@ -351,7 +367,8 @@ async fn dispatch_admin_cli(
         ),
         AdminCliSurfaceRequestV1::RegistryContext { project_arg } => {
             AdminCliResultV1::RegistryContext(
-                registry_context(context.project, global_db, project_arg.as_deref()).await?,
+                registry_context(context.active_checkout, global_db, project_arg.as_deref())
+                    .await?,
             )
         }
         AdminCliSurfaceRequestV1::RegistryEmpty {} => {
@@ -490,7 +507,7 @@ async fn gain_query(
 }
 
 async fn registry_list(
-    cg: Option<&TraceDecay>,
+    active_checkout: Option<&Path>,
     global_db: &RegisteredGlobalDb,
     limit: usize,
     query: Option<String>,
@@ -503,7 +520,7 @@ async fn registry_list(
     };
     let truncated = projects.len() > limit;
     projects.truncate(limit);
-    let active_checkout = cg.map(TraceDecay::project_root).or(project_arg);
+    let active_checkout = active_checkout.or(project_arg);
     let active_id = match active_checkout {
         Some(project_root) => active_project_id(project_root, global_db).await?,
         None => None,
@@ -540,11 +557,11 @@ async fn active_project_id(
 }
 
 async fn registry_context(
-    cg: Option<&TraceDecay>,
+    active_checkout: Option<&Path>,
     global_db: &RegisteredGlobalDb,
     project_arg: Option<&Path>,
 ) -> Result<AdminCliRegistryContextV1> {
-    let Some(selector) = project_arg.or_else(|| cg.map(TraceDecay::project_root)) else {
+    let Some(selector) = project_arg.or(active_checkout) else {
         return Ok(AdminCliRegistryContextV1::Invalid { project: () });
     };
     let Some(context) = global_db
@@ -553,8 +570,8 @@ async fn registry_context(
     else {
         return Ok(AdminCliRegistryContextV1::NotFound { project: () });
     };
-    let active_id = match cg {
-        Some(cg) => active_project_id(cg.project_root(), global_db).await?,
+    let active_id = match active_checkout {
+        Some(checkout) => active_project_id(checkout, global_db).await?,
         None => None,
     };
     let public =
@@ -745,21 +762,8 @@ async fn execute_session_sync(
 fn session_sync_scope(context: &AdminCliContext<'_>) -> Result<SessionSyncScopeV1> {
     let project = context.require_project()?;
     let identity = context.require_profile_identity()?;
-    let project_id = project
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "daemon project identity is unavailable".to_string(),
-        })
-        .and_then(|value| {
-            tracedecay_domain::ProjectId::new(value).map_err(|error| TraceDecayError::Config {
-                message: error.to_string(),
-            })
-        })?;
     Ok(SessionSyncScopeV1::new(
-        project_id,
+        served_project_id(project)?,
         identity.profile_id().clone(),
     ))
 }
@@ -864,7 +868,7 @@ mod tests {
             .profile_sessions()
             .await
             .unwrap();
-        let mut context = AdminCliContext::projectless(&profile_database, None, &profile);
+        let mut context = AdminCliContext::projectless(&profile_database, None, &profile, None);
         context.project = Some(&project);
         // A supplied foreign session pointer must never substitute for the
         // current project's registered runtime authority.

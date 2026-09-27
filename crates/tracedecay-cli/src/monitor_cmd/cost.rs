@@ -11,7 +11,7 @@ use tracedecay_contracts::retrieval::{
 };
 
 use crate::{
-    commands::{admin_cli_result, admin_cli_result_mismatch},
+    commands::{admin_cli_result, admin_cli_result_mismatch, admin_cli_scope},
     cost_summary::CostAdminPayload,
 };
 
@@ -229,6 +229,7 @@ async fn cost_summary(
         project_root,
         AdminCliSurfaceRequestV1::CostSummary {
             range: range.to_owned(),
+            scope: admin_cli_scope(project_root),
         },
     )
     .await?

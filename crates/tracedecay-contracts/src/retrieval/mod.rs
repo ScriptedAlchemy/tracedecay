@@ -80,7 +80,7 @@ pub use admin_cli_surface::{
     AdminCliGainDayV1, AdminCliGainHistoryV1, AdminCliGainTotalV1, AdminCliProjectTokenTotalV1,
     AdminCliProjectTokensV1, AdminCliRegistryContextV1, AdminCliRegistryEmptyV1,
     AdminCliRegistryGcV1, AdminCliRegistryListV1, AdminCliRegistryUpdateV1, AdminCliResultV1,
-    AdminCliSessionSyncV1, AdminCliStorageReportV1, AdminCliSurfaceRequestV1,
+    AdminCliScopeV1, AdminCliSessionSyncV1, AdminCliStorageReportV1, AdminCliSurfaceRequestV1,
     AdminCliUnfinishedSessionsV1,
 };
 pub use analysis_report_surface::{

@@ -2,7 +2,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::time::Instant;
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
-use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
+use tracedecay_contracts::retrieval::{
+    AdminCliResultV1, AdminCliScopeV1, AdminCliSurfaceRequestV1,
+};
 use tracedecay_contracts::{ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope};
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -150,6 +152,15 @@ pub(crate) async fn admin_cli_result(
     match result {
         GraphToolResultV1::AdminCli(result) => Ok(*result),
         _ => Err(admin_cli_result_mismatch("tracedecay_admin_cli")),
+    }
+}
+
+/// A cost or analytics action reads the project the command runs in, or the
+/// whole profile outside one.
+pub(crate) fn admin_cli_scope(project_path: Option<&std::path::Path>) -> AdminCliScopeV1 {
+    match project_path {
+        Some(_) => AdminCliScopeV1::Project,
+        None => AdminCliScopeV1::Profile,
     }
 }
 
