@@ -17,9 +17,10 @@ import sys
 
 # Case-insensitive. GitHub still closes an issue when the keyword is
 # lowercased or wrapped in backticks, so the keyword itself has to change.
+# Release-please writes the reference as a markdown link, `closes [#N](url)`.
 _CLOSING_KEYWORD = re.compile(
     r"(?i)\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\b"
-    r"(\s*:?\s*)"
+    r"(\s*:?\s*\[?)"
     r"(#\d+|GH-\d+|[\w.-]+/[\w.-]+#\d+|https://github\.com/[\w.-]+/[\w.-]+/issues/\d+)"
 )
 
