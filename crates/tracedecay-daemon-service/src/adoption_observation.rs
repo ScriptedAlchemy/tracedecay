@@ -365,6 +365,7 @@ mod tests {
                 ("capability.application.primitive.constructors", "available"),
                 ("capability.application.primitive.context", "available"),
                 ("capability.application.primitive.coupling", "available"),
+                ("capability.application.primitive.dashboard", "available"),
                 ("capability.application.primitive.dead-code", "available"),
                 (
                     "capability.application.primitive.dependency-depth",
@@ -422,6 +423,10 @@ mod tests {
                 ("capability.application.primitive.retrieve", "available"),
                 (
                     "capability.application.primitive.rename-preview",
+                    "available",
+                ),
+                (
+                    "capability.application.primitive.run-affected-tests",
                     "available",
                 ),
                 ("capability.application.primitive.search", "available"),
