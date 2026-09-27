@@ -165,6 +165,69 @@ fn update_plugin_waits_on_the_operator_for_a_tracked_host_whose_cli_is_not_insta
     );
 }
 
+/// A refresh that finds a host's MCP registration already in place reports it
+/// unchanged and leaves the operator's config alone: same bytes, same inode.
+#[cfg(unix)]
+#[test]
+fn update_plugin_reports_registrations_already_in_place_as_unchanged() {
+    use std::os::unix::fs::MetadataExt;
+
+    let cli = IsolatedCli::new();
+    let hosts = [
+        (HostKindV1::Cline, ".cline/mcp.json"),
+        (HostKindV1::Devin, ".config/devin/mcp_config.json"),
+        (
+            HostKindV1::RooCode,
+            ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
+        ),
+        (HostKindV1::Kilo, ".config/kilo/kilo.jsonc"),
+        (HostKindV1::OpenCode, ".config/opencode/opencode.json"),
+    ];
+    let mut installed = Vec::new();
+    for (host, relative) in hosts {
+        let case = host_case(host);
+        seed_host(case, &cli);
+        let install = cli.run_without_host_clis(&["install", "--agent", case.id]);
+        let install_stderr = stderr(&install);
+        assert_eq!(install.status.code(), Some(0), "{install_stderr}");
+        let path = cli.home.path().join(relative);
+        assert!(
+            install_stderr.contains(&format!(
+                "Added tracedecay MCP server to {}\n",
+                path.display()
+            )),
+            "{install_stderr}"
+        );
+        let metadata = fs::metadata(&path).unwrap();
+        installed.push((path.clone(), fs::read(&path).unwrap(), metadata.ino()));
+    }
+
+    let refresh = cli.run_without_host_clis(&["update-plugin"]);
+
+    let refresh_stderr = stderr(&refresh);
+    assert_eq!(refresh.status.code(), Some(0), "{refresh_stderr}");
+    for (path, bytes, inode) in installed {
+        assert!(
+            refresh_stderr.contains(&format!(
+                "  tracedecay MCP server unchanged in {}\n",
+                path.display()
+            )),
+            "{refresh_stderr}"
+        );
+        assert!(
+            !refresh_stderr.contains(&format!("tracedecay MCP server to {}", path.display())),
+            "{refresh_stderr}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes, "{}", path.display());
+        assert_eq!(
+            fs::metadata(&path).unwrap().ino(),
+            inode,
+            "{} was republished",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn install_fails_an_untracked_named_host_whose_cli_is_not_installed() {
     let cli = IsolatedCli::new();

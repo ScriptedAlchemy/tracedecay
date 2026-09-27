@@ -61,6 +61,9 @@ pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
     "is warming in the background; retry the same tool shortly";
 /// Typed reason a project/profile/owner open has not finished yet.
 pub const PROJECT_WARMING_REASON_CODE: &str = "project_warming";
+/// Typed reason the runtime's Doctor report is absent: the project runtime
+/// that owns the report is still mounting.
+pub(crate) const DOCTOR_REPORT_OWNER_WARMING_REASON: &str = "doctor_report_owner_warming";
 /// Typed reason a repository-identity probe deferred past its budget.
 pub use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
 /// Typed reason a retained project server was retired mid-response.

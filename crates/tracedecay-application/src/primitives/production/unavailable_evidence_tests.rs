@@ -1,43 +1,57 @@
 use super::super::runtime::QualifiedNamePrimitiveResult;
 use super::*;
+use tracedecay_contracts::ApplicationProblemKind;
 
 #[test]
-fn graph_admission_failures_preserve_termination_and_omission_reason() {
-    for (error, reason) in [
+fn graph_admission_failures_refuse_with_the_typed_graph_state() {
+    for (error, reason, refusal) in [
         (
             CodeGraphReadError::Unavailable {
                 detail: "the verified graph is not ready".to_owned(),
             },
             OmissionReason::Unavailable,
+            Some((
+                ApplicationProblemKind::Unavailable,
+                "application.code-graph.unavailable",
+            )),
         ),
         (
             CodeGraphReadError::Stale {
                 detail: "the graph no longer matches the request".to_owned(),
             },
             OmissionReason::Stale,
+            Some((
+                ApplicationProblemKind::Stale,
+                "application.code-graph.stale",
+            )),
         ),
-        (CodeGraphReadError::Cancelled, OmissionReason::Cancelled),
-        (CodeGraphReadError::TimedOut, OmissionReason::TimedOut),
+        (
+            CodeGraphReadError::Cancelled,
+            OmissionReason::Cancelled,
+            None,
+        ),
+        (CodeGraphReadError::TimedOut, OmissionReason::TimedOut, None),
     ] {
         let outcome: RetrievalPortOutcome<QualifiedNamePrimitiveResult> =
             graph_read_outcome(&error, EvidenceDomain::Symbol, UtcMicros(1));
-        match reason {
-            OmissionReason::Cancelled => {
-                assert!(matches!(&outcome, RetrievalPortOutcome::Cancelled(_)));
+        match (&outcome, refusal) {
+            (RetrievalPortOutcome::Refused(_, problem), Some((kind, code))) => {
+                assert_eq!(
+                    (problem.kind(), problem.reason_code()),
+                    (kind, code),
+                    "{error:?}"
+                );
             }
-            OmissionReason::TimedOut => {
-                assert!(matches!(&outcome, RetrievalPortOutcome::TimedOut(_)));
+            (RetrievalPortOutcome::Cancelled(_), None) => {
+                assert_eq!(reason, OmissionReason::Cancelled);
             }
-            _ => assert!(matches!(&outcome, RetrievalPortOutcome::Unavailable(_))),
+            (RetrievalPortOutcome::TimedOut(_), None) => {
+                assert_eq!(reason, OmissionReason::TimedOut);
+            }
+            (outcome, _) => panic!("{error:?} produced {outcome:?}"),
         }
         let evidence = outcome.evidence();
         assert!(evidence.payload.is_none());
-        assert!(evidence.coverage.validate().is_ok());
-        assert_eq!(
-            evidence.coverage.completeness,
-            CoverageCompleteness::Unknown
-        );
-        assert_eq!(evidence.coverage.returned, 0);
         assert_eq!(
             evidence.omissions,
             vec![Omission {

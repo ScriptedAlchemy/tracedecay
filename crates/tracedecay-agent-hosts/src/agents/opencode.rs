@@ -26,6 +26,7 @@ use super::{
     TextFileMutation, load_json_file, safe_write_text_file, update_text_file_transactionally,
 };
 
+use super::mcp_registration::McpRegistrationOutcome;
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 
 pub struct OpenCodeIntegration;
@@ -647,16 +648,28 @@ fn install_registration_entries(
     if !install_mcp && !install_lsp {
         return Ok(());
     }
-    update_text_file_transactionally(config_path, |existing: &str| {
+    let outcome = update_text_file_transactionally(config_path, |existing: &str| {
+        let before = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
         let config = merge_registration_entries(
             config_path,
-            existing,
+            before.clone(),
             tracedecay_bin,
             install_mcp,
             install_lsp,
         )?;
+        if config == before {
+            return Ok((
+                McpRegistrationOutcome::Unchanged,
+                TextFileMutation::Unchanged,
+            ));
+        }
+        let outcome = if before.pointer("/mcp/tracedecay").is_some() {
+            McpRegistrationOutcome::Updated
+        } else {
+            McpRegistrationOutcome::Added
+        };
         Ok((
-            (),
+            outcome,
             TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
                 config_path,
                 existing,
@@ -664,23 +677,19 @@ fn install_registration_entries(
             )?),
         ))
     })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        config_path.display()
-    );
+    outcome.report(config_path);
     Ok(())
 }
 
-/// Merge TraceDecay's registrations into the config bytes observed under the
-/// write lock, returning the replacement value.
+/// Merge TraceDecay's registrations into the config parsed from the bytes
+/// observed under the write lock, returning the replacement value.
 fn merge_registration_entries(
     config_path: &Path,
-    existing: &str,
+    mut config: serde_json::Value,
     tracedecay_bin: &str,
     install_mcp: bool,
     install_lsp: bool,
 ) -> Result<serde_json::Value> {
-    let mut config = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
     // Snapshot the host-recorded plugin registration before touching anything,
     // so the write below can be proven not to have created, altered, or
     // dropped the key `opencode plugin` owns.

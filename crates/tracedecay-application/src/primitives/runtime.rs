@@ -20,8 +20,8 @@ use tracedecay_contracts::retrieval::grep_analysis::{
 };
 use tracedecay_contracts::retrieval::{
     AffectedFileTestsPrimitiveResultV1, HealthDeltaRequest, HealthDeltaResult,
-    OperationalRetrievalPort, PrimitiveFailureKind, PrimitiveInvocation, PrimitiveRequest,
-    PrimitiveSupportGap, RetrievalPortContext, RetrievalPortOutcome, SessionRetrievalBudgetStageV1,
+    OperationalRetrievalPort, PrimitiveInvocation, PrimitiveRequest, PrimitiveSupportGap,
+    RetrievalPortContext, RetrievalPortOutcome, SessionRetrievalBudgetStageV1,
     SessionRetrievalStructuralRefusalV1, SourceReadPortContext, SourceReadPortOutcome,
     SourceReadPrimitivePort, SourceRetrievalPort, SymbolGraphItem, SymbolGraphPage,
     SymbolGraphPortContext, SymbolGraphPortOutcome, SymbolGraphPrimitivePort,
@@ -1903,23 +1903,7 @@ fn primitive_failure<T>(
     operation: &ApplicationOperation,
     failure: tracedecay_contracts::retrieval::PrimitiveFailure,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
-    let application_problem = match failure.kind {
-        PrimitiveFailureKind::InvalidRequest => {
-            ApplicationProblem::invalid_request_without_action(failure.code, failure.message)
-        }
-        PrimitiveFailureKind::NotFoundOrNotAuthorized => {
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-        }
-        PrimitiveFailureKind::Stale => ApplicationProblem::stale(SafeDiagnostic {
-            code: failure.code,
-            message: failure.message,
-        }),
-        PrimitiveFailureKind::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: failure.code,
-            message: failure.message,
-        }),
-    };
-    problem(context, operation, application_problem)
+    problem(context, operation, failure.into_problem())
 }
 
 fn grep_problem<T>(

@@ -13,10 +13,10 @@ use tracedecay_contracts::doctor::ResidentMemoryHolderReadV1;
 use tracedecay_contracts::retrieval::{
     ActiveProjectBranchV1, ActiveProjectResolutionSourceV1, ActiveProjectResultV1,
     ActiveProjectStorageV1, ProjectStatusV1, StatusAdmissionV1, StatusBranchMismatchV1,
-    StatusCodeIndexFreshnessV1, StatusGitStalenessV1, StatusMemoryOwnerV1, StatusMemoryPressureV1,
-    StatusMemoryV1, StatusResultV1, StatusRetrievalServingV1, StatusSchemaConvergenceStateV1,
-    StatusSchemaConvergenceV1, StatusServingConditionV1, StatusServingFreshnessV1,
-    StatusSurfaceRequestV1,
+    StatusCodeIndexFreshnessV1, StatusGitStalenessUnavailableV1, StatusGitStalenessV1,
+    StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1,
+    StatusRetrievalServingV1, StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1,
+    StatusServingConditionV1, StatusServingFreshnessV1, StatusSurfaceRequestV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::ProjectId;
@@ -31,6 +31,7 @@ use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
 
 use crate::McpToolContext;
+use crate::handlers::workflow::current_head_commit_id;
 use crate::tools::render::Md;
 
 fn display_path(path: &Path) -> String {
@@ -361,6 +362,42 @@ fn code_index_freshness_status(
     )
 }
 
+/// The latest sealed generation's watermark, the commit its source snapshot
+/// was captured from, against the worktree's checked-out commit.
+fn git_staleness(
+    freshness_payload: Option<
+        &tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1,
+    >,
+    project_root: &Path,
+) -> StatusGitStalenessV1 {
+    let Some(sealed) = freshness_payload
+        .and_then(|payload| payload.worktrees.first())
+        .filter(|freshness| freshness.latest_generation_id.is_some())
+    else {
+        return StatusGitStalenessV1::Unavailable {
+            reason: StatusGitStalenessUnavailableV1::NoSealedGeneration,
+        };
+    };
+    let Some(watermark) = sealed.source_revision.clone() else {
+        return StatusGitStalenessV1::Unavailable {
+            reason: StatusGitStalenessUnavailableV1::SealedGenerationHasNoCommit,
+        };
+    };
+    let Some(head) = current_head_commit_id(project_root) else {
+        return StatusGitStalenessV1::Unavailable {
+            reason: StatusGitStalenessUnavailableV1::GitHeadUnreadable,
+        };
+    };
+    if head.as_str() == watermark {
+        StatusGitStalenessV1::Current { watermark }
+    } else {
+        StatusGitStalenessV1::Stale {
+            watermark,
+            head: head.as_str().to_owned(),
+        }
+    }
+}
+
 /// Computes `tracedecay_status`. `server_stats` is the serving MCP server's
 /// request counters; `wait` is the readiness wait the owner held the read
 /// for, when the request asked for one, and `reached_freshness` the reading
@@ -455,12 +492,9 @@ pub async fn compute_status(
         branch_warnings: None,
         session_ingest: None,
         session_history_catch_up: None,
-        git_staleness: request.include_staleness.then(|| StatusGitStalenessV1 {
-            status: "unavailable".to_owned(),
-            reason: "sealed_generation_git_watermark_not_published".to_owned(),
-            message: "the verified code generation does not publish a Git commit watermark"
-                .to_owned(),
-        }),
+        git_staleness: request
+            .include_staleness
+            .then(|| git_staleness(freshness_payload.as_ref(), ctx.project_root())),
         scope_prefix: scope_prefix.map(str::to_owned),
         wait,
     };
@@ -874,8 +908,8 @@ mod tests {
 
     use super::{
         CodeIndexReadinessWaitReadV1, FreshnessLabelV1, code_index_freshness_projection,
-        graph_statistics_value, historical_session_catch_up_state, readiness_wait_outcome,
-        render_status_md, schema_convergence_status,
+        git_staleness, graph_statistics_value, historical_session_catch_up_state,
+        readiness_wait_outcome, render_status_md, schema_convergence_status,
     };
     use tracedecay_contracts::code_index_freshness::{
         CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
@@ -1143,6 +1177,62 @@ mod tests {
         let warning = warning.expect("a parked read carries the reason");
         assert!(warning.contains("not owner-private (mode 775, need 700)"));
         assert!(warning.contains("restore owner-only access"));
+    }
+
+    /// The watermark is the sealed generation's commit: current while HEAD
+    /// stays on it, stale with both commits once HEAD moves, and unavailable
+    /// before any generation seals.
+    #[test]
+    fn git_staleness_compares_the_sealed_watermark_with_head() {
+        let repository = tempfile::TempDir::new().expect("repository");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(args)
+                .current_dir(repository.path())
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8(output.stdout)
+                .expect("utf-8")
+                .trim()
+                .to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "sealed"]);
+        let sealed = git(&["rev-parse", "HEAD"]);
+        let payload = |latest_generation_id: Option<&str>| {
+            tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1 {
+                worktrees: vec![
+                    tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                        worktree_root: repository.path().display().to_string(),
+                        latest_generation_id: latest_generation_id.map(str::to_owned),
+                        source_revision: Some(sealed.clone()),
+                        ..Default::default()
+                    },
+                ],
+                note: String::new(),
+            }
+        };
+        let staleness = |payload| {
+            serde_json::to_value(git_staleness(Some(&payload), repository.path()))
+                .expect("staleness serializes")
+        };
+
+        assert_eq!(
+            staleness(payload(Some("generation.fixture"))),
+            serde_json::json!({ "status": "current", "watermark": sealed })
+        );
+        git(&["commit", "-q", "--allow-empty", "-m", "moved"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            staleness(payload(Some("generation.fixture"))),
+            serde_json::json!({ "status": "stale", "watermark": sealed, "head": head })
+        );
+        assert_eq!(
+            staleness(payload(None)),
+            serde_json::json!({ "status": "unavailable", "reason": "no_sealed_generation" })
+        );
     }
 
     #[test]

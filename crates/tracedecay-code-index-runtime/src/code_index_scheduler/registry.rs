@@ -1881,7 +1881,6 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn pause_next_cold_mount_before_final_commit(
-        &self,
         project_root: PathBuf,
     ) -> (
         tokio::sync::oneshot::Receiver<()>,

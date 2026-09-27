@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemRecord, ApplicationResult, EvidenceCoverage,
-    OperationReceipt, ResolvedScope,
+    OperationReceipt, OperationTermination, ResolvedScope,
 };
 use tracedecay_tool_catalog::BindingId;
 
@@ -45,7 +45,7 @@ impl CanonicalHumanView {
                         "Payload",
                         payload_preview(operation, packet.payload.as_ref())?,
                     );
-                    view.code("Status", "success");
+                    view.code("Status", evidence_status(packet.execution.termination)?);
                     view.push_evidence_summary(packet)?;
                     view.push_provenance(
                         binding_id,
@@ -379,6 +379,21 @@ fn scalar<T: Serialize>(value: &T) -> serde_json::Result<String> {
     })
 }
 
+/// `success` only for evidence the read completed; a read that ended any other
+/// way is named by its termination, so an unavailable read with no payload
+/// never reads as a successful empty answer.
+fn evidence_status(termination: OperationTermination) -> serde_json::Result<String> {
+    match termination {
+        OperationTermination::Completed => Ok("success".to_owned()),
+        OperationTermination::Partial
+        | OperationTermination::Cancelled
+        | OperationTermination::TimedOut
+        | OperationTermination::Failed
+        | OperationTermination::Unavailable
+        | OperationTermination::EffectUnknown => scalar(&termination),
+    }
+}
+
 fn optional_count(value: Option<u64>) -> String {
     value.map_or_else(|| "unknown".to_owned(), |count| count.to_string())
 }
@@ -563,7 +578,9 @@ mod tests {
     };
     use tracedecay_domain::UtcMicros;
 
-    use super::{CanonicalHumanView, HumanField, HumanFieldValue, payload_preview};
+    use super::{
+        CanonicalHumanView, HumanField, HumanFieldValue, evidence_status, payload_preview,
+    };
 
     fn code(label: &'static str, value: &str) -> HumanField {
         HumanField {
@@ -646,6 +663,20 @@ mod tests {
                 code("Cancellation stage", "during_read"),
                 block("Payload", "{\n  \"items\": [\n    1,\n    2\n  ]\n}"),
             ]
+        );
+    }
+
+    #[test]
+    fn evidence_status_says_success_only_for_a_completed_read() {
+        assert_eq!(
+            [
+                OperationTermination::Completed,
+                OperationTermination::Partial,
+                OperationTermination::Failed,
+                OperationTermination::Unavailable,
+            ]
+            .map(|termination| evidence_status(termination).unwrap()),
+            ["success", "partial", "failed", "unavailable"]
         );
     }
 

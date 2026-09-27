@@ -386,15 +386,18 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         Box::pin(hotpath::future!(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
-                let Ok(reader) = open_code_graph(
+                let reader = match open_code_graph(
                     self.code_graph.as_ref(),
                     context.request,
                     now_observed(),
                     Arc::clone(&cancellation),
                 )
                 .await
-                else {
-                    return failed(EvidenceDomain::Graph, now_observed());
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Graph, now_observed());
+                    }
                 };
                 let Ok(from) =
                     tracedecay_domain::SymbolOccurrenceId::new(request.from_node_id.clone())
@@ -514,15 +517,18 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         Box::pin(hotpath::future!(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
-                let Ok(reader) = open_code_graph(
+                let reader = match open_code_graph(
                     self.code_graph.as_ref(),
                     context.request,
                     now_observed(),
                     Arc::clone(&cancellation),
                 )
                 .await
-                else {
-                    return failed(EvidenceDomain::Source, now_observed());
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Source, now_observed());
+                    }
                 };
                 let Ok(occurrence) =
                     tracedecay_domain::SymbolOccurrenceId::new(request.node_id.clone())
@@ -578,15 +584,18 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         Box::pin(hotpath::future!(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
-                let Ok(reader) = open_code_graph(
+                let reader = match open_code_graph(
                     self.code_graph.as_ref(),
                     context.request,
                     now_observed(),
                     Arc::clone(&cancellation),
                 )
                 .await
-                else {
-                    return failed(EvidenceDomain::Source, now_observed());
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Source, now_observed());
+                    }
                 };
                 let Ok(nodes) =
                     reader.symbols_in_logical_file(&request.file, 100_000, cancellation)
@@ -621,15 +630,18 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         Box::pin(hotpath::future!(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
-                let Ok(reader) = open_code_graph(
+                let reader = match open_code_graph(
                     self.code_graph.as_ref(),
                     context.request,
                     now_observed(),
                     Arc::clone(&cancellation),
                 )
                 .await
-                else {
-                    return failed(EvidenceDomain::Symbol, now_observed());
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Symbol, now_observed());
+                    }
                 };
                 let Ok(nodes) = all_code_graph_symbols(&reader, cancellation) else {
                     return failed(EvidenceDomain::Symbol, now_observed());

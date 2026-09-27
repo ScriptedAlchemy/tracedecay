@@ -5,7 +5,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use tracedecay_contracts::retrieval::grep_analysis::PrimitiveCoverageV1;
 use tracedecay_contracts::retrieval::{
-    RetrievalPortOutcome, TemporalRetrievalPort, TestPrimitivePortContext, TestPrimitivePortOutcome,
+    PrimitiveFailure, PrimitiveFailureKind, RetrievalPortOutcome, TemporalRetrievalPort,
+    TestPrimitivePortContext, TestPrimitivePortOutcome,
 };
 use tracedecay_contracts::{
     ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceCoverage,
@@ -284,7 +285,76 @@ fn graph_read_outcome<T>(
     match error {
         CodeGraphReadError::Cancelled => RetrievalPortOutcome::Cancelled(evidence),
         CodeGraphReadError::TimedOut => RetrievalPortOutcome::TimedOut(evidence),
-        _ => RetrievalPortOutcome::Unavailable(evidence),
+        _ => RetrievalPortOutcome::Refused(
+            evidence,
+            Box::new(code_graph_read_failure(error).into_problem()),
+        ),
+    }
+}
+
+/// The typed refusal for a code-graph read the projection could not serve.
+///
+/// Every graph read reports one state per cause, so a graph that is still
+/// building answers `application.code-graph.unavailable` from every tool
+/// instead of an empty answer that reads as "nothing depends on this".
+pub(super) fn code_graph_read_failure(error: &CodeGraphReadError) -> PrimitiveFailure {
+    let (kind, code, message) = match error {
+        CodeGraphReadError::MissingRegistry => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.registry-missing",
+            "The code index has not registered this project's code graph yet.",
+        ),
+        CodeGraphReadError::Unavailable { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.unavailable",
+            "The project's verified code graph is not serving yet; retry after the code index \
+             seals a generation.",
+        ),
+        CodeGraphReadError::ResetRequired { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.reset-required",
+            "The project's code graph requires a reset before it can serve.",
+        ),
+        CodeGraphReadError::Stale { .. } => (
+            PrimitiveFailureKind::Stale,
+            "application.code-graph.stale",
+            "The code-graph generation this read was admitted against has been superseded.",
+        ),
+        CodeGraphReadError::Cancelled => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.cancelled",
+            "The code-graph read was cancelled.",
+        ),
+        CodeGraphReadError::TimedOut => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.timed-out",
+            "The code-graph read timed out.",
+        ),
+        CodeGraphReadError::BudgetExhausted { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.budget-exhausted",
+            "The code-graph read exceeded its budget.",
+        ),
+        CodeGraphReadError::Denied => (
+            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+            "application.code-graph.denied",
+            "The code-graph read is not authorized.",
+        ),
+        CodeGraphReadError::InvalidRequest { .. } => (
+            PrimitiveFailureKind::InvalidRequest,
+            "application.code-graph.invalid-request",
+            "The code-graph read request is invalid.",
+        ),
+        CodeGraphReadError::Corrupt { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.corrupt",
+            "The project's verified code-graph projection is corrupt.",
+        ),
+    };
+    PrimitiveFailure {
+        kind,
+        code: code.to_owned(),
+        message: message.to_owned(),
     }
 }
 
