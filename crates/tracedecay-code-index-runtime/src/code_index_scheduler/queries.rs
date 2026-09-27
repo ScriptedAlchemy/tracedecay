@@ -488,9 +488,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 .map_err(|_| CallableCodeCursorError::Unavailable)?
                 .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
-                self.retained_text_owner_freshness_for_scope(request.scope())
+                self.current_text_owner_for_scope(request.scope())
                     .await
-                    .and_then(|(latest, fresh)| fresh.then_some(latest))
                     .ok_or(CallableCodeCursorError::Unavailable)
             } else if let Some(latest) = self
                 .retained_text_owner_freshness_for_scope(request.scope())
