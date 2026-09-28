@@ -91,17 +91,16 @@ order. The Actions page shows the waiting and running jobs; no GitHub App or
 additional service needs installing.
 
 Manual dispatch retains the optional OS, host, profiling and full-workspace
-inputs. The trusted close workflow shares the PR's CI concurrency group,
-so GitHub cancels its CI before allocating the cache-cleanup runner. Merged
-runs can return empty PR associations, making API-based identification
-unreliable. Cleanup checks that the PR remains closed and that the
-event still names its current closure before deleting merge-ref caches.
+inputs. The trusted close workflow has a separate ordered hygiene group. It
+checks the event's exact closure, cancels matching pre-closure CI first attempts
+(including ones still queued) and pre-closure reruns, waits for them to finish,
+then rechecks the closure before deleting merge-ref caches. A late close event
+therefore does not enter the reopened PR's CI concurrency group. Existing runs
+without the stable `CI for PR #N` title are outside this selector. GitHub
+offers no atomic check-and-cancel operation for a run attempt; cleanup
+remains guarded best effort, and its five-minute job bound can leave caches
+for later expiry.
 Manual dispatches remain under the operator's control.
-
-Native cancellation follows GitHub's event arrival order. A delayed close
-event can cancel a reopened PR's newer run before cache cleanup checks its
-state. Rerun CI in Actions if that happens; the cache guard does not prevent
-this cancellation race.
 
 ## What was measured
 
@@ -360,6 +359,21 @@ measurement artifact. The current manual trial adds multi-head checks, while
 automatic multi-PR demand admission remains unimplemented. Production
 workers do not persist across workflow runs. Release workflows retain their
 current behavior.
+
+[Hosted two-PR trial 36460638739](https://github.com/ScriptedAlchemy/tracedecay/actions/runs/36460638739)
+admitted ready, same-repository PRs #2488 and #2489 at exact SHAs
+`bc36eeabff1c` and `202084ddc336` for `core-contracts`. On one four-core Arm
+runner, B's fresh-target compilation took 979.0 seconds and its 3,759 nextest
+cases took 34.6 seconds. Reusing A's target for B took 1.3 seconds of Cargo
+freshness checking and 33.0 seconds for the same 3,759 cases: 29.6× faster
+for B's compile-and-test phase. Including the shared A seed, cold versus warm
+totals were 2,045.9 versus 1,066.5 seconds, a 47.9% reduction. A changed-source
+negative control failed, and restoring the source passed. The trial's two
+non-required checks reported on the admitted SHAs; the report, JUnit and
+compile logs are attached to the run. These are three sequential measurements
+on one hosted worker, not independent parallel PR verdicts or proof of a
+production queue reduction. The worker still spent about six minutes in
+dependency setup, and automatic cross-PR admission remains to be built.
 
 For the compact-await change released as Cargo Hauler 0.10.0, `pnpm run check`
 passed artifact freshness, validation, build, typechecking, Effect diagnostics,
