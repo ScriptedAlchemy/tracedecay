@@ -902,12 +902,29 @@ pub fn install_process_allocator_release_v1(release: fn()) -> Result<(), String>
 /// trimmed after the installed release as well.
 #[must_use]
 pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
+    measured_trim(|| {
+        let released = PROCESS_ALLOCATOR_RELEASE_V1
+            .get()
+            .map(|release| release())
+            .is_some();
+        glibc_trim() || released
+    })
+}
+
+/// Return freed glibc arena pages to the kernel without the installed release.
+///
+/// C-library churn (`SQLite` statements and caches on the store writers,
+/// tree-sitter parses on the index workers) accumulates between the events
+/// that run the full release, so the daemon runs this on its resident-memory
+/// sampling cadence. It never waits on a busy worker pool.
+#[must_use]
+pub fn release_c_library_heap_v1() -> ProcessAllocatorTrimV1 {
+    measured_trim(glibc_trim)
+}
+
+fn measured_trim(trim: impl FnOnce() -> bool) -> ProcessAllocatorTrimV1 {
     let before_bytes = sampled_process_resident_bytes_v1();
-    let released = PROCESS_ALLOCATOR_RELEASE_V1
-        .get()
-        .map(|release| release())
-        .is_some();
-    let trimmed = glibc_trim() || released;
+    let trimmed = trim();
     let after_bytes = sampled_process_resident_bytes_v1();
     let trim = ProcessAllocatorTrimV1 {
         trimmed,
