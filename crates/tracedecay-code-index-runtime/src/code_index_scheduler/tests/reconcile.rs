@@ -34,16 +34,17 @@ use super::{
     clear_pending_wake_until_quiet, committed_capture_corpus_files, core_search_request, git,
     git_stdout, hold_scheduler_for_root, mounted_core_query_worktree,
     mounted_core_query_worktree_with_one_permit, move_git_metadata, published, query_authority,
-    query_meta, quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
-    replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
-    rewrite_preserving_stat, scheduler, scheduler_with_policy, served_lexical_texts,
-    settle_text_projection, settled_owner_with_idle_admission, test_project_id,
-    wait_for_dashboard_ready, wait_for_event_to_ready, wait_for_generation_change,
-    wait_for_initial_generation, wait_for_live_complete_generation,
-    wait_for_live_complete_generation_by_polling, wait_for_owner_pass,
-    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
-    wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
-    wait_for_worker_phase, wait_until_serving_seat, write,
+    query_meta, quiesced_background_reconcile_admission, ranked_symbol_names, ranks_symbol,
+    replace_scheduler_chunker_revision, replace_scheduler_policy_revision,
+    rewrite_active_rust_extractor_revision, rewrite_preserving_stat, scheduler,
+    scheduler_with_policy, served_lexical_texts, settle_text_projection,
+    settled_owner_with_idle_admission, test_project_id, wait_for_dashboard_ready,
+    wait_for_event_to_ready, wait_for_generation_change, wait_for_initial_generation,
+    wait_for_live_complete_generation, wait_for_live_complete_generation_by_polling,
+    wait_for_owner_pass, wait_for_queryable_text_generation,
+    wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
+    wait_for_quiescent_owner_pass, wait_for_settled_owner, wait_for_worker_phase,
+    wait_until_serving_seat, write,
 };
 use crate::{
     code_index::{
@@ -3092,6 +3093,122 @@ async fn sealed_generation_serves_and_next_edit_seals_while_text_projection_is_h
     .await
     .expect("a later edit seals while the previous projection is still held");
     assert_ne!(later.generation_id(), sealed.generation_id());
+    let _ = release_projection.send(());
+    registry.shutdown().await;
+}
+
+/// Between the seal and a ready lexical artifact, search keeps returning the
+/// predecessor generation's hits and marks them stale. An empty success, or a
+/// typed miss while that predecessor still exists, is the failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_serves_predecessor_while_lexical_artifact_is_unready() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let first = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let first_id = first.generation().manifest().generation_id.clone();
+    let snapshot = first.generation.snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    registry
+        .mount_query_authority(
+            fixture.path(),
+            &scope,
+            query_authority(first.generation.manifest().privacy_domain.clone()),
+        )
+        .await
+        .expect("mount query authority");
+    let before = registry
+        .execute_query_search(&scope, core_search_request("alpha"))
+        .await
+        .expect("the seated generation answers before the next seal");
+    assert!(!before.served_stale);
+    assert_eq!(before.generation, first_id);
+    assert!(
+        ranks_symbol(&ranked_symbol_names(&before, &first), "alpha"),
+        "the seated generation returns the alpha symbol"
+    );
+
+    let (projection_started, release_projection) = registry
+        .pause_next_published_text_projection(canonical_root)
+        .await;
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        matches!(
+            registry
+                .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+                .await,
+            super::super::CodeIndexDemandAdmissionV1::Queued
+        ),
+        "the edit reaches the worker"
+    );
+    tokio::time::timeout(Duration::from_secs(10), projection_started)
+        .await
+        .expect("publication did not reach text projection")
+        .expect("publication projection gate stays armed");
+
+    let sealed = registry
+        .sealed_publication_identity(fixture.path(), Some(&first_id))
+        .await
+        .expect("sealed identity read")
+        .expect("the edit sealed while its projection is held");
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await.as_ref(),
+        Some(sealed.generation_id()),
+        "the sealed generation is the advertised head while its artifact is unfinished"
+    );
+    assert!(
+        registry
+            .latest_text_serving_for_root(fixture.path())
+            .await
+            .is_none_or(|text| {
+                &text.metadata().manifest().generation_id != sealed.generation_id()
+            }),
+        "the sealed generation's lexical owners are not ready in this window"
+    );
+
+    let during = registry
+        .execute_query_search(&scope, core_search_request("alpha"))
+        .await
+        .expect("search serves the predecessor while the lexical artifact is unfinished");
+    assert!(
+        during.served_stale,
+        "predecessor hits in the lexical window are stale, never a current success"
+    );
+    assert_eq!(
+        during.generation, first_id,
+        "the answer names the predecessor generation that still has lexical owners"
+    );
+    assert_ne!(&during.generation, sealed.generation_id());
+    assert!(
+        ranks_symbol(&ranked_symbol_names(&during, &first), "alpha"),
+        "the predecessor still returns the alpha symbol"
+    );
+    let coverage =
+        tracedecay_query::code_search::CodeIndexSearchCoverageV1::stale(during.generation.as_str());
+    assert!(
+        coverage.any_servable(),
+        "a stale predecessor answer is servable"
+    );
+    assert!(
+        coverage.is_degraded(),
+        "a stale predecessor answer is a flagged partial, not complete coverage"
+    );
+
     let _ = release_projection.send(());
     registry.shutdown().await;
 }

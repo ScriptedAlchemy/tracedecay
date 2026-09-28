@@ -700,6 +700,11 @@ pub struct MountedCodeIndexWorktreeV1 {
     pub(super) build_publication_lock: Arc<tokio::sync::Mutex<()>>,
     pub historical_generation_owner: super::HistoricalCodeIndexGenerationOwnerV1,
     pub serving_generation: Arc<ServingGenerationSlot>,
+    /// Last lexically searchable complete generation displaced by a newer
+    /// seal. Search serves it, flagged stale, until the active text owner's
+    /// query owners are ready. Empty on a cold start, which stays a typed
+    /// unavailable result rather than an empty success.
+    lexical_search_predecessor: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
     /// Complete-generation callers need the decoded serving owner; restored
     /// text and persistent graph reads do not. Only their explicit demand
     /// admits this optional decode after verified-head recovery.

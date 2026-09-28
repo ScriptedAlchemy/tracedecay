@@ -487,6 +487,13 @@ impl CodeIndexSchedulerRegistryV1 {
         // nothing is servable may the query await the in-flight decode, and
         // when no complete generation exists at all this stays a typed
         // fail-fast rather than degrading into an empty answer.
+        //
+        // The seal-to-lexical window is the exception that still has a
+        // predecessor. The seat is cleared so `latest_generation_id` follows
+        // the new seal, and the new generation's query owners are not ready
+        // until its lexical artifact lands. Search serves the displaced
+        // generation flagged stale through that window. A cold start with
+        // nothing to displace stays the typed error below.
         let (latest, served_stale) = match self.latest_complete_serving_for_scope(scope).await {
             Some(serving) => match self.latest_complete_ready_decoded_for_scope(scope).await {
                 Some(ready) => {
@@ -580,6 +587,23 @@ impl CodeIndexSchedulerRegistryV1 {
                 match self.latest_complete_ready_for_scope(scope).await {
                     Some(ready) => (ready, false),
                     None => {
+                        // The seat is empty and the active text owner cannot
+                        // answer yet. A predecessor displaced by this seal
+                        // still can; serve it flagged stale. Cold start has
+                        // no predecessor and stays the typed error below.
+                        if let Some(predecessor) =
+                            self.lexical_predecessor_while_artifact_unready(scope).await
+                        {
+                            return execute_query_search_on_latest(
+                                self,
+                                scope,
+                                input,
+                                predecessor,
+                                true,
+                                graph_control,
+                            )
+                            .await;
+                        }
                         // Nothing servable and the ready gate refused. Search is the
                         // one lane whose resolution never runs the freshness ladder,
                         // so nothing else on this path will ever request the rebuild
@@ -609,6 +633,21 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             }
         };
+        // A decoded seat can name the new seal before its lexical owners
+        // exist. That generation is not searchable yet; the predecessor is.
+        if !latest.query_owners_are_ready()
+            && let Some(predecessor) = self.lexical_predecessor_while_artifact_unready(scope).await
+        {
+            return execute_query_search_on_latest(
+                self,
+                scope,
+                input,
+                predecessor,
+                true,
+                graph_control,
+            )
+            .await;
+        }
         execute_query_search_on_latest(self, scope, input, latest, served_stale, graph_control)
             .await
     }

@@ -1348,6 +1348,52 @@ impl CodeIndexSchedulerRegistryV1 {
         Some((latest, current))
     }
 
+    /// Predecessor complete generation to search while the active seal's
+    /// lexical artifact cannot answer.
+    ///
+    /// `None` when the active text owner or the seated generation can already
+    /// answer, and that path drops the retained decode. A cold start with no
+    /// predecessor also returns `None`; the caller keeps the typed
+    /// unavailable result instead of an empty success.
+    pub(crate) async fn lexical_predecessor_while_artifact_unready(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let (text_generation, serving_generation, predecessor) = {
+            let mounted = self.mounted.lock().await;
+            let worktree = unique_mounted_for_scope(&mounted, scope).unique()?.1;
+            (
+                Arc::clone(&worktree.text_generation),
+                Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.lexical_search_predecessor),
+            )
+        };
+        let text_ready = text_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready);
+        let serving_ready = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|serving| serving.query_owners_are_ready());
+        if text_ready || serving_ready {
+            *predecessor
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            return None;
+        }
+        let stashed = predecessor
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        if !stashed.query_owners_are_ready() || !latest_matches_scope_identity(&stashed, scope) {
+            return None;
+        }
+        Some(stashed)
+    }
+
     pub async fn latest_complete_serving_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,

@@ -281,28 +281,68 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
-    /// Drop a seat that no longer names the advertised generation. Search
-    /// serves the text owner while the seat is empty, and holding the
-    /// predecessor's decode would only keep a corpus-sized generation alive.
+    /// Drop a seat that no longer names the advertised generation.
+    ///
+    /// The predecessor decode stays only while the active text owner cannot
+    /// answer exact and lexical queries. Search serves that generation,
+    /// flagged stale, until the successor's lexical artifact is ready; a
+    /// ready text owner drops it so the corpus-sized decode is not pinned
+    /// after the window.
     fn release_superseded_serving_seat(
         serving_generation: &ServingGenerationSlot,
         serving_generation_epoch: &AtomicU64,
         serving_source_witness: &RwLock<Option<super::super::ServingSourceWitnessV1>>,
         serving_seats: &tokio::sync::watch::Sender<u64>,
         serving_generation_changed: &tokio::sync::watch::Sender<()>,
+        lexical_search_predecessor: &RwLock<Option<LatestCompleteCodeIndexV1>>,
+        active_text: &RwLock<Option<LatestCodeTextGenerationV1>>,
     ) -> bool {
-        let displaced = serving_generation
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if displaced.is_none() {
+        let (active_text_ready, active_text_generation) = {
+            let text = active_text
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                text.as_ref()
+                    .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready),
+                text.as_ref()
+                    .map(|text| text.metadata().manifest().generation_id.clone()),
+            )
+        };
+        let mut retired_predecessor = None;
+        let mut dropped_seat = None;
+        let displaced = {
+            let mut serving = serving_generation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let taken = serving.take();
+            let displaced = taken.is_some();
+            let mut predecessor = lexical_search_predecessor
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if active_text_ready {
+                retired_predecessor = predecessor.take();
+                dropped_seat = taken;
+            } else if let Some(taken) = taken {
+                if taken.query_owners_are_ready()
+                    && active_text_generation.as_ref()
+                        != Some(&taken.generation().manifest().generation_id)
+                {
+                    retired_predecessor = predecessor.replace(taken);
+                } else {
+                    dropped_seat = Some(taken);
+                }
+            }
+            displaced
+        };
+        drop(retired_predecessor);
+        drop(dropped_seat);
+        if !displaced {
             return false;
         }
         serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
         *serving_source_witness
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        drop(displaced);
         Self::record_serving_seat(serving_seats);
         serving_generation_changed.send_replace(());
         true
@@ -426,6 +466,8 @@ impl CodeIndexSchedulerRegistryV1 {
             RwLock::new(None),
             label = "daemon.code_index.serving_generation"
         ));
+        let lexical_search_predecessor: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>> =
+            Arc::new(RwLock::new(None));
         let complete_generation_requested = Arc::new(AtomicBool::new(false));
         let (
             complete_generation_requested_changed,
@@ -461,6 +503,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_build_progress = Arc::clone(&build_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
+        let worker_lexical_search_predecessor = Arc::clone(&lexical_search_predecessor);
         let worker_complete_generation_requested = Arc::clone(&complete_generation_requested);
         let worker_text_generation = Arc::clone(&text_generation);
         let worker_convergence_park = Arc::clone(&convergence_park);
@@ -1132,18 +1175,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 // generation's lexical build. Retire that build before this
                 // pass captures source. A worker-owned continuation is the
                 // seat pass for the build still in flight and leaves it alone.
-                if published_projection_detached && arrival.wake_micros().is_some() {
-                    if let Some(previous_projection) = retained_text_projection.take() {
-                        if let Some(previous) = worker_text_generation
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone()
-                        {
-                            previous.text_execution_control().retire();
-                        }
-                        previous_projection.abort();
-                        published_projection_detached = false;
+                if published_projection_detached
+                    && arrival.wake_micros().is_some()
+                    && let Some(previous_projection) = retained_text_projection.take()
+                {
+                    if let Some(previous) = worker_text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        previous.text_execution_control().retire();
                     }
+                    previous_projection.abort();
+                    published_projection_detached = false;
                 }
                 tracing::info!(
                     event = "code_index_reconcile_pass_started",
@@ -1395,12 +1439,14 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(published_text.clone());
                             // A predecessor decode would keep answering the
-                            // previous generation id. Drop it so reads fall
-                            // through to this sealed text owner before the
-                            // lexical artifact exists. An empty slot still
-                            // records a seat: cold-start waiters only watch
-                            // that counter, and the publication broadcast
-                            // already fired while the slot was empty.
+                            // previous generation id through `latest_generation_id`.
+                            // Drop the seat so that id follows this seal before
+                            // the lexical artifact exists, and retain the
+                            // predecessor only for search until those owners
+                            // are ready. An empty slot still records a seat:
+                            // cold-start waiters only watch that counter, and
+                            // the publication broadcast already fired while
+                            // the slot was empty.
                             let text_generation_id =
                                 published_text.metadata().manifest().generation_id.clone();
                             let seated_generation_id = worker_serving_generation
@@ -1415,6 +1461,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                     &worker_serving_source_witness,
                                     &worker_serving_seats,
                                     &worker_serving_generation_changed,
+                                    &worker_lexical_search_predecessor,
+                                    &worker_text_generation,
                                 );
                                 if !displaced {
                                     Self::record_serving_seat(&worker_serving_seats);
@@ -1458,11 +1506,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         } else {
                             None
                         };
-                let shutting_down = Arc::clone(&worker_shutting_down);
-                let park = Arc::clone(&worker_convergence_park);
-                let projection_pending_wake = Arc::clone(&worker_pending_wake);
-                let projection_wake = Arc::clone(&worker_wake);
-                let projection_memory_retry = Arc::clone(&worker_memory_retry);
+                        let shutting_down = Arc::clone(&worker_shutting_down);
+                        let park = Arc::clone(&worker_convergence_park);
+                        let projection_pending_wake = Arc::clone(&worker_pending_wake);
+                        let projection_wake = Arc::clone(&worker_wake);
+                        let projection_memory_retry = Arc::clone(&worker_memory_retry);
                         #[cfg(test)]
                         let project_root = worker_project_root.clone();
                         retained_text_projection = Some(tokio::spawn(async move {
@@ -1984,6 +2032,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                 &worker_serving_source_witness,
                                 &worker_serving_seats,
                                 &worker_serving_generation_changed,
+                                &worker_lexical_search_predecessor,
+                                &worker_text_generation,
                             );
                             tracing::info!(
                                 event = "code_index_serving_decode_deferred",
@@ -2326,7 +2376,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 if published_projection_detached
                     && retained_text_projection
                         .as_ref()
-                        .is_some_and(|projection| projection.is_finished())
+                        .is_some_and(tokio::task::JoinHandle::is_finished)
                 {
                     published_text_projection = retained_text_projection.take();
                     published_projection_detached = false;
@@ -2378,6 +2428,32 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished => {
+                            // The successor can answer exact and lexical
+                            // queries, so the predecessor decode is no longer
+                            // the search fallback. A finish for a generation
+                            // the text slot has already replaced leaves the
+                            // newer window's predecessor in place.
+                            if graph_text
+                                .as_ref()
+                                .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready)
+                            {
+                                let finished_id = graph_text
+                                    .as_ref()
+                                    .map(|text| text.metadata().manifest().generation_id.clone());
+                                let active_is_finished = worker_text_generation
+                                    .read()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .as_ref()
+                                    .is_some_and(|active| {
+                                        Some(&active.metadata().manifest().generation_id)
+                                            == finished_id.as_ref()
+                                    });
+                                if active_is_finished {
+                                    *worker_lexical_search_predecessor
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                                }
+                            }
                             // The seat needs only the ready owners. Text work
                             // left in the slot is retained-owner work on the
                             // next pass (no pass guard once owners already
@@ -2543,6 +2619,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let serving_generation = Arc::clone(&worker_serving_generation);
                     let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
                     let serving_source_witness = Arc::clone(&worker_serving_source_witness);
+                    let lexical_search_predecessor = Arc::clone(&worker_lexical_search_predecessor);
                     let text_generation = Arc::clone(&worker_text_generation);
                     let serving_seats = Arc::clone(&worker_serving_seats);
                     let serving_generation_changed = worker_serving_generation_changed.clone();
@@ -2628,10 +2705,29 @@ impl CodeIndexSchedulerRegistryV1 {
                             );
                             // The displaced seats can hold the last reference
                             // to a whole generation; they drop after the
-                            // guards, not inside the swap.
+                            // guards, not inside the swap. A predecessor that
+                            // search still needs is moved to the lexical
+                            // fallback before that drop.
                             let mut displaced = (None, None);
+                            let mut retired_predecessor = None;
                             if outcome.installs() {
-                                displaced.0 = serving.replace(latest.clone());
+                                let previous = serving.replace(latest.clone());
+                                {
+                                    let mut predecessor = lexical_search_predecessor
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    if latest.query_owners_are_ready() {
+                                        retired_predecessor = predecessor.take();
+                                    } else if let Some(previous_generation) = previous.as_ref()
+                                        && previous_generation.query_owners_are_ready()
+                                        && previous_generation.generation().manifest().generation_id
+                                            != latest.generation().manifest().generation_id
+                                    {
+                                        retired_predecessor =
+                                            predecessor.replace(previous_generation.clone());
+                                    }
+                                }
+                                displaced.0 = previous;
                                 serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
                                 displaced.1 = text_generation
                                     .write()
@@ -2667,6 +2763,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             }
                             drop(serving);
                             drop(displaced);
+                            drop(retired_predecessor);
                             // The serving slot is now fully published, including
                             // its exact-source witness, so dependent readers
                             // may wake.
@@ -3012,7 +3109,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 if published_projection_detached {
                     let finished = retained_text_projection
                         .as_ref()
-                        .is_some_and(|projection| projection.is_finished());
+                        .is_some_and(tokio::task::JoinHandle::is_finished);
                     if finished {
                         drop(retained_text_projection.take());
                         published_projection_detached = false;
@@ -3246,6 +3343,7 @@ impl CodeIndexSchedulerRegistryV1 {
             build_publication_lock,
             historical_generation_owner,
             serving_generation,
+            lexical_search_predecessor,
             complete_generation_requested,
             complete_generation_requested_changed,
             memory_retry,
