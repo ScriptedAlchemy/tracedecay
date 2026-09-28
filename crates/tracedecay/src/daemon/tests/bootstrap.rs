@@ -3947,11 +3947,14 @@ async fn production_composition_dashboard_persists_project_settings_over_http() 
     let dashboard_payload: serde_json::Value =
         serde_json::from_str(production_composition_tool_text(&dashboard))
             .expect("dashboard start payload");
-    let base_url = dashboard_payload["url"]
-        .as_str()
-        .expect("dashboard URL")
-        .trim_end_matches('/')
-        .to_owned();
+    let launch_url = dashboard_payload["url"].as_str().expect("dashboard URL");
+    let (origin, token) = launch_url
+        .split_once("/?token=")
+        .expect("dashboard launch token");
+    let authority = origin
+        .strip_prefix("http://")
+        .expect("dashboard HTTP origin");
+    let base_url = format!("http://tracedecay:{token}@{authority}");
 
     tokio::task::spawn_blocking(move || {
         fn response_json(
