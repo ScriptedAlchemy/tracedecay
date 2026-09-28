@@ -385,10 +385,7 @@ describe('the rerun census', () => {
           coverage: 'capped',
           returned: 1,
           remaining: 41,
-          resume: {
-            generation: 'generation-7',
-            start_after: { attempt_id: 'a-1', run_id: 'run-1', task_id: 'alpha' },
-          },
+          resume: 'bc1.resume',
         }),
       ),
     };

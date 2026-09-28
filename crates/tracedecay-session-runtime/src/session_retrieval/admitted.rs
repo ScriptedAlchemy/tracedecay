@@ -422,9 +422,9 @@ fn task_session_binding_outcome(
             TaskSessionRetrievalOutcomeV1::ResetRequired
         }
         SessionRetrievalServiceOutcome::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
-        SessionRetrievalServiceOutcome::CursorStale
-        | SessionRetrievalServiceOutcome::CursorRefused(_) => {
-            TaskSessionRetrievalOutcomeV1::Unavailable
+        SessionRetrievalServiceOutcome::CursorStale => TaskSessionRetrievalOutcomeV1::CursorStale,
+        SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+            TaskSessionRetrievalOutcomeV1::CursorRefused(mismatch)
         }
         SessionRetrievalServiceOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
         SessionRetrievalServiceOutcome::BudgetExhausted { stage, .. } => {
