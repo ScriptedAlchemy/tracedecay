@@ -2836,7 +2836,7 @@ mod tests {
                 .to_string(),
             format!(
                 "config error: automation run ledger '{}' has an incomplete durable tail",
-                file.display()
+                path.display()
             )
         );
         assert_eq!(
@@ -2846,7 +2846,7 @@ mod tests {
                 .to_string(),
             format!(
                 "config error: automation run ledger '{}' has an incomplete durable tail",
-                file.display()
+                path.display()
             )
         );
         assert!(
