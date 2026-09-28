@@ -438,12 +438,12 @@ describe("Knowledge view switcher", () => {
     stubRoutes();
     renderPage();
     const tab = await screen.findByRole("tab", { name: "Facts" });
-    const panelId = tab.getAttribute("aria-controls");
-    expect(panelId).toBeTruthy();
     // `aria-controls` naming an element that was never drawn is an invalid
     // reference, not a weaker one, the accessibility gate reads it as a
     // failure.
-    expect(document.getElementById(panelId ?? "")).toBeTruthy();
+    const panel = document.getElementById(tab.getAttribute("aria-controls") ?? "");
+    expect(panel?.getAttribute("role")).toBe("tabpanel");
+    expect(panel?.getAttribute("aria-labelledby")).toBe(tab.id);
   });
 });
 

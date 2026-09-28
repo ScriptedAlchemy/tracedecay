@@ -251,7 +251,8 @@ describe('nodeHullFrame', () => {
 
     const frame = nodeHullFrame(graph, ['only']);
 
-    expect(frame.x[1] - frame.x[0]).toBeGreaterThan(0);
-    expect(frame.y[1] - frame.y[0]).toBeGreaterThan(0);
+    // A zero extent is padded as if it were one unit wide.
+    expect(frame.x).toEqual([3.85, 4.15]);
+    expect(frame.y).toEqual([3.85, 4.15]);
   });
 });
