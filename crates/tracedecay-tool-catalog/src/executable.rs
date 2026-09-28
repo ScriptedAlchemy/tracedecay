@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -50,22 +49,11 @@ impl RustTypePathV1 {
     }
 }
 
-/// How many executable schema bodies this process has generated.
-///
-/// Dispatch and deadline lookup must stay at the value they observed on
-/// entry. SDK and discovery projections are the callers that move it.
-pub fn executable_schema_body_generations() -> u64 {
-    EXECUTABLE_SCHEMA_BODY_GENERATIONS.load(Ordering::Relaxed)
-}
-
-static EXECUTABLE_SCHEMA_BODY_GENERATIONS: AtomicU64 = AtomicU64::new(0);
-
 impl SchemaBodyAuthorityV1 {
     pub fn for_type_at_path<T: JsonSchema>(
         schema_ref: SchemaRef,
         rust_type_path: impl Into<String>,
     ) -> Result<Self, CatalogValidationError> {
-        EXECUTABLE_SCHEMA_BODY_GENERATIONS.fetch_add(1, Ordering::Relaxed);
         let body = serde_json::to_value(schemars::schema_for!(T)).map_err(|_| {
             CatalogValidationError::InvalidValue {
                 field: "schema body",

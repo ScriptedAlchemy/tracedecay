@@ -2,6 +2,7 @@ use std::fs;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
@@ -12,12 +13,12 @@ use tracedecay_runtime_core::resident_memory::{
     ResidentMemoryComponentIdV1, ResidentMemoryPressureV1,
 };
 
-use crate::code_index::production::CodeIndexPublicationStoreErrorV1;
+use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
 
 use super::tests::OwnerSignals;
 use super::{
-    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
-    SharedCodeIndexBytePoolV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
 };
 
 fn git(root: &Path, args: &[&str]) {
@@ -572,6 +573,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     let view = Arc::new(Mutex::new(ProcessResidentSampleV1 {
         resident_bytes: GIB,
         unreclaimable_bytes: GIB,
+        cgroup_committed_bytes: None,
     }));
     let sampled = Arc::clone(&view);
     let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
@@ -594,6 +596,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     *view.lock().expect("view") = ProcessResidentSampleV1 {
         resident_bytes: high_watermark - 1,
         unreclaimable_bytes: 2 * GIB,
+        cgroup_committed_bytes: None,
     };
     let decoded = scheduler
         .latest_complete()
@@ -618,6 +621,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     *view.lock().expect("view") = ProcessResidentSampleV1 {
         resident_bytes: high_watermark - 1,
         unreclaimable_bytes: high_watermark - 1,
+        cgroup_committed_bytes: None,
     };
     assert!(matches!(
         scheduler.publication.load_active_shared(),
@@ -627,5 +631,62 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
         scheduler.sealed_decode_count(),
         decodes_before + 1,
         "a decode refused on unreclaimable bytes decodes nothing"
+    );
+}
+
+/// A linked-worktree reconcile is admitted while RSS is still under the
+/// watermark and then keeps allocating. The next checkpoint has to read the
+/// process again: once the sample crosses the watermark the pass stops as a
+/// capacity refusal and the worktree stays unpublished. Treating that stop as
+/// a superseded epoch would start another capture immediately.
+#[test]
+fn reconcile_stops_when_resident_memory_crosses_the_watermark() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-watermark-stop").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let limit = NonZeroU64::new(16 * 1024 * 1024 * 1024).expect("limit");
+    let sampled = Arc::new(AtomicU64::new(0));
+    let ceiling = limit.get();
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            let read = sampled.fetch_add(1, Ordering::AcqRel);
+            let unreclaimable_bytes = if read == 0 { 1 } else { ceiling };
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: unreclaimable_bytes,
+                unreclaimable_bytes,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit, pressure,
+    )));
+
+    let error = scheduler
+        .reconcile_now()
+        .expect_err("a reconcile whose live RSS crosses the watermark must not publish");
+    assert!(
+        error.is_transient_capacity_failure(),
+        "the watermark stop must stay retryable after RSS falls: {error}"
+    );
+    assert!(
+        matches!(
+            error,
+            CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_)
+            ))
+        ),
+        "the stop must be a resident-memory refusal, not a superseded retry: {error}"
+    );
+    assert!(
+        matches!(scheduler.publication.load_active_shared(), Ok(None)),
+        "the refused reconcile must leave the worktree unpublished"
     );
 }
