@@ -509,7 +509,9 @@ async fn wait_for_batch_pause(admission: &PausingAdmission, label: &str) {
     tokio::time::timeout(Duration::from_mins(2), admission.scan_paused.notified())
         .await
         .unwrap_or_else(|_| {
-            panic!("{label}: the candidate scan never reached its batch checkpoint")
+            panic!(
+                "{label}: the candidate scan never reached its batch checkpoint while holding the permit"
+            )
         });
 }
 

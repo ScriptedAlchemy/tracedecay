@@ -268,8 +268,8 @@ async fn cancelled_scan_releases_permit(query: &str, pause_at: usize, source_cou
 ///
 /// One scan is held inside its candidate walk. A second search on the same
 /// executor must finish with a complete result before that walk is released.
-/// A single project permit refuses the second search with
-/// `CapacityUnavailable` for the whole time the first scan is inside the walk.
+/// Linked-worktree and unrelated-repository agents must also finish while
+/// that walk is held, retaining their own result scope.
 #[tokio::test]
 async fn independent_search_completes_while_another_scan_is_in_progress() {
     let sources = (0..48)
@@ -288,7 +288,49 @@ async fn independent_search_completes_while_another_scan_is_in_progress() {
         .collect::<Vec<_>>();
     let fixture = GitFixture::new(&files);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let (registry, scope) =
+        mounted_core_query_worktree_in(CodeIndexSchedulerRegistryV1::new(3), &fixture, &store)
+            .await;
+    let linked_parent = TempDir::new().expect("linked parent");
+    let linked = linked_parent.path().join("linked");
+    git(
+        fixture.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "search-linked",
+            linked.to_str().expect("linked path"),
+            "main",
+        ],
+    );
+    let (registry, linked_scope) =
+        mounted_core_query_worktree_at(registry, &linked, store.path().join("linked")).await;
+    assert_eq!(scope.repository_id, linked_scope.repository_id);
+    assert_ne!(scope.worktree_id, linked_scope.worktree_id);
+
+    let other = GitFixture::new(&[("src/beta.rs", "pub fn beta() -> u32 { 42 }\n")]);
+    let other_project = ProjectId::new("project.concurrent-other").expect("other project");
+    registry
+        .mount_worktree(
+            other_project.clone(),
+            other.path(),
+            store.path().join("other"),
+        )
+        .await
+        .expect("mount another repository");
+    let latest = wait_for_live_complete_generation(&registry, other.path()).await;
+    let snapshot = latest.generation.snapshot();
+    let other_scope = ResolvedScope::new(
+        other_project.clone(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("other worktree"),
+        snapshot.reference.clone(),
+    )
+    .expect("other scope");
+    assert_ne!(scope.repository_id, other_scope.repository_id);
+    mount_core_query_authority(&registry, other.path(), &other_scope, &latest).await;
 
     let (resume_tx, resume_rx) = mpsc::channel::<()>();
     let admission = PausingAdmission {
@@ -330,6 +372,58 @@ async fn independent_search_completes_while_another_scan_is_in_progress() {
     assert!(
         !held.is_finished(),
         "the first scan is still inside its walk"
+    );
+
+    let linked_executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(admission.authority.clone()),
+        FixedScopeResolver(linked_scope),
+    );
+    let other_executor = code_index_search_executor(
+        registry.clone(),
+        other_project,
+        OpenAdmission(admission.authority.clone()),
+        FixedScopeResolver(other_scope),
+    );
+    let mut searches = Vec::new();
+    for (executor, root, query, path_prefix) in [
+        (linked_executor, linked.as_path(), "alpha", "src/alpha_"),
+        (other_executor, other.path(), "beta", "src/beta.rs"),
+    ] {
+        for _ in 0..4 {
+            let mut request = search_request(root, None);
+            request.query = query.to_owned();
+            request.deadline = Some(
+                Deadline::new(UtcMicros(
+                    tracedecay_contracts::clock::now_micros().0 + 30_000_000,
+                ))
+                .expect("wave deadline"),
+            );
+            searches.push((tokio::spawn(executor(request)), path_prefix));
+        }
+    }
+    for (search, path_prefix) in searches {
+        let outcome = tokio::time::timeout(Duration::from_secs(30), search)
+            .await
+            .expect("other agents complete while primary scan is paused")
+            .expect("search joins");
+        let CodeIndexSearchOutcomeV1::Complete(result) = outcome else {
+            panic!("other worktree or repository failed: {outcome:?}");
+        };
+        assert!(!result.ordered_candidates.is_empty());
+        assert!(!result.display_by_anchor.is_empty());
+        assert!(
+            result
+                .display_by_anchor
+                .values()
+                .all(|display| display.path.starts_with(path_prefix)),
+            "parallel agents must retain repository/worktree result isolation"
+        );
+    }
+    assert!(
+        !held.is_finished(),
+        "unrelated agents do not wait for the paused scan"
     );
 
     resume_tx.send(()).expect("release the held scan");

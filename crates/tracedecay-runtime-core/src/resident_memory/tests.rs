@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
-    CgroupMemoryCeilingV1, ProcessResidentMemoryV1, ProcessResidentPeakV1,
+    CgroupMemoryCeilingV1, ProcessResidentMemoryV1, ProcessResidentPeakV1, ProcessResidentSampleV1,
     RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
     ResidentMemoryPressureV1, cgroup_service_ceiling_bytes, cgroup_v2_memory_ceiling_v1,
@@ -477,6 +477,40 @@ fn reservation_tracks_exact_identity_and_releases_on_drop() {
     assert_eq!(authority.snapshot().used_bytes, 30);
 
     drop(lexical_reservation);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn additional_reservations_share_identity_but_charge_and_release_independently() {
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(100),
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(100),
+            Arc::new(|| {
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: 0,
+                    unreclaimable_bytes: 0,
+                })
+            }),
+        )),
+    ));
+    let owner = key("project-a", "worktree-a", "generation-a", "reader");
+    let baseline = authority
+        .reserve(owner.clone(), bytes(60))
+        .expect("baseline");
+    let additional = baseline
+        .reserve_additional(bytes(40))
+        .expect("overlap charge");
+    assert_eq!(authority.snapshot().charge_for(&owner), 100);
+    assert!(baseline.reserve_additional(bytes(1)).is_err());
+    drop(additional);
+    assert_eq!(authority.snapshot().charge_for(&owner), 60);
+    let next = baseline
+        .reserve_additional(bytes(40))
+        .expect("released capacity reused");
+    drop(baseline);
+    assert_eq!(authority.snapshot().charge_for(&owner), 40);
+    drop(next);
     assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
