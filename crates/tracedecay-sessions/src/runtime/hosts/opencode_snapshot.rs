@@ -16,6 +16,8 @@ pub(super) struct OpenCodeDatabase {
 }
 
 pub(super) enum OpenedOpenCodeDatabase {
+    /// The opened snapshot. Boxed so a refusal or a stopped scan does not
+    /// carry the verified reader's SQLite connection.
     Ready(Box<OpenCodeDatabase>),
     Refused(HostCoverageReason),
     /// The open budget ended before a source decision (cancellation or deadline).
