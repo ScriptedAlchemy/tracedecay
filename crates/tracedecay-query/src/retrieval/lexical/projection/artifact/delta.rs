@@ -385,19 +385,36 @@ fn retire_occurrences(
 }
 
 fn clear_source_receipts(transaction: &Transaction<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
+    // A sealed parent keeps `source_pages` and drops the per-page cursor
+    // table at the statistics step. Delete only the tables that are present;
+    // the cursor table is recreated empty before append.
+    let mut statements = vec![
+        "DELETE FROM source_pages".to_owned(),
+        "UPDATE content_epoch SET epoch = 0 WHERE singleton = 1".to_owned(),
+    ];
+    if table_exists(transaction, "source_page_cursors")? {
+        statements.insert(1, "DELETE FROM source_page_cursors".to_owned());
+    }
     transaction
-        .execute_batch(
-            "DELETE FROM source_pages;
-             DELETE FROM source_page_cursors;
-             UPDATE content_epoch SET epoch = 0 WHERE singleton = 1;",
-        )
+        .execute_batch(&statements.join(";\n"))
         .map_err(sqlite_error)
 }
 
 fn ensure_staging_tables(transaction: &Transaction<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
     transaction
         .execute_batch(
-            "CREATE TABLE IF NOT EXISTS row_chunk_pages (
+            "CREATE TABLE IF NOT EXISTS finalization_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                state BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS source_page_cursors (
+                page_ordinal INTEGER PRIMARY KEY,
+                page_digest TEXT NOT NULL,
+                cumulative_digest TEXT NOT NULL,
+                payload_bytes INTEGER NOT NULL,
+                next_cursor BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS row_chunk_pages (
                 document_id INTEGER PRIMARY KEY,
                 chunk_id BLOB NOT NULL
             );
@@ -462,7 +479,9 @@ fn write_carried_plan(
         .map_err(sqlite_error)?;
     transaction
         .execute_batch(&format!(
-            "CREATE TABLE {CARRIED_SHIFT_TABLE}(singleton INTEGER PRIMARY KEY CHECK(singleton = 1), shift INTEGER NOT NULL);
+            "DROP TABLE IF EXISTS {CARRIED_SHIFT_TABLE};
+             DROP TABLE IF EXISTS {CARRIED_REBUILD_TABLE};
+             CREATE TABLE {CARRIED_SHIFT_TABLE}(singleton INTEGER PRIMARY KEY CHECK(singleton = 1), shift INTEGER NOT NULL);
              CREATE TABLE {CARRIED_REBUILD_TABLE}(occurrence TEXT PRIMARY KEY) WITHOUT ROWID;"
         ))
         .map_err(sqlite_error)?;
@@ -992,9 +1011,15 @@ fn merge_field_stats(transaction: &Transaction<'_>) -> Result<(), CodeLexicalArt
     }
     transaction
         .execute_batch(
-            "INSERT INTO field_stats(field, total_length)
+            "UPDATE field_stats
+             SET total_length = total_length + (
+                 SELECT total_length FROM field_stats_staging
+                 WHERE field_stats_staging.field = field_stats.field
+             )
+             WHERE field IN (SELECT field FROM field_stats_staging);
+             INSERT INTO field_stats(field, total_length)
              SELECT field, total_length FROM field_stats_staging
-             ON CONFLICT(field) DO UPDATE SET total_length = total_length + excluded.total_length;",
+             WHERE field NOT IN (SELECT field FROM field_stats);",
         )
         .map_err(sqlite_error)
 }
