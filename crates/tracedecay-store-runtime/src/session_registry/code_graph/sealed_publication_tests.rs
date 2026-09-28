@@ -1977,6 +1977,7 @@ async fn sealed_publication_samples_resident_memory_per_interval_not_per_row() {
             Some(ProcessResidentSampleV1 {
                 resident_bytes: 0,
                 unreclaimable_bytes: 0,
+                swapped_bytes: 0,
                 cgroup_committed_bytes: None,
             })
         }),

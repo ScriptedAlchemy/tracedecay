@@ -1286,6 +1286,8 @@ fn admission_counts_swapped_anonymous_pages() {
         Some(2 * resident),
         "the cgroup's swapped pages are committed to it"
     );
+}
+
 /// A checkpoint polled from a per-row loop reads the process at most once per
 /// interval: a sealed graph build that sampled `/proc` and the cgroup files on
 /// every row spent its whole budget in those reads (#2505). Once the interval
@@ -1304,6 +1306,7 @@ fn checkpoints_read_the_process_once_per_interval_and_then_see_growth() {
             Some(ProcessResidentSampleV1 {
                 resident_bytes: resident,
                 unreclaimable_bytes: resident,
+                swapped_bytes: 0,
                 cgroup_committed_bytes: None,
             })
         }),
