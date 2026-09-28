@@ -275,40 +275,6 @@ async fn replace_symbol_proves_apply_rewrites_only_the_named_function() {
     close_test_graph(fixture).await;
 }
 
-#[tokio::test]
-async fn replace_symbol_proves_omitted_docs_and_attributes_are_removed() {
-    let (_dir, project, fixture) = open_sources(&[("src/main.rs", DOCUMENTED)]).await;
-
-    let preview = preview_replace(&fixture, "count", COUNT_NEW_SOURCE).await;
-    assert_eq!(preview["success"], true);
-    assert_eq!(preview["replaced_span"], COUNT_OLD_SPAN);
-    assert_eq!(preview["matched_str"], "count (function)");
-    assert_eq!(preview["file_path"], "src/main.rs");
-    assert_eq!(
-        preview["message"],
-        "dry run. Nothing written; preview only (replaced src/main.rs:2-6)"
-    );
-    assert_eq!(read_project_file(&project, "src/main.rs"), DOCUMENTED);
-
-    let apply = apply_replace(
-        &fixture,
-        "count",
-        COUNT_NEW_SOURCE,
-        "mcp-test.replace-symbol.drop-docs",
-        &preview,
-    )
-    .await;
-    assert_eq!(apply["success"], true);
-    assert_eq!(apply["replaced_span"], COUNT_OLD_SPAN);
-    assert_eq!(apply["message"], "replaced src/main.rs:2-6");
-    assert_eq!(
-        read_project_file(&project, "src/main.rs"),
-        DOCUMENTED_APPLIED
-    );
-
-    close_test_graph(fixture).await;
-}
-
 const LICENSED: &str = "\
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Example
@@ -328,29 +294,47 @@ fn count() -> u32 {
 }
 ";
 
+/// The docs and attributes attached to the symbol are replaced with it; a
+/// file header a blank line above them stays.
 #[tokio::test]
-async fn replace_symbol_keeps_a_file_header_separated_by_a_blank_line() {
-    let (_dir, project, fixture) = open_sources(&[("src/main.rs", LICENSED)]).await;
+async fn replace_symbol_removes_omitted_docs_and_keeps_a_separated_header() {
+    for (source, replaced_span, lines, applied) in [
+        (DOCUMENTED, COUNT_OLD_SPAN, "2-6", DOCUMENTED_APPLIED),
+        (
+            LICENSED,
+            "/// Counts widgets.\nfn count() -> u32 {\n    1\n}",
+            "4-7",
+            LICENSED_APPLIED,
+        ),
+    ] {
+        let (_dir, project, fixture) = open_sources(&[("src/main.rs", source)]).await;
 
-    let preview = preview_replace(&fixture, "count", COUNT_NEW_SOURCE).await;
-    assert_eq!(preview["success"], true, "{preview}");
-    assert_eq!(
-        preview["replaced_span"],
-        "/// Counts widgets.\nfn count() -> u32 {\n    1\n}"
-    );
-    let apply = apply_replace(
-        &fixture,
-        "count",
-        COUNT_NEW_SOURCE,
-        "mcp-test.replace-symbol.keep-header",
-        &preview,
-    )
-    .await;
-    assert_eq!(apply["success"], true, "{apply}");
-    assert_eq!(apply["message"], "replaced src/main.rs:4-7");
-    assert_eq!(read_project_file(&project, "src/main.rs"), LICENSED_APPLIED);
+        let preview = preview_replace(&fixture, "count", COUNT_NEW_SOURCE).await;
+        assert_eq!(preview["success"], true, "{preview}");
+        assert_eq!(preview["replaced_span"], replaced_span);
+        assert_eq!(preview["matched_str"], "count (function)");
+        assert_eq!(preview["file_path"], "src/main.rs");
+        assert_eq!(
+            preview["message"],
+            format!("dry run. Nothing written; preview only (replaced src/main.rs:{lines})")
+        );
+        assert_eq!(read_project_file(&project, "src/main.rs"), source);
 
-    close_test_graph(fixture).await;
+        let apply = apply_replace(
+            &fixture,
+            "count",
+            COUNT_NEW_SOURCE,
+            "mcp-test.replace-symbol.drop-docs",
+            &preview,
+        )
+        .await;
+        assert_eq!(apply["success"], true, "{apply}");
+        assert_eq!(apply["replaced_span"], replaced_span);
+        assert_eq!(apply["message"], format!("replaced src/main.rs:{lines}"));
+        assert_eq!(read_project_file(&project, "src/main.rs"), applied);
+
+        close_test_graph(fixture).await;
+    }
 }
 
 #[tokio::test]
