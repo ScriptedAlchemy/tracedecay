@@ -17,6 +17,9 @@ use tracedecay_runtime_core::test_executable::link_or_copy_executable;
 use crate::isolated_profile::{apply_isolated_profile_env, hermetic_path};
 
 #[cfg(unix)]
+#[path = "host_lifecycle_cli_acceptance/exact_restore.rs"]
+mod exact_restore;
+#[cfg(unix)]
 #[path = "host_lifecycle_cli_acceptance/kimi_web_refresh.rs"]
 mod kimi_web_refresh;
 #[path = "host_lifecycle_cli_acceptance/native_plugin_fixture.rs"]
