@@ -88,6 +88,13 @@ fn published_import_generation() -> Arc<CodeIndexPublishedGenerationV1> {
 }
 
 fn published_rust_workspace(sources: &[(&str, &str, &str)]) -> Arc<CodeIndexPublishedGenerationV1> {
+    published_workspace("rust", sources)
+}
+
+fn published_workspace(
+    language: &str,
+    sources: &[(&str, &str, &str)],
+) -> Arc<CodeIndexPublishedGenerationV1> {
     let mut request = request_with_source(
         "file.rust-workspace.seed",
         1_500_000,
@@ -106,7 +113,7 @@ fn published_rust_workspace(sources: &[(&str, &str, &str)]) -> Arc<CodeIndexPubl
         request.snapshot.files.push(SanitizedCodeFileV1 {
             file_occurrence_id: file_occurrence_id.clone(),
             logical_path: path.to_owned(),
-            language: Some(id::<LanguageId>("rust")),
+            language: Some(id::<LanguageId>(language)),
             content_digest: content_digest(bytes),
             disposition: SnapshotFileDispositionV1::Present,
         });
@@ -134,7 +141,7 @@ fn published_rust_workspace(sources: &[(&str, &str, &str)]) -> Arc<CodeIndexPubl
     request
         .snapshot
         .validate()
-        .expect("Rust workspace snapshot is canonical");
+        .expect("workspace snapshot is canonical");
 
     CodeIndexProductionOwnerV1::new(
         config(),
@@ -143,7 +150,7 @@ fn published_rust_workspace(sources: &[(&str, &str, &str)]) -> Arc<CodeIndexPubl
     )
     .expect("production owner")
     .build_and_publish(request, &ActiveControl)
-    .expect("Rust workspace generation publishes")
+    .expect("workspace generation publishes")
 }
 
 fn symbol_occurrence(
@@ -852,6 +859,46 @@ fn rust_dotted_call_on_untyped_receiver_stays_unresolved() {
                 || edge.kind != RelationEdgeKindV1::Calls
         }),
         "a receiver bound by a `for` pattern has no stated type and must not bind"
+    );
+}
+
+#[test]
+fn ruby_receiver_call_of_the_same_name_is_not_recursion() {
+    let generation = published_workspace(
+        "ruby",
+        &[(
+            "file.ruby.util",
+            "lib/util.rb",
+            "module Util\n  def self.clamp(x, lo, hi)\n    x.clamp(lo, hi)\n  end\n\n  def self.fact(n)\n    n <= 1 ? 1 : n * fact(n - 1)\n  end\nend\n",
+        )],
+    );
+    let method = |name: &str| {
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.simple_name == name)
+            .unwrap_or_else(|| panic!("missing Ruby method {name}"))
+            .occurrence
+            .clone()
+    };
+    let self_calls = |occurrence: &SymbolOccurrenceId| {
+        generation
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == *occurrence
+                    && edge.to_occurrence == *occurrence
+                    && edge.kind == RelationEdgeKindV1::Calls
+            })
+            .count()
+    };
+
+    assert_eq!(self_calls(&method("fact")), 1, "`fact(n - 1)` recurses");
+    assert_eq!(
+        self_calls(&method("clamp")),
+        0,
+        "`x.clamp(lo, hi)` calls the receiver's method, not the enclosing one"
     );
 }
 
