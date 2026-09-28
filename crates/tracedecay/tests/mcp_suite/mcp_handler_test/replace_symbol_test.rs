@@ -164,6 +164,40 @@ async fn call_replace(fixture: &ProductionSourceEditFixture, args: Value) -> Val
     tool_payload(&result.value)
 }
 
+async fn preview_replace(
+    fixture: &ProductionSourceEditFixture,
+    symbol: &str,
+    new_source: &str,
+) -> Value {
+    call_replace(
+        fixture,
+        json!({ "symbol": symbol, "new_source": new_source, "dry_run": true }),
+    )
+    .await
+}
+
+async fn apply_replace(
+    fixture: &ProductionSourceEditFixture,
+    symbol: &str,
+    new_source: &str,
+    idempotency_key: &str,
+    preview: &Value,
+) -> Value {
+    let expected_state = preview["expected_state"]
+        .as_str()
+        .expect("preview returns expected_state");
+    call_replace(
+        fixture,
+        json!({
+            "symbol": symbol,
+            "new_source": new_source,
+            "idempotency_key": idempotency_key,
+            "expected_state": expected_state
+        }),
+    )
+    .await
+}
+
 fn read_project_file(project: &Path, relative: &str) -> String {
     fs::read_to_string(project.join(relative))
         .unwrap_or_else(|error| panic!("failed to read {relative} after replace_symbol: {error}"))
@@ -173,15 +207,7 @@ fn read_project_file(project: &Path, relative: &str) -> String {
 async fn replace_symbol_proves_apply_rewrites_only_the_named_function() {
     let (_dir, project, fixture) = open_sources(&[("src/main.rs", NEIGHBORS)]).await;
 
-    let preview = call_replace(
-        &fixture,
-        json!({
-            "symbol": "target",
-            "new_source": TARGET_NEW_SOURCE,
-            "dry_run": true
-        }),
-    )
-    .await;
+    let preview = preview_replace(&fixture, "target", TARGET_NEW_SOURCE).await;
     assert_eq!(preview["success"], true);
     assert_eq!(preview["dry_run"], true);
     assert_eq!(preview["file_path"], "src/main.rs");
@@ -196,17 +222,12 @@ async fn replace_symbol_proves_apply_rewrites_only_the_named_function() {
     assert_eq!(preview["replayed"], false);
     assert_eq!(read_project_file(&project, "src/main.rs"), NEIGHBORS);
 
-    let expected_state = preview["expected_state"]
-        .as_str()
-        .expect("preview returns expected_state");
-    let apply = call_replace(
+    let apply = apply_replace(
         &fixture,
-        json!({
-            "symbol": "target",
-            "new_source": TARGET_NEW_SOURCE,
-            "idempotency_key": "mcp-test.replace-symbol.apply-target",
-            "expected_state": expected_state
-        }),
+        "target",
+        TARGET_NEW_SOURCE,
+        "mcp-test.replace-symbol.apply-target",
+        &preview,
     )
     .await;
     assert_eq!(apply["success"], true);
@@ -235,14 +256,12 @@ async fn replace_symbol_proves_apply_rewrites_only_the_named_function() {
         NEIGHBORS_APPLIED
     );
 
-    let replay = call_replace(
+    let replay = apply_replace(
         &fixture,
-        json!({
-            "symbol": "target",
-            "new_source": TARGET_NEW_SOURCE,
-            "idempotency_key": "mcp-test.replace-symbol.apply-target",
-            "expected_state": expected_state
-        }),
+        "target",
+        TARGET_NEW_SOURCE,
+        "mcp-test.replace-symbol.apply-target",
+        &preview,
     )
     .await;
     assert_eq!(replay["success"], true);
@@ -260,15 +279,7 @@ async fn replace_symbol_proves_apply_rewrites_only_the_named_function() {
 async fn replace_symbol_proves_omitted_docs_and_attributes_are_removed() {
     let (_dir, project, fixture) = open_sources(&[("src/main.rs", DOCUMENTED)]).await;
 
-    let preview = call_replace(
-        &fixture,
-        json!({
-            "symbol": "count",
-            "new_source": COUNT_NEW_SOURCE,
-            "dry_run": true
-        }),
-    )
-    .await;
+    let preview = preview_replace(&fixture, "count", COUNT_NEW_SOURCE).await;
     assert_eq!(preview["success"], true);
     assert_eq!(preview["replaced_span"], COUNT_OLD_SPAN);
     assert_eq!(preview["matched_str"], "count (function)");
@@ -279,17 +290,12 @@ async fn replace_symbol_proves_omitted_docs_and_attributes_are_removed() {
     );
     assert_eq!(read_project_file(&project, "src/main.rs"), DOCUMENTED);
 
-    let expected_state = preview["expected_state"]
-        .as_str()
-        .expect("preview returns expected_state");
-    let apply = call_replace(
+    let apply = apply_replace(
         &fixture,
-        json!({
-            "symbol": "count",
-            "new_source": COUNT_NEW_SOURCE,
-            "idempotency_key": "mcp-test.replace-symbol.drop-docs",
-            "expected_state": expected_state
-        }),
+        "count",
+        COUNT_NEW_SOURCE,
+        "mcp-test.replace-symbol.drop-docs",
+        &preview,
     )
     .await;
     assert_eq!(apply["success"], true);
@@ -326,28 +332,18 @@ fn count() -> u32 {
 async fn replace_symbol_keeps_a_file_header_separated_by_a_blank_line() {
     let (_dir, project, fixture) = open_sources(&[("src/main.rs", LICENSED)]).await;
 
-    let preview = call_replace(
-        &fixture,
-        json!({
-            "symbol": "count",
-            "new_source": COUNT_NEW_SOURCE,
-            "dry_run": true
-        }),
-    )
-    .await;
+    let preview = preview_replace(&fixture, "count", COUNT_NEW_SOURCE).await;
     assert_eq!(preview["success"], true, "{preview}");
     assert_eq!(
         preview["replaced_span"],
         "/// Counts widgets.\nfn count() -> u32 {\n    1\n}"
     );
-    let apply = call_replace(
+    let apply = apply_replace(
         &fixture,
-        json!({
-            "symbol": "count",
-            "new_source": COUNT_NEW_SOURCE,
-            "idempotency_key": "mcp-test.replace-symbol.keep-header",
-            "expected_state": preview["expected_state"]
-        }),
+        "count",
+        COUNT_NEW_SOURCE,
+        "mcp-test.replace-symbol.keep-header",
+        &preview,
     )
     .await;
     assert_eq!(apply["success"], true, "{apply}");
@@ -361,31 +357,18 @@ async fn replace_symbol_keeps_a_file_header_separated_by_a_blank_line() {
 async fn replace_symbol_proves_bare_name_prefers_the_callable() {
     let (_dir, project, fixture) = open_sources(&[("src/main.rs", CALLABLE_SHADOW)]).await;
 
-    let preview = call_replace(
-        &fixture,
-        json!({
-            "symbol": "target",
-            "new_source": TARGET_NEW_SOURCE,
-            "dry_run": true
-        }),
-    )
-    .await;
+    let preview = preview_replace(&fixture, "target", TARGET_NEW_SOURCE).await;
     assert_eq!(preview["success"], true);
     assert_eq!(preview["matched_str"], "target (function)");
     assert_eq!(preview["replaced_span"], TARGET_OLD_SPAN);
     assert_eq!(read_project_file(&project, "src/main.rs"), CALLABLE_SHADOW);
 
-    let expected_state = preview["expected_state"]
-        .as_str()
-        .expect("preview returns expected_state");
-    let apply = call_replace(
+    let apply = apply_replace(
         &fixture,
-        json!({
-            "symbol": "target",
-            "new_source": TARGET_NEW_SOURCE,
-            "idempotency_key": "mcp-test.replace-symbol.callable-wins",
-            "expected_state": expected_state
-        }),
+        "target",
+        TARGET_NEW_SOURCE,
+        "mcp-test.replace-symbol.callable-wins",
+        &preview,
     )
     .await;
     assert_eq!(apply["success"], true);
