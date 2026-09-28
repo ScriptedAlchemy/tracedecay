@@ -1002,6 +1002,191 @@ mod goal_event_tests {
         );
     }
 
+    /// The newest in-project day is admitted, and its message text is durable,
+    /// before any older out-of-project day is opened.
+    ///
+    /// Search reads the published projection of those admitted messages. A pass
+    /// that keeps walking older days writes their coverage cursors before that
+    /// projection can run, so the newest day stays invisible until the older
+    /// sweep finishes. The follow-up pass must still open the older day, or
+    /// the yield would retry the same page forever.
+    #[tokio::test]
+    async fn newest_day_messages_are_durable_before_older_days_are_opened() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let marker = "NEWEST_DAY_MARKER cobalt orchard scheduler is ready";
+        let newest = [
+            ("2026", "08", "29", "newest-a"),
+            ("2026", "08", "29", "newest-b"),
+        ];
+        let older = [
+            ("2026", "08", "28", "older-a"),
+            ("2026", "08", "28", "older-b"),
+        ];
+        for (year, month, day, session_id) in newest {
+            write_scoped_rollout(&home, year, month, day, session_id, &project, marker);
+        }
+        for (year, month, day, session_id) in older {
+            write_scoped_rollout(
+                &home,
+                year,
+                month,
+                day,
+                session_id,
+                &other,
+                "OLDER_DAY_MARKER should stay unopened",
+            );
+        }
+
+        let project_id = ProjectId::new("project-newest-before-older").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let run_pass = || {
+            with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
+            )
+        };
+
+        let first = run_pass().await;
+        assert!(first.failures.is_empty(), "{:?}", first.failures);
+        let admitted = session_ids_of(&admission.observations());
+        assert_eq!(
+            admitted,
+            ["newest-a".to_owned(), "newest-b".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(
+            admission.observations().iter().any(|stored| {
+                let envelope: CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.facts().iter().any(|fact| {
+                    matches!(
+                        fact,
+                        CanonicalObservationFactV1::Message { content, .. }
+                            if content.as_str() == Some(marker)
+                    )
+                })
+            }),
+            "the newest day's message text must be durable before older days are opened"
+        );
+        for session_id in ["older-a", "older-b"] {
+            let source =
+                crate::runtime::hosts::codex::codex_observation_source_v2(session_id).unwrap();
+            assert!(
+                admission
+                    .get_source_cursor(&source, &scope)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{session_id} was opened in the pass that admitted the newest day"
+            );
+        }
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Partial)
+        );
+
+        let mut older_opened = false;
+        for _ in 0..3 {
+            let outcome = run_pass().await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+            let source =
+                crate::runtime::hosts::codex::codex_observation_source_v2("older-a").unwrap();
+            if admission
+                .get_source_cursor(&source, &scope)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                older_opened = true;
+                break;
+            }
+        }
+        assert!(
+            older_opened,
+            "deferring the older day must still open it on a later pass"
+        );
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            ["newest-a".to_owned(), "newest-b".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "out-of-project days stay out of the project observation set"
+        );
+    }
+
+    fn write_scoped_rollout(
+        home: &std::path::Path,
+        year: &str,
+        month: &str,
+        day: &str,
+        session_id: &str,
+        cwd: &std::path::Path,
+        message: &str,
+    ) {
+        let directory = home
+            .join(".codex/sessions")
+            .join(year)
+            .join(month)
+            .join(day);
+        std::fs::create_dir_all(&directory).unwrap();
+        let lines = [
+            json!({
+                "timestamp": format!("{year}-{month}-{day}T12:00:00.000Z"),
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": cwd}
+            }),
+            json!({
+                "timestamp": format!("{year}-{month}-{day}T12:00:01.000Z"),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": message}
+            }),
+        ];
+        std::fs::write(
+            directory.join(format!("rollout-{session_id}.jsonl")),
+            lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+    }
+
+    fn session_ids_of(observations: &[tracedecay_store::StoredObservation]) -> BTreeSet<String> {
+        observations
+            .iter()
+            .map(|stored| {
+                let envelope: CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.relations().session_id().as_str().to_owned()
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn legacy_current_message_migration_records_receipted_duplicate_coverage() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();

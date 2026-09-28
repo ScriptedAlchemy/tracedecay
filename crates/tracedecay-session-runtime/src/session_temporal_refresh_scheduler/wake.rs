@@ -126,6 +126,9 @@ macro_rules! define_wake_state {
             pub(super) recovery_cycle_pending: std::sync::Mutex<VecDeque<String>>,
             pub(super) busy: AtomicBool,
             pub(super) history_retry_pending: AtomicBool,
+            /// The last history window made progress and its projection backlog
+            /// is still unpublished. The next history window waits.
+            pub(super) history_after_projection: AtomicBool,
             pub(super) pass_count: std::sync::atomic::AtomicUsize,
             pub(super) history_requested_sequence: std::sync::atomic::AtomicUsize,
             pub(super) history_completed_sequence: std::sync::atomic::AtomicUsize,
@@ -160,6 +163,7 @@ impl Default for SessionTemporalRefreshWakeState {
             recovery_cycle_pending: std::sync::Mutex::new(VecDeque::new()),
             busy: AtomicBool::new(false),
             history_retry_pending: AtomicBool::new(false),
+            history_after_projection: AtomicBool::new(false),
             pass_count: std::sync::atomic::AtomicUsize::new(0),
             history_requested_sequence: std::sync::atomic::AtomicUsize::new(0),
             history_completed_sequence: std::sync::atomic::AtomicUsize::new(0),
@@ -404,6 +408,20 @@ impl SessionTemporalRefreshWakeState {
     pub fn clear_worker_activity_instrumentation(&self) {
         self.mark_worker_idle();
         self.update_history_retry_state(false);
+        self.release_history_for_projection();
+    }
+
+    pub fn hold_history_for_projection(&self) {
+        self.history_after_projection.store(true, Ordering::Release);
+    }
+
+    pub fn release_history_for_projection(&self) {
+        self.history_after_projection
+            .store(false, Ordering::Release);
+    }
+
+    pub fn history_held_for_projection(&self) -> bool {
+        self.history_after_projection.load(Ordering::Acquire)
     }
 
     pub fn history_retry_pending(&self) -> bool {

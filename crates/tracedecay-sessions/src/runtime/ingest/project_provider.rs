@@ -8,7 +8,7 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use crate::runtime::shared::TranscriptIngestStats;
+use crate::runtime::shared::{ProjectMembership, TranscriptIngestStats};
 use crate::runtime::source::{
     HostCoverageReason, HostProviderCoverage, TranscriptDiscoveryBounds,
     persist_codex_history_frontier, persist_host_provider_coverage, read_codex_history_frontier,
@@ -262,6 +262,10 @@ impl<'a> ProjectProviderRun<'a> {
         let mut remaining = self.max_new_bytes;
         let mut deferred = discovery.is_truncated();
         let mut frontier_committable = true;
+        // Out-of-scope rollouts consume no byte budget, so a newest-first page
+        // would otherwise write a cursor for every older day before this pass
+        // returns and the admitted window can be projected into search.
+        let mut persisted_in_scope = false;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         for path in &discovery.paths {
             if remaining == 0 {
@@ -270,6 +274,16 @@ impl<'a> ProjectProviderRun<'a> {
                 break;
             }
             if self.cancellation.is_cancelled() {
+                deferred = true;
+                frontier_committable = false;
+                break;
+            }
+            if persisted_in_scope
+                && run_blocking_transcript_section(|| {
+                    codex::codex_rollout_project_membership(path, self.project_root)
+                        == Some(ProjectMembership::NoMatch)
+                })
+            {
                 deferred = true;
                 frontier_committable = false;
                 break;
@@ -285,6 +299,9 @@ impl<'a> ProjectProviderRun<'a> {
             .await
             {
                 Ok(progress) => {
+                    if progress.frames_persisted > 0 {
+                        persisted_in_scope = true;
+                    }
                     deferred |= progress.source_deferred || progress.bytes_consumed > remaining;
                     frontier_committable &=
                         !progress.source_deferred && progress.bytes_consumed <= remaining;
