@@ -1,8 +1,9 @@
 //! Self-update for the tracedecay binary.
 //!
 //! Direct installs use GitHub release assets: the platform archive is
-//! verified against the release's `SHA256SUMS`, every required release member
-//! (the executable alone) is staged in an attempt-owned scratch directory, and
+//! verified against the release's `SHA256SUMS` and its build-provenance
+//! attestation (see [`attestation`]), every required release member (the
+//! executable alone) is staged in an attempt-owned scratch directory, and
 //! only then is it published over the running executable. Installations owned by
 //! a package manager (Homebrew, Scoop) are upgraded by that manager and never
 //! written to directly; see [`UpgradeSource`].
@@ -20,12 +21,17 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use self::attestation::{ReleaseProvenance, verify_release_attestation};
 use crate::cloud::{self, InstallMethod};
 use crate::macos_codesign::stabilize_installed_executable;
 use tracedecay_dashboard_api::cloud::ReleaseLookupError;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
 use tracedecay_session_memory::user_config::UserConfig;
+
+mod attestation;
+#[cfg(test)]
+mod test_server;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 
@@ -94,9 +100,10 @@ fn io_err(msg: &str) -> impl Fn(std::io::Error) -> TraceDecayError + '_ {
 }
 
 /// The platform archive and checksum manifest of one GitHub release, with the
-/// byte sizes the release metadata advertises for each. Those sizes are the
-/// download ceilings: a body that runs past its advertised size, or ends
-/// short of it, is not the published asset.
+/// byte sizes the release metadata advertises for each, and where the
+/// archive's build provenance is proven. The sizes are the download
+/// ceilings: a body that runs past its advertised size, or ends short of it,
+/// is not the published asset.
 #[derive(Debug)]
 struct ReleaseDownload {
     asset_name: String,
@@ -104,6 +111,7 @@ struct ReleaseDownload {
     asset_size: u64,
     checksums_url: String,
     checksums_size: u64,
+    provenance: ReleaseProvenance,
 }
 
 /// Resolves both the platform archive and its checksum manifest from one
@@ -164,6 +172,7 @@ fn fetch_release_download(
         asset_size: archive.size,
         checksums_url: checksums.browser_download_url.clone(),
         checksums_size: checksums.size,
+        provenance: ReleaseProvenance::for_release(api_base, authorization, tag, is_beta),
     })
 }
 
@@ -254,12 +263,12 @@ fn download_manifest(agent: &ureq::Agent, download: &ReleaseDownload) -> Result<
 }
 
 /// Streams the release archive into `archive`, bounded by its advertised
-/// size, and returns the lowercase hex SHA-256 of the bytes written.
+/// size, and returns the SHA-256 of the bytes written.
 fn stream_archive(
     agent: &ureq::Agent,
     download: &ReleaseDownload,
     archive: &mut File,
-) -> Result<String> {
+) -> Result<[u8; 32]> {
     let mut sink = DigestingWriter {
         inner: archive,
         hasher: Sha256::new(),
@@ -271,7 +280,7 @@ fn stream_archive(
         "release archive",
         &mut sink,
     )?;
-    Ok(hex::encode(sink.hasher.finalize()))
+    Ok(sink.hasher.finalize().into())
 }
 
 fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
@@ -325,9 +334,10 @@ fn download_and_stage(
 
 /// Streams the archive into an exclusively created file inside `scratch`,
 /// hashing as it lands, verifies the whole-archive digest against the
-/// release's checksum manifest, and only then rewinds that same file for
-/// extraction. `scratch` is owned by this attempt: it is removed with
-/// everything in it whenever this returns an error.
+/// release's checksum manifest and its build-provenance attestation, and
+/// only then rewinds that same file for extraction. `scratch` is owned by
+/// this attempt: it is removed with everything in it whenever this returns
+/// an error.
 fn stage_release_in(
     scratch: TempDir,
     download: &ReleaseDownload,
@@ -351,8 +361,14 @@ fn stage_release_in(
     let actual = stream_archive(&agent, download, &mut archive)?;
 
     eprintln!(" ({:.1} MiB)", download.asset_size as f64 / 1_048_576.0);
-    verify_sha256(&actual, &expected, &download.asset_name)?;
+    verify_sha256(&hex::encode(actual), &expected, &download.asset_name)?;
     eprintln!("  Checksum verified");
+    let signer = verify_release_attestation(&download.provenance, actual).map_err(|refusal| {
+        TraceDecayError::Config {
+            message: refusal.to_string(),
+        }
+    })?;
+    eprintln!("  Build provenance verified: {signer}");
     eprint!("  Extracting...");
 
     archive
@@ -1762,18 +1778,20 @@ mod tests {
     #[cfg(unix)]
     mod release_bundle {
         use std::fs;
-        use std::io::{Cursor, Read, Write};
-        use std::net::TcpListener;
+        use std::io::Cursor;
         use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
 
         use flate2::Compression;
         use flate2::write::GzEncoder;
         use sha2::{Digest, Sha256};
         use tar::{Builder, EntryType, Header};
 
+        use super::super::test_server::{FakeGitHub, attestations_path};
         use super::super::{
-            EXECUTABLE_MEMBER, RELEASE_MEMBER_MODE, ReleaseDownload, ReleaseMember, StagedRelease,
-            extract_targz, intended_member, publish_member, publish_release_at, stage_release_in,
+            EXECUTABLE_MEMBER, RELEASE_MEMBER_MODE, ReleaseDownload, ReleaseMember,
+            ReleaseProvenance, StagedRelease, extract_targz, intended_member, publish_member,
+            publish_release_at, stage_release_in,
         };
 
         /// The release contract every platform shares: the executable alone.
@@ -1979,35 +1997,28 @@ mod tests {
 
         const ASSET: &str = "tracedecay-v9.9.9-x86_64-linux.tar.gz";
 
-        /// Serves each `(path, body)` over plain HTTP/1.1 on a loopback port
-        /// for as long as the test process lives.
-        fn serve(responses: Vec<(&'static str, Vec<u8>)>) -> String {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let base = format!("http://{}", listener.local_addr().unwrap());
-            std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    let Ok(mut stream) = stream else { break };
-                    let mut request = [0u8; 4096];
-                    let read = stream.read(&mut request).unwrap_or(0);
-                    let head = String::from_utf8_lossy(&request[..read]).into_owned();
-                    let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
-                    let body = responses
-                        .iter()
-                        .find(|(served, _)| *served == path)
-                        .map_or(&[][..], |(_, body)| body.as_slice());
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = stream.write_all(body);
-                }
-            });
-            base
+        /// Serves the archive and its manifest, plus any extra `(path, body)`.
+        fn serve(
+            archive: &[u8],
+            manifest: &[u8],
+            extra: Vec<(String, Vec<u8>)>,
+        ) -> (String, Arc<Mutex<Vec<String>>>) {
+            let server = FakeGitHub::bind();
+            let base = server.base.clone();
+            let mut responses = vec![
+                ("/SHA256SUMS".to_owned(), manifest.to_vec()),
+                ("/archive".to_owned(), archive.to_vec()),
+            ];
+            responses.extend(extra);
+            (base, server.serve(responses))
         }
 
         fn manifest_for(archive: &[u8]) -> Vec<u8> {
             format!("{}  {ASSET}\n", hex::encode(Sha256::digest(archive))).into_bytes()
+        }
+
+        fn archive_attestations_path(archive: &[u8]) -> String {
+            attestations_path(&hex::encode(Sha256::digest(archive)))
         }
 
         fn download(base: &str, asset_size: u64, checksums_size: u64) -> ReleaseDownload {
@@ -2017,6 +2028,7 @@ mod tests {
                 asset_size,
                 checksums_url: format!("{base}/SHA256SUMS"),
                 checksums_size,
+                provenance: ReleaseProvenance::for_release(base, None, "v9.9.9", false),
             }
         }
 
@@ -2034,41 +2046,81 @@ mod tests {
         }
 
         #[test]
-        fn a_verified_archive_is_streamed_into_owned_scratch_and_staged() {
+        fn a_matching_sha256sums_without_an_attestation_is_refused_before_extraction() {
             let archive = complete_release();
             let manifest = manifest_for(&archive);
-            let base = serve(vec![
-                ("/SHA256SUMS", manifest.clone()),
-                ("/archive", archive.clone()),
-            ]);
+            let (base, requests) = serve(&archive, &manifest, Vec::new());
             let parent = tempfile::tempdir().unwrap();
             let download = download(&base, archive.len() as u64, manifest.len() as u64);
 
-            let staged =
-                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap();
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
 
-            assert!(staged.scratch.path().starts_with(parent.path()));
+            let digest = hex::encode(Sha256::digest(&archive));
             assert_eq!(
-                fs::read(staged.scratch.path().join("archive")).unwrap(),
-                archive,
-                "the verified bytes are the ones extracted"
+                error.to_string(),
+                format!(
+                    "config error: GitHub has no build-provenance attestation for \
+                     sha256:{digest}; refusing an unattested release archive"
+                )
             );
-            assert_eq!(fs::read(staged.executable()).unwrap(), b"new-executable");
-            drop(staged);
+            assert_eq!(
+                *requests.lock().unwrap(),
+                [
+                    "/SHA256SUMS".to_owned(),
+                    "/archive".to_owned(),
+                    archive_attestations_path(&archive)
+                ]
+            );
             assert!(
                 is_empty_dir(parent.path()),
-                "the attempt must remove its own scratch on handoff"
+                "a refused attempt stages nothing and removes its scratch"
             );
+        }
+
+        #[test]
+        fn a_swapped_archive_with_a_matching_sha256sums_is_refused_before_extraction() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let released_bundle: serde_json::Value = serde_json::from_str(include_str!(
+                "../tests/fixtures/release-attestations/tracedecay-beta-v1.0.0-beta.59-x86_64-linux.sigstore.json"
+            ))
+            .unwrap();
+            let listing = serde_json::json!({ "attestations": [{ "bundle": released_bundle }] });
+            let (base, _) = serve(
+                &archive,
+                &manifest,
+                vec![(
+                    archive_attestations_path(&archive),
+                    listing.to_string().into_bytes(),
+                )],
+            );
+            let parent = tempfile::tempdir().unwrap();
+            let mut download = download(&base, archive.len() as u64, manifest.len() as u64);
+            download.provenance =
+                ReleaseProvenance::for_release(&base, None, "v1.0.0-beta.59", true);
+
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
+
+            let digest = hex::encode(Sha256::digest(&archive));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "config error: no build-provenance attestation for sha256:{digest} \
+                     proves a release workflow build: attestation 1: failed verification \
+                     (Verification error: artifact hash does not match any subject in \
+                     attestation)"
+                )
+            );
+            assert!(is_empty_dir(parent.path()));
         }
 
         #[test]
         fn an_archive_running_past_its_advertised_size_is_refused() {
             let archive = complete_release();
             let manifest = manifest_for(&archive);
-            let base = serve(vec![
-                ("/SHA256SUMS", manifest.clone()),
-                ("/archive", archive.clone()),
-            ]);
+            let (base, _) = serve(&archive, &manifest, Vec::new());
             let parent = tempfile::tempdir().unwrap();
             let download = download(&base, archive.len() as u64 - 1, manifest.len() as u64);
 
@@ -2086,10 +2138,7 @@ mod tests {
         fn a_truncated_archive_is_refused() {
             let archive = complete_release();
             let manifest = manifest_for(&archive);
-            let base = serve(vec![
-                ("/SHA256SUMS", manifest.clone()),
-                ("/archive", archive.clone()),
-            ]);
+            let (base, _) = serve(&archive, &manifest, Vec::new());
             let parent = tempfile::tempdir().unwrap();
             let download = download(&base, archive.len() as u64 + 1, manifest.len() as u64);
 
@@ -2104,10 +2153,7 @@ mod tests {
         fn a_checksum_mismatch_refuses_before_extraction() {
             let archive = complete_release();
             let manifest = manifest_for(b"some other release");
-            let base = serve(vec![
-                ("/SHA256SUMS", manifest.clone()),
-                ("/archive", archive.clone()),
-            ]);
+            let (base, _) = serve(&archive, &manifest, Vec::new());
             let parent = tempfile::tempdir().unwrap();
             let download = download(&base, archive.len() as u64, manifest.len() as u64);
 
@@ -2122,10 +2168,7 @@ mod tests {
         fn an_oversized_checksum_manifest_is_refused() {
             let archive = complete_release();
             let manifest = manifest_for(&archive);
-            let base = serve(vec![
-                ("/SHA256SUMS", manifest.clone()),
-                ("/archive", archive.clone()),
-            ]);
+            let (base, _) = serve(&archive, &manifest, Vec::new());
             let parent = tempfile::tempdir().unwrap();
             let download = download(&base, archive.len() as u64, manifest.len() as u64 - 1);
 

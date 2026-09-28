@@ -44,6 +44,7 @@ static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocato
 mod branch_publication_tests;
 mod cancellation_tests;
 mod deferred_mount_tests;
+mod ignored_dependency_seat_tests;
 mod noop_reconcile_tests;
 mod publication_store;
 mod reconcile;

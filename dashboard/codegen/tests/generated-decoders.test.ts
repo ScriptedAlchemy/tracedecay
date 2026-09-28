@@ -19,7 +19,7 @@ import {
   StorageTelemetryPayloadV1Schema,
   StoreTelemetryEntryV1Schema,
   WIRE_SCHEMA_REVISION,
-} from "../../src/contracts/index.ts";
+} from "../../src/contracts/generated.ts";
 
 const PayloadSchema = z.object({ ok: z.boolean() });
 

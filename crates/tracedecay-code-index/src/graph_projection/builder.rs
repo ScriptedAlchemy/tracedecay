@@ -5,8 +5,8 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::chunks::{
-    CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1, published_symbol_spans,
-    typescript_family_path,
+    CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1, module_import_language_path,
+    published_symbol_spans, typescript_family_path,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::{
@@ -160,12 +160,13 @@ pub fn build_sealed_code_graph_rows(
 ///
 /// A dotted Rust-style call stays a limitation unless the canonical resolver
 /// bound its exact receiver site, and so does a call the extractor marked as
-/// sitting under an unmodeled import; TypeScript member calls are decided by
-/// the module resolver and arrive in `typescript_unresolved`.
+/// sitting under an unmodeled import. TypeScript, Python, Go, Java, and Ruby
+/// calls are decided by their module resolvers and arrive in
+/// `import_unresolved`.
 pub(crate) fn unresolved_call_limitations<'a>(
     references: &[(&str, &'a CodeIndexUnresolvedReferenceV1)],
     edges: impl Iterator<Item = &'a CanonicalRelationEdgeV1>,
-    typescript_unresolved: Vec<CodeIndexUnresolvedReferenceV1>,
+    import_unresolved: Vec<CodeIndexUnresolvedReferenceV1>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<CodeIndexUnresolvedReferenceV1>, CodeGraphProjectionError> {
     let mut site_candidates = BTreeMap::new();
@@ -206,9 +207,9 @@ pub(crate) fn unresolved_call_limitations<'a>(
     let mut unresolved_calls = Vec::new();
     for &(logical_path, reference) in references {
         check()?;
-        // TypeScript member calls are retained only through an imported
-        // namespace; the module resolver decides which are gaps.
-        if typescript_family_path(logical_path) {
+        // The module resolvers decide which of these languages' retained
+        // calls are gaps.
+        if typescript_family_path(logical_path) || module_import_language_path(logical_path) {
             continue;
         }
         // An enclosing-symbol fallback is not exact call-site proof, even
@@ -247,10 +248,10 @@ pub(crate) fn unresolved_call_limitations<'a>(
             }
         }
     }
-    // A TypeScript call whose import names project code the seal could not
-    // bind is the same kind of disclosed gap as an unresolved Rust receiver.
+    // A call whose import names project code the seal could not bind is the
+    // same kind of disclosed gap as an unresolved Rust receiver.
     check()?;
-    unresolved_calls.extend(typescript_unresolved);
+    unresolved_calls.extend(import_unresolved);
     unresolved_calls.sort();
     unresolved_calls.dedup();
     Ok(unresolved_calls)
@@ -330,63 +331,112 @@ pub(crate) fn sample_code_graph_rows(
     generation: &CodeGenerationId,
     files: &[CodeGraphSampleFileV1<'_>],
 ) -> Result<CodeGraphRowSampleV1, CodeGraphProjectionError> {
-    let check = || Ok(());
     let projection = super::code_graph_projection_identity(GraphNamespace::new("code-graph")?)?;
+    let partials = if files.len() < 2 || crate::parallelism::indexing_workers() < 2 {
+        files
+            .iter()
+            .map(|file| sample_one_code_graph_file(generation, &projection, file))
+            .collect::<Result<Vec<_>, _>>()?
+    } else if rayon::current_thread_index().is_some() {
+        files
+            .par_iter()
+            .map(|file| sample_one_code_graph_file(generation, &projection, file))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        crate::parallelism::install(|| {
+            files
+                .par_iter()
+                .map(|file| sample_one_code_graph_file(generation, &projection, file))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| CodeGraphProjectionError::Unavailable(error.to_string()))??
+    };
     let mut sample = CodeGraphRowSampleV1::default();
-    for file in files {
-        let snapshot = BTreeMap::from([(&file.snapshot.file_occurrence_id, file.snapshot)]);
-        let bound = file
-            .chunks
-            .iter()
-            .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.clone())
-            .chain(file.symbols.iter().map(|symbol| symbol.occurrence.clone()))
-            .collect::<HashSet<_>>();
-        let references = file
-            .unresolved
-            .iter()
-            .map(|reference| (file.logical_path, reference))
-            .collect::<Vec<_>>();
-        let unresolved =
-            unresolved_call_limitations(&references, file.edges.iter(), Vec::new(), &check)?;
-        let unresolved_by_source = group_unresolved_calls(&unresolved, &check)?;
-        let rows = emit_code_graph_rows(
-            &CodeGraphRowContext {
-                projection: &projection,
-                generation,
-                files: Some(&snapshot),
-                bound: &bound,
-                unresolved_by_source: &unresolved_by_source,
-            },
-            &CodeGraphRowBatch {
-                files: &[file.snapshot],
-                imports: file.imports,
-                chunks: file.chunks,
-                symbols: file.symbols,
-                edges: file.edges,
-                bindings: None,
-            },
-            &check,
-        )?;
-        for entity in &rows.entities {
-            let footprint = GraphSpillRowFootprint::of_entity(entity)?;
-            if has_label(entity, FILE_LABEL) {
-                sample.file_entities.add(footprint);
-            } else if has_label(entity, IMPORT_LABEL) {
-                sample.import_entities.add(footprint);
-            } else {
-                sample.symbol_entities.add(footprint);
-            }
+    for part in partials {
+        add_row_sample(&mut sample, part);
+    }
+    Ok(sample)
+}
+
+fn sample_one_code_graph_file(
+    generation: &CodeGenerationId,
+    projection: &GraphProjectionIdentity,
+    file: &CodeGraphSampleFileV1<'_>,
+) -> Result<CodeGraphRowSampleV1, CodeGraphProjectionError> {
+    let check = || Ok(());
+    let snapshot = BTreeMap::from([(&file.snapshot.file_occurrence_id, file.snapshot)]);
+    let bound = file
+        .chunks
+        .iter()
+        .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.clone())
+        .chain(file.symbols.iter().map(|symbol| symbol.occurrence.clone()))
+        .collect::<HashSet<_>>();
+    let references = file
+        .unresolved
+        .iter()
+        .map(|reference| (file.logical_path, reference))
+        .collect::<Vec<_>>();
+    let unresolved =
+        unresolved_call_limitations(&references, file.edges.iter(), Vec::new(), &check)?;
+    let unresolved_by_source = group_unresolved_calls(&unresolved, &check)?;
+    let rows = emit_code_graph_rows(
+        &CodeGraphRowContext {
+            projection,
+            generation,
+            files: Some(&snapshot),
+            bound: &bound,
+            unresolved_by_source: &unresolved_by_source,
+        },
+        &CodeGraphRowBatch {
+            files: &[file.snapshot],
+            imports: file.imports,
+            chunks: file.chunks,
+            symbols: file.symbols,
+            edges: file.edges,
+            bindings: None,
+        },
+        &check,
+    )?;
+    let mut sample = CodeGraphRowSampleV1::default();
+    for entity in &rows.entities {
+        let footprint = GraphSpillRowFootprint::of_entity(entity)?;
+        if has_label(entity, FILE_LABEL) {
+            sample.file_entities.add(footprint);
+        } else if has_label(entity, IMPORT_LABEL) {
+            sample.import_entities.add(footprint);
+        } else {
+            sample.symbol_entities.add(footprint);
         }
-        for relation in &rows.relations {
-            let footprint = GraphSpillRowFootprint::of_relation(relation)?;
-            match relation.kind.as_str() {
-                FILE_IMPORT_EDGE_KIND => sample.import_relations.add(footprint),
-                FILE_SYMBOL_EDGE_KIND => sample.binding_relations.add(footprint),
-                _ => sample.edge_relations.add(footprint),
-            }
+    }
+    for relation in &rows.relations {
+        let footprint = GraphSpillRowFootprint::of_relation(relation)?;
+        match relation.kind.as_str() {
+            FILE_IMPORT_EDGE_KIND => sample.import_relations.add(footprint),
+            FILE_SYMBOL_EDGE_KIND => sample.binding_relations.add(footprint),
+            _ => sample.edge_relations.add(footprint),
         }
     }
     Ok(sample)
+}
+
+fn add_row_sample(total: &mut CodeGraphRowSampleV1, part: CodeGraphRowSampleV1) {
+    fn add(into: &mut CodeGraphRowKindSampleV1, part: CodeGraphRowKindSampleV1) {
+        into.rows = into.rows.saturating_add(part.rows);
+        into.footprint.buffered = into
+            .footprint
+            .buffered
+            .saturating_add(part.footprint.buffered);
+        into.footprint.resident = into
+            .footprint
+            .resident
+            .saturating_add(part.footprint.resident);
+    }
+    add(&mut total.file_entities, part.file_entities);
+    add(&mut total.import_entities, part.import_entities);
+    add(&mut total.symbol_entities, part.symbol_entities);
+    add(&mut total.import_relations, part.import_relations);
+    add(&mut total.binding_relations, part.binding_relations);
+    add(&mut total.edge_relations, part.edge_relations);
 }
 
 pub(super) struct BuiltProjection {

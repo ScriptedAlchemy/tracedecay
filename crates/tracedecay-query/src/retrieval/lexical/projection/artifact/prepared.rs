@@ -172,6 +172,7 @@ pub(super) fn prepare_page(
     page: &VerifiedSealedLexicalPageV1,
     previous_cursor: Option<Vec<u8>>,
     preparation_scratch_bytes: usize,
+    document_id_shift: u64,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<PreparedCodeLexicalArtifactPageV1, CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
@@ -209,6 +210,7 @@ pub(super) fn prepare_page(
         }
         let document = first_document
             .checked_add(u64::try_from(offset).map_err(contract_number)?)
+            .and_then(|document| document.checked_add(document_id_shift))
             .ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Contract(
                     "lexical artifact prepared document id overflowed".to_owned(),

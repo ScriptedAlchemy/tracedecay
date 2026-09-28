@@ -2,7 +2,7 @@ import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { WorkGraphReadV1Schema } from '../../contracts/generated.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
-import type { WorkGraphReadV1 } from '../../contracts/index.ts';
+import type { WorkGraphReadV1 } from '../../contracts/generated.ts';
 import type { WorkResult } from '../work/workApi.ts';
 import { AgentFailureContext } from './AgentFailureContext.tsx';
 import { readAttemptFailures, type AttemptFailureReading } from './failure.ts';

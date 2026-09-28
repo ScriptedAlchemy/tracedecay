@@ -4,9 +4,8 @@ use std::time::Duration;
 
 use tracedecay_application::observability::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
-    ObservabilityOwnerEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
-    ObservabilityProducerIdentityV1, RegisteredAggregateShareExporterV1,
-    RegisteredObservabilityPortV1, provider_latency_read_model,
+    ObservabilityOwnerEmissionOutcomeV1, ObservabilityProducerIdentityV1,
+    RegisteredAggregateShareExporterV1, RegisteredObservabilityPortV1, provider_latency_read_model,
 };
 use tracedecay_contracts::{
     AggregateShareExportRequestV1, ObservabilityAggregateExportApplicationV1,
@@ -303,14 +302,14 @@ async fn persistence_failure_cannot_be_rewritten_as_a_clean_terminal() {
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    let producer = BoundedObservabilityProducerV1::start_with_deadlines(
+    // The producer's deadlines read the Tokio clock. Paused, it advances only
+    // while every task waits, so the held writer exhausts the production
+    // persistence deadline without a wall-clock guess.
+    tokio::time::pause();
+    let producer = BoundedObservabilityProducerV1::start(
         db.clone(),
         identity(scope, "boot:persistence-failed"),
         1,
-        ObservabilityProducerDeadlinesV1 {
-            persistence: Duration::from_millis(50),
-            shutdown: Duration::from_millis(500),
-        },
     )
     .expect("producer");
     assert_eq!(
@@ -338,7 +337,10 @@ async fn persistence_failure_cannot_be_rewritten_as_a_clean_terminal() {
         producer.try_emit(dropped).expect("capacity observation"),
         ObservabilityEmissionOutcomeV1::DroppedAtCapacity
     );
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(producer.persistence_deadline() * 3).await;
+    // The receipts written after the release run under real production
+    // budgets.
+    tokio::time::resume();
     blocker.commit().await.expect("release registered writer");
 
     let error = producer

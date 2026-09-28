@@ -672,6 +672,9 @@ fn safe_write_bytes_file_from_snapshot(
             ),
         });
     }
+    if matches!(observed, HostFileSnapshot::Missing) {
+        super::host_config_io::note_created_file(path);
+    }
     #[cfg(feature = "test-transport")]
     super::host_config_io::test_abort_after_host_config_write(path);
     Ok(())

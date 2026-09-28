@@ -11,6 +11,8 @@ use tracedecay_domain::{CodeGenerationId, HostIntegrationIdV1};
 #[cfg(unix)]
 use tracedecay_hooks::core_events::DaemonHookEvent;
 #[cfg(unix)]
+use tracedecay_runtime_core::cancellation::CancellationToken;
+#[cfg(unix)]
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use super::*;
@@ -1221,6 +1223,7 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
         project_path,
         &fixture.handshake,
         &fixture.engine.store_administration,
+        &CancellationToken::new(),
     )
     .await
     .expect("open controlled project");

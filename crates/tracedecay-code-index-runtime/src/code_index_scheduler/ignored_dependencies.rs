@@ -15,6 +15,7 @@ use tracedecay_code_index::production::{
     MAX_IGNORED_DEPENDENCY_ENTRYPOINT_BYTES_V1,
 };
 use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1, canonical_sha256};
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
@@ -34,6 +35,36 @@ pub struct CodeIndexIgnoredDependencyRequestV1 {
     pub scope: ResolvedScope,
     pub expected_generation: CodeGenerationId,
     pub verified_imports: Vec<CodeIndexImportEvidenceV1>,
+}
+
+impl CodeIndexIgnoredDependencyRequestV1 {
+    /// The request a graph read of `latest` hands to admission when it found
+    /// the parser-verified import of `module`, or `None` without that import.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn for_verified_import_for_test(
+        latest: &LatestCompleteCodeIndexV1,
+        module: &str,
+    ) -> Option<Self> {
+        let generation = latest.generation();
+        let import = generation
+            .imports()
+            .iter()
+            .find(|import| import.module_specifier == module)?
+            .clone();
+        let snapshot = generation.snapshot();
+        let scope = ResolvedScope::new(
+            generation.manifest().project_id.clone(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone()?,
+            snapshot.reference.clone(),
+        )
+        .ok()?;
+        Some(Self {
+            scope,
+            expected_generation: generation.manifest().generation_id.clone(),
+            verified_imports: vec![import],
+        })
+    }
 }
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
@@ -64,6 +95,15 @@ pub enum CodeIndexIgnoredDependencyRefusalV1 {
     StaleGeneration,
     #[error("the request scope does not identify this exact mounted worktree")]
     ScopeMismatch,
+    /// The worktree has no decoded generation and its worker is parked on a
+    /// failure a wake does not clear, so no generation to admit against is
+    /// coming until the park's remediation is applied.
+    #[error(
+        "the code index for this worktree is parked; remedy: {}; cause: {}",
+        .0.remediation,
+        .0.reason
+    )]
+    ConvergenceParked(CodeIndexConvergenceParkedV1),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

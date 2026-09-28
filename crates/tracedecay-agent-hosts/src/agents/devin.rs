@@ -289,11 +289,7 @@ fn install_mcp_if_selected(
             settings["mcpServers"]["tracedecay"] = entry;
             Ok((
                 outcome,
-                TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
-                    config_path,
-                    existing,
-                    &settings,
-                )?),
+                JsonConfigDialect::Json.mutation(config_path, existing, settings)?,
             ))
         })?;
         outcome.report(config_path);
@@ -323,11 +319,7 @@ fn uninstall_mcp_if_selected(
             }
             Ok((
                 true,
-                TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
-                    config_path,
-                    existing,
-                    &settings,
-                )?),
+                JsonConfigDialect::Json.mutation(config_path, existing, settings)?,
             ))
         })?;
         if removed {

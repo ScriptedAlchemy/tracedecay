@@ -128,6 +128,9 @@ async fn map_ignored_dependency_scheduler_error(
             CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded,
         ) => CodeIndexIgnoredDependencyAdmissionErrorV1::TimedOut,
         CodeIndexSchedulerErrorV1::IgnoredDependency(
+            CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(parked),
+        ) => CodeIndexIgnoredDependencyAdmissionErrorV1::Parked(parked),
+        CodeIndexSchedulerErrorV1::IgnoredDependency(
             CodeIndexIgnoredDependencyRefusalV1::StaleGeneration,
         ) => match exact_serving_generation(schedulers, project_root, scope).await {
             Some(active_generation) => {

@@ -528,8 +528,10 @@ pub(super) enum ActiveGenerationWorkV1 {
 struct ActiveGenerationChargesV1 {
     generation_id: CodeGenerationId,
     decode_bytes: u64,
-    /// The sealed graph build's estimated structural peak, or its sizing error.
-    graph_build_bound: Result<u64, String>,
+    /// The sealed graph build's estimated structural peak, or its sizing
+    /// error. `None` means a decode recorded the generation and admission
+    /// has not sized the build yet.
+    graph_build_bound: Option<Result<u64, String>>,
 }
 
 /// The resident cost of materializing the active generation.
@@ -2243,7 +2245,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let decoded = self.decode_active_generation();
         drop(charge);
         if let Ok(Some(generation)) = decoded.as_ref() {
-            let charges = Self::active_generation_charges(generation);
+            let charges = Self::active_generation_charges(generation, false);
             let mut state = self.cache.lock_state()?;
             if state.active_epoch == lease.epoch {
                 state.forget(&generation.manifest().generation_id);
@@ -2478,14 +2480,32 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     /// A decoded copy charges its next decode what this decode measured at
     /// its peak, which covers the pass transients above what it retains; a
-    /// generation built in memory has only its retained bytes to go on. Its
-    /// graph build is charged its structural estimate. Process-wide growth
-    /// includes other owners and cannot be attributed to this generation.
+    /// generation built in memory has only its retained bytes to go on.
+    /// Publication sizes the graph build it is about to admit. A decode
+    /// leaves that sample until a graph build of the same generation is
+    /// admitted, so recovering a head that will not be rebuilt does not emit
+    /// one. Process-wide growth includes other owners and cannot be
+    /// attributed to this generation.
     fn active_generation_charges(
         generation: &CodeIndexPublishedGenerationV1,
+        size_graph_build: bool,
     ) -> ActiveGenerationChargesV1 {
         let retained = generation.retained_bytes();
-        let graph_build_bound = generation
+        let graph_build_bound =
+            size_graph_build.then(|| Self::measure_graph_build_bound(generation));
+        ActiveGenerationChargesV1 {
+            generation_id: generation.manifest().generation_id.clone(),
+            decode_bytes: generation
+                .decode_peak_growth_bytes()
+                .map_or(retained, |peak| peak.max(retained)),
+            graph_build_bound,
+        }
+    }
+
+    fn measure_graph_build_bound(
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<u64, String> {
+        generation
             .graph_build_bound()
             .map(|bound| {
                 publish_graph_build_bound_gauges(&bound);
@@ -2498,14 +2518,49 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     "the sealed graph build of the active generation could not be sized"
                 );
                 error.to_string()
-            });
-        ActiveGenerationChargesV1 {
-            generation_id: generation.manifest().generation_id.clone(),
-            decode_bytes: generation
-                .decode_peak_growth_bytes()
-                .map_or(retained, |peak| peak.max(retained)),
-            graph_build_bound,
+            })
+    }
+
+    /// Size a decoded generation's graph build the first time admission asks.
+    fn measure_deferred_graph_build_bound(&self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let Some(pointer) = self.read_publication_pointer()? else {
+            return Ok(());
+        };
+        let pending = {
+            let charges = self
+                .active_decode_charge
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            charges.as_ref().is_some_and(|charges| {
+                charges.generation_id.as_str() == pointer.generation_id
+                    && charges.graph_build_bound.is_none()
+            })
+        };
+        if !pending {
+            return Ok(());
         }
+        let generation = {
+            let state = self.cache.lock_state()?;
+            state.active.as_ref().and_then(|active| {
+                (active.manifest().generation_id.as_str() == pointer.generation_id)
+                    .then(|| Arc::clone(active))
+            })
+        };
+        let Some(generation) = generation else {
+            return Ok(());
+        };
+        let bound = Self::measure_graph_build_bound(&generation);
+        let mut charges = self
+            .active_decode_charge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(charges) = charges.as_mut()
+            && charges.generation_id.as_str() == generation.manifest().generation_id.as_str()
+            && charges.graph_build_bound.is_none()
+        {
+            charges.graph_build_bound = Some(bound);
+        }
+        Ok(())
     }
 
     fn record_active_generation_charges(&self, charges: ActiveGenerationChargesV1) {
@@ -2524,30 +2579,36 @@ impl DaemonCodeIndexPublicationStoreV1 {
         if work == ActiveGenerationWorkV1::Decode && self.cache.lock_state()?.active.is_some() {
             return Ok(ActiveGenerationDecodeChargeV1::Decoded);
         }
+        if work == ActiveGenerationWorkV1::SealedGraphBuild {
+            self.measure_deferred_graph_build_bound()?;
+        }
         let Some(pointer) = self.read_publication_pointer()? else {
             return Ok(ActiveGenerationDecodeChargeV1::Decoded);
         };
-        let charge = self
+        let charges = self
             .active_decode_charge
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(charges) = charges
             .as_ref()
             .filter(|charges| charges.generation_id.as_str() == pointer.generation_id)
-            .map(|charges| {
-                let bytes = match work {
-                    ActiveGenerationWorkV1::Decode => Ok(charges.decode_bytes),
-                    ActiveGenerationWorkV1::SealedGraphBuild => charges.graph_build_bound.clone(),
-                };
-                (charges.generation_id.clone(), bytes)
-            });
-        Ok(match charge {
-            Some((generation_id, Ok(bytes))) => ActiveGenerationDecodeChargeV1::Measured {
-                generation_id,
-                bytes,
+        else {
+            return Ok(ActiveGenerationDecodeChargeV1::Unmeasured);
+        };
+        let bytes = match work {
+            ActiveGenerationWorkV1::Decode => Ok(charges.decode_bytes),
+            ActiveGenerationWorkV1::SealedGraphBuild => match charges.graph_build_bound.clone() {
+                Some(bound) => bound,
+                None => return Ok(ActiveGenerationDecodeChargeV1::Unmeasured),
             },
-            Some((_, Err(error))) => return Err(Self::unavailable(error)),
-            None => ActiveGenerationDecodeChargeV1::Unmeasured,
-        })
+        };
+        match bytes {
+            Ok(bytes) => Ok(ActiveGenerationDecodeChargeV1::Measured {
+                generation_id: charges.generation_id.clone(),
+                bytes,
+            }),
+            Err(error) => Err(Self::unavailable(error)),
+        }
     }
 
     pub(super) fn active_encoded_bytes(&self) -> Arc<AtomicU64> {
@@ -3121,7 +3182,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         })?;
         drop(source_fence);
         let charges = matches!(self.disposition, CodeIndexPublicationDispositionV1::Active)
-            .then(|| Self::active_generation_charges(&generation));
+            .then(|| Self::active_generation_charges(&generation, true));
         let mut state = self.cache.lock_state()?;
         if undecoded_expectation.is_none() {
             let cached_active = state

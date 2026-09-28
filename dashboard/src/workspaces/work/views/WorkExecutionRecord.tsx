@@ -1,4 +1,4 @@
-import type { WorkAttemptListCoverageV1 } from '../../../contracts/index.ts';
+import type { WorkAttemptListCoverageV1 } from '../../../contracts/generated.ts';
 import { StateChip, type DomainStateKind } from '../../../ui/StateChip.tsx';
 import { Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';

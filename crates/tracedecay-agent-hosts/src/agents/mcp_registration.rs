@@ -100,90 +100,48 @@ impl McpRegistrationOutcome {
     }
 }
 
-/// How far an uninstall prunes a config once the tracedecay entry is gone.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct McpUninstallPolicy {
-    /// Drop the MCP root key itself once it holds no servers.
-    pub prune_empty_root: bool,
-    /// Delete the config file when an empty MCP root is all that is left.
-    pub remove_empty_file: bool,
-}
-
-/// Result of the uninstall transform, reported after publication.
-enum McpUninstallOutcome {
-    NoEntry,
-    RemovedEntry,
-    RemovedFile,
-}
-
 /// Remove the tracedecay MCP entry under `root_key` from a host config.
 ///
 /// Runs under the host-file write lock like [`install_mcp_server_entry`]. A
 /// config that exists but cannot be parsed is a typed error, reporting a
 /// clean uninstall over a corrupt config would fabricate state, and callers
-/// decide whether to keep going across the remaining hosts. Every rewrite or
-/// removal publishes through the durable conditional write/remove shared by
-/// every host-file transaction.
+/// decide whether to keep going across the remaining hosts. Only the entry is
+/// removed here; the root key and the file go too exactly when the install
+/// this lifecycle records created them.
 #[hotpath::measure(label = "agent_hosts.agents.mcp.uninstall")]
 pub fn uninstall_mcp_server_entry(
     config_path: &Path,
     root_key: &str,
     dialect: JsonConfigDialect,
-    policy: McpUninstallPolicy,
 ) -> Result<()> {
     if !config_path.exists() {
         eprintln!("  {} not found, skipping", config_path.display());
         return Ok(());
     }
 
-    let outcome = update_json_config_transactionally(config_path, dialect, |mut settings| {
-        let Some(servers) = settings.get_mut(root_key).and_then(|v| v.as_object_mut()) else {
-            return Ok((McpUninstallOutcome::NoEntry, JsonConfigMutation::Unchanged));
-        };
-        if servers.remove("tracedecay").is_none() {
-            return Ok((McpUninstallOutcome::NoEntry, JsonConfigMutation::Unchanged));
+    let removed = update_json_config_transactionally(config_path, dialect, |mut settings| {
+        let removed = settings
+            .get_mut(root_key)
+            .and_then(|servers| servers.as_object_mut())
+            .is_some_and(|servers| servers.remove("tracedecay").is_some());
+        if removed {
+            Ok((true, JsonConfigMutation::Write(settings)))
+        } else {
+            Ok((false, JsonConfigMutation::Unchanged))
         }
-        let root_is_empty = servers.is_empty();
-
-        if policy.prune_empty_root
-            && root_is_empty
-            && let Some(object) = settings.as_object_mut()
-        {
-            object.remove(root_key);
-        }
-
-        if policy.remove_empty_file && config_holds_only_empty_root(&settings, root_key) {
-            return Ok((McpUninstallOutcome::RemovedFile, JsonConfigMutation::Remove));
-        }
-        Ok((
-            McpUninstallOutcome::RemovedEntry,
-            JsonConfigMutation::Write(settings),
-        ))
     })?;
-    match outcome {
-        McpUninstallOutcome::NoEntry => eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        ),
-        McpUninstallOutcome::RemovedEntry => eprintln!(
+    if removed {
+        eprintln!(
             "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             config_path.display()
-        ),
-        McpUninstallOutcome::RemovedFile => eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
+        );
+    } else {
+        eprintln!(
+            "  No tracedecay MCP server in {}, skipping",
             config_path.display()
-        ),
+        );
     }
     Ok(())
-}
-
-/// True when nothing survives in `settings` except an empty MCP root.
-fn config_holds_only_empty_root(settings: &serde_json::Value, root_key: &str) -> bool {
-    settings.as_object().is_some_and(|object| {
-        object.iter().all(|(key, value)| {
-            key == root_key && value.as_object().is_some_and(serde_json::Map::is_empty)
-        })
-    })
 }
 
 /// Bundle registration state for hosts that store the tracedecay MCP server

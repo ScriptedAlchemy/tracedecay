@@ -274,13 +274,19 @@ fn steering_uninstall_refuses_a_concurrent_edit_before_empty_deletion() {
 fn steering_empty_deletion_requires_a_persisted_remove_intent() {
     let root = tempfile::tempdir().unwrap();
     let steering = root.path().join("tracedecay.md");
-    install_steering_rules(&steering).unwrap();
+    let mut facts = Vec::new();
+    crate::agents::recorded_lifecycle(root.path(), &mut facts, false, || {
+        install_steering_rules(&steering)
+    })
+    .unwrap();
     let original = std::fs::read(&steering).unwrap();
     let blocked_intent_root = root.path().join("blocked-intent-root");
     std::fs::write(&blocked_intent_root, b"not a directory").unwrap();
 
     let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
-        remove_steering_rules(&steering)
+        crate::agents::recorded_lifecycle(root.path(), &mut facts, true, || {
+            remove_steering_rules(&steering)
+        })
     })
     .unwrap_err();
 
@@ -305,9 +311,16 @@ fn steering_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
     assert_eq!(std::fs::read(&nonempty).unwrap(), b"operator rules\n");
 
     let empty = root.path().join("empty.md");
-    install_steering_rules(&empty).unwrap();
+    let mut facts = Vec::new();
+    crate::agents::recorded_lifecycle(root.path(), &mut facts, false, || {
+        install_steering_rules(&empty)
+    })
+    .unwrap();
 
-    remove_steering_rules(&empty).unwrap();
+    crate::agents::recorded_lifecycle(root.path(), &mut facts, true, || {
+        remove_steering_rules(&empty)
+    })
+    .unwrap();
 
     assert!(!empty.exists());
 }

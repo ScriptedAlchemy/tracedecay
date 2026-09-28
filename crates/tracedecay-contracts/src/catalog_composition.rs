@@ -9,12 +9,12 @@
 use std::collections::BTreeSet;
 
 use crate::handlers::BoundApplicationHandler;
+use crate::retrieval::catalog::application_catalog_contributions_with;
 use crate::schema_bodies::SchemaBodyMaterialization;
 use crate::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
     APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID, ApplicationContractError,
-    ApplicationHandlerDescriptors, application_binding_contributions,
-    application_catalog_contributions, application_handler_descriptors,
+    ApplicationHandlerDescriptors, application_handler_descriptors,
 };
 use thiserror::Error;
 use tracedecay_tool_catalog::{
@@ -85,7 +85,8 @@ pub fn compose_application_catalog<Dispatcher>(
 pub fn compose_application_catalog_with<Dispatcher>(
     dispatcher: impl FnOnce(&CatalogSnapshotV1) -> Dispatcher,
 ) -> Result<ApplicationCatalogComposition<Dispatcher>, CatalogCompositionError> {
-    let (snapshot, handlers) = assemble_application_catalog()?;
+    let (snapshot, handlers) =
+        assemble_application_catalog_with(SchemaBodyMaterialization::Materialize)?;
     let dispatcher = dispatcher(&snapshot);
     Ok(ApplicationCatalogComposition {
         snapshot,
@@ -111,21 +112,15 @@ pub fn build_application_binding_snapshot() -> Result<CatalogSnapshotV1, Catalog
 }
 
 #[hotpath::measure(label = "catalog_composition.assemble")]
-fn assemble_application_catalog()
--> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
-    assemble_application_catalog_with(SchemaBodyMaterialization::Materialize)
-}
-
 fn assemble_application_catalog_with(
     materialize: SchemaBodyMaterialization,
 ) -> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
     let (mut contributions, handlers) =
         hotpath::measure_block!("catalog_composition.contributions", {
-            let contributions = match materialize {
-                SchemaBodyMaterialization::Materialize => application_catalog_contributions()?,
-                SchemaBodyMaterialization::Omit => application_binding_contributions()?,
-            };
-            (contributions, application_handler_descriptors()?)
+            (
+                application_catalog_contributions_with(materialize)?,
+                application_handler_descriptors()?,
+            )
         });
     contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
     hotpath::measure_block!(
@@ -284,7 +279,10 @@ fn application_profile(
 mod tests {
     use super::*;
     use crate::handlers::CanonicalApplicationDispatcher;
-    use crate::{ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic};
+    use crate::{
+        ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
+        application_catalog_contributions,
+    };
     use tracedecay_tool_catalog::{CapabilityId, SurfaceBindingV1, SurfaceOperationName};
 
     fn current_bindings_on(surface: BindingSurface) -> Vec<SurfaceBindingV1> {

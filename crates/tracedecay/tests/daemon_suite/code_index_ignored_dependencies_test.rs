@@ -273,26 +273,8 @@ fn request_for(
     latest: &LatestCompleteCodeIndexV1,
     module: &str,
 ) -> CodeIndexIgnoredDependencyRequestV1 {
-    let generation = latest.generation();
-    let import = generation
-        .imports()
-        .iter()
-        .find(|import| import.module_specifier == module)
+    CodeIndexIgnoredDependencyRequestV1::for_verified_import_for_test(latest, module)
         .unwrap_or_else(|| panic!("verified import row for {module}"))
-        .clone();
-    let snapshot = generation.snapshot();
-    let scope = ResolvedScope::new(
-        generation.manifest().project_id.clone(),
-        snapshot.repository.clone(),
-        snapshot.worktree.clone().expect("worktree identity"),
-        snapshot.reference.clone(),
-    )
-    .expect("resolved scope");
-    CodeIndexIgnoredDependencyRequestV1 {
-        scope,
-        expected_generation: generation.manifest().generation_id.clone(),
-        verified_imports: vec![import],
-    }
 }
 
 fn roster_paths(latest: &LatestCompleteCodeIndexV1) -> Vec<&str> {

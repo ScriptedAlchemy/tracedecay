@@ -40,7 +40,12 @@ curl -fsSL https://raw.githubusercontent.com/ScriptedAlchemy/tracedecay/master/i
 ```
 
 The installer defaults to `~/.local/bin`. Set `TRACEDECAY_INSTALL_DIR` to
-choose another directory. Prebuilt archives are available on the
+choose another directory. It verifies the archive's build-provenance
+attestation with `gh attestation verify`, so it needs the
+[GitHub CLI](https://cli.github.com/) signed in; without `gh` it refuses
+unless `TRACEDECAY_INSTALL_UNATTESTED=1` accepts a checksum-only install.
+`tracedecay upgrade` verifies the same attestation itself. See the
+[user guide](docs/USER-GUIDE.md#installing-tracedecay). Prebuilt archives are available on the
 [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest).
 
 ## Final V2 storage model

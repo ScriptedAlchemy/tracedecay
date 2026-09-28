@@ -9,6 +9,9 @@ use crate::common::{
     ExtractionState, clean_c_comment, docstring_from_preceding_comments, local_node_id,
 };
 use crate::complexity::{GO_COMPLEXITY, count_complexity};
+use crate::extraction_artifact::{
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportBindingV1, ImportNamespaceV1,
+};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
@@ -24,9 +27,10 @@ impl GoExtractor {
         source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        let mut imports = Vec::new();
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -58,17 +62,145 @@ impl GoExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-            Self::visit_node(&mut state, child);
-        });
+        let metrics = if file_path.ends_with(".mod") {
+            Self::visit_module_manifest(&mut state, source);
+            crate::parsed_extraction::ParsedTraversalMetrics::default()
+        } else {
+            crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+                Self::visit_node(&mut state, child);
+                if child.kind() == "import_declaration" {
+                    Self::import_evidence(&mut state, &mut imports, child);
+                }
+            })
+        };
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            ExtractionArtifactV1::with_imports(Self::build_result(state, start), imports),
             scope,
             metrics,
         )
+    }
+
+    /// The `module` directive of a `go.mod` manifest becomes a `Module` symbol
+    /// named by the module path, the prefix every import of the module's
+    /// packages starts with.
+    fn visit_module_manifest(state: &mut ExtractionState, source: &str) {
+        // ponytail: `.mod` dispatches by extension, so a non-Go `.mod` file
+        // indexes here as a bare Go file; a file-name keyed dispatch would
+        // route only `go.mod`.
+        if state.file_path.rsplit('/').next() != Some("go.mod") {
+            return;
+        }
+        let Some((line, text, path)) = source.lines().enumerate().find_map(|(line, text)| {
+            let directive = text.split("//").next().unwrap_or(text).trim();
+            let path = directive.strip_prefix("module")?;
+            if !path.starts_with(char::is_whitespace) {
+                return None;
+            }
+            let path = path.trim().trim_matches('"');
+            (!path.is_empty()).then_some((line, text, path))
+        }) else {
+            return;
+        };
+        let (Ok(line), Ok(end_column)) = (u32::try_from(line), u32::try_from(text.len())) else {
+            state
+                .errors
+                .push("go.mod module directive exceeds the canonical position width".to_owned());
+            return;
+        };
+        let id = generate_node_id(&state.file_path, &NodeKind::Module, path, line);
+        state.nodes.push(Node {
+            id: id.clone(),
+            kind: NodeKind::Module,
+            name: path.to_owned(),
+            qualified_name: format!("{}::{path}", state.qualified_prefix()),
+            file_path: state.file_path.clone(),
+            start_line: line,
+            attrs_start_line: line,
+            end_line: line,
+            start_column: 0,
+            end_column,
+            signature: Some(text.trim().to_owned()),
+            docstring: None,
+            visibility: Visibility::Pub,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            updated_at: state.timestamp,
+            parent_id: None,
+        });
+        if let Some(parent_id) = state.parent_node_id() {
+            state.edges.push(Edge {
+                source: parent_id.to_string(),
+                target: id,
+                kind: EdgeKind::Contains,
+                line: Some(line),
+            });
+        }
+    }
+
+    /// One import row per spec: a package bound under its alias or its
+    /// default name, a dot import as a glob, and a blank import as a load.
+    fn import_evidence(
+        state: &mut ExtractionState,
+        imports: &mut Vec<ExtractedImportEvidenceV1>,
+        declaration: TsNode<'_>,
+    ) {
+        let mut specs = Vec::new();
+        let mut cursor = declaration.walk();
+        for child in declaration.named_children(&mut cursor) {
+            match child.kind() {
+                "import_spec" => specs.push(child),
+                "import_spec_list" => {
+                    let mut inner = child.walk();
+                    specs.extend(
+                        child
+                            .named_children(&mut inner)
+                            .filter(|spec| spec.kind() == "import_spec"),
+                    );
+                }
+                _ => {}
+            }
+        }
+        for spec in specs {
+            let Some(path) = spec.child_by_field_name("path") else {
+                continue;
+            };
+            let path = state.node_text(path).trim_matches(|c| c == '"' || c == '`');
+            if path.is_empty() {
+                continue;
+            }
+            let alias = spec
+                .child_by_field_name("name")
+                .map(|name| state.node_text(name));
+            let binding = match alias {
+                Some(".") => ImportBindingV1::Glob,
+                Some("_") => ImportBindingV1::SideEffect,
+                Some(local) => ImportBindingV1::Namespace { local },
+                None => ImportBindingV1::Namespace {
+                    local: go_default_package_name(path),
+                },
+            };
+            match ExtractedImportEvidenceV1::private_binding(
+                &state.file_path,
+                "go",
+                path,
+                binding,
+                ImportNamespaceV1::Value,
+                spec,
+            ) {
+                Ok(row) => imports.push(row),
+                Err(error) => state.errors.push(error),
+            }
+        }
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -1213,7 +1345,7 @@ impl GoExtractor {
 
 impl crate::LanguageExtractor for GoExtractor {
     fn extensions(&self) -> &[&str] {
-        &["go"]
+        &["go", "mod"]
     }
 
     fn language_name(&self) -> &'static str {
@@ -1228,8 +1360,28 @@ impl crate::LanguageExtractor for GoExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(
-            GoExtractor::extract_tree(file_path, source, tree, scope),
-        )
+        GoExtractor::extract_tree(file_path, source, tree, scope)
+    }
+}
+
+/// The package name an unaliased import binds by convention: the last path
+/// element, skipping a major-version element (`/v2`) and a `gopkg.in`
+/// version suffix (`yaml.v3`). A package declaring another name binds that
+/// name instead, which the seal then finds no import for.
+fn go_default_package_name(path: &str) -> &str {
+    let is_version = |segment: &str| {
+        segment
+            .strip_prefix('v')
+            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let mut segments = path.rsplit('/');
+    let last = segments.next().unwrap_or(path);
+    let name = match segments.next() {
+        Some(previous) if is_version(last) => previous,
+        _ => last,
+    };
+    match name.rsplit_once('.') {
+        Some((stem, version)) if is_version(version) => stem,
+        _ => name,
     }
 }

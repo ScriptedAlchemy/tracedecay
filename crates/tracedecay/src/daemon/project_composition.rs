@@ -712,6 +712,7 @@ impl ProjectOpenInputs<'_> {
                 self.canonical_project_path,
                 self.handshake,
                 self.store_administration,
+                self.cancellation,
             )
             .await?,
         );
