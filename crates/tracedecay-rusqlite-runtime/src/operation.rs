@@ -117,6 +117,48 @@ impl From<rusqlite::Error> for StorageOperationError {
     }
 }
 
+impl StorageOperationExecutor for Box<dyn StorageOperationExecutor + Send> {
+    fn execute(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        payload: &RepositoryWritePayloadV1,
+    ) -> rusqlite::Result<()> {
+        (**self).execute(savepoint, payload)
+    }
+
+    fn enqueue_outbox(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        entry: &TransactionalOutboxEntryV1,
+    ) -> rusqlite::Result<()> {
+        (**self).enqueue_outbox(savepoint, entry)
+    }
+
+    fn apply_inbox(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        entry: &TransactionalOutboxEntryV1,
+    ) -> rusqlite::Result<()> {
+        (**self).apply_inbox(savepoint, entry)
+    }
+
+    fn acknowledge_outbox(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        receipt: &TransactionalInboxReceiptV1,
+    ) -> rusqlite::Result<()> {
+        (**self).acknowledge_outbox(savepoint, receipt)
+    }
+
+    fn execute_closed(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        payload: &RepositoryWritePayloadV1,
+    ) -> Result<(), StorageOperationError> {
+        (**self).execute_closed(savepoint, payload)
+    }
+}
+
 pub(crate) fn execute<E: StorageOperationExecutor>(
     savepoint: &Savepoint<'_>,
     request: &RuntimeSubmitRequestV1,

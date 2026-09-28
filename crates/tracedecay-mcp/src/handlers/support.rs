@@ -165,24 +165,6 @@ pub fn require_positive_limit(limit: usize, tool_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
-/// fallback alias.
-pub fn require_node_id(args: &Value) -> Result<&str> {
-    let node_id = args
-        .get("node_id")
-        .or_else(|| args.get("id"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: node_id".to_string(),
-        })?;
-    if node_id.trim().is_empty() {
-        return Err(TraceDecayError::Config {
-            message: "invalid parameter: node_id must not be empty".to_string(),
-        });
-    }
-    Ok(node_id)
-}
-
 /// Returns the user-provided `path` argument, falling back to the scope
 /// prefix when the argument is absent.
 pub fn effective_path<'a>(args: &'a Value, scope_prefix: Option<&'a str>) -> Option<&'a str> {
@@ -205,40 +187,7 @@ mod tests {
     use serde_json::json;
     use tracedecay_contracts::retrieval::NodeSurfaceRequestV1;
 
-    use super::{
-        decode_primitive_request, require_node_id, require_positive_limit, unique_file_paths,
-    };
-
-    #[test]
-    fn node_id_validation_accepts_alias_and_rejects_missing_or_blank_values() {
-        assert!(matches!(
-            require_node_id(&json!({"node_id": "fn:canonical", "id": "fn:alias"})),
-            Ok("fn:canonical")
-        ));
-        assert!(matches!(
-            require_node_id(&json!({"id": "trait:alias"})),
-            Ok("trait:alias")
-        ));
-        assert_eq!(
-            require_node_id(&json!({"query": "missing"}))
-                .unwrap_err()
-                .to_string(),
-            "config error: missing required parameter: node_id"
-        );
-
-        for args in [
-            json!({"node_id": ""}),
-            json!({"node_id": "   "}),
-            json!({"node_id": "\t\n"}),
-            json!({"id": ""}),
-        ] {
-            let error = require_node_id(&args).expect_err("blank node id must fail");
-            assert!(
-                error.to_string().contains("node_id must not be empty"),
-                "unexpected error for {args}: {error}"
-            );
-        }
-    }
+    use super::{decode_primitive_request, require_positive_limit, unique_file_paths};
 
     #[test]
     fn primitive_decode_strips_transport_keys_and_rejects_legacy_aliases() {

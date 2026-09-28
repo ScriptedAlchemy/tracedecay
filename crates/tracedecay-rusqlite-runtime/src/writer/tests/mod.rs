@@ -8,28 +8,29 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, Savepoint, Transaction};
+use rusqlite::{Connection, Savepoint};
 use tracedecay_domain::{
     FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
     FactLineageEventV1, FactOwnerV1, PayloadAccessState, ProjectId, ProvenanceId, UtcMicros,
 };
 use tracedecay_store::{
-    AdmissionConfigV1, AnchorDispositionReasonClassV1, AnchorDispositionStateV1, CommitSequenceV1,
-    FactWriteBatch, IdempotencyIdentityV1, LocatorDigest, RepositoryOperationEnvelopeV1,
-    RepositoryWritePayloadV1, RetrievalAnchorDispositionRecordV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
-    RuntimeSubmitRequestV1, StorageRuntimeErrorV1, StoreCommitReceiptV1, StoreRuntimeBindingV1,
-    VerifiedStoreLocatorV1,
+    AdmissionConfigV1, AnchorDispositionReasonClassV1, AnchorDispositionStateV1, FactWriteBatch,
+    LocatorDigest, RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1,
+    RetrievalAnchorDispositionRecordV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
+    RuntimeInterruptionV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    StorageRuntimeErrorV1, VerifiedStoreLocatorV1,
 };
 
 use super::*;
 use crate::{
+    StorageOperationExecutor,
     checkpoint::{
         CheckpointBlockers, CheckpointDecision, CheckpointInterruption, CheckpointKind,
         CheckpointMode, CheckpointOutcome, CheckpointPressure, CheckpointReport, CheckpointResult,
         MaintenanceCheckpointMode, WalPressure, WalSample,
     },
     maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
+    persistence::RuntimeWriterPersistence,
     test_support::{binding, metadata, request, scope},
 };
 
@@ -63,7 +64,6 @@ impl Drop for TestDatabase {
 
 struct TestPersistence {
     applied: Arc<AtomicU64>,
-    sequence: u64,
 }
 
 struct BlockingPersistence {
@@ -135,198 +135,99 @@ struct CancellingFirstRequestPersistence {
 
 struct LongRunningPersistence;
 
-impl WriterPersistence for LongRunningPersistence {
-    fn lookup_idempotency(
+impl StorageOperationExecutor for LongRunningPersistence {
+    fn execute(
         &mut self,
-        _transaction: &Transaction<'_>,
-        _binding: &StoreRuntimeBindingV1,
-        _idempotency: &IdempotencyIdentityV1,
-    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
-        Ok(None)
-    }
-
-    fn apply_and_record(
-        &mut self,
-        savepoint: &mut Savepoint<'_>,
-        _binding: &StoreRuntimeBindingV1,
-        request: &RuntimeSubmitRequestV1,
-    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
-        savepoint
-            .query_row(
-                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT sum(x) FROM n",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|_| settlement::infrastructure("run long cancellation query"))?;
-        let metadata = &request.envelope().metadata;
-        Ok(StoreCommitReceiptV1 {
-            operation_id: metadata.operation_id.clone(),
-            idempotency: metadata.idempotency.clone(),
-            shard_id: metadata.shard_id.clone(),
-            incarnation: metadata.incarnation,
-            authority_epoch: metadata.authority_epoch,
-            commit_sequence: CommitSequenceV1(1),
-            committed_at: metadata.admitted_at,
-        })
+        savepoint: &Savepoint<'_>,
+        _payload: &RepositoryWritePayloadV1,
+    ) -> rusqlite::Result<()> {
+        savepoint.query_row(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT sum(x) FROM n",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(())
     }
 }
 
-impl WriterPersistence for CancellingFirstRequestPersistence {
-    fn lookup_idempotency(
+impl StorageOperationExecutor for CancellingFirstRequestPersistence {
+    fn execute(
         &mut self,
-        _transaction: &Transaction<'_>,
-        _binding: &StoreRuntimeBindingV1,
-        _idempotency: &IdempotencyIdentityV1,
-    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
-        Ok(None)
-    }
-
-    fn apply_and_record(
-        &mut self,
-        savepoint: &mut Savepoint<'_>,
-        _binding: &StoreRuntimeBindingV1,
-        request: &RuntimeSubmitRequestV1,
-    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
-        savepoint
-            .execute_batch("CREATE TABLE IF NOT EXISTS cancellation_batch (value INTEGER NOT NULL)")
-            .map_err(|_| settlement::infrastructure("create cancellation batch table"))?;
+        savepoint: &Savepoint<'_>,
+        _payload: &RepositoryWritePayloadV1,
+    ) -> rusqlite::Result<()> {
+        savepoint.execute_batch(
+            "CREATE TABLE IF NOT EXISTS cancellation_batch (value INTEGER NOT NULL)",
+        )?;
         self.sequence += 1;
         if self.sequence == 1 {
             self.first_probe.interruption.store(1, Ordering::SeqCst);
         } else {
-            savepoint
-                .query_row(
-                    "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(|_| settlement::infrastructure("run unrelated batch query"))?;
+            savepoint.query_row(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
         }
         let sequence = i64::try_from(self.sequence)
-            .map_err(|_| settlement::infrastructure("convert cancellation batch marker"))?;
-        savepoint
-            .execute(
-                "INSERT INTO cancellation_batch(value) VALUES (?1)",
-                [sequence],
-            )
-            .map_err(|_| settlement::infrastructure("insert cancellation batch marker"))?;
-        let metadata = &request.envelope().metadata;
-        Ok(StoreCommitReceiptV1 {
-            operation_id: metadata.operation_id.clone(),
-            idempotency: metadata.idempotency.clone(),
-            shard_id: metadata.shard_id.clone(),
-            incarnation: metadata.incarnation,
-            authority_epoch: metadata.authority_epoch,
-            commit_sequence: CommitSequenceV1(self.sequence),
-            committed_at: metadata.admitted_at,
-        })
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        savepoint.execute(
+            "INSERT INTO cancellation_batch(value) VALUES (?1)",
+            [sequence],
+        )?;
+        Ok(())
     }
 }
 
-impl WriterPersistence for RevokingPersistence {
-    fn lookup_idempotency(
+impl StorageOperationExecutor for RevokingPersistence {
+    fn execute(
         &mut self,
-        transaction: &Transaction<'_>,
-        binding: &StoreRuntimeBindingV1,
-        idempotency: &IdempotencyIdentityV1,
-    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
-        self.inner
-            .lookup_idempotency(transaction, binding, idempotency)
-    }
-
-    fn apply_and_record(
-        &mut self,
-        savepoint: &mut Savepoint<'_>,
-        binding: &StoreRuntimeBindingV1,
-        request: &RuntimeSubmitRequestV1,
-    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
-        let receipt = self.inner.apply_and_record(savepoint, binding, request)?;
+        savepoint: &Savepoint<'_>,
+        payload: &RepositoryWritePayloadV1,
+    ) -> rusqlite::Result<()> {
+        self.inner.execute(savepoint, payload)?;
         self.allowed.store(false, Ordering::SeqCst);
-        Ok(receipt)
+        Ok(())
     }
 }
 
-impl WriterPersistence for TestPersistence {
-    fn lookup_idempotency(
+impl StorageOperationExecutor for TestPersistence {
+    fn execute(
         &mut self,
-        _transaction: &Transaction<'_>,
-        _binding: &StoreRuntimeBindingV1,
-        _idempotency: &IdempotencyIdentityV1,
-    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
-        Ok(None)
-    }
-
-    fn apply_and_record(
-        &mut self,
-        savepoint: &mut Savepoint<'_>,
-        _binding: &StoreRuntimeBindingV1,
-        request: &RuntimeSubmitRequestV1,
-    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
+        savepoint: &Savepoint<'_>,
+        _payload: &RepositoryWritePayloadV1,
+    ) -> rusqlite::Result<()> {
         savepoint
-            .execute_batch("CREATE TABLE IF NOT EXISTS writer_test (value INTEGER NOT NULL)")
-            .map_err(|_| settlement::infrastructure("create test table"))?;
-        savepoint
-            .execute("INSERT INTO writer_test(value) VALUES (1)", [])
-            .map_err(|_| settlement::infrastructure("insert test marker"))?;
+            .execute_batch("CREATE TABLE IF NOT EXISTS writer_test (value INTEGER NOT NULL)")?;
+        savepoint.execute("INSERT INTO writer_test(value) VALUES (1)", [])?;
         self.applied.fetch_add(1, Ordering::SeqCst);
-        self.sequence += 1;
-        let metadata = &request.envelope().metadata;
-        Ok(StoreCommitReceiptV1 {
-            operation_id: metadata.operation_id.clone(),
-            idempotency: metadata.idempotency.clone(),
-            shard_id: metadata.shard_id.clone(),
-            incarnation: metadata.incarnation,
-            authority_epoch: metadata.authority_epoch,
-            commit_sequence: CommitSequenceV1(self.sequence),
-            committed_at: metadata.admitted_at,
-        })
+        Ok(())
     }
 }
 
-impl WriterPersistence for BlockingPersistence {
-    fn lookup_idempotency(
+impl StorageOperationExecutor for BlockingPersistence {
+    fn execute(
         &mut self,
-        _transaction: &Transaction<'_>,
-        _binding: &StoreRuntimeBindingV1,
-        _idempotency: &IdempotencyIdentityV1,
-    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
-        Ok(None)
-    }
-
-    fn apply_and_record(
-        &mut self,
-        savepoint: &mut Savepoint<'_>,
-        _binding: &StoreRuntimeBindingV1,
-        request: &RuntimeSubmitRequestV1,
-    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
+        savepoint: &Savepoint<'_>,
+        _payload: &RepositoryWritePayloadV1,
+    ) -> rusqlite::Result<()> {
         self.sequence += 1;
         self.entered
             .send(self.sequence)
-            .map_err(|_| settlement::infrastructure("report blocked test write"))?;
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         self.release
             .recv()
-            .map_err(|_| settlement::infrastructure("release blocked test write"))?;
-        savepoint
-            .execute_batch("CREATE TABLE IF NOT EXISTS maintenance_order (value INTEGER NOT NULL)")
-            .map_err(|_| settlement::infrastructure("create maintenance order table"))?;
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        savepoint.execute_batch(
+            "CREATE TABLE IF NOT EXISTS maintenance_order (value INTEGER NOT NULL)",
+        )?;
         let sequence = i64::try_from(self.sequence)
-            .map_err(|_| settlement::infrastructure("convert maintenance order marker"))?;
-        savepoint
-            .execute(
-                "INSERT INTO maintenance_order(value) VALUES (?1)",
-                [sequence],
-            )
-            .map_err(|_| settlement::infrastructure("insert maintenance order marker"))?;
-        let metadata = &request.envelope().metadata;
-        Ok(StoreCommitReceiptV1 {
-            operation_id: metadata.operation_id.clone(),
-            idempotency: metadata.idempotency.clone(),
-            shard_id: metadata.shard_id.clone(),
-            incarnation: metadata.incarnation,
-            authority_epoch: metadata.authority_epoch,
-            commit_sequence: CommitSequenceV1(self.sequence),
-            committed_at: metadata.admitted_at,
-        })
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        savepoint.execute(
+            "INSERT INTO maintenance_order(value) VALUES (?1)",
+            [sequence],
+        )?;
+        Ok(())
     }
 }
 
@@ -416,38 +317,27 @@ fn start(
     request: &RuntimeSubmitRequestV1,
     applied: Arc<AtomicU64>,
 ) -> PersistentWriter {
-    let binding = binding(&request.envelope().metadata);
-    let locator = VerifiedStoreLocatorV1::new(
-        binding.shard_id.clone(),
-        binding.incarnation,
-        LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
-    );
-    PersistentWriter::start_with_persistence(
-        ExistingWriterLocator::new(binding, locator, database.0.clone()).unwrap(),
-        AdmissionConfigV1::default(),
-        Box::new(TestPersistence {
-            applied,
-            sequence: 0,
-        }),
-    )
-    .unwrap()
+    start_with_executor(database, request, TestPersistence { applied })
 }
 
-fn start_with_persistence(
+fn start_with_executor<E>(
     database: &TestDatabase,
     request: &RuntimeSubmitRequestV1,
-    persistence: Box<dyn WriterPersistence>,
-) -> PersistentWriter {
+    executor: E,
+) -> PersistentWriter
+where
+    E: StorageOperationExecutor + Send + 'static,
+{
     let binding = binding(&request.envelope().metadata);
     let locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
         binding.incarnation,
         LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
     );
-    PersistentWriter::start_with_persistence(
+    PersistentWriter::start(
         ExistingWriterLocator::new(binding, locator, database.0.clone()).unwrap(),
         AdmissionConfigV1::default(),
-        persistence,
+        executor,
     )
     .unwrap()
 }
@@ -527,7 +417,10 @@ fn actor_commits_before_reply_and_releases_admission() {
         .build()
         .unwrap();
     let outcome = runtime.block_on(writer.submit(request, probe)).unwrap();
-    assert!(matches!(outcome, RuntimeSubmitOutcomeV1::Committed { .. }));
+    let RuntimeSubmitOutcomeV1::Committed { receipt } = outcome else {
+        panic!("writer must commit through the runtime ledger");
+    };
+    assert_eq!(receipt.commit_sequence.0, 1);
     runtime
         .block_on(checkpoint_status.changed())
         .expect("writer publishes a scheduled WAL sample");
@@ -537,11 +430,22 @@ fn actor_commits_before_reply_and_releases_admission() {
     ));
     assert_eq!(applied.load(Ordering::SeqCst), 1);
     assert_eq!(writer.telemetry_snapshot().queue.queued_operations, 0);
-    let rows: i64 = Connection::open(&database.0)
-        .unwrap()
+    let opened = Connection::open(&database.0).unwrap();
+    let rows: i64 = opened
         .query_row("SELECT COUNT(*) FROM writer_test", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 1);
+    let (operation_id, commit_sequence): (String, i64) = opened
+        .query_row(
+            "SELECT operation_id, commit_sequence
+             FROM td_runtime_writer_idempotency_v2
+             WHERE idempotency_key = 'key.writer'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(operation_id, "operation.writer");
+    assert_eq!(commit_sequence, 1);
     writer.shutdown_and_join().unwrap();
 }
 
@@ -630,14 +534,14 @@ fn queued_compatible_writes_commit_in_one_transaction() {
 
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let writer = Arc::new(start_with_persistence(
+    let writer = Arc::new(start_with_executor(
         &database,
         &holder,
-        Box::new(BlockingPersistence {
+        BlockingPersistence {
             entered: entered_tx,
             release: release_rx,
             sequence: 0,
-        }),
+        },
     ));
     let before = writer.telemetry_snapshot().transactions;
 
