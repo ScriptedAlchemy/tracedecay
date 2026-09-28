@@ -9,24 +9,23 @@ permissions:
   actions: write
   pull-requests: read
 
+# Share CI's PR key so closing cancels its run before cleanup gets a runner.
 concurrency:
-  group: pr-run-hygiene-${{ github.event.pull_request.number }}
+  group: ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  cancel:
-    name: Cancel superseded runs
+  cache-cleanup:
+    name: Delete closed PR caches
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
-      PR_URL: ${{ github.event.pull_request.url }}
       CLOSED_AT: ${{ github.event.pull_request.closed_at }}
-      OWN_RUN: ${{ github.run_id }}
     steps:
-      - name: Release runs and caches owned by the closed pull request
+      - name: Delete caches owned by the closed pull request
         run: |
           set -euo pipefail
           require_same_closure() {
@@ -38,29 +37,7 @@ jobs:
             fi
           }
           require_same_closure
-          cancelled=0
           failed=0
-          for status in queued in_progress waiting pending; do
-            runs=$(gh api --paginate "repos/$REPO/actions/runs?event=pull_request&status=$status&per_page=100" |
-              jq -r --argjson pr "$PR_NUMBER" --arg url "$PR_URL" --arg closed "$CLOSED_AT" --argjson own "$OWN_RUN" '
-                .workflow_runs[]
-                | select(.event == "pull_request" and .id != $own)
-                | select((.created_at | fromdateiso8601) <= ($closed | fromdateiso8601))
-                | select(any(.pull_requests[]?; .number == $pr and .url == $url))
-                | .id')
-            for run in $runs; do
-              require_same_closure
-              if gh api -X POST "repos/$REPO/actions/runs/$run/cancel" >/dev/null; then
-                echo "cancelled run $run ($status) for PR $PR_NUMBER"
-                cancelled=$((cancelled + 1))
-              elif run_status=$(gh api "repos/$REPO/actions/runs/$run" --jq .status) && [[ $run_status == completed ]]; then
-                echo "run $run completed before cancellation"
-              else
-                failed=1
-              fi
-            done
-          done
-          require_same_closure
           merge_ref="refs/pull/$PR_NUMBER/merge"
           caches=$(gh api --paginate "repos/$REPO/actions/caches?ref=$merge_ref&per_page=100" --jq '.actions_caches[].id')
           deleted=0
@@ -72,5 +49,5 @@ jobs:
               failed=1
             fi
           done
-          echo "cancelled $cancelled run(s) and deleted $deleted cache entry(ies) for PR $PR_NUMBER"
+          echo "deleted $deleted cache entry(ies) for PR $PR_NUMBER"
           exit "$failed"

@@ -91,10 +91,17 @@ order. The Actions page shows the waiting and running jobs; no GitHub App or
 additional service needs installing.
 
 Manual dispatch retains the optional OS, host, profiling and full-workspace
-inputs. Closing a PR cancels only automatic runs associated with that PR
-from before the close event. Cleanup checks that the PR remains closed and
-that the event still names its current closure before deleting merge-ref
-caches. Manual dispatches remain under the operator's control.
+inputs. The trusted close workflow shares the PR's CI concurrency group,
+so GitHub cancels its CI before allocating the cache-cleanup runner. GitHub
+removes run-to-PR associations after merging, so the run-list API cannot own
+this cancellation. Cleanup checks that the PR remains closed and that the
+event still names its current closure before deleting merge-ref caches.
+Manual dispatches remain under the operator's control.
+
+Native cancellation follows GitHub's event arrival order. A delayed close
+event can cancel a reopened PR's newer run before cache cleanup checks its
+state. Rerun CI in Actions if that happens; the cache guard does not prevent
+this cancellation race.
 
 ## What was measured
 
