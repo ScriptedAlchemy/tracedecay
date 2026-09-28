@@ -147,7 +147,10 @@ pub struct CodeLexicalArtifactReaderV1 {
     fuzzy_vocabulary: Arc<OnceLock<Arc<FuzzyVocabularyV1>>>,
     /// Scoring prefaces for every document. A common term touches thousands
     /// of blocks; decoding that window on every query was the lexical walk.
-    scoring_prefaces: Arc<OnceLock<Arc<ScoringPrefaceIndexV1>>>,
+    scoring_prefaces: Arc<StdMutex<Option<Arc<ScoringPrefaceIndexV1>>>>,
+    /// The admitted reader ceiling left after metadata and page caches. The
+    /// preface cache must fit here: it is held for the reader's lifetime.
+    preface_ceiling_bytes: usize,
 }
 
 struct ArtifactReaders {
@@ -887,7 +890,8 @@ impl CodeLexicalArtifactReaderV1 {
             receipt: stored,
             retained_owned_bytes,
             fuzzy_vocabulary: Arc::new(OnceLock::new()),
-            scoring_prefaces: Arc::new(OnceLock::new()),
+            scoring_prefaces: Arc::new(StdMutex::new(None)),
+            preface_ceiling_bytes: cache_budget_bytes.saturating_sub(retained_owned_bytes),
         })
     }
 
@@ -1398,29 +1402,32 @@ impl CodeLexicalArtifactReaderV1 {
         }
     }
 
-    /// One decoded preface per document, shared by later queries on this
-    /// reader. The first lexical read pays the scan; a warm common-term
+    /// Every block's scoring preface, shared by later queries on this reader.
+    /// The first lexical read pays the scan while concurrent first reads wait
+    /// for it rather than each holding their own copy; a warm common-term
     /// walk then looks up field lengths without re-reading row blocks.
     fn scoring_preface_index(
         &self,
         connection: &Connection,
         control: &dyn RetrievalExecutionControl,
     ) -> Result<Arc<ScoringPrefaceIndexV1>, CodeLexicalArtifactErrorV1> {
-        if let Some(cached) = self.scoring_prefaces.get() {
+        let mut slot = self.scoring_prefaces.lock().map_err(|_| {
+            CodeLexicalArtifactErrorV1::Io("lexical artifact preface lock is poisoned".to_owned())
+        })?;
+        if let Some(cached) = slot.as_ref() {
             return Ok(Arc::clone(cached));
         }
-        let loaded = hotpath::measure_block!("query.artifact.preface.load", {
-            load_scoring_preface_index(connection, || {
+        let loaded = Arc::new(hotpath::measure_block!("query.artifact.preface.load", {
+            load_scoring_preface_index(connection, self.preface_ceiling_bytes, || {
                 retrieval_checkpoint(control).map_err(|_| {
                     CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
                 })
             })
-        })?;
+        })?);
         #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.preface.rows").set(loaded.len());
-        Ok(Arc::clone(
-            self.scoring_prefaces.get_or_init(|| Arc::new(loaded)),
-        ))
+        hotpath::gauge!("query.artifact.preface.bytes").set(loaded.retained_bytes());
+        *slot = Some(Arc::clone(&loaded));
+        Ok(loaded)
     }
 }
 
