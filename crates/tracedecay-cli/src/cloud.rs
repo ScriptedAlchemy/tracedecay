@@ -11,6 +11,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
+use tracedecay_application::http_agent::http_agent;
 use tracedecay_dashboard_api::cloud::ReleaseLookupError;
 
 /// The Cloudflare Worker endpoint URL.
@@ -35,10 +36,11 @@ struct WorkerResponse {
 
 /// Creates a ureq agent with the given timeout.
 pub fn agent_with_timeout(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .build()
-        .into()
+    http_agent(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .build(),
+    )
 }
 
 /// Uploads pending tokens to the worldwide counter.
@@ -210,11 +212,25 @@ pub(crate) fn get_release_json<T: DeserializeOwned>(
     authorization: Option<&str>,
     timeout: Duration,
 ) -> Result<Option<T>, ReleaseLookupError> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    get_release_json_over(
+        &http_agent(release_lookup_config(timeout)),
+        url,
+        authorization,
+    )
+}
+
+fn release_lookup_config(timeout: Duration) -> ureq::config::Config {
+    ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
         .build()
-        .into();
+}
+
+fn get_release_json_over<T: DeserializeOwned>(
+    agent: &ureq::Agent,
+    url: &str,
+    authorization: Option<&str>,
+) -> Result<Option<T>, ReleaseLookupError> {
     let mut request = agent
         .get(url)
         .header("User-Agent", "tracedecay")
@@ -392,6 +408,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
+    use tracedecay_application::http_agent::{InterruptFirstReadConnector, http_agent_over};
+    use ureq::unversioned::transport::DefaultConnector;
 
     fn release(tag: &str, prerelease: bool, asset_names: &[&str]) -> GitHubRelease {
         GitHubRelease {
@@ -601,6 +619,43 @@ mod tests {
                 channel: "beta",
                 platform: current_platform(),
             }
+        );
+    }
+
+    /// A caught signal fails a socket read that has a receive timeout with
+    /// `EINTR` even under `SA_RESTART`, and the CLI catches `SIGCHLD` while
+    /// tokio supervises any child. The lookup resumes the wait instead of
+    /// reporting GitHub as unreachable.
+    #[test]
+    fn a_signal_interrupting_the_lookup_is_resumed_not_reported_as_unreachable() {
+        let tag = "v0.9.9-beta.1";
+        let asset = asset_name("0.9.9-beta.1", true);
+        let (base, _heads) = stub(Some(respond(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            &format!(
+                r#"[{{"tag_name":"{tag}","prerelease":true,"assets":[{{"name":"{asset}"}}]}}]"#
+            ),
+        )));
+        let agent = http_agent_over(
+            release_lookup_config(FETCH_TIMEOUT),
+            InterruptFirstReadConnector(DefaultConnector::new()),
+        );
+
+        let releases: Vec<GitHubRelease> = get_release_json_over(
+            &agent,
+            &format!("{}?per_page=10", releases_url(&base)),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            releases
+                .iter()
+                .map(|release| release.tag_name.as_str())
+                .collect::<Vec<_>>(),
+            [tag]
         );
     }
 
