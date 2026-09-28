@@ -303,6 +303,60 @@ async fn replace_symbol_proves_omitted_docs_and_attributes_are_removed() {
     close_test_graph(fixture).await;
 }
 
+const LICENSED: &str = "\
+// SPDX-License-Identifier: MIT
+// Copyright 2026 Example
+
+/// Counts widgets.
+fn count() -> u32 {
+    1
+}
+";
+
+const LICENSED_APPLIED: &str = "\
+// SPDX-License-Identifier: MIT
+// Copyright 2026 Example
+
+fn count() -> u32 {
+    2
+}
+";
+
+#[tokio::test]
+async fn replace_symbol_keeps_a_file_header_separated_by_a_blank_line() {
+    let (_dir, project, fixture) = open_sources(&[("src/main.rs", LICENSED)]).await;
+
+    let preview = call_replace(
+        &fixture,
+        json!({
+            "symbol": "count",
+            "new_source": COUNT_NEW_SOURCE,
+            "dry_run": true
+        }),
+    )
+    .await;
+    assert_eq!(preview["success"], true, "{preview}");
+    assert_eq!(
+        preview["replaced_span"],
+        "/// Counts widgets.\nfn count() -> u32 {\n    1\n}"
+    );
+    let apply = call_replace(
+        &fixture,
+        json!({
+            "symbol": "count",
+            "new_source": COUNT_NEW_SOURCE,
+            "idempotency_key": "mcp-test.replace-symbol.keep-header",
+            "expected_state": preview["expected_state"]
+        }),
+    )
+    .await;
+    assert_eq!(apply["success"], true, "{apply}");
+    assert_eq!(apply["message"], "replaced src/main.rs:4-7");
+    assert_eq!(read_project_file(&project, "src/main.rs"), LICENSED_APPLIED);
+
+    close_test_graph(fixture).await;
+}
+
 #[tokio::test]
 async fn replace_symbol_proves_bare_name_prefers_the_callable() {
     let (_dir, project, fixture) = open_sources(&[("src/main.rs", CALLABLE_SHADOW)]).await;
