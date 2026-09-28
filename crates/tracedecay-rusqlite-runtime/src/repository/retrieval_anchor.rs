@@ -607,7 +607,7 @@ mod tests {
         let source = anchor("retrieval.source.fixture");
         insert_anchor(&connection, &source);
         let snapshot = connection.transaction().unwrap();
-        assert!(
+        assert_eq!(
             RetrievalAnchorExecutor
                 .execute_read(
                     &snapshot,
@@ -616,7 +616,9 @@ mod tests {
                         owner: owner(),
                     },
                 )
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "Conversion error from type Text at index: 0, missing field `anchor_id` at line 1 column 2"
         );
     }
 
@@ -652,7 +654,7 @@ mod tests {
             .unwrap();
 
         let snapshot = connection.transaction().unwrap();
-        assert!(
+        assert_eq!(
             RetrievalAnchorExecutor
                 .execute_read(
                     &snapshot,
@@ -661,7 +663,9 @@ mod tests {
                         owner: owner(),
                     },
                 )
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "Invalid parameter name: retrieval anchor disposition physical columns mismatch"
         );
     }
 }

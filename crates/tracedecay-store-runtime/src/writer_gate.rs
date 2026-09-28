@@ -266,6 +266,12 @@ mod tests {
                 .is_some(),
             "owner bookkeeping must not queue behind an index sync"
         );
+        assert!(
+            gates
+                .try_acquire(&store("/a", StoreWriterClass::Content))
+                .is_none(),
+            "a second index sync on the same store still queues"
+        );
     }
 
     #[tokio::test]
@@ -286,22 +292,34 @@ mod tests {
     #[tokio::test]
     async fn daemon_scope_excludes_every_store() {
         let gates = StoreWriterGates::default();
-        let _daemon = gates.acquire(&WriterScope::Daemon).await;
+        let daemon = gates.acquire(&WriterScope::Daemon).await;
         assert!(
             gates
                 .try_acquire(&store("/a", StoreWriterClass::Owner))
                 .is_none(),
             "daemon-wide administration must exclude store writers"
         );
+        drop(daemon);
+        assert!(
+            gates
+                .try_acquire(&store("/a", StoreWriterClass::Owner))
+                .is_some(),
+            "store writers are admitted once daemon administration releases"
+        );
     }
 
     #[tokio::test]
     async fn a_store_writer_excludes_daemon_scope() {
         let gates = StoreWriterGates::default();
-        let _store = gates.acquire(&store("/a", StoreWriterClass::Content)).await;
+        let store_writer = gates.acquire(&store("/a", StoreWriterClass::Content)).await;
         assert!(
             gates.try_acquire(&WriterScope::Daemon).is_none(),
             "a store writer must exclude daemon-wide administration"
+        );
+        drop(store_writer);
+        assert!(
+            gates.try_acquire(&WriterScope::Daemon).is_some(),
+            "daemon administration is admitted once the store writer releases"
         );
     }
 

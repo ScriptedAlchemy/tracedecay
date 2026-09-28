@@ -856,12 +856,14 @@ fn automatic_fact_state_wire_contract_is_terminal_only() {
 
 #[test]
 fn automatic_fact_evidence_rejects_unknown_persisted_fields() {
-    assert!(
+    assert_eq!(
         serde_json::from_value::<ProjectMemoryAutomaticFactEvidenceV1>(json!({
             "evidence_hash": "evidence.fixture",
             "unexpected": true,
         }))
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "unknown field `unexpected`, expected one of `evidence_hash`, `item`, `validation`"
     );
 }
 

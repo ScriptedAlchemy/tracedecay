@@ -304,10 +304,20 @@ mod store_removal_tests {
         let dangling = tmp.path().join("dangling");
         symlink(tmp.path().join("missing"), &dangling).unwrap();
 
-        assert!(remove_store_directory(&link).is_err());
+        assert_eq!(
+            remove_store_directory(&link).unwrap_err().to_string(),
+            format!(
+                "config error: failed to validate store removal target '{}': store removal target path must not contain symlinks",
+                link.display()
+            )
+        );
         assert!(real.exists(), "the symlink target must survive the refusal");
-        assert!(
-            verify_store_path_absent(&dangling).is_err(),
+        assert_eq!(
+            verify_store_path_absent(&dangling).unwrap_err().to_string(),
+            format!(
+                "config error: store removal did not remove expected namespace entry '{}'",
+                dangling.display()
+            ),
             "a dangling symlink remains a namespace entry"
         );
     }
