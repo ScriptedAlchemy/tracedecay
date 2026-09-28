@@ -263,10 +263,16 @@ struct StableArtifactFileStateV1 {
     #[cfg(windows)]
     file_index: u64,
     #[cfg(windows)]
-    last_write_time: i64,
-    #[cfg(windows)]
-    change_time: i64,
+    last_write_time: u64,
 }
+
+/// Whether an unchanged [`StableArtifactFileStateV1`] proves the artifact's
+/// bytes unchanged since the full verification that recorded it. Unix ctime
+/// advances on every write and cannot be set back. No Windows timestamp
+/// witnesses a same-length rewrite that restores `LastWriteTime` (NTFS
+/// `ChangeTime` stays put too), so there the state only guards an open against
+/// a concurrent replacement and every reopen re-verifies the content digest.
+const NATIVE_FILE_STATE_WITNESSES_REWRITES: bool = cfg!(unix);
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -432,7 +438,8 @@ impl CodeLexicalArtifactReaderV1 {
     /// Perform the explicit full verification and capture the restore witness
     /// from the same retained file handle after its final digest. Capturing
     /// the state by reopening the pathname would create a gap in which changed
-    /// bytes could be incorrectly vouched for by the earlier digest.
+    /// bytes could be incorrectly vouched for by the earlier digest. No witness
+    /// is captured where native file state cannot prove the bytes unchanged.
     #[hotpath::measure(label = "query.artifact.open_content_addressed_full_verify_with_witness")]
     pub fn open_content_addressed_fully_verified_with_witness(
         path: impl AsRef<Path>,
@@ -441,7 +448,8 @@ impl CodeLexicalArtifactReaderV1 {
         authority: &super::super::CodeLexicalProjectionMetadataV1,
         cache_budget_bytes: usize,
         control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<(Self, CodeLexicalArtifactRestoreWitnessV1), CodeLexicalArtifactErrorV1> {
+    ) -> Result<(Self, Option<CodeLexicalArtifactRestoreWitnessV1>), CodeLexicalArtifactErrorV1>
+    {
         checkpoint(control)?;
         validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
@@ -498,11 +506,15 @@ impl CodeLexicalArtifactReaderV1 {
         verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
         verify_stable_artifact_file_state(&file, &verified_state)?;
         verify_named_path_identity(path, &file)?;
-        let witness = CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
-            expected_file_digest.clone(),
-            reader.receipt.artifact_digest().clone(),
-            verified_state,
-        )?;
+        let witness = NATIVE_FILE_STATE_WITNESSES_REWRITES
+            .then(|| {
+                CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
+                    expected_file_digest.clone(),
+                    reader.receipt.artifact_digest().clone(),
+                    verified_state,
+                )
+            })
+            .transpose()?;
         Ok((reader, witness))
     }
 
@@ -546,6 +558,13 @@ impl CodeLexicalArtifactReaderV1 {
         mut progress: impl FnMut(u64, u64),
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         const TOTAL_RESTORE_CHECKS: u64 = 6;
+        if !NATIVE_FILE_STATE_WITNESSES_REWRITES {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                "native file state on this platform cannot prove the artifact unchanged since \
+                 its full verification"
+                    .to_owned(),
+            ));
+        }
         progress(0, TOTAL_RESTORE_CHECKS);
         checkpoint(control)?;
         let path = path.as_ref();
@@ -3360,16 +3379,15 @@ fn stable_artifact_file_state(
     }
     #[cfg(windows)]
     {
+        use std::os::windows::fs::MetadataExt;
+
         let information = tracedecay_private_fs::windows_file::information(file)
-            .map_err(map_artifact_file_error)?;
-        let change_token = tracedecay_private_fs::windows_file::change_token(file)
             .map_err(map_artifact_file_error)?;
         Ok(StableArtifactFileStateV1 {
             len: metadata.len(),
             volume_serial_number: information.volume_serial_number,
             file_index: information.file_index,
-            last_write_time: change_token.last_write_time,
-            change_time: change_token.change_time,
+            last_write_time: metadata.last_write_time(),
         })
     }
 }

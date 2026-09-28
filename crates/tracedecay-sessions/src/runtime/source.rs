@@ -935,8 +935,9 @@ pub(in crate::runtime) use jsonl::spin_until_jsonl_change_settled;
 pub use jsonl::try_stream_new_jsonl_raw_strict;
 pub(in crate::runtime) use jsonl::try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit;
 pub(in crate::runtime) use jsonl::{
-    JsonlFileChangeToken, JsonlNativeFileIdentity, ResumeDigest, jsonl_change_token_settled,
-    jsonl_file_change_token, jsonl_native_file_identity, jsonl_prefix_digest,
+    JSONL_CHANGE_TOKEN_WITNESSES_REWRITES, JsonlFileChangeToken, JsonlNativeFileIdentity,
+    ResumeDigest, jsonl_change_token_settled, jsonl_file_change_token, jsonl_native_file_identity,
+    jsonl_prefix_digest,
 };
 pub use jsonl::{
     JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,

@@ -255,10 +255,10 @@ impl StatKeyV1 {
         }
     }
 
-    // ponytail: without a change time a stat cannot prove unchanged bytes, so
-    // non-Unix keys never settle and every sweep re-derives every digest, as
-    // before this cache. Upgrade path: the Windows change time once std
-    // exposes it.
+    // ponytail: without a rewrite witness a stat cannot prove unchanged bytes,
+    // so non-Unix keys never settle and every sweep re-derives every digest,
+    // as before this cache. NTFS ChangeTime is not that witness: it stays put
+    // when a writer restores LastWriteTime through its handle.
     #[cfg(not(unix))]
     fn of(metadata: &Metadata) -> Self {
         Self {
