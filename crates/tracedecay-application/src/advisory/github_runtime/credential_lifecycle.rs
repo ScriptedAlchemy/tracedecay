@@ -19,6 +19,7 @@ use super::{
     unregister_profile_github_public_repository_v1,
     unregister_profile_github_read_only_credential_authority_v1,
 };
+use crate::http_agent::http_agent;
 
 type ProfileRepositoryCredentialKeyV1 = (UserProfileId, String, String);
 
@@ -77,16 +78,17 @@ struct GitHubProviderPermissionVerifierV1 {
 impl GitHubProviderPermissionVerifierV1 {
     fn production() -> Self {
         Self {
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(20)))
-                .timeout_connect(Some(Duration::from_secs(10)))
-                .timeout_recv_response(Some(Duration::from_secs(20)))
-                .timeout_recv_body(Some(Duration::from_secs(20)))
-                .https_only(true)
-                .max_redirects(0)
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: http_agent(
+                ureq::Agent::config_builder()
+                    .timeout_global(Some(Duration::from_secs(20)))
+                    .timeout_connect(Some(Duration::from_secs(10)))
+                    .timeout_recv_response(Some(Duration::from_secs(20)))
+                    .timeout_recv_body(Some(Duration::from_secs(20)))
+                    .https_only(true)
+                    .max_redirects(0)
+                    .http_status_as_error(false)
+                    .build(),
+            ),
             base_uri: "https://api.github.com".to_owned(),
         }
     }

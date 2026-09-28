@@ -69,6 +69,7 @@ pub mod git_query;
 pub mod git_reads;
 pub mod graph_health_delta;
 mod hotpath_observe;
+pub mod http_agent;
 pub mod lsp_runtime;
 mod lsp_support;
 pub mod native_integration;

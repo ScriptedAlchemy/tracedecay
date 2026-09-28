@@ -14,6 +14,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use tracedecay_application::http_agent::http_agent;
 
 use crate::agents::host_cli::{HostServerChild, require_host_cli, spawn_host_server};
 
@@ -153,13 +154,14 @@ fn refresh_through_server(
     staged: &Path,
     staged_version: &str,
 ) -> Result<KimiPluginRefreshV1, KimiWebRefreshError> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(KIMI_WEB_REQUEST_TIMEOUT))
-        .http_status_as_error(false)
-        .proxy(None)
-        .max_redirects(0)
-        .build()
-        .into();
+    let agent = http_agent(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(KIMI_WEB_REQUEST_TIMEOUT))
+            .http_status_as_error(false)
+            .proxy(None)
+            .max_redirects(0)
+            .build(),
+    );
     let deadline = Instant::now() + KIMI_WEB_READY_DEADLINE;
     let (authorization, listing) = loop {
         if let Some(status) = server

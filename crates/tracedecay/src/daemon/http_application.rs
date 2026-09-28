@@ -26,6 +26,7 @@ use serde::Deserialize;
 use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
+use tracedecay_application::http_agent::http_agent;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_contracts::{
@@ -451,7 +452,7 @@ pub fn live_remote_operational_status(
     let agent = agent.middleware(hotpath::UreqHttpMiddleware::with_label(
         "daemon.http.application.remote_status",
     ));
-    let agent: ureq::Agent = agent.build().into();
+    let agent = http_agent(agent.build());
     let mut response = agent
         .get(&url)
         .header("Authorization", format!("Bearer {auth_token}"))
