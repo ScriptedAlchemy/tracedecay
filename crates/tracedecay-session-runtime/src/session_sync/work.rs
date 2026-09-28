@@ -491,18 +491,9 @@ impl SessionSyncProjectContext {
         request: &SessionSyncRequestV1,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
-        let observation = match service
-            .await_import_history(self, request, &project_sessions)
-            .await
-        {
+        let observation = match service.schedule_import_history(self, request) {
             Ok(observation) => observation,
-            Err(Some(interruption)) => {
-                return SessionSyncWorkResult::Interrupted(interruption);
-            }
-            Err(None) => super::ImportHistoryObservation {
-                coverage: super::transcript_import_requested_coverage(),
-                failure_codes: vec!["session_history_not_current".to_owned()],
-            },
+            Err(interruption) => return SessionSyncWorkResult::Interrupted(interruption),
         };
         let pass = async {
             let stats =

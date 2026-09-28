@@ -117,19 +117,6 @@ pub use observation::{
     try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation,
 };
 
-/// Project membership from a rollout's leading `session_meta` cwd.
-///
-/// `None` means the header could not be read. Callers may leave a rollout for
-/// a later pass only on a definitive [`ProjectMembership::NoMatch`]; an
-/// `Unknown` git timeout stays in the current pass.
-pub(crate) fn codex_rollout_project_membership(
-    path: &Path,
-    project_root: &Path,
-) -> Option<ProjectMembership> {
-    let meta = session_meta(path)?;
-    Some(TranscriptScopeMatcher::project(project_root).membership(Some(&meta.cwd)))
-}
-
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
 const MAX_SCAN_DEPTH: u8 = 6;

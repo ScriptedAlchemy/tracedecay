@@ -13,6 +13,9 @@ use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_sessions::serving::{
+    SessionProjectionServingState, SessionProjectionServingStatusPort, SessionProjectionStaleReason,
+};
 
 use crate::session_sync::{DaemonSessionSyncConfig, DaemonSessionSyncService};
 use crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
@@ -53,7 +56,10 @@ fn bound_wake(state: &Arc<SessionTemporalRefreshWakeState>) -> SessionTemporalRe
 async fn import_receipt(
     kind: CatchUp,
     label: &str,
-) -> tracedecay_contracts::session_sync::SessionSyncCompletionReceiptV1 {
+) -> (
+    tracedecay_contracts::session_sync::SessionSyncCompletionReceiptV1,
+    Arc<SessionTemporalRefreshWakeState>,
+) {
     let root = tempfile::tempdir().expect("import fixture directory");
     let project_root = root.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project directory");
@@ -113,7 +119,7 @@ async fn import_receipt(
                     started.elapsed() < Duration::from_secs(1),
                     "import consumed its observation bound instead of returning the settled catch-up"
                 );
-                return receipt;
+                return (receipt, project_state);
             }
             SessionSyncOutcomeV1::Accepted(_) | SessionSyncOutcomeV1::Joined(_) => {
                 assert!(
@@ -139,26 +145,35 @@ fn remaining_work(
 
 #[tokio::test]
 async fn import_reports_deferred_progress_while_historical_catch_up_is_still_pending() {
-    let receipt = import_receipt(CatchUp::Pending, "import-pending").await;
+    let (receipt, _) = import_receipt(CatchUp::Pending, "import-pending").await;
 
-    assert_ne!(receipt.termination, OperationTermination::TimedOut);
     assert_eq!(receipt.termination, OperationTermination::Partial);
     assert!(receipt.failure_codes.is_empty());
-    assert!(remaining_work(&receipt) > 0);
+    assert_eq!(remaining_work(&receipt), 2);
 }
 
 #[tokio::test]
-async fn import_completes_when_historical_catch_up_is_already_current() {
-    let receipt = import_receipt(CatchUp::Current, "import-current").await;
+async fn import_after_current_catch_up_defers_until_the_scheduled_pass_runs() {
+    let (receipt, state) = import_receipt(CatchUp::Current, "import-current").await;
 
-    assert_eq!(receipt.termination, OperationTermination::Completed);
+    // History was current before the request, but the pass it scheduled has
+    // not run: sources written since the last pass are not admitted yet.
+    assert_eq!(receipt.termination, OperationTermination::Partial);
     assert!(receipt.failure_codes.is_empty());
-    assert_eq!(remaining_work(&receipt), 0);
+    assert_eq!(remaining_work(&receipt), 2);
+    assert_eq!(
+        bound_wake(&state).serving_status().state,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalConvergence,
+        }
+    );
+    assert!(state.take_historical_dirty());
 }
 
 #[tokio::test]
 async fn import_keeps_a_blocked_catch_up_as_a_failure() {
-    let receipt = import_receipt(CatchUp::Blocked, "import-blocked").await;
+    let (receipt, state) = import_receipt(CatchUp::Blocked, "import-blocked").await;
+    assert!(!state.take_historical_dirty());
 
     assert_eq!(receipt.termination, OperationTermination::Failed);
     assert!(

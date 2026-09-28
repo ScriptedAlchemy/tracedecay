@@ -130,11 +130,6 @@ macro_rules! define_wake_state {
             /// is still unpublished. The next history window waits.
             pub(super) history_after_projection: AtomicBool,
             pub(super) pass_count: std::sync::atomic::AtomicUsize,
-            pub(super) history_requested_sequence: std::sync::atomic::AtomicUsize,
-            pub(super) history_completed_sequence: std::sync::atomic::AtomicUsize,
-            pub(super) history_sessions_upserted: std::sync::atomic::AtomicU64,
-            pub(super) history_messages_upserted: std::sync::atomic::AtomicU64,
-            pub(super) history_commit_count: std::sync::atomic::AtomicUsize,
             pub(super) wake: tokio::sync::Notify,
             pub(super) idle: tokio::sync::Notify,
             pub(super) cancelled: AtomicBool,
@@ -165,11 +160,6 @@ impl Default for SessionTemporalRefreshWakeState {
             history_retry_pending: AtomicBool::new(false),
             history_after_projection: AtomicBool::new(false),
             pass_count: std::sync::atomic::AtomicUsize::new(0),
-            history_requested_sequence: std::sync::atomic::AtomicUsize::new(0),
-            history_completed_sequence: std::sync::atomic::AtomicUsize::new(0),
-            history_sessions_upserted: std::sync::atomic::AtomicU64::new(0),
-            history_messages_upserted: std::sync::atomic::AtomicU64::new(0),
-            history_commit_count: std::sync::atomic::AtomicUsize::new(0),
             wake: tokio::sync::Notify::new(),
             idle: tokio::sync::Notify::new(),
             cancelled: AtomicBool::new(false),
@@ -358,29 +348,6 @@ impl SessionTemporalRefreshWakeState {
             hotpath::gauge!("session_temporal_refresh_history_dirty").inc(1.0);
         }
         self.wake.notify_one();
-    }
-
-    pub fn history_requested_sequence(&self) -> usize {
-        self.history_requested_sequence.load(Ordering::Acquire)
-    }
-
-    pub fn record_history_progress(
-        &self,
-        progress: super::history::SessionHistoricalIngestProgress,
-    ) {
-        self.history_sessions_upserted
-            .fetch_add(progress.stats.sessions_upserted, Ordering::AcqRel);
-        self.history_messages_upserted
-            .fetch_add(progress.stats.messages_upserted, Ordering::AcqRel);
-        if progress.committed {
-            self.history_commit_count.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    pub fn complete_history_sequence(&self, sequence: usize) {
-        self.history_completed_sequence
-            .fetch_max(sequence, Ordering::AcqRel);
-        self.idle.notify_waiters();
     }
 
     pub fn has_pending_work(&self) -> bool {
@@ -862,22 +829,21 @@ pub struct SessionTemporalRefreshWake {
     route: Arc<SessionTemporalRefreshWakeRoute>,
 }
 
-/// What historical catch-up has already settled, read before this call's wake.
+/// Whether a request for historical catch-up could be handed to its worker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum HistoricalAdmissionView {
-    Current,
-    InProgress,
+    Scheduled,
     Blocked { reason_code: String },
     Unavailable,
 }
 
 fn historical_admission_view(status: &SessionProjectionServingStatus) -> HistoricalAdmissionView {
     match &status.state {
-        SessionProjectionServingState::Current => HistoricalAdmissionView::Current,
+        SessionProjectionServingState::Current => HistoricalAdmissionView::Scheduled,
         SessionProjectionServingState::Stale { reason } => match reason {
             SessionProjectionStaleReason::HistoricalConvergence
             | SessionProjectionStaleReason::HistoricalRetry { .. } => {
-                HistoricalAdmissionView::InProgress
+                HistoricalAdmissionView::Scheduled
             }
             SessionProjectionStaleReason::HistoricalBlocked { reason_code } => {
                 HistoricalAdmissionView::Blocked {
@@ -887,7 +853,7 @@ fn historical_admission_view(status: &SessionProjectionServingStatus) -> Histori
         },
         SessionProjectionServingState::Unavailable { reason } => match reason {
             SessionProjectionUnavailableReason::WorkerRecovering => {
-                HistoricalAdmissionView::InProgress
+                HistoricalAdmissionView::Scheduled
             }
             SessionProjectionUnavailableReason::WorkerMissing
             | SessionProjectionUnavailableReason::WorkerStalled
@@ -980,24 +946,22 @@ impl SessionTemporalRefreshWake {
         }
     }
 
-    /// Schedules another historical pass and reports the admission already
-    /// settled by the worker.
+    /// Marks historical catch-up pending and wakes its worker, unless the
+    /// worker is blocked or gone.
     ///
     /// Callers that must return inside a bound, such as `sessions import`,
     /// use this instead of waiting for the pass just queued. Waiting for that
     /// pass is historical convergence: a large Codex home does not finish it
-    /// before the import deadline, so the operation was recorded as timed out
-    /// while catch-up was still admitting rollouts.
+    /// before the import deadline. The pass has not run when this returns, so
+    /// `Scheduled` is never evidence that sources are admitted.
     #[hotpath::skip]
-    pub(crate) fn observe_and_schedule_historical_admission(&self) -> HistoricalAdmissionView {
+    pub(crate) fn schedule_historical_admission(&self) -> HistoricalAdmissionView {
         let Some(state) = self.target() else {
             return HistoricalAdmissionView::Unavailable;
         };
         let view = historical_admission_view(&state.serving_status());
-        if matches!(
-            view,
-            HistoricalAdmissionView::Current | HistoricalAdmissionView::InProgress
-        ) {
+        if view == HistoricalAdmissionView::Scheduled {
+            state.mark_history_pending();
             state.wake_history();
         }
         view
