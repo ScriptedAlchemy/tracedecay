@@ -154,7 +154,7 @@ async fn git_context_tools_refuse_arguments_outside_their_typed_request() {
     );
     assert_invalid_request(
         &refusal(&fixture, "tracedecay_branch_list", json!({"limt": 5})).await,
-        "invalid arguments for tracedecay_branch_list: unknown field `limt`, expected `limit` or `after`",
+        "invalid arguments for tracedecay_branch_list: unknown field `limt`, expected `limit` or `cursor`",
     );
 
     fixture.harness.shutdown().await;
