@@ -185,7 +185,8 @@ pub(crate) async fn daemon_tool_json(
         label = "cli.daemon.request"
     )
     .await?;
-    recover_truncated_payload(profile, &handshake, tool_name, result, None).await
+    tracedecay::daemon::recover_truncated_tool_payload(profile, &handshake, tool_name, result, None)
+        .await
 }
 
 /// Deadline-carrying variant for CLI journeys that deliberately trigger a cold
@@ -213,107 +214,21 @@ pub(crate) async fn daemon_tool_json_until(
         label = "cli.daemon.request_open_wait"
     )
     .await?;
-    recover_truncated_payload(profile, &handshake, tool_name, result, Some(deadline)).await
-}
-
-async fn recover_truncated_payload(
-    profile: &ProfileRoot,
-    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
-    tool_name: &str,
-    result: serde_json::Value,
-    deadline: Option<Instant>,
-) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    let payload = tracedecay::daemon::tool_json_payload(&result, tool_name)?;
-    if !is_truncation_envelope(&payload) {
-        return Ok(payload);
-    }
-    let handle = payload
-        .get("handle")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "daemon tool {tool_name} returned truncated JSON without a retrieval handle"
-            ),
-        })?;
-    // `tracedecay_retrieve` pages the stored response so every page fits the
-    // response budget; reassemble the pages through `offset` / `next_offset`
-    // / `has_more` before parsing, exactly as an agent does.
-    let mut content = String::new();
-    let mut offset: u64 = 0;
-    loop {
-        let arguments = serde_json::json!({ "handle": handle, "format": "json", "offset": offset });
-        let retrieved = match deadline {
-            Some(deadline) => {
-                hotpath::future!(
-                    tracedecay::daemon::call_default_tool_awaiting_project_open(
-                        profile,
-                        handshake,
-                        "tracedecay_retrieve",
-                        arguments,
-                        deadline,
-                    ),
-                    label = "cli.daemon.recovery_fetch"
-                )
-                .await?
-            }
-            None => {
-                hotpath::future!(
-                    tracedecay::daemon::call_default_tool(
-                        profile,
-                        handshake,
-                        "tracedecay_retrieve",
-                        arguments
-                    ),
-                    label = "cli.daemon.recovery_fetch"
-                )
-                .await?
-            }
-        };
-        let page = tracedecay::daemon::tool_json_payload(&retrieved, "tracedecay_retrieve")?;
-        let page_content = page
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("daemon retrieval for {tool_name} omitted response content"),
-            })?;
-        content.push_str(page_content);
-        if page.get("has_more").and_then(serde_json::Value::as_bool) != Some(true) {
-            break;
-        }
-        let next_offset = page
-            .get("next_offset")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "daemon retrieval for {tool_name} reported more pages without a next offset"
-                ),
-            })?;
-        if next_offset <= offset {
-            return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "daemon retrieval for {tool_name} did not advance past offset {offset}"
-                ),
-            });
-        }
-        offset = next_offset;
-    }
-    serde_json::from_str(&content).map_err(Into::into)
-}
-
-pub(crate) fn is_truncation_envelope(value: &Value) -> bool {
-    value.get("truncated").and_then(Value::as_bool) == Some(true)
-        && value
-            .get("original_chars")
-            .and_then(Value::as_u64)
-            .is_some()
-        && value.get("preview").and_then(Value::as_str).is_some()
+    tracedecay::daemon::recover_truncated_tool_payload(
+        profile,
+        &handshake,
+        tool_name,
+        result,
+        Some(deadline),
+    )
+    .await
 }
 
 pub(crate) fn reject_truncation_envelope(
     value: &Value,
     tool_name: &str,
 ) -> tracedecay_domain::errors::Result<()> {
-    if !is_truncation_envelope(value) {
+    if !tracedecay::daemon::is_truncation_envelope(value) {
         return Ok(());
     }
     let original_chars = value.get("original_chars").and_then(Value::as_u64);
@@ -348,7 +263,8 @@ mod tests {
     };
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, SortContractId, UseCaseId};
 
-    use super::{is_truncation_envelope, retained_tool_payload};
+    use super::retained_tool_payload;
+    use tracedecay::daemon::is_truncation_envelope;
 
     fn contract() -> ResultContractRef {
         ResultContractRef::new(SchemaId::new("schema.cli.fixture.result").unwrap(), 1).unwrap()

@@ -789,7 +789,8 @@ pub fn inspect_receipt_backed_host_components(
 // DoctorCounters
 // ---------------------------------------------------------------------------
 
-/// Diagnostic counters for doctor checks.
+/// Diagnostic counters for doctor checks, plus every check line in order so
+/// `tracedecay doctor --json` carries exactly what the terminal showed.
 #[derive(Default)]
 pub struct DoctorCounters {
     pub issues: u32,
@@ -797,33 +798,65 @@ pub struct DoctorCounters {
     /// Steps only the operator can take; nothing failed, but the
     /// installation is not converged until they are done.
     pub pending_actions: u32,
+    pub checks: Vec<DoctorCheckV1>,
+}
+
+/// One reported doctor check line.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DoctorCheckV1 {
+    pub level: DoctorCheckLevelV1,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorCheckLevelV1 {
+    Pass,
+    Issue,
+    Warning,
+    PendingOperatorAction,
+    /// A host that is not installed or not signed in.
+    Skipped,
+    Info,
 }
 
 impl DoctorCounters {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn pass(&self, msg: &str) {
+    pub fn pass(&mut self, msg: &str) {
         eprintln!("  \x1b[32m✔\x1b[0m {msg}");
+        self.record(DoctorCheckLevelV1::Pass, msg);
     }
     pub fn fail(&mut self, msg: &str) {
         eprintln!("  \x1b[31m✘\x1b[0m {msg}");
         self.issues += 1;
+        self.record(DoctorCheckLevelV1::Issue, msg);
     }
     pub fn warn(&mut self, msg: &str) {
         eprintln!("  \x1b[33m!\x1b[0m {msg}");
         self.warnings += 1;
+        self.record(DoctorCheckLevelV1::Warning, msg);
     }
     pub fn pending(&mut self, msg: &str) {
         eprintln!("  \x1b[33m…\x1b[0m {msg}");
         self.pending_actions += 1;
+        self.record(DoctorCheckLevelV1::PendingOperatorAction, msg);
     }
     /// A host that is not installed or not signed in; counted nowhere.
-    pub fn skipped(&self, msg: &str) {
+    pub fn skipped(&mut self, msg: &str) {
         eprintln!("  - {msg}");
+        self.record(DoctorCheckLevelV1::Skipped, msg);
     }
-    pub fn info(&self, msg: &str) {
+    pub fn info(&mut self, msg: &str) {
         eprintln!("    {msg}");
+        self.record(DoctorCheckLevelV1::Info, msg);
+    }
+    fn record(&mut self, level: DoctorCheckLevelV1, msg: &str) {
+        self.checks.push(DoctorCheckV1 {
+            level,
+            message: msg.to_owned(),
+        });
     }
 }
 

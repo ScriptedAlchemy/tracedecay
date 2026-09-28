@@ -2006,6 +2006,207 @@ fn doctor_reports_an_unenrolled_project_without_recovery_guidance() {
     );
 }
 
+const INGEST_COVERAGE_FINDING: &str = "observability: durable ingest coverage records no refused \
+     source records (observability.ingest-coverage.converged)";
+const PROFILE_AUTHORITY_FINDING: &str = "storage_runtime: the exact registered profile and \
+     profile-session authorities are attached (profile.authority.registered)";
+
+fn doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
+    let output = tracedecay_command_with_home(home)
+        .args(["doctor", "--json"])
+        .current_dir(project)
+        .output()
+        .expect("doctor --json should run");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let document = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "doctor --json stdout is not one JSON document ({error}):\n{}\nstderr:\n{stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    (output.status.code(), document, stderr)
+}
+
+/// The identity of each projected finding: family, state, and evidence.
+/// Statements carry live measurements (resident MiB), so equality across two
+/// reads is judged on identity plus the surrounding coverage record.
+fn doctor_finding_identities(payload: &Value) -> Vec<Value> {
+    payload["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("findings payload has no entries array: {payload}"))
+        .iter()
+        .map(|entry| {
+            json!([
+                entry["finding"]["family"],
+                entry["finding"]["state"],
+                entry["finding"]["evidence"],
+            ])
+        })
+        .collect()
+}
+
+fn doctor_route_findings(url: &str) -> Value {
+    ureq::get(url)
+        .call()
+        .unwrap_or_else(|error| panic!("GET {url} failed: {error}"))
+        .into_body()
+        .read_json()
+        .unwrap_or_else(|error| panic!("GET {url} returned no JSON envelope: {error}"))
+}
+
+/// One doctor: the CLI asks the running daemon for its canonical findings and
+/// renders them with the daemon's own statements, and `--json` carries the
+/// findings `/api/doctor/findings` serves, projected by the same authority.
+#[test]
+fn doctor_renders_the_daemon_canonical_findings_the_dashboard_serves() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_committed_git_project_with_cli(&home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    // A freshly started daemon answers Doctor with the typed mounting state
+    // until the project runtime that owns the report has mounted.
+    wait_for_tool_status_server_tool_calls(&home_path, &project_path);
+
+    let doctor = tracedecay_command_with_home(&home_path)
+        .arg("doctor")
+        .current_dir(&project_path)
+        .output()
+        .expect("doctor should run");
+    let stderr = String::from_utf8_lossy(&doctor.stderr);
+    assert_eq!(doctor.status.code(), Some(0), "doctor exit:\n{stderr}");
+    for statement in [INGEST_COVERAGE_FINDING, PROFILE_AUTHORITY_FINDING] {
+        assert!(
+            stderr.contains(statement),
+            "doctor omitted the daemon finding `{statement}`:\n{stderr}"
+        );
+    }
+
+    let dashboard = tracedecay_command_with_home(&home_path)
+        .args(["dashboard", "--host", "127.0.0.1", "--port", "0"])
+        .current_dir(&project_path)
+        .output()
+        .expect("dashboard should start");
+    let stdout = String::from_utf8_lossy(&dashboard.stdout);
+    let base_url = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("tracedecay dashboard listening on "))
+        .unwrap_or_else(|| {
+            panic!(
+                "dashboard announced no URL:\n{stdout}\n{}",
+                String::from_utf8_lossy(&dashboard.stderr)
+            )
+        })
+        .trim_end_matches('/')
+        .to_owned();
+    let findings_url = format!("{base_url}/api/doctor/findings");
+
+    // Live producers (table-growth sampling) may settle between reads, so the
+    // comparison is taken once the route answers the same identity on both
+    // sides of the CLI read.
+    for _ in 0..3 {
+        let before = doctor_route_findings(&findings_url);
+        let (code, document, stderr) = doctor_json(&home_path, &project_path);
+        let after = doctor_route_findings(&findings_url);
+        if doctor_finding_identities(&before["payload"])
+            != doctor_finding_identities(&after["payload"])
+        {
+            continue;
+        }
+        assert_eq!(code, Some(0), "doctor --json exit:\n{stderr}");
+        assert_eq!(document["outcome"], "healthy", "{document}");
+        let findings = &document["daemon_findings"];
+        assert_eq!(findings["state"], "observed", "{document}");
+        assert_eq!(findings["domain_state"], before["domain_state"]);
+        assert_eq!(findings["coverage"], before["coverage"]);
+        let (cli, route) = (&findings["payload"], &before["payload"]);
+        assert_eq!(
+            doctor_finding_identities(cli),
+            doctor_finding_identities(route)
+        );
+        for field in [
+            "family_filter",
+            "report_coverage",
+            "known_families",
+            "schema_convergences",
+            "storage_kind_statuses",
+            "note",
+        ] {
+            assert_eq!(cli[field], route[field], "`{field}` differs");
+        }
+        let ingest_statement = |payload: &Value| {
+            payload["entries"]
+                .as_array()
+                .and_then(|entries| {
+                    entries.iter().find(|entry| {
+                        entry["finding"]["evidence"][0]["reference"]
+                            == "observability.ingest-coverage.converged"
+                    })
+                })
+                .map(|entry| entry["finding"]["coverage"]["statement"].clone())
+        };
+        assert_eq!(
+            ingest_statement(cli),
+            Some(json!(
+                "durable ingest coverage records no refused source records"
+            ))
+        );
+        assert_eq!(ingest_statement(cli), ingest_statement(route));
+        assert!(
+            document["checks"]
+                .as_array()
+                .is_some_and(|checks| checks.contains(&json!({
+                    "level": "pass",
+                    "message": INGEST_COVERAGE_FINDING,
+                }))),
+            "{document}"
+        );
+        return;
+    }
+    panic!("/api/doctor/findings never answered the same findings twice in a row");
+}
+
+/// With no daemon listening, Doctor still runs its binary-local checks and
+/// names the typed `daemon_unavailable` state as the operator's pending step.
+#[test]
+fn doctor_without_a_daemon_reports_daemon_unavailable_as_pending() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+
+    let output = tracedecay_command_with_home(&home_path)
+        .arg("doctor")
+        .current_dir(&project_path)
+        .output()
+        .expect("doctor should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(75), "doctor exit:\n{stderr}");
+    assert!(
+        stderr.contains(
+            "daemon_unavailable: no TraceDecay daemon is listening for this profile, so the \
+             daemon's canonical Doctor findings were not read and only binary-local checks ran. \
+             Pending operator action: start the daemon (`tracedecay daemon start` for the \
+             managed service, or `tracedecay daemon run`), then re-run `tracedecay doctor`"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Version: "),
+        "binary-local checks must still run:\n{stderr}"
+    );
+
+    let (code, document, stderr) = doctor_json(&home_path, &project_path);
+    assert_eq!(code, Some(75), "doctor --json exit:\n{stderr}");
+    assert_eq!(document["outcome"], "pending_operator_action");
+    assert_eq!(
+        document["daemon_findings"],
+        json!({"state": "daemon_unavailable"})
+    );
+    assert_eq!(document["issues"], 0, "{document}");
+}
+
 #[test]
 fn daemon_project_handshake_uses_client_profile_identity() {
     let daemon_home = TempDir::new().unwrap();
