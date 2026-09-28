@@ -624,20 +624,28 @@ impl RubyExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "call" | "method_call" => {
-                        // In tree-sitter-ruby, a call node has a "method" field for the method name.
-                        // For simple calls like `foo(args)`, the first named child is the method name.
-                        let callee_name =
-                            if let Some(method_node) = child.child_by_field_name("method") {
-                                Some(state.node_text(method_node))
-                            } else {
-                                // Fall back to first named child
-                                child.named_child(0).map(|n| state.node_text(n))
-                            };
+                        // `x.clamp(lo, hi)` names `x.clamp`, not `clamp`: a bare
+                        // member name would bind the enclosing `clamp` as
+                        // recursion. `self.m` stays `m`, the same object's method.
+                        let receiver = child
+                            .child_by_field_name("receiver")
+                            .filter(|receiver| receiver.kind() != "self");
+                        let callee_name = match (receiver, child.child_by_field_name("method")) {
+                            (Some(receiver), Some(method)) => Some(format!(
+                                "{}.{}",
+                                state.node_text(receiver),
+                                state.node_text(method)
+                            )),
+                            (None, Some(method)) => Some(state.node_text(method).to_owned()),
+                            (_, None) => {
+                                child.named_child(0).map(|n| state.node_text(n).to_owned())
+                            }
+                        };
 
                         if let Some(name) = callee_name {
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: name.to_string(),
+                                reference_name: name,
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
