@@ -117,6 +117,10 @@ pub struct PreparedObservabilityEmissionV1 {
 /// Result of claiming and settling one owner fact in a shared write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservabilityOwnerEmissionWriteOutcomeV1 {
+    /// This fact was rejected before mutation; other facts may still settle.
+    Rejected {
+        error: String,
+    },
     /// An outbox row already owns this fact, so no new delivery was prepared.
     Replayed,
     Settled {

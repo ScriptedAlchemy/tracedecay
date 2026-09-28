@@ -879,7 +879,7 @@ async fn shutdown_drains_every_offered_owner_fact() {
 }
 
 #[tokio::test]
-async fn conflicting_owner_settlement_does_not_remain_claimed_for_recovery() {
+async fn conflicting_owner_settlement_preserves_siblings_without_a_recovery_claim() {
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.shutdown";
@@ -908,12 +908,19 @@ async fn conflicting_owner_settlement_does_not_remain_claimed_for_recovery() {
         4,
     )
     .expect("producer");
-    assert_eq!(
-        producer
-            .try_emit_owner_fact(owner.clone())
-            .expect("offer conflicting owner fact"),
-        ObservabilityEmissionOutcomeV1::Enqueued
-    );
+    // The current-thread runtime keeps these offers in one worker batch.
+    for offered in [
+        owner_envelope(scope, 6),
+        owner.clone(),
+        owner_envelope(scope, 8),
+    ] {
+        assert_eq!(
+            producer
+                .try_emit_owner_fact(offered)
+                .expect("offer owner fact"),
+            ObservabilityEmissionOutcomeV1::Enqueued
+        );
+    }
     let failed = producer
         .shutdown()
         .await
@@ -922,6 +929,19 @@ async fn conflicting_owner_settlement_does_not_remain_claimed_for_recovery() {
         failed.to_string().contains("idempotency conflict"),
         "unexpected shutdown error: {failed}"
     );
+
+    for id in [6, 8] {
+        let sibling = owner_envelope(scope, id);
+        let stored = db
+            .read_observability_event(scope, &sibling.idempotency_key)
+            .await
+            .expect("sibling lookup")
+            .expect("an independent valid owner fact must survive a rejected sibling");
+        let delivery: ObservabilityEnvelopeV1 =
+            serde_json::from_str(stored.metadata_json.as_deref().expect("sibling delivery"))
+                .expect("decode sibling");
+        assert_eq!(delivery.idempotency_key, sibling.idempotency_key);
+    }
 
     let restarted = BoundedObservabilityProducerV1::start(
         db.clone(),

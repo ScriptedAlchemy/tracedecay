@@ -535,7 +535,7 @@ fn prepared_delivery(
 }
 
 #[tokio::test]
-async fn owner_fact_run_keeps_replayed_delivery_and_drops_a_conflicted_sibling() {
+async fn owner_fact_run_preserves_siblings_when_an_owner_fact_conflicts() {
     let harness = RegisteredGlobalDbHarness::open("observability-owner-run").await;
     let project = "scope:owner-run";
     let first = owner_write(project, "owner:first", r#"{"owner":"first"}"#);
@@ -580,16 +580,28 @@ async fn owner_fact_run_keeps_replayed_delivery_and_drops_a_conflicted_sibling()
             },
         )
         .await
-        .expect_err("changed owner fact conflicts");
-    assert!(conflict.contains("owner fact conflict"), "{conflict}");
+        .expect("independent facts commit");
+    assert!(matches!(
+        conflict[0],
+        ObservabilityOwnerEmissionWriteOutcomeV1::Replayed
+    ));
+    assert!(matches!(
+        conflict[1],
+        ObservabilityOwnerEmissionWriteOutcomeV1::Settled { .. }
+    ));
+    assert!(matches!(
+        &conflict[2],
+        ObservabilityOwnerEmissionWriteOutcomeV1::Rejected { error }
+            if error.contains("owner fact conflict")
+    ));
     assert!(
         harness
             .registered
             .read_observability_event(project, "owner:sibling")
             .await
             .expect("sibling lookup")
-            .is_none(),
-        "a conflicted run must not publish the sibling"
+            .is_some(),
+        "a rejected owner fact must not discard its valid sibling"
     );
     let stored = harness
         .registered
@@ -633,4 +645,61 @@ async fn owner_fact_run_keeps_replayed_delivery_and_drops_a_conflicted_sibling()
             .as_deref(),
         Some(r#"{"delivery":"owner:first"}"#)
     );
+}
+
+#[tokio::test]
+async fn owner_fact_storage_failure_rolls_back_the_entire_transaction() {
+    let harness = RegisteredGlobalDbHarness::open("observability-owner-storage-failure").await;
+    let project = "scope:owner-storage-failure";
+    let emissions = [
+        owner_write(project, "owner:first", r#"{"owner":"first"}"#),
+        owner_write(project, "owner:second", r#"{"owner":"second"}"#),
+    ];
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "CREATE TRIGGER fail_owner_insert BEFORE INSERT ON observability_emission_outbox
+             WHEN NEW.owner_event_id = 'owner:second'
+             BEGIN SELECT RAISE(ABORT, 'test owner storage failure'); END;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let error = harness
+        .registered
+        .claim_and_settle_observability_emissions(&emissions, |index| {
+            Ok(prepared_delivery(
+                project,
+                &emissions[index].owner_event_id,
+                r#"{"delivery":"owner"}"#,
+            ))
+        })
+        .await
+        .expect_err("storage failure aborts the batch");
+    assert!(error.contains("test owner storage failure"), "{error}");
+    for emission in &emissions {
+        assert!(
+            harness
+                .registered
+                .read_observability_event(project, &emission.owner_event_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "neither the earlier sibling nor the failed insertion may survive rollback"
+        );
+        assert!(
+            harness
+                .registered
+                .observability_emission_claim(
+                    project,
+                    &emission.owner_event_id,
+                    &emission.owner_fact_json,
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "rollback must leave no replay claim"
+        );
+    }
 }

@@ -232,18 +232,20 @@ pub(super) async fn claim_and_settle_owner_run(
     .await
     {
         Ok(Ok(outcomes)) => {
-            let settled = outcomes
-                .iter()
-                .filter(|outcome| {
-                    matches!(
-                        outcome,
-                        ObservabilityOwnerEmissionWriteOutcomeV1::Settled { .. }
-                    )
-                })
-                .count();
-            progress.persisted = progress
-                .persisted
-                .saturating_add(u64::try_from(settled).unwrap_or(u64::MAX));
+            for outcome in outcomes {
+                match outcome {
+                    ObservabilityOwnerEmissionWriteOutcomeV1::Settled { .. } => {
+                        progress.persisted = progress.persisted.saturating_add(1);
+                    }
+                    ObservabilityOwnerEmissionWriteOutcomeV1::Rejected { error } => {
+                        retain_first_error(
+                            &mut progress.first_error,
+                            ApplicationContractError::Domain(error),
+                        );
+                    }
+                    ObservabilityOwnerEmissionWriteOutcomeV1::Replayed => {}
+                }
+            }
         }
         Ok(Err(error)) => {
             retain_first_error(
