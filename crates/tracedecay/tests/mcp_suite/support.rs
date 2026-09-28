@@ -353,12 +353,14 @@ pub(crate) async fn harness_wait_for_readiness(
     status
 }
 
-/// Wait until the current worktree generation serves its native graph, then
-/// require `query` to answer from that generation with every lane complete
-/// and a fresh seat, the same terminal signal daemon journeys use.
+/// Wait until the current worktree generation is verified fresh against the
+/// source, then require `query` to answer from that generation with every
+/// lane complete and a fresh seat, the same terminal signal daemon journeys
+/// use. `ready` accepts a reading without sweeping the source, so a queued
+/// verification pass or an unreported save can follow it.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &str) {
-    let status = wait_for_readiness(server, "ready", Duration::from_secs(30)).await;
+    let status = wait_for_readiness(server, "fresh", Duration::from_secs(30)).await;
     let generation = status["code_index_freshness"]["worktree"]["latest_generation_id"].as_str();
     let result =
         handle_real_server_tool_call(server, "tracedecay_search", json!({ "query": query })).await;
