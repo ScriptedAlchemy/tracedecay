@@ -216,6 +216,7 @@ libc = "0.2"
 axum = "0.8"
 dirs = "6"
 regex = "1.12.3"
+socket2 = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"
 tower = "0.5"
