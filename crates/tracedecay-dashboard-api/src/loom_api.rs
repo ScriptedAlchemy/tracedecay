@@ -896,12 +896,12 @@ fn event_statuses(
             granularity: "host-recorded pull-request link",
             providers: pr_providers,
             item_count: Some(pr_served),
-            reason: Some(format!(
+            reason: Some(
                 "only hosts whose transcripts record pull-request links (Claude Code pr-link \
                  records, Cursor composer) contribute; a session without one is not proof that \
-                 no pull request was opened; {}",
-                pr_coverage.reason
-            )),
+                 no pull request was opened"
+                    .to_owned(),
+            ),
             required_authority: None,
             coverage: pr_coverage,
         },

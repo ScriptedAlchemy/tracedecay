@@ -4042,7 +4042,8 @@ function loomTemporalPayload(scenario: 'default' | 'dense-fanout' = 'default'): 
         required_authority: null,
         providers: [...new Set(events.filter((event) => event.kind === 'pull_request').map((event) => String(event.provider)))].sort(),
         item_count: pullRequestEvents,
-        reason: `only hosts whose transcripts record pull-request links (Claude Code pr-link records, Cursor composer) contribute; a session without one is not proof that no pull request was opened; ${eventReason(pullRequestEvents, pullRequestEvents)}`,
+        reason:
+          'only hosts whose transcripts record pull-request links (Claude Code pr-link records, Cursor composer) contribute; a session without one is not proof that no pull request was opened',
         coverage: coverage(pullRequestEvents, pullRequestEvents, 'recorded events', eventReason(pullRequestEvents, pullRequestEvents)),
       },
       {

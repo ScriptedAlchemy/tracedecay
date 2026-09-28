@@ -339,6 +339,7 @@ fn loom_temporal_serves_recorded_tool_and_pull_request_events_in_recorded_time_o
         assert_eq!(tools["coverage"]["matched"], 3);
         assert_eq!(tools["coverage"]["omitted"], 1);
         let pull_requests = loom_source(&envelope, "session_pull_request");
+        assert_eq!(pull_requests["state"], "partial", "{pull_requests}");
         assert_eq!(pull_requests["item_count"], 2);
         assert_eq!(pull_requests["coverage"]["eligible"], 2);
         assert_eq!(pull_requests["coverage"]["omitted"], 0);
