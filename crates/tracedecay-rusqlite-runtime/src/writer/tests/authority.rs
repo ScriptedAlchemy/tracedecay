@@ -105,16 +105,15 @@ fn fact_write_rechecks_authority_before_outer_commit_and_rolls_back() {
     );
     let applied = Arc::new(AtomicU64::new(0));
     let allowed = Arc::new(AtomicBool::new(true));
-    let writer = start_with_persistence(
+    let writer = start_with_executor(
         &database,
         &request,
-        Box::new(RevokingPersistence {
+        RevokingPersistence {
             inner: TestPersistence {
                 applied: Arc::clone(&applied),
-                sequence: 0,
             },
             allowed: Arc::clone(&allowed),
-        }),
+        },
     );
     let authority = Arc::new(ToggleAuthority { allowed });
     let probe = Arc::new(Probe::new(&request, None));

@@ -76,9 +76,9 @@ Examples:
   tracedecay status                              Human-readable project stats
   tracedecay status --json                       Machine-readable output
   tracedecay status --short                      Header only (version, tokens, sync)
-  tracedecay status --details                    Node-kind breakdown
   tracedecay status --runtime                    PID/RSS/CPU/DB-size snapshot
-  tracedecay status --project-id proj_123 --json Inspect another registered project
+  tracedecay status --project-id proj_123 --json
+                                                 Inspect another registered project
 
 Related: tracedecay sync (refresh a stale index), tracedecay projects
 (registry lookup), tracedecay doctor (installation health).";
@@ -207,7 +207,7 @@ Examples:
   tracedecay install --agent kimi --component context-mcp
   tracedecay install --agent opencode --component context-mcp
   tracedecay install --agent codex --automation  Also enable the automation loop
-  tracedecay install --agent hermes --profile dev
+  tracedecay install --agent hermes              Configure every existing Hermes profile
   tracedecay install --local                     Project-local config in cwd
 
 Related: tracedecay uninstall, tracedecay reinstall (repair installed agents),
@@ -260,7 +260,6 @@ Examples:
   tracedecay uninstall --agent cursor            Remove from one agent
   tracedecay uninstall --agent cursor --component context-mcp --dry-run
   tracedecay uninstall --agent cursor --component context-mcp --yes
-  tracedecay uninstall --agent hermes --profile dev
 
 Related: tracedecay install, tracedecay wipe (delete project stores).",
     host_lifecycle_exit_status!()

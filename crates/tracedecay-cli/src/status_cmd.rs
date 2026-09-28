@@ -465,6 +465,7 @@ async fn handle_status_command_within(
         deadline,
         "tracedecay_admin_project",
         commands::admin_project_until(
+            profile,
             commands::client_handshake(profile, Some(&project_path))?,
             AdminProjectSurfaceRequestV1::StatusAccounting {},
             server_deadline,

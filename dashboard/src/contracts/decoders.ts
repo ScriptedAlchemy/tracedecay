@@ -1519,6 +1519,11 @@ export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetai
   remedy: z.string(),
   required_version: z.number().int().safe().nullable(),
 }).strict(), z.object({
+  current: z.number().int().safe().min(0),
+  field: z.string(),
+  kind: z.literal("stale_precondition"),
+  requested: z.number().int().safe().min(0),
+}).strict(), z.object({
   active: z.number().int().safe().min(0),
   committed: z.number().int().safe().min(0),
   kind: z.literal("stale_refresh_frontier"),
@@ -6295,6 +6300,7 @@ export const MemoryFactRowV1Schema: z.ZodObject<{
   retrieval_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
   score_millionths: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
   source_label: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  superseded_by: z.ZodOptional<z.ZodType<FactId | null, z.ZodTypeDef, unknown>>;
   tags: z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>;
   trust_score: z.ZodType<number | null, z.ZodTypeDef, unknown>;
   unhelpful_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
@@ -6316,6 +6322,7 @@ export const MemoryFactRowV1Schema: z.ZodObject<{
   retrieval_count: z.number().int().safe().min(0).nullable(),
   score_millionths: z.number().int().min(0).nullable().optional(),
   source_label: z.string().nullable(),
+  superseded_by: z.union([z.lazy(() => FactIdSchema), z.null()]).optional(),
   tags: z.array(z.string()).nullable(),
   trust_score: z.number().nullable(),
   unhelpful_count: z.number().int().safe().min(0).nullable(),

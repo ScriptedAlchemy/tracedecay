@@ -106,13 +106,8 @@ fn hook_invocation_rows_include_duration_telemetry() {
         .find(|row| event_kind(row) == "hook_completed")
         .expect("hook_completed row");
     assert_eq!(row["hook_name"].as_str(), Some("PostToolUse"));
-    for forbidden in [
-        "tool_name",
-        "session_id",
-        "project_root",
-        "event_cwd",
-        "command",
-    ] {
+    assert_eq!(row["session_id"].as_str(), Some("s1"));
+    for forbidden in ["tool_name", "project_root", "event_cwd", "command"] {
         assert!(
             row.get(forbidden).is_none(),
             "hook telemetry must omit {forbidden}"

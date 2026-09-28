@@ -121,7 +121,11 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.kiro.prompt_submit")]
 pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::Kiro,
+        "userPromptSubmit"
+    );
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let profile = tracedecay_runtime_core::storage::read_existing_profile_identity_record(
         &runtime

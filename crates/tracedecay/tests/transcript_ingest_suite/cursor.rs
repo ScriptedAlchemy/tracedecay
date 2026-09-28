@@ -694,6 +694,73 @@ async fn cursor_tool_use_blocks_populate_tool_event_metadata() {
     assert!(tool_events[0]["input_bytes"].as_u64().unwrap() > 0);
 }
 
+/// Cursor's transcript JSONL writes `tool_use` blocks without ids. Those calls
+/// are served without one and the row names the gap, instead of every call on
+/// the record sharing the capture's record-rooted fallback id; a block that
+/// does carry an id keeps it.
+#[tokio::test]
+async fn cursor_tool_calls_without_host_ids_are_served_without_ids() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Reading the retry module."},{"type":"tool_use","name":"Read","input":{"path":"lib.rs"}},{"type":"tool_use","name":"Shell","input":{"command":"ls"}}]}}"#,
+            "\n",
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Listing the workspace."},{"type":"tool_use","id":"call_1","name":"Shell","input":{"command":"ls"}}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 2);
+
+    let metadata = |query: &str| {
+        let db = &db;
+        let query = query.to_owned();
+        async move {
+            let results = db.search_session_messages("cursor", None, &query, 10).await;
+            assert_eq!(results.len(), 1, "{query}");
+            serde_json::from_str::<serde_json::Value>(
+                results[0].message.metadata_json.as_deref().unwrap(),
+            )
+            .unwrap()
+        }
+    };
+
+    let unrecorded = metadata("retry").await;
+    assert_eq!(
+        unrecorded["tool_calls"],
+        serde_json::json!([
+            {"type": "function", "function": {"name": "Read", "arguments": {"path": "lib.rs"}}},
+            {"type": "function", "function": {"name": "Shell", "arguments": {"command": "ls"}}},
+        ])
+    );
+    assert_eq!(
+        unrecorded["tool_events"],
+        serde_json::json!([
+            {"type": "tool_use", "tool_name": "Read", "input_bytes": 17},
+            {"type": "tool_use", "tool_name": "Shell", "input_bytes": 16},
+        ])
+    );
+    assert_eq!(unrecorded["tool_call_id_coverage"], "host_unrecorded");
+    assert_eq!(unrecorded.get("tool_use_id"), None);
+
+    let recorded = metadata("workspace").await;
+    assert_eq!(recorded["tool_calls"][0]["id"], "call_1");
+    assert_eq!(recorded["tool_events"][0]["call_id"], "call_1");
+    assert_eq!(recorded.get("tool_call_id_coverage"), None);
+}
+
 #[tokio::test]
 async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
     let tmp = TempDir::new().unwrap();

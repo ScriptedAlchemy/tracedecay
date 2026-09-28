@@ -87,11 +87,20 @@ fn command(
 }
 
 fn write(command: WorkDuplicateAdjudicationCommandV1) -> WorkDuplicateAdjudicationWriteV1 {
+    let current_evidence = command.evidence.clone();
+    write_observing(command, current_evidence)
+}
+
+fn write_observing(
+    command: WorkDuplicateAdjudicationCommandV1,
+    current_evidence: WorkDuplicateAdjudicationEvidenceV1,
+) -> WorkDuplicateAdjudicationWriteV1 {
     let canonical_input_digest = work_duplicate_adjudication_input_digest(&command).unwrap();
     WorkDuplicateAdjudicationWriteV1 {
         actor_id: id::<ActorId>("actor.duplicate"),
         command,
         canonical_input_digest,
+        current_evidence,
     }
 }
 
@@ -257,6 +266,60 @@ fn adjudication_is_revision_cas_and_exact_replay_on_the_registered_store() {
         latest[0].command().verdict,
         DuplicateEffortKindV1::NotDuplicate
     );
+}
+
+#[test]
+fn adjudication_refuses_evidence_the_owner_did_not_observe_but_replays_committed_commands() {
+    let store = RegisteredWorkStore::start_with_setup(
+        "duplicate-adjudication-evidence-authority",
+        insert_attempts,
+    );
+    let advanced = WorkDuplicateAdjudicationEvidenceV1 {
+        work_generation: id::<ProjectionGenerationId>("generation.work.2"),
+        topology_generation: topology_ref('1'),
+    };
+    let fabricated = command(
+        "command.duplicate.fabricated-evidence",
+        None,
+        DuplicateEffortKindV1::ExactDuplicate,
+    );
+    assert_eq!(
+        store
+            .storage()
+            .compare_and_record_duplicate_adjudication(
+                &authority(),
+                &write_observing(fabricated, advanced.clone()),
+            )
+            .unwrap_err(),
+        WorkDuplicateAdjudicationStorageErrorV1::EvidenceStale
+    );
+    assert_eq!(store.count("work_duplicate_adjudications_v1"), 0);
+
+    let committed = command(
+        "command.duplicate.current-evidence",
+        None,
+        DuplicateEffortKindV1::ExactDuplicate,
+    );
+    let appended = store
+        .storage()
+        .compare_and_record_duplicate_adjudication(&authority(), &write(committed.clone()))
+        .unwrap();
+    assert!(matches!(
+        appended,
+        WorkDuplicateAdjudicationAppendOutcomeV1::Appended(_)
+    ));
+    assert!(matches!(
+        store
+            .storage()
+            .compare_and_record_duplicate_adjudication(
+                &authority(),
+                &write_observing(committed, advanced),
+            )
+            .unwrap(),
+        WorkDuplicateAdjudicationAppendOutcomeV1::Replayed(receipt)
+            if receipt == *appended.receipt()
+    ));
+    assert_eq!(store.count("work_duplicate_adjudications_v1"), 1);
 }
 
 #[test]

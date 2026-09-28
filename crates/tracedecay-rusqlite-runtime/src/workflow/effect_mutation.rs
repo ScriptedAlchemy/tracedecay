@@ -46,8 +46,8 @@ pub(super) fn apply_workflow_effect(
 /// Applies one compare-and-swap lifecycle transition and maps its typed
 /// outcome onto the durable effect contract.
 ///
-/// Retire and reject are terminal, so an illegal edge and a stale expected
-/// revision are both reported as conflicts rather than silently coerced; a
+/// A stale expected revision and an illegal edge are distinct refusals that
+/// carry the stored disposition's revision, never silently coerced; a
 /// replayed command returns the stored disposition unchanged.
 fn apply_lifecycle_command(
     transaction: &ExactSqlTransaction,
@@ -60,9 +60,17 @@ fn apply_lifecycle_command(
         | WorkflowDefinitionTransitionOutcome::Replayed(disposition) => {
             WorkflowEffectOutcomeV1::Success(lifecycle_success(command.operation, disposition))
         }
-        WorkflowDefinitionTransitionOutcome::RevisionConflict(_)
-        | WorkflowDefinitionTransitionOutcome::IllegalTransition(_) => {
-            WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::Conflict)
+        WorkflowDefinitionTransitionOutcome::RevisionConflict(current) => {
+            WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::LifecycleRevisionStale {
+                requested_revision: command.expected_revision,
+                current_revision: current.revision,
+            })
+        }
+        WorkflowDefinitionTransitionOutcome::IllegalTransition(current) => {
+            WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::IllegalLifecycleTransition {
+                current_state: current.state,
+                current_revision: current.revision,
+            })
         }
         WorkflowDefinitionTransitionOutcome::Missing => {
             WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::NotFoundOrNotAuthorized)
@@ -111,7 +119,7 @@ fn apply_definition_registration(
             sql_text(&row.values, 0).ok_or_else(workflow_effect_codec_unavailable)?;
         if existing_digest != digest.as_str() {
             return Ok(WorkflowEffectOutcomeV1::Problem(
-                WorkflowEffectProblemV1::InvalidRequest,
+                WorkflowEffectProblemV1::DefinitionContentConflict,
             ));
         }
         super::disposition::seed_candidate_disposition(
@@ -164,7 +172,7 @@ fn apply_handoff_issue(
     .map_err(workflow_effect_unavailable)?;
     if !existing.rows.is_empty() {
         return Ok(WorkflowEffectOutcomeV1::Problem(
-            WorkflowEffectProblemV1::InvalidRequest,
+            WorkflowEffectProblemV1::HandoffTokenConflict,
         ));
     }
     let scope_payload =
@@ -221,9 +229,16 @@ fn apply_handoff_redeem(
     }
     let expires_at = sql_integer(&row.values, 1).ok_or_else(workflow_effect_codec_unavailable)?;
     let consumed = sql_integer(&row.values, 2).ok_or_else(workflow_effect_codec_unavailable)?;
-    if consumed_at.0 >= expires_at || consumed != 0 {
+    // A consumed grant is replayed even after its lifetime ends: redemption,
+    // not expiry, is what closed it.
+    if consumed != 0 {
         return Ok(WorkflowEffectOutcomeV1::Problem(
-            WorkflowEffectProblemV1::InvalidRequest,
+            WorkflowEffectProblemV1::HandoffReplayed,
+        ));
+    }
+    if consumed_at.0 >= expires_at {
+        return Ok(WorkflowEffectOutcomeV1::Problem(
+            WorkflowEffectProblemV1::HandoffExpired,
         ));
     }
     let frontier_payload =

@@ -13,6 +13,7 @@ use tracedecay_contracts::{ApplicationEnvelope, RequestId};
 use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 use tracedecay_daemon_protocol::{DaemonHandshake, DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn initialize_project(home: &Path, project: &Path) {
@@ -106,15 +107,24 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
         .to_owned()
 }
 
-fn project_handshake(environment: &common::IsolatedHome, project: &Path) -> DaemonHandshake {
-    tracedecay::daemon::handshake_for_current_client(
-        environment.profile(),
-        Some(project.to_path_buf()),
-        None,
-        false,
-        false,
-    )
-    .expect("project daemon handshake")
+/// One project's daemon route under the test's isolated profile.
+struct ProjectRoute {
+    profile: ProfileRoot,
+    handshake: DaemonHandshake,
+}
+
+fn project_route(environment: &common::IsolatedHome, project: &Path) -> ProjectRoute {
+    ProjectRoute {
+        profile: environment.profile().clone(),
+        handshake: tracedecay::daemon::handshake_for_current_client(
+            environment.profile(),
+            Some(project.to_path_buf()),
+            None,
+            false,
+            false,
+        )
+        .expect("project daemon handshake"),
+    }
 }
 
 async fn assert_client_project_identity(
@@ -153,13 +163,13 @@ async fn assert_client_project_identity(
 }
 
 async fn fact_store_payload(
-    handshake: &DaemonHandshake,
+    route: &ProjectRoute,
     operation: &str,
     label: &str,
     arguments: Value,
 ) -> Value {
     let tool = format!("tracedecay_fact_store_{operation}");
-    let result = call_default_tool(handshake, &tool, arguments)
+    let result = call_default_tool(&route.profile, &route.handshake, &tool, arguments)
         .await
         .unwrap_or_else(|error| panic!("{label} failed: {error}"));
     tracedecay::daemon::tool_json_payload(&result, &tool)
@@ -361,7 +371,7 @@ fn relation_snapshot(payload: &Value, added: &AddedFactEvidence) -> Option<Value
 }
 
 async fn wait_for_related_fact(
-    handshake: &DaemonHandshake,
+    route: &ProjectRoute,
     added: &AddedFactEvidence,
     memory_scope: &str,
     label: &str,
@@ -375,7 +385,7 @@ async fn wait_for_related_fact(
             "min_trust": 0.0,
             "format": "json",
         });
-        let envelope = fact_store_payload(handshake, "related", label, arguments).await;
+        let envelope = fact_store_payload(route, "related", label, arguments).await;
         let payload = application_payload(&envelope, "evidence");
         if let Some(snapshot) = relation_snapshot(payload, added) {
             return snapshot;
@@ -387,7 +397,7 @@ async fn wait_for_related_fact(
 }
 
 async fn assert_related_absent(
-    handshake: &DaemonHandshake,
+    route: &ProjectRoute,
     entity: &str,
     memory_scope: &str,
     label: &str,
@@ -395,7 +405,7 @@ async fn assert_related_absent(
     let mut last_payload = Value::Null;
     for _ in 0..100 {
         let envelope = fact_store_payload(
-            handshake,
+            route,
             "related",
             label,
             json!({
@@ -421,14 +431,9 @@ async fn assert_related_absent(
     panic!("{label} never reached complete graph coverage: {last_payload}");
 }
 
-async fn get_fact(
-    handshake: &DaemonHandshake,
-    fact_id: &str,
-    memory_scope: &str,
-    label: &str,
-) -> Value {
+async fn get_fact(route: &ProjectRoute, fact_id: &str, memory_scope: &str, label: &str) -> Value {
     let envelope = fact_store_payload(
-        handshake,
+        route,
         "get",
         label,
         json!({
@@ -442,14 +447,14 @@ async fn get_fact(
 }
 
 async fn get_selected_project_fact(
-    handshake: &DaemonHandshake,
+    route: &ProjectRoute,
     admitted_project_id: &str,
     project_id: &str,
     fact_id: &str,
     label: &str,
 ) -> Value {
     let envelope = fact_store_payload(
-        handshake,
+        route,
         "get",
         label,
         json!({
@@ -473,14 +478,15 @@ async fn get_selected_project_fact(
 }
 
 async fn assert_selected_project_write_denied(
-    handshake: &DaemonHandshake,
+    route: &ProjectRoute,
     project_id: &str,
     content: &str,
     entity: &str,
 ) {
     let tool = "tracedecay_fact_store_add";
     let result = call_default_tool(
-        handshake,
+        &route.profile,
+        &route.handshake,
         tool,
         json!({
             "content": content,
@@ -519,9 +525,10 @@ fn graph_publication_retryable(error: &tracedecay_domain::errors::TraceDecayErro
         )
 }
 
-async fn request_authoritative_reconcile(handshake: &DaemonHandshake, label: &str) {
+async fn request_authoritative_reconcile(route: &ProjectRoute, label: &str) {
     let result = call_default_tool(
-        handshake,
+        &route.profile,
+        &route.handshake,
         "tracedecay_admin_sync",
         json!({ "format": "json" }),
     )
@@ -543,14 +550,15 @@ async fn request_authoritative_reconcile(handshake: &DaemonHandshake, label: &st
 /// ceiling, so a longer overall budget is spent as consecutive waits.
 const STATUS_WAIT_SLICE: Duration = Duration::from_secs(110);
 
-async fn wait_for_current_graph(handshake: &DaemonHandshake, label: &str) {
+async fn wait_for_current_graph(route: &ProjectRoute, label: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(180);
     loop {
         let budget = deadline
             .saturating_duration_since(std::time::Instant::now())
             .min(STATUS_WAIT_SLICE);
         match call_default_tool(
-            handshake,
+            &route.profile,
+            &route.handshake,
             "tracedecay_status",
             json!({
                 "format": "json",
@@ -592,12 +600,13 @@ async fn wait_for_current_graph(handshake: &DaemonHandshake, label: &str) {
     }
 }
 
-async fn context_payload(handshake: &DaemonHandshake, task: &str, label: &str) -> Value {
+async fn context_payload(route: &ProjectRoute, task: &str, label: &str) -> Value {
     let mut last = String::new();
     tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             match call_default_tool(
-                handshake,
+                &route.profile,
+                &route.handshake,
                 "tracedecay_context",
                 json!({
                     "task": task,
@@ -626,13 +635,8 @@ async fn context_payload(handshake: &DaemonHandshake, task: &str, label: &str) -
     .unwrap_or_else(|_| panic!("{label} failed: {last}"))
 }
 
-async fn assert_context_matches_fact(
-    handshake: &DaemonHandshake,
-    fact_id: &str,
-    task: &str,
-    label: &str,
-) {
-    let payload = context_payload(handshake, task, label).await;
+async fn assert_context_matches_fact(route: &ProjectRoute, fact_id: &str, task: &str, label: &str) {
+    let payload = context_payload(route, task, label).await;
     assert!(
         payload["memory_matches"].as_array().is_some_and(|matches| {
             matches
@@ -643,9 +647,9 @@ async fn assert_context_matches_fact(
     );
 }
 
-async fn explicit_search(handshake: &DaemonHandshake, query: &str, fact_id: &str, label: &str) {
+async fn explicit_search(route: &ProjectRoute, query: &str, fact_id: &str, label: &str) {
     let envelope = fact_store_payload(
-        handshake,
+        route,
         "search",
         label,
         json!({
@@ -686,12 +690,14 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     let project_b_id = admitted_project_id(environment.home(), &project_b);
     assert_ne!(project_a_id, project_b_id);
 
-    let first_a = project_handshake(&environment, &project_a);
-    let first_b = project_handshake(&environment, &project_b);
-    let first_a_client = tracedecay_daemon_identity::invocation_client_for_current(first_a.clone())
-        .expect("project A client");
-    let first_b_client = tracedecay_daemon_identity::invocation_client_for_current(first_b.clone())
-        .expect("project B client");
+    let first_a = project_route(&environment, &project_a);
+    let first_b = project_route(&environment, &project_b);
+    let first_a_client =
+        tracedecay_daemon_identity::invocation_client_for_current(first_a.handshake.clone())
+            .expect("project A client");
+    let first_b_client =
+        tracedecay_daemon_identity::invocation_client_for_current(first_b.handshake.clone())
+            .expect("project B client");
     assert_client_project_identity(
         &first_a_client,
         &project_a_id,
@@ -871,13 +877,13 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     daemon = common::spawn_tracedecay_daemon(environment.home());
     assert_ne!(daemon.id(), first_daemon_pid);
 
-    let restarted_a = project_handshake(&environment, &project_a);
-    let restarted_b = project_handshake(&environment, &project_b);
+    let restarted_a = project_route(&environment, &project_a);
+    let restarted_b = project_route(&environment, &project_b);
     let restarted_a_client =
-        tracedecay_daemon_identity::invocation_client_for_current(restarted_a.clone())
+        tracedecay_daemon_identity::invocation_client_for_current(restarted_a.handshake.clone())
             .expect("restarted A client");
     let restarted_b_client =
-        tracedecay_daemon_identity::invocation_client_for_current(restarted_b.clone())
+        tracedecay_daemon_identity::invocation_client_for_current(restarted_b.handshake.clone())
             .expect("restarted B client");
     assert_client_project_identity(
         &restarted_a_client,

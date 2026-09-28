@@ -78,8 +78,8 @@ pub use context_headings::{
 };
 pub use handlers::{
     decode_primitive_request, effective_path, generic_tool_result, handle_multi_root, handle_work,
-    handle_workflow, rendered_tool_result, require_node_id, require_object_args,
-    require_positive_limit, text_tool_result, tool_json, tool_json_with_md, unique_file_paths,
+    handle_workflow, rendered_tool_result, require_object_args, require_positive_limit,
+    text_tool_result, tool_json, tool_json_with_md, unique_file_paths,
 };
 pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,

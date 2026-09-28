@@ -261,14 +261,14 @@ fn maintenance_checkpoint_waits_for_product_writes_admitted_before_drain() {
     );
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let writer = Arc::new(start_with_persistence(
+    let writer = Arc::new(start_with_executor(
         &database,
         &first_request,
-        Box::new(BlockingPersistence {
+        BlockingPersistence {
             entered: entered_tx,
             release: release_rx,
             sequence: 0,
-        }),
+        },
     ));
     let checkpoint = writer.checkpoint_handle();
 

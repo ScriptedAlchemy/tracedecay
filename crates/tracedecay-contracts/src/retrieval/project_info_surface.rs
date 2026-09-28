@@ -21,6 +21,7 @@ use crate::code_index_freshness::{
 };
 use crate::doctor::{DoctorReportV1, LanguageServerReadV1, ResidentMemoryHolderReadV1};
 use crate::project_registry::{ProjectRegistrySummary, ProjectRepoGroup, PublicCodeProject};
+use crate::retained_surfaces::LcmDoctorProjectionV1;
 use crate::storage::{SchemaConvergenceFindingV1, TableGrowthDoctorEvidenceV1};
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -121,12 +122,49 @@ pub struct ProjectStatusV1 {
     pub session_ingest: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_history_catch_up: Option<Value>,
+    /// The project session projection's serving state, the same reading
+    /// `tracedecay_lcm_doctor` reports.
+    pub session_projection: LcmDoctorProjectionV1,
+    /// The session↔Git evidence `tracedecay_sessions_for` and the
+    /// branch/commit session filters read.
+    pub session_git_evidence: StatusSessionGitEvidenceV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_staleness: Option<StatusGitStalenessV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<CodeIndexReadinessWaitOutcomeV1>,
+}
+
+/// The project's session↔Git evidence generation.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StatusSessionGitEvidenceV1 {
+    /// A convergence pass installed this generation.
+    Recorded {
+        generation: String,
+        source_watermark: String,
+        span_count: u64,
+        commit_count: u64,
+        backfill_watermark: Option<i64>,
+    },
+    /// No convergence pass has written evidence for this project yet.
+    Unrecorded { backfill_watermark: Option<i64> },
+    /// The evidence could not be read.
+    Unavailable {
+        reason: StatusSessionGitEvidenceUnavailableV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusSessionGitEvidenceUnavailableV1 {
+    /// This request holds no project session store.
+    SessionStoreDenied,
+    /// The session store refused the evidence read.
+    ReadFailed,
 }
 
 /// The daemon's resident memory as one project sees it.

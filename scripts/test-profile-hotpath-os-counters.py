@@ -179,6 +179,15 @@ class FdClassificationTests(unittest.TestCase):
             env = os.environ.copy()
             env["HOTPATH_OS_WORK_FILE"] = str(Path(tmp) / "work.bin")
             env["HOTPATH_OS_PROFILE_IDLE_SECONDS"] = "0"
+            metadata_repo = Path(tmp) / "metadata-repo"
+            metadata_repo.mkdir()
+            git = ["git", "-C", str(metadata_repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+            subprocess.run([*git, "init", "-q"], check=True)
+            subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "fixture"], check=True)
+            head = subprocess.run(
+                [*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+            ).stdout.strip()
+            env["HOTPATH_OS_PROFILE_REPO"] = str(metadata_repo)
             completed = subprocess.run(
                 [
                     str(DRIVER),
@@ -210,11 +219,12 @@ class FdClassificationTests(unittest.TestCase):
                     f"stderr:\n{completed.stderr}"
                 )
             report = json.loads((out / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["schema"], self.mod.SCHEMA)
+            self.assertEqual(report["schema"], "tracedecay.hotpath.os_counter_profile.v1")
             self.assertEqual(report["identity"]["scenario"], "one-workload-sample")
             self.assertEqual(report["identity"]["feature_set"], "hotpath")
             self.assertEqual(report["identity"]["profile_identity"], "harness-self-test")
-            self.assertTrue(report["identity"]["commit"])
+            self.assertEqual(report["identity"]["commit"], head)
+            self.assertIs(report["identity"]["commit_dirty"], False)
             self.assertGreaterEqual(report["identity"]["duration_ms"], 200)
             self.assertIn("before_to_after_catch_up", report["deltas"])
             stat = report["deltas"]["before_to_after_catch_up"]["stat"]

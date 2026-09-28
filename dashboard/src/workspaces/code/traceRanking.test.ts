@@ -60,7 +60,8 @@ describe('callSiteTotals', () => {
     // `degree` is the symbol's total over every edge kind; this is the drawn
     // call sites only. Conflating them would print an unmeasured figure under a
     // measured label.
-    expect(totals.get(focus.id)).not.toBe(focus.degree);
+    expect(focus.degree).toBe(24);
+    expect(totals.get(focus.id)).toBe(72);
   });
 });
 

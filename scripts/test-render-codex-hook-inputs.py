@@ -46,9 +46,11 @@ class CodexHookInputRendererTests(unittest.TestCase):
         messages, users = self.renderer.parse_file(CURRENT_SHAPES)
         pairs = self.renderer.pair_submitted_users(messages, users)
 
-        self.assertEqual(len(messages), 1)
-        self.assertEqual(len(users), 1)
-        self.assertEqual(pairs[messages[0]], users[0])
+        prompt = "Anonymized prompt from a recent Codex rollout."
+        self.assertEqual(
+            [(m.line_no, m.role, m.text, u.line_no, u.role, u.text) for m, u in pairs.items()],
+            [(1, "user", prompt, 2, "user", prompt)],
+        )
 
     def test_legacy_user_message_remains_supported(self) -> None:
         fixture = self.write_records(
@@ -82,9 +84,13 @@ class CodexHookInputRendererTests(unittest.TestCase):
         messages, users = self.renderer.parse_file(fixture)
         pairs = self.renderer.pair_submitted_users(messages, users)
 
-        self.assertEqual(pairs[messages[0]].text, "First prompt.")
-        self.assertEqual(pairs[messages[1]].text, "Second prompt.")
-        self.assertEqual(len(set(pairs.values())), 2)
+        self.assertEqual(
+            [(m.line_no, m.text, u.line_no, u.text) for m, u in pairs.items()],
+            [
+                (2, "Second prompt.", 3, "Second prompt."),
+                (1, "First prompt.", 4, "First prompt."),
+            ],
+        )
 
 
 if __name__ == "__main__":

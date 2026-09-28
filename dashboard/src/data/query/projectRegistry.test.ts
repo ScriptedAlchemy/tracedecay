@@ -43,12 +43,22 @@ function registryBatch(): SseBatch {
 }
 
 describe('project registry query keys', () => {
-  it('keeps entries for different projects apart', () => {
-    expect(projectRegistryEntryKey('proj_a')).not.toEqual(projectRegistryEntryKey('proj_b'));
-  });
+  it('keeps the listing and each project entry in their own cache slots', () => {
+    const client = new QueryClient();
+    const slots = [
+      [[...projectRegistryListKey, 'unscoped'], 'listing'],
+      [[...projectRegistryEntryKey('list'), 'unscoped'], 'entry named list'],
+      [[...projectRegistryEntryKey('proj_a'), 'unscoped'], 'entry a'],
+      [[...projectRegistryEntryKey('proj_b'), 'unscoped'], 'entry b'],
+    ] as const;
+    for (const [key, value] of slots) client.setQueryData(key, value);
 
-  it('does not collide the listing with an entry', () => {
-    expect(projectRegistryListKey).not.toEqual(projectRegistryEntryKey('list'));
+    expect(slots.map(([key]) => client.getQueryData(key))).toEqual([
+      'listing',
+      'entry named list',
+      'entry a',
+      'entry b',
+    ]);
   });
 
   /**

@@ -25,6 +25,7 @@ use super::super::{
     RetainedTextGenerationRestoreV1,
     graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1},
     now_micros,
+    publication_store::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1,
     reconcile_panic_guard::{
         ReconcileCapacityRetryV1, ReconcilePanicDecisionV1, ReconcilePanicGuardV1,
     },
@@ -33,6 +34,7 @@ use super::{
     ACTIVATION_RETRY_BACKOFF_CEILING, ACTIVATION_RETRY_BACKOFF_FLOOR,
     CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
     CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
+    CONVERGENCE_PARK_GRAPH_STORE_BUSY_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
     CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
@@ -61,7 +63,34 @@ enum PublicationAuthorityResetV1 {
     },
 }
 
+/// Why graph prepare produced no generation to seat.
+enum GraphPrepareStopV1 {
+    /// The build or decode does not fit resident memory yet.
+    ResidentMemory(String),
+    /// Another holder has the code-generation store lock; it releases on its own.
+    StoreBusy(String),
+    /// The active generation could not be decoded; a retry needs a new wake.
+    DecodeFailed(String),
+}
+
 impl CodeIndexSchedulerRegistryV1 {
+    /// Arm one delayed wake for capacity another holder releases without
+    /// waking this worktree; `false` once the bound is spent.
+    fn arm_capacity_retry(
+        capacity_retry: &mut ReconcileCapacityRetryV1,
+        wake: &Arc<tokio::sync::Notify>,
+    ) -> bool {
+        let Some(delay) = capacity_retry.record_capacity_failure() else {
+            return false;
+        };
+        let retry_wake = Arc::clone(wake);
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            retry_wake.notify_one();
+        });
+        true
+    }
+
     /// Spend this mount's single automatic reset on a corrupt publication.
     ///
     /// The reset is attempted once per mount so a store that is corrupt again
@@ -1797,6 +1826,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 // projection still holds the build memory is sequencing, not
                 // a stall: it runs again as soon as that projection joins.
                 let mut graph_waits_for_text = false;
+                // A decode refused by a store-lock holder outside this pass is
+                // not progress, so the capacity retry keeps its bound.
+                let mut graph_store_busy = false;
                 let text_projection_running = published_text_projection.is_some();
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
@@ -1935,12 +1967,20 @@ impl CodeIndexSchedulerRegistryV1 {
                         let prepare_passes = Arc::clone(&worker_reconcile_in_progress);
                         let prepare_pending_wake = Arc::clone(&worker_pending_wake);
                         let prepare_wake = Arc::clone(&worker_wake);
-                        match hotpath::future!(
+                        #[cfg(test)]
+                        let after_decode_gate =
+                            Self::enter_graph_decode_gate(&worker_project_root).await;
+                        let prepared = hotpath::future!(
                             tokio::task::spawn_blocking(move || {
                                 // A graph build the memory watermark stopped
                                 // parks exactly like a decode that does not fit.
                                 if let Some(detail) = graph_publish_refusal {
-                                    return Ok((None, None, false, Some(detail)));
+                                    return Ok((
+                                        None,
+                                        None,
+                                        false,
+                                        Some(GraphPrepareStopV1::ResidentMemory(detail)),
+                                    ));
                                 }
                                 if defer_serving_decode {
                                     return Ok((None, None, false, None));
@@ -1963,29 +2003,36 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // the text build. Decoding it again is charged
                                 // against the process budget, and a decode that
                                 // does not fit parks until memory is given back.
-                                let decoded = match decoder
+                                let generation = match decoder
                                     .as_ref()
                                     .map(DaemonCodeIndexPublicationStoreV1::load_active_shared)
                                 {
-                                    Some(Err(
-                                        CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
-                                            detail,
-                                        ),
-                                    )) => return Ok((None, None, false, Some(detail))),
-                                    decoded => decoded,
-                                };
-                                let generation = decoded.and_then(|decoded| match decoded {
-                                    Ok(generation) => generation,
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            event = "code_index_graph_prepare_load_failed",
-                                            error = %error,
-                                            "active generation decode failed; \
-                                             the sealed generation cannot seat"
-                                        );
-                                        None
+                                    None => None,
+                                    Some(Ok(generation)) => generation,
+                                    Some(Err(error)) => {
+                                        let stop = match error {
+                                            CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+                                                detail,
+                                            ) => GraphPrepareStopV1::ResidentMemory(detail),
+                                            CodeIndexPublicationStoreErrorV1::Unavailable(detail)
+                                                if detail
+                                                    == CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1 =>
+                                            {
+                                                GraphPrepareStopV1::StoreBusy(detail)
+                                            }
+                                            error => {
+                                                tracing::warn!(
+                                                    event = "code_index_graph_prepare_load_failed",
+                                                    error = %error,
+                                                    "active generation decode failed; \
+                                                     the sealed generation cannot seat"
+                                                );
+                                                GraphPrepareStopV1::DecodeFailed(error.to_string())
+                                            }
+                                        };
+                                        return Ok((None, None, false, Some(stop)));
                                     }
-                                });
+                                };
                                 let latest = match generation {
                                     Some(generation) => Self::lock_scheduler_for_graph_step(
                                         &graph_scheduler,
@@ -2043,9 +2090,11 @@ impl CodeIndexSchedulerRegistryV1 {
                             }),
                             label = "daemon.code_index.graph_prepare"
                         )
-                        .await
-                        {
-                            Ok(Ok((_, _, _, Some(detail)))) => {
+                        .await;
+                        #[cfg(test)]
+                        Self::pass_worker_step_gate(after_decode_gate).await;
+                        match prepared {
+                            Ok(Ok((_, _, _, Some(stop)))) => {
                                 // Once the text owner serves the graph, the
                                 // generation has converged: only the reader
                                 // that demanded the whole decode waits for
@@ -2053,29 +2102,83 @@ impl CodeIndexSchedulerRegistryV1 {
                                 let converged = graph_serves_from_text || graph_already_serves;
                                 // A build that waits for this pass's own text
                                 // projection is rescheduled at its join below.
+                                // That projection is also the store-lock holder
+                                // a publication's decode meets: its artifact
+                                // attachment holds the lock exclusively, and
+                                // the join is its release.
                                 graph_waits_for_text = published_pass && text_projection_running;
-                                if !graph_waits_for_text {
-                                    if !converged {
-                                        park_convergence(
-                                            &worker_convergence_park,
-                                            detail.clone(),
-                                            CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
-                                            Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
-                                            true,
+                                match &stop {
+                                    GraphPrepareStopV1::ResidentMemory(detail) => {
+                                        if !graph_waits_for_text {
+                                            if !converged {
+                                                park_convergence(
+                                                    &worker_convergence_park,
+                                                    detail.clone(),
+                                                    CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
+                                                    Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                                                    true,
+                                                );
+                                            }
+                                            worker_memory_retry
+                                                .schedule(&worker_pending_wake, &worker_wake);
+                                        }
+                                        tracing::warn!(
+                                            event = "code_index_graph_prepare_decode_refused",
+                                            published_pass,
+                                            converged,
+                                            graph_waits_for_text,
+                                            detail = %detail,
+                                            "the sealed generation waits to decode until memory \
+                                             is given back; text serving is unaffected"
                                         );
                                     }
-                                    worker_memory_retry
-                                        .schedule(&worker_pending_wake, &worker_wake);
+                                    GraphPrepareStopV1::StoreBusy(detail) => {
+                                        // Any other holder releases without
+                                        // waking this worktree.
+                                        let retry_armed = if graph_waits_for_text {
+                                            true
+                                        } else {
+                                            graph_store_busy = true;
+                                            Self::arm_capacity_retry(
+                                                &mut capacity_retry,
+                                                &worker_wake,
+                                            )
+                                        };
+                                        if !retry_armed && !converged {
+                                            park_convergence(
+                                                &worker_convergence_park,
+                                                detail.clone(),
+                                                CONVERGENCE_PARK_GRAPH_STORE_BUSY_REMEDIATION_V1,
+                                                Some(
+                                                    CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
+                                                ),
+                                                true,
+                                            );
+                                        }
+                                        tracing::warn!(
+                                            event = "code_index_graph_prepare_store_busy",
+                                            published_pass,
+                                            converged,
+                                            graph_waits_for_text,
+                                            retry_armed,
+                                            "the sealed generation waits to decode until the \
+                                             code-generation store lock is released"
+                                        );
+                                    }
+                                    GraphPrepareStopV1::DecodeFailed(detail) => {
+                                        if !graph_waits_for_text && !converged {
+                                            park_convergence(
+                                                &worker_convergence_park,
+                                                detail.clone(),
+                                                CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
+                                                Some(
+                                                    CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
+                                                ),
+                                                true,
+                                            );
+                                        }
+                                    }
                                 }
-                                tracing::warn!(
-                                    event = "code_index_graph_prepare_decode_refused",
-                                    published_pass,
-                                    converged,
-                                    graph_waits_for_text,
-                                    detail = %detail,
-                                    "the sealed generation waits to decode until memory is \
-                                     given back; text serving is unaffected"
-                                );
                                 Ok((outcome, None, None))
                             }
                             Ok(Ok((latest, replay_binding, roster_refusal_rebuild, None))) => {
@@ -2693,7 +2796,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     // panicking input nor the capacity contention is still
                     // reproducing, so both bounded retry states restart.
                     panic_guard.record_progress();
-                    capacity_retry.record_progress();
+                    if !graph_store_busy {
+                        capacity_retry.record_progress();
+                    }
                     let _service_micros = Self::record_reconcile_receipt(
                         &worker_cadence_telemetry,
                         worker_project_root.clone(),
@@ -2831,20 +2936,13 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // Permanent refusals deliberately never reach
                                 // here: retrying those forever is the failure
                                 // this loop already had.
-                                match capacity_retry.record_capacity_failure() {
-                                    Some(delay) => {
-                                        let retry_wake = Arc::clone(&worker_wake);
-                                        tokio::spawn(async move {
-                                            tokio::time::sleep(delay).await;
-                                            retry_wake.notify_one();
-                                        });
-                                    }
-                                    None => tracing::warn!(
+                                if !Self::arm_capacity_retry(&mut capacity_retry, &worker_wake) {
+                                    tracing::warn!(
                                         event = "code_index_reconcile_capacity_retry_exhausted",
                                         path = "background_worker",
                                         consecutive = capacity_retry.consecutive(),
                                         "code-index reconcile stopped retrying a capacity refusal; the next hint retries"
-                                    ),
+                                    );
                                 }
                             } else if error.reproduces_on_unchanged_input() {
                                 // The restored arrival alone read as an

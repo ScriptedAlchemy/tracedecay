@@ -5,6 +5,7 @@ use tracedecay_domain::*;
 use tree_sitter::Parser;
 
 include!("support/edges.rs");
+include!("support/calls.rs");
 
 #[test]
 fn test_rust_cfg_attribute_in_struct_pattern_field() {
@@ -1608,5 +1609,32 @@ mod inner {
             "crate::m::g".to_owned(),
             Some(UnmodeledImportShapeV1::InlineModuleGlob)
         )]
+    );
+}
+
+#[test]
+fn test_rust_const_and_static_initializers_own_their_calls() {
+    let source = r#"static REGISTRY: LazyLock<Registry> = LazyLock::new(|| build_registry());
+const LIMIT: usize = compute_limit();
+
+fn run() {
+    work();
+}
+"#;
+    let result = RustExtractor.extract_artifact("lib.rs", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    assert_eq!(
+        calls_by_owner(&result),
+        [
+            (
+                "static",
+                "REGISTRY",
+                0,
+                vec!["LazyLock::new", "build_registry"]
+            ),
+            ("const", "LIMIT", 1, vec!["compute_limit"]),
+            ("function", "run", 3, vec!["work"]),
+        ]
     );
 }

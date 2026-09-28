@@ -54,8 +54,9 @@ use super::format::{
 };
 use super::postings::{NGRAM_NORMALIZED, query_ngrams, raw_override_query_ngrams};
 use super::row_codec::{
-    ConnectionRowDictionaryV1, ROW_BLOCK_BY_DOCUMENT_SQL, RowBlocksV1, StoredRowV1,
-    decode_artifact_row, stored_chunk_key, stored_symbol_key,
+    ConnectionRowDictionaryV1, ROW_BLOCK_BY_DOCUMENT_SQL, RowBlocksV1, ScoringPrefaceIndexV1,
+    StoredRowV1, decode_artifact_row, load_scoring_preface_index, stored_chunk_key,
+    stored_symbol_key,
 };
 use super::schema::{
     exact_field_code, field_from_code, require_served_revision, stable_exact_term_id,
@@ -141,9 +142,15 @@ pub struct CodeLexicalArtifactReaderV1 {
     metadata: super::super::CodeLexicalProjectionMetadataV1,
     receipt: VerifiedCodeLexicalArtifactV1,
     retained_owned_bytes: usize,
-    /// Fuzzy expansion walks every in-fuzzy term; share one load across
-    /// clones and later queries on this reader.
-    fuzzy_vocabulary: Arc<OnceLock<Arc<Vec<String>>>>,
+    /// Fuzzy expansion walks in-fuzzy terms; share one load across clones
+    /// and later queries on this reader.
+    fuzzy_vocabulary: Arc<OnceLock<Arc<FuzzyVocabularyV1>>>,
+    /// Scoring prefaces for every document. A common term touches thousands
+    /// of blocks; decoding that window on every query was the lexical walk.
+    scoring_prefaces: Arc<StdMutex<Option<Arc<ScoringPrefaceIndexV1>>>>,
+    /// The admitted reader ceiling left after metadata and page caches. The
+    /// preface cache must fit here: it is held for the reader's lifetime.
+    preface_ceiling_bytes: usize,
 }
 
 struct ArtifactReaders {
@@ -883,6 +890,8 @@ impl CodeLexicalArtifactReaderV1 {
             receipt: stored,
             retained_owned_bytes,
             fuzzy_vocabulary: Arc::new(OnceLock::new()),
+            scoring_prefaces: Arc::new(StdMutex::new(None)),
+            preface_ceiling_bytes: cache_budget_bytes.saturating_sub(retained_owned_bytes),
         })
     }
 
@@ -917,7 +926,7 @@ impl CodeLexicalArtifactReaderV1 {
         let Some(document) = document else {
             return Ok(None);
         };
-        let stored = RowBlocksV1::new(&connection).row(
+        let stored = RowBlocksV1::new(&connection, ScoringPrefaceIndexV1::empty()).row(
             u32::try_from(document)
                 .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?,
         )?;
@@ -1392,6 +1401,34 @@ impl CodeLexicalArtifactReaderV1 {
             Ok(())
         }
     }
+
+    /// Every block's scoring preface, shared by later queries on this reader.
+    /// The first lexical read pays the scan while concurrent first reads wait
+    /// for it rather than each holding their own copy; a warm common-term
+    /// walk then looks up field lengths without re-reading row blocks.
+    fn scoring_preface_index(
+        &self,
+        connection: &Connection,
+        control: &dyn RetrievalExecutionControl,
+    ) -> Result<Arc<ScoringPrefaceIndexV1>, CodeLexicalArtifactErrorV1> {
+        let mut slot = self.scoring_prefaces.lock().map_err(|_| {
+            CodeLexicalArtifactErrorV1::Io("lexical artifact preface lock is poisoned".to_owned())
+        })?;
+        if let Some(cached) = slot.as_ref() {
+            return Ok(Arc::clone(cached));
+        }
+        let loaded = Arc::new(hotpath::measure_block!("query.artifact.preface.load", {
+            load_scoring_preface_index(connection, self.preface_ceiling_bytes, || {
+                retrieval_checkpoint(control).map_err(|_| {
+                    CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+                })
+            })
+        })?);
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.artifact.preface.bytes").set(loaded.retained_bytes());
+        *slot = Some(Arc::clone(&loaded));
+        Ok(loaded)
+    }
 }
 
 impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
@@ -1418,11 +1455,15 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
                 }
             }))
             .map_err(map_query_artifact_error)?;
+        let prefaces = self
+            .scoring_preface_index(&connection, request.control)
+            .map_err(map_query_artifact_error)?;
         let outcome = ArtifactQueryV1::new(
             &connection,
             &self.metadata,
             &self.receipt,
             &self.fuzzy_vocabulary,
+            prefaces.as_ref(),
         )?
         .lexical_batch(request)?;
         crate::hotpath_metrics::record_lane(
@@ -1477,6 +1518,7 @@ where
             &self.reader.metadata,
             &self.reader.receipt,
             &self.reader.fuzzy_vocabulary,
+            ScoringPrefaceIndexV1::empty(),
         )?
         .exact_batch(request, &self.authority)?;
         crate::hotpath_metrics::record_lane(
@@ -1495,7 +1537,7 @@ struct ArtifactQueryV1<'a> {
     metadata: &'a super::super::CodeLexicalProjectionMetadataV1,
     document_count: usize,
     metrics: ArtifactQueryMetricsV1,
-    fuzzy_vocabulary: &'a OnceLock<Arc<Vec<String>>>,
+    fuzzy_vocabulary: &'a OnceLock<Arc<FuzzyVocabularyV1>>,
     /// Row dictionary entries resolved during this query.
     row_dictionary: ConnectionRowDictionaryV1<'a>,
     /// The row block this query decoded last.
@@ -1976,7 +2018,8 @@ impl<'a> ArtifactQueryV1<'a> {
         connection: &'a Connection,
         metadata: &'a super::super::CodeLexicalProjectionMetadataV1,
         receipt: &'a VerifiedCodeLexicalArtifactV1,
-        fuzzy_vocabulary: &'a OnceLock<Arc<Vec<String>>>,
+        fuzzy_vocabulary: &'a OnceLock<Arc<FuzzyVocabularyV1>>,
+        prefaces: &'a ScoringPrefaceIndexV1,
     ) -> Result<Self, RetrievalPortError> {
         Ok(Self {
             connection,
@@ -1997,7 +2040,7 @@ impl<'a> ArtifactQueryV1<'a> {
             metrics: ArtifactQueryMetricsV1::default(),
             fuzzy_vocabulary,
             row_dictionary: ConnectionRowDictionaryV1::new(connection),
-            row_blocks: RowBlocksV1::new(connection),
+            row_blocks: RowBlocksV1::new(connection, prefaces),
         })
     }
 
@@ -2690,11 +2733,21 @@ impl<'a> ArtifactQueryV1<'a> {
                     continue;
                 }
                 scratch.prepare_query(&group.normalized_query);
+                let query_len = scratch.query_chars.len();
+                // Levenshtein distance is at least the character-length gap,
+                // so terms outside this window cannot match at `distance`.
+                // Indices stay in vocabulary load order, which is the order
+                // the expansion budget fills.
+                let candidates = vocabulary.indices_within(
+                    query_len.saturating_sub(distance),
+                    query_len.saturating_add(distance),
+                );
                 let mut added = 0usize;
-                for term in vocabulary.iter() {
+                for index in candidates {
                     if added >= remaining {
                         break;
                     }
+                    let term = &vocabulary.terms[usize::try_from(index).map_err(contract_error)?];
                     if term != &group.normalized_query
                         && scratch.bounded_edit_distance(term, distance) == Some(distance)
                         && group.seen.insert(term.clone())
@@ -2720,7 +2773,7 @@ impl<'a> ArtifactQueryV1<'a> {
     }
 
     #[hotpath::measure(label = "query.artifact.vocabulary.load")]
-    fn load_vocabulary(&self) -> Result<Arc<Vec<String>>, RetrievalPortError> {
+    fn load_vocabulary(&self) -> Result<Arc<FuzzyVocabularyV1>, RetrievalPortError> {
         if let Some(cached) = self.fuzzy_vocabulary.get() {
             return Ok(Arc::clone(cached));
         }
@@ -2732,7 +2785,7 @@ impl<'a> ArtifactQueryV1<'a> {
     /// read here, so the walk never follows a list's overflow pages.
     const VOCABULARY_SQL: &'static str = "SELECT term FROM term_postings WHERE in_fuzzy = 1";
 
-    fn load_vocabulary_from_sqlite(&self) -> Result<Arc<Vec<String>>, RetrievalPortError> {
+    fn load_vocabulary_from_sqlite(&self) -> Result<Arc<FuzzyVocabularyV1>, RetrievalPortError> {
         self.metrics.probe();
         let mut statement = self
             .connection
@@ -2748,7 +2801,7 @@ impl<'a> ArtifactQueryV1<'a> {
         self.metrics
             .rows(u64::try_from(vocabulary.len()).map_err(contract_error)?);
         hotpath::gauge!("query.lane.fuzzy.vocabulary_terms").set(vocabulary.len());
-        Ok(Arc::new(vocabulary))
+        Ok(Arc::new(FuzzyVocabularyV1::from_terms(vocabulary)?))
     }
 
     /// Read the document-independent scoring statistics once per request.
@@ -3113,8 +3166,44 @@ fn exact_matches_artifact(
     )
 }
 
+/// In-fuzzy terms plus a character-length index. Buckets keep load order so
+/// merging a length window and sorting indices reproduces the order a full
+/// scan would have visited those terms.
+struct FuzzyVocabularyV1 {
+    terms: Vec<String>,
+    by_char_len: Vec<Vec<u32>>,
+}
+
+impl FuzzyVocabularyV1 {
+    fn from_terms(terms: Vec<String>) -> Result<Self, RetrievalPortError> {
+        let mut by_char_len = Vec::new();
+        for (index, term) in terms.iter().enumerate() {
+            let len = term.chars().count();
+            if by_char_len.len() <= len {
+                by_char_len.resize(len + 1, Vec::new());
+            }
+            by_char_len[len].push(u32::try_from(index).map_err(contract_error)?);
+        }
+        Ok(Self { terms, by_char_len })
+    }
+
+    /// Terms whose character length is in `min..=max`, in load order.
+    fn indices_within(&self, min: usize, max: usize) -> Vec<u32> {
+        if min > max || min >= self.by_char_len.len() {
+            return Vec::new();
+        }
+        let end = max.min(self.by_char_len.len() - 1);
+        let mut indices = Vec::new();
+        for bucket in &self.by_char_len[min..=end] {
+            indices.extend_from_slice(bucket);
+        }
+        indices.sort_unstable();
+        indices
+    }
+}
+
 /// Reusable buffers for the vocabulary edit-distance sweep. One expansion
-/// pass compares the query against every vocabulary term per distance level;
+/// pass compares the query against the length window that can still match;
 /// per-comparison `Vec` allocations dominated that sweep.
 #[derive(Default)]
 struct EditDistanceScratchV1 {
@@ -3529,7 +3618,9 @@ mod tests {
     use tracedecay_private_fs::open_private_file;
 
     use super::super::format::{PostingListEncoderV1, encode_document_set};
-    use super::super::row_codec::{BlockRowV1, RowBlocksV1, encode_row_blocks};
+    use super::super::row_codec::{
+        BlockRowV1, RowBlocksV1, ScoringPrefaceIndexV1, encode_row_blocks,
+    };
     use super::{
         ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_NGRAM_MAX_CANDIDATES_V1,
         ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
@@ -4418,7 +4509,7 @@ mod tests {
         let mut visited = 0;
         visit_lexical_rows(
             &connection,
-            &RowBlocksV1::new(&connection),
+            &RowBlocksV1::new(&connection, ScoringPrefaceIndexV1::empty()),
             &documents,
             &postings,
             &ArtifactQueryMetricsV1::default(),
@@ -4450,7 +4541,7 @@ mod tests {
         let mut visited = 0usize;
         let error = visit_lexical_rows(
             &connection,
-            &RowBlocksV1::new(&connection),
+            &RowBlocksV1::new(&connection, ScoringPrefaceIndexV1::empty()),
             &documents,
             &postings,
             &ArtifactQueryMetricsV1::default(),
@@ -4475,7 +4566,7 @@ mod tests {
         let mut complete = 0usize;
         visit_lexical_rows(
             &connection,
-            &RowBlocksV1::new(&connection),
+            &RowBlocksV1::new(&connection, ScoringPrefaceIndexV1::empty()),
             &documents,
             &postings,
             &ArtifactQueryMetricsV1::default(),
@@ -4513,7 +4604,7 @@ mod tests {
         let metrics = ArtifactQueryMetricsV1::default();
         let mut visited = 0usize;
 
-        let rows = RowBlocksV1::new(&connection);
+        let rows = RowBlocksV1::new(&connection, ScoringPrefaceIndexV1::empty());
         visit_lexical_rows(
             &connection,
             &rows,
@@ -4618,6 +4709,23 @@ mod tests {
             selected, all,
             "bounded selection must equal a full sort truncated to the cap"
         );
+    }
+
+    #[test]
+    fn fuzzy_length_window_keeps_load_order_and_drops_impossible_lengths() {
+        let vocabulary = super::FuzzyVocabularyV1::from_terms(vec![
+            "aa".to_owned(),
+            "planningplanning".to_owned(),
+            "ab".to_owned(),
+            "abc".to_owned(),
+        ])
+        .expect("vocabulary");
+        assert_eq!(
+            vocabulary.indices_within(1, 3),
+            vec![0, 2, 3],
+            "a distance-1 window around a 2-character term skips the long term and stays in load order"
+        );
+        assert!(vocabulary.indices_within(8, 8).is_empty());
     }
 
     #[test]

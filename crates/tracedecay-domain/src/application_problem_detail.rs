@@ -24,6 +24,13 @@ pub enum ApplicationProblemDetailV1 {
         committed: u64,
         active: u64,
     },
+    /// A compare-and-swap request named `requested` in `field`, but the
+    /// authority holds `current`. Resending with `current` is a new request.
+    StalePrecondition {
+        field: String,
+        requested: u64,
+        current: u64,
+    },
     /// A writer lock stayed held by other writers past its admission
     /// deadline.
     LockDeadline { resource: String, deadline_ms: u64 },
@@ -114,6 +121,7 @@ impl ApplicationProblemDetailV1 {
         match self {
             Self::Parked { .. } => "application.code-index.parked",
             Self::StaleRefreshFrontier { .. } => "application.retained.refresh-frontier-stale",
+            Self::StalePrecondition { .. } => "application.precondition-stale",
             Self::LockDeadline { .. } => "application.lock-deadline",
             Self::ResetRequired { .. } => "application.reset-required",
             Self::DiagnosticsUnsupported { .. } => "application.diagnostics.unsupported",
@@ -132,6 +140,14 @@ impl ApplicationProblemDetailV1 {
             Self::StaleRefreshFrontier { active, .. } => format!(
                 "The refresh window no longer contains the committed projection frontier \
                  {active}; begin again from source frontier {active}."
+            ),
+            Self::StalePrecondition {
+                field,
+                requested,
+                current,
+            } => format!(
+                "{field} {requested} does not match the current value {current}; refresh and \
+                 resend with {field} {current}."
             ),
             Self::LockDeadline {
                 resource,
@@ -205,6 +221,15 @@ impl ApplicationProblemDetailV1 {
                 ("Requested frontier", requested.to_string()),
                 ("Committed frontier", committed.to_string()),
                 ("Active frontier", active.to_string()),
+            ],
+            Self::StalePrecondition {
+                field,
+                requested,
+                current,
+            } => vec![
+                ("Precondition", field.clone()),
+                ("Requested value", requested.to_string()),
+                ("Current value", current.to_string()),
             ],
             Self::LockDeadline {
                 resource,

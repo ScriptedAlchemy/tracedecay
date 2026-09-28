@@ -72,6 +72,7 @@ use tracedecay_mcp::application_output::markdown::render as render_markdown;
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use tracedecay_mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
 
@@ -89,6 +90,10 @@ struct RuntimeFixture {
 impl RuntimeFixture {
     fn home(&self) -> &Path {
         self._environment.home()
+    }
+
+    fn profile(&self) -> &ProfileRoot {
+        self._environment.profile()
     }
 
     fn response_handle_root(&self) -> PathBuf {
@@ -874,6 +879,7 @@ fn normalize_application_envelope(value: &mut Value) {
                 "expires_at",
                 "observed_at",
                 "elapsed_micros",
+                "wall_micros",
             ] {
                 fields.remove(volatile);
             }
@@ -1071,6 +1077,7 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
     assert_eq!(stale["actual_revision_id"], applied_revision.as_str());
 
     let _ = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_dashboard",
         serde_json::json!({ "action": "stop", "format": "json" }),
@@ -1145,6 +1152,7 @@ async fn dashboard_user_settings_replay_through_application_restart() {
     );
 
     call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_dashboard",
         serde_json::json!({ "action": "stop", "format": "json" }),
@@ -1199,6 +1207,7 @@ async fn dashboard_user_settings_replay_through_application_restart() {
     );
 
     let _ = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_dashboard",
         serde_json::json!({ "action": "stop", "format": "json" }),
@@ -1210,6 +1219,7 @@ async fn dashboard_user_settings_replay_through_application_restart() {
 async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
     let fixture = runtime_fixture().await;
     let active_project = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_active_project",
         serde_json::json!({ "format": "json" }),
@@ -1401,6 +1411,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
 /// authorities instead of dialing back over a socket.
 async fn start_daemon_hosted_dashboard(fixture: &RuntimeFixture) -> String {
     let started = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_dashboard",
         serde_json::json!({
@@ -1479,6 +1490,7 @@ async fn dashboard_handoff_token_frontier_reads_the_registered_grant_store() {
     );
 
     let _ = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_dashboard",
         serde_json::json!({ "action": "stop", "format": "json" }),
@@ -1538,6 +1550,7 @@ async fn project_open_application_boundary() {
 async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
     let fixture = lsp_runtime_fixture().await;
     let result = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_status",
         serde_json::json!({
@@ -2638,6 +2651,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     }
 
     let managed_run = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_run_affected_tests",
         serde_json::json!({

@@ -25,7 +25,15 @@ use tracedecay_mcp::handlers::hook_runtime::{
     admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_pending_work_envelopes,
 };
 
-/// How often a project's spools are drained after the project-open pass.
+#[cfg(unix)]
+mod spool_opener;
+mod spool_watch;
+
+#[cfg(unix)]
+pub(in crate::daemon) use spool_opener::spawn_spooled_hook_opener;
+
+/// The longest a retained record waits for its next delivery attempt; a
+/// spool append wakes the drain sooner.
 const REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 
 fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmissionOutcomeV1 {
@@ -91,10 +99,8 @@ async fn drain_hook_delivery_receipts(
     let Some(spool) = open_delivery_receipt_spool_for_drain(&root, host) else {
         return;
     };
-    for receipt_id in settled {
-        if let Err(error) = spool.acknowledge(receipt_id) {
-            tracing::warn!(host = host.hook_key(), %error, "hook delivery receipt drain could not acknowledge a settled receipt");
-        }
+    if let Err(error) = spool.acknowledge_many(&settled) {
+        tracing::warn!(host = host.hook_key(), %error, "hook delivery receipt drain could not acknowledge settled receipts");
     }
 }
 
@@ -139,8 +145,9 @@ async fn drain_all_hosts(
     delivery_settlements: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
-) {
+) -> bool {
     let _sweep = HookReplaySweepObservation::begin();
+    let mut more_pending = false;
     let project_id =
         tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout());
     // Worktree identity needs only the hook runtime's scope resolver; the
@@ -208,8 +215,13 @@ async fn drain_all_hosts(
                 retained = report.retained,
                 "hook V2 replay pass completed"
             );
+            // A pass settles a bounded batch; records behind it replay now,
+            // not a full interval later.
+            more_pending |=
+                HookSpoolV1::has_records(&hook_v2_spool_root(data_root, *host)).unwrap_or(false);
         }
     }
+    more_pending
 }
 
 async fn drain_admitted_host_spool(
@@ -324,6 +336,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
     background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) -> bool {
     let data_root = graph.hook_store_layout().data_root.clone();
+    let project_root = graph.project_root().to_path_buf();
     let graph = Arc::downgrade(&graph);
     let delivery_settlements = Arc::downgrade(&delivery_settlements);
     match registered_replay_roots().lock() {
@@ -350,6 +363,8 @@ pub(crate) fn register_hook_v2_replay_consumer(
     let task_delivery_settlements = delivery_settlements.clone();
     let task_project_sessions = project_sessions;
     let task_background_cpu = background_cpu;
+    let wake = Arc::new(tokio::sync::Notify::new());
+    spool_watch::attach_consumer(&data_root, &project_root, Arc::clone(&wake));
     let task = tokio::spawn(async move {
         loop {
             let (Some(graph_owner), Some(delivery_settlements)) =
@@ -357,7 +372,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
             else {
                 break;
             };
-            Box::pin(drain_all_hosts(
+            let more_pending = Box::pin(drain_all_hosts(
                 &graph_owner,
                 &task_data_root,
                 delivery_settlements.as_ref(),
@@ -367,14 +382,25 @@ pub(crate) fn register_hook_v2_replay_consumer(
             .await;
             drop(graph_owner);
             drop(delivery_settlements);
-            // Retained records wait exactly this interval for their next
-            // delivery attempt; keep the pacing WAIT separate from sweep WORK.
+            if more_pending {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            // Retained records wait at most this interval for their next
+            // delivery attempt; a hook append wakes the drain sooner. Keep
+            // the pacing WAIT separate from sweep WORK.
             hotpath::future!(
-                tokio::time::sleep(REPLAY_INTERVAL),
+                async {
+                    tokio::select! {
+                        () = tokio::time::sleep(REPLAY_INTERVAL) => {}
+                        () = wake.notified() => {}
+                    }
+                },
                 label = "daemon.hook_replay.interval_wait"
             )
             .await;
         }
+        spool_watch::detach_consumer(&task_data_root);
         if let Ok(mut roots) = registered_replay_roots().lock()
             && roots
                 .get(&task_data_root)
@@ -406,4 +432,5 @@ pub(crate) async fn shutdown_hook_v2_replay_consumer(data_root: &Path) {
         task.abort();
         let _ = task.await;
     }
+    spool_watch::detach_consumer(data_root);
 }

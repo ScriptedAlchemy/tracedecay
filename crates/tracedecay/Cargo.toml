@@ -277,6 +277,8 @@ axum = "0.8"
 hotpath = { workspace = true, features = ["tokio"] }
 tower = "0.5"
 constant_time_eq = "0.5.0"
+# Wakes the hook replay drain when a callback appends to a spool.
+notify = "6"
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }
 tracedecay-api = { path = "../tracedecay-api" }
 tracedecay-contracts = { path = "../tracedecay-contracts" }

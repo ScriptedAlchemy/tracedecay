@@ -2,30 +2,30 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tracedecay_application::work::RegisteredWorkflowApplicationServicesV1;
 use tracedecay_contracts::{
-    CancellationContext, Deadline, TaskHandoffToken, WorkflowDefinitionLifecycleCommand,
-    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowLifecycleOperation,
-    prepare_task_handoff_issue, prepare_task_handoff_redeem,
-    prepare_workflow_definition_registration,
+    ApplicationProblem, CancellationContext, Deadline, TaskHandoffScope, TaskHandoffToken,
+    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionLifecycleState, WorkflowEffectPreparedV1,
+    WorkflowLifecycleOperation, WorkflowRunStoragePort, prepare_task_handoff_issue,
+    prepare_task_handoff_redeem, prepare_workflow_definition_registration,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
 use tracedecay_daemon_protocol::{
-    DaemonInvocationProblem, DaemonInvocationResponse, WorkflowApplicationInvocation,
-    WorkflowApplicationOutcome,
+    DaemonInvocationResponse, WorkflowApplicationInvocation, WorkflowApplicationOutcome,
 };
 
 use super::super::work_attempt_exec::WorkAttemptProcessRegistryV1;
 use super::workflow_effect_journal::{
     complete_workflow_read, complete_workflow_run_effect, execute_journaled_workflow_effect,
-    task_handoff_problem, workflow_coordination_effect_problem, workflow_effect_problem,
-    workflow_storage_problem,
+    prepared_refusal, task_handoff_refusal, workflow_storage_problem,
 };
 use super::workflow_fan_out::{reconcile_workflow_fan_out, synchronize_fan_out_run_controls};
 use super::workflow_run_control::{
     admit_workflow_environment_pins, apply_workflow_run_command, cancel_workflow_run,
-    start_workflow_run, workflow_coordination_application_problem, workflow_coordination_problem,
-    workflow_run_storage_problem,
+    start_workflow_run, workflow_coordination_problem, workflow_invalid_request,
+    workflow_invocation_problem, workflow_not_found, workflow_run_storage_problem,
+    workflow_runtime_unavailable,
 };
 use super::{RegisteredWorkRuntime, work_request_context, workflow_census};
 
@@ -46,14 +46,20 @@ pub(crate) async fn execute_workflow_application(
     worktree_holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
 ) -> DaemonInvocationResponse {
     let Some(holder_root) = project_root.canonicalize().ok() else {
-        return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            workflow_runtime_unavailable(),
+        );
     };
     // Fan-out start/resume can durably publish attempts and immediately spawn
     // their processes. Retain one exact-root admission lease through the full
     // workflow command so cleanup cannot observe between those publications.
     let Some(_holder_admission) = worktree_holder_admission.admit_holders([holder_root]).await
     else {
-        return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            workflow_runtime_unavailable(),
+        );
     };
     let observed_at = tracedecay_contracts::now_micros();
     let operation_key = request.operation_key();
@@ -61,9 +67,9 @@ pub(crate) async fn execute_workflow_application(
         .iter()
         .find(|(operation, _, _)| *operation == operation_key)
     else {
-        return DaemonInvocationResponse::problem(
+        return DaemonInvocationResponse::application_problem(
             request_id,
-            DaemonInvocationProblem::InvalidRequest,
+            workflow_invalid_request(),
         );
     };
     let (context, canonical_request_id, use_case) = match work_request_context(
@@ -76,14 +82,19 @@ pub(crate) async fn execute_workflow_application(
         cancellation,
     ) {
         Ok(context) => context,
-        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+        Err(problem) => {
+            return DaemonInvocationResponse::application_problem(
+                request_id,
+                workflow_invocation_problem(problem),
+            );
+        }
     };
     let input_digest = match canonical_sha256(&request) {
         Ok(digest) => digest,
         Err(_) => {
-            return DaemonInvocationResponse::problem(
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::InvalidRequest,
+                workflow_invalid_request(),
             );
         }
     };
@@ -93,7 +104,7 @@ pub(crate) async fn execute_workflow_application(
         ) {
             Ok(services) => services,
             Err(error) => {
-                return DaemonInvocationResponse::problem(
+                return DaemonInvocationResponse::application_problem(
                     request_id,
                     workflow_storage_problem(&error),
                 );
@@ -109,10 +120,17 @@ pub(crate) async fn execute_workflow_application(
                             input_digest.clone(),
                             definition,
                         ),
-                        Err(error) => WorkflowEffectPreparedV1::problem(
-                            input_digest.clone(),
-                            workflow_effect_problem(workflow_coordination_problem(error)),
-                        ),
+                        Err(error) => match prepared_refusal(
+                            &input_digest,
+                            workflow_coordination_problem(error),
+                        ) {
+                            Ok(prepared) => prepared,
+                            Err(problem) => {
+                                return DaemonInvocationResponse::application_problem(
+                                    request_id, problem,
+                                );
+                            }
+                        },
                     };
                 execute_journaled_workflow_effect(
                     &registered,
@@ -140,14 +158,20 @@ pub(crate) async fn execute_workflow_application(
                 let admitted = services
                     .definitions()
                     .admit_activation(&request.definition_id, request.definition_version)
-                    .map_err(workflow_coordination_effect_problem)
+                    .map_err(workflow_coordination_problem)
                     .and_then(|()| {
                         let definition = services
                             .definitions()
                             .get(&request.definition_id, request.definition_version)
-                            .map_err(workflow_coordination_effect_problem)?;
-                        admit_workflow_environment_pins(&registered, &definition)
-                            .map_err(WorkflowEffectProblemV1::InvalidRequestDiagnostic)
+                            .map_err(workflow_coordination_problem)?;
+                        admit_workflow_environment_pins(&registered, &definition).map_err(
+                            |diagnostic| {
+                                ApplicationProblem::invalid_request(
+                                    diagnostic.code,
+                                    diagnostic.message,
+                                )
+                            },
+                        )
                     });
                 let prepared = match admitted {
                     Ok(()) => WorkflowEffectPreparedV1::activate_definition(
@@ -160,9 +184,14 @@ pub(crate) async fn execute_workflow_application(
                             transitioned_at: observed_at,
                         },
                     ),
-                    Err(problem) => {
-                        WorkflowEffectPreparedV1::problem(input_digest.clone(), problem)
-                    }
+                    Err(problem) => match prepared_refusal(&input_digest, problem) {
+                        Ok(prepared) => prepared,
+                        Err(problem) => {
+                            return DaemonInvocationResponse::application_problem(
+                                request_id, problem,
+                            );
+                        }
+                    },
                 };
                 execute_journaled_workflow_effect(
                     &registered,
@@ -236,21 +265,13 @@ pub(crate) async fn execute_workflow_application(
         WorkflowApplicationInvocation::ValidateDefinition(request) => {
             hotpath::measure_block!("daemon.service.workflow.validate_definition", {
                 let validation = services.definitions().validate(request.definition);
-                if let Err(error) = &validation
-                    && let Some(problem) = workflow_coordination_application_problem(error)
-                {
-                    return DaemonInvocationResponse::application_problem(request_id, problem);
-                }
                 if let Ok(validated) = &validation
                     && let Err(diagnostic) =
                         admit_workflow_environment_pins(&registered, &validated.definition)
                 {
                     return DaemonInvocationResponse::application_problem(
                         request_id,
-                        tracedecay_contracts::ApplicationProblem::invalid_request(
-                            diagnostic.code,
-                            diagnostic.message,
-                        ),
+                        ApplicationProblem::invalid_request(diagnostic.code, diagnostic.message),
                     );
                 }
                 complete_workflow_read(
@@ -354,6 +375,9 @@ pub(crate) async fn execute_workflow_application(
         }
         WorkflowApplicationInvocation::HandoffIssue(request) => {
             hotpath::measure_block!("daemon.service.workflow.handoff_issue", {
+                if let Err(problem) = resolve_handoff_scope(&services, &request.scope) {
+                    return DaemonInvocationResponse::application_problem(request_id, problem);
+                }
                 let prepared = match TaskHandoffToken::new(request.secret).and_then(|token| {
                     prepare_task_handoff_issue(
                         &context,
@@ -366,10 +390,16 @@ pub(crate) async fn execute_workflow_application(
                     Ok(grant) => {
                         WorkflowEffectPreparedV1::handoff_issue(input_digest.clone(), grant)
                     }
-                    Err(error) => WorkflowEffectPreparedV1::problem(
-                        input_digest.clone(),
-                        workflow_effect_problem(task_handoff_problem(error)),
-                    ),
+                    Err(error) => {
+                        match prepared_refusal(&input_digest, task_handoff_refusal(error)) {
+                            Ok(prepared) => prepared,
+                            Err(problem) => {
+                                return DaemonInvocationResponse::application_problem(
+                                    request_id, problem,
+                                );
+                            }
+                        }
+                    }
                 };
                 execute_journaled_workflow_effect(
                     &registered,
@@ -398,10 +428,16 @@ pub(crate) async fn execute_workflow_application(
                         scope,
                         observed_at,
                     ),
-                    Err(error) => WorkflowEffectPreparedV1::problem(
-                        input_digest.clone(),
-                        workflow_effect_problem(task_handoff_problem(error)),
-                    ),
+                    Err(error) => {
+                        match prepared_refusal(&input_digest, task_handoff_refusal(error)) {
+                            Ok(prepared) => prepared,
+                            Err(problem) => {
+                                return DaemonInvocationResponse::application_problem(
+                                    request_id, problem,
+                                );
+                            }
+                        }
+                    }
                 };
                 execute_journaled_workflow_effect(
                     &registered,
@@ -573,11 +609,8 @@ pub(crate) async fn execute_workflow_application(
                     operation_key,
                     use_case,
                     input_digest,
-                    tracedecay_contracts::WorkflowRunStoragePort::projection(
-                        services.effects(),
-                        &request.run_id,
-                    )
-                    .map_err(workflow_run_storage_problem),
+                    WorkflowRunStoragePort::projection(services.effects(), &request.run_id)
+                        .map_err(workflow_run_storage_problem),
                     observed_at,
                     deadline,
                     WorkflowApplicationOutcome::GetRun,
@@ -585,4 +618,46 @@ pub(crate) async fn execute_workflow_application(
             })
         }
     }
+}
+
+/// A handoff names one declared step of an Active definition version and a
+/// run admitted from that version. A scope the registered definition and run
+/// authorities cannot resolve is refused before any grant is journaled, with
+/// the same concealed answer as a denial.
+///
+/// `task_id` stays the issuer's assertion: redemption grants no Work
+/// authority, so the redeemer still resolves the task through Work admission.
+fn resolve_handoff_scope(
+    services: &RegisteredWorkflowApplicationServicesV1,
+    scope: &TaskHandoffScope,
+) -> Result<(), ApplicationProblem> {
+    let definition = services
+        .definitions()
+        .get(scope.definition_id(), scope.definition_version())
+        .map_err(workflow_coordination_problem)?;
+    if definition.project_id() != scope.project_id()
+        || !definition
+            .steps()
+            .iter()
+            .any(|step| &step.step_id == scope.step_id())
+    {
+        return Err(workflow_not_found());
+    }
+    let disposition = services
+        .definitions()
+        .disposition(scope.definition_id(), scope.definition_version())
+        .map_err(workflow_coordination_problem)?;
+    if disposition.state != WorkflowDefinitionLifecycleState::Active {
+        return Err(workflow_not_found());
+    }
+    let run = services
+        .effects()
+        .projection(scope.run_id())
+        .map_err(workflow_run_storage_problem)?;
+    if run.definition().definition_id() != scope.definition_id()
+        || run.definition().definition_version() != scope.definition_version()
+    {
+        return Err(workflow_not_found());
+    }
+    Ok(())
 }

@@ -676,6 +676,8 @@ async fn run_foreground_unix(
         .with_maintenance_coordinator(maintenance)
         .with_pr_autotrack_task(pr_autotrack_task)
         .await;
+    let spooled_hook_opener =
+        hook_v2_replay_consumer::spawn_spooled_hook_opener(engine.clone(), profile.clone());
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
@@ -745,6 +747,7 @@ async fn run_foreground_unix(
     }
     engine.lifecycle.begin_draining();
     tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
+    spooled_hook_opener.abort();
     if let Some(rotation) = stderr_log_rotation {
         rotation.abort();
     }

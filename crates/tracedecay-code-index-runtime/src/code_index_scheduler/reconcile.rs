@@ -1372,7 +1372,18 @@ impl CodeIndexWorktreeSchedulerV1 {
         let _workers = self.ensure_worker_plan()?;
         let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
         let snapshot = self.resident_memory.snapshot();
-        let remaining = snapshot.limit_bytes.saturating_sub(snapshot.used_bytes);
+        // Admission refuses a request larger than the measured headroom, so
+        // the slab is planned against that too: the ledger alone does not see
+        // live state no owner charges, and a width planned from it asks for
+        // more than the process has left and is refused on every retry.
+        let pressure = self.resident_memory.pressure();
+        let measured_remaining = pressure
+            .limit_bytes()
+            .saturating_sub(pressure.state().observed_bytes().unwrap_or(0));
+        let remaining = snapshot
+            .limit_bytes
+            .saturating_sub(snapshot.used_bytes)
+            .min(measured_remaining);
         // The process-global worker plan may have been installed against a
         // larger authority (standalone seed using detected host RAM). This
         // scheduler's remaining bytes are a different authority: the 6 GiB

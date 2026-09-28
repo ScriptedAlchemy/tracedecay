@@ -491,6 +491,7 @@ async fn daemon_project_status(
     let warmup_deadline = tokio::time::Instant::now() + RUNTIME_TELEMETRY_WARMUP;
     loop {
         let result = crate::daemon::call_default_tool_within(
+            profile,
             &handshake,
             "tracedecay_runtime",
             daemon_doctor_runtime_args(),

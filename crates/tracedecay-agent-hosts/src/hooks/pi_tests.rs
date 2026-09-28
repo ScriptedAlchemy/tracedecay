@@ -1,21 +1,16 @@
-use std::path::Path;
 use std::time::Instant;
 
 use serde_json::Value;
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use super::{HOOK_ANALYTICS_FILENAME, TestDaemonHookActionGuard, dispatch_pi_event};
+use super::{TestDaemonHookActionGuard, dispatch_pi_event};
+use crate::hooks::analytics::record_native_hook_invoked_parsed;
+use tracedecay_domain::NativeHostIdentityV1;
 
-fn read_analytics_rows(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
-}
-
+/// The Pi row itself is recorded by the shared native-event handler before
+/// dispatch; the replay suite asserts it through the real binary.
 #[tokio::test]
-async fn pi_lifecycle_events_record_under_pi_and_land_their_session() {
+async fn pi_session_boundaries_land_their_session() {
     let project = tempfile::tempdir().unwrap();
     let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
@@ -35,7 +30,7 @@ async fn pi_lifecycle_events_record_under_pi_and_land_their_session() {
     ]);
     let runtime = crate::ports::hook_runtime::crate_test_runtime(profile.clone());
 
-    for hook_name in ["session_start", "agent_end"] {
+    for hook_name in ["session_start", "agent_end", "turn_start"] {
         let event = serde_json::json!({
             "hook_event_name": hook_name,
             "id": format!("event-{hook_name}"),
@@ -43,30 +38,28 @@ async fn pi_lifecycle_events_record_under_pi_and_land_their_session() {
             "cwd": project_root,
         })
         .to_string();
-        dispatch_pi_event(&runtime, &event, &project_root, Instant::now()).await;
-    }
-
-    let rows = read_analytics_rows(&layout.data_root.join(HOOK_ANALYTICS_FILENAME));
-    for hook_name in ["session_start", "agent_end"] {
-        assert!(
-            rows.iter().any(|row| row["event"] == "hook_invoked"
-                && row["agent"] == "pi"
-                && row["hook_name"] == hook_name),
-            "missing Pi {hook_name} invocation: {rows:?}"
+        let parsed: Value = serde_json::from_str(&event).unwrap();
+        let telemetry = record_native_hook_invoked_parsed(
+            &runtime,
+            Some(&project_root),
+            NativeHostIdentityV1::Pi,
+            hook_name,
+            &event,
+            &parsed,
         );
+        dispatch_pi_event(&runtime, &event, &project_root, &telemetry, Instant::now()).await;
     }
-    assert!(
-        rows.iter()
-            .all(|row| row["agent"] != "other" && row["hook_name"] != "pi_event"),
-        "Pi hooks must not fold into the shared other host: {rows:?}"
-    );
 
     let ingests = daemon
         .calls()
         .into_iter()
         .filter(|(_, args)| args["action"] == "ingest_transcript")
         .collect::<Vec<_>>();
-    assert_eq!(ingests.len(), 2, "each session boundary lands its session");
+    assert_eq!(
+        ingests.len(),
+        2,
+        "each session boundary, and only a boundary, lands its session"
+    );
     for (root, args) in &ingests {
         assert_eq!(root.as_deref(), Some(project_root.as_path()));
         assert_eq!(args["provider"], "pi");

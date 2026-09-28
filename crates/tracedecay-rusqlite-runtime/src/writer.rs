@@ -19,13 +19,11 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use rusqlite::{Savepoint, Transaction};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracedecay_store::{
-    AdmissionConfigV1, IdempotencyIdentityV1, RuntimeCancellationStageV1, RuntimeRequestProbeV1,
-    RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StorageRuntimeContractErrorV1,
-    StorageRuntimeErrorV1, StoreCommitReceiptV1, StoreRuntimeBindingV1, UnavailableReasonV1,
-    VerifiedStoreLocatorV1,
+    AdmissionConfigV1, RuntimeCancellationStageV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
+    RuntimeSubmitRequestV1, StorageRuntimeContractErrorV1, StorageRuntimeErrorV1,
+    StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
 };
 
 use crate::{
@@ -474,22 +472,6 @@ impl Error for WriterActorError {
     }
 }
 
-pub(crate) trait WriterPersistence: Send + 'static {
-    fn lookup_idempotency(
-        &mut self,
-        transaction: &Transaction<'_>,
-        binding: &StoreRuntimeBindingV1,
-        idempotency: &IdempotencyIdentityV1,
-    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1>;
-
-    fn apply_and_record(
-        &mut self,
-        savepoint: &mut Savepoint<'_>,
-        binding: &StoreRuntimeBindingV1,
-        request: &RuntimeSubmitRequestV1,
-    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1>;
-}
-
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WriterState {
@@ -547,10 +529,11 @@ impl PersistentWriter {
     where
         E: StorageOperationExecutor + Send + 'static,
     {
-        Self::start_with_persistence(
+        Self::start_with_checkpoint_blockers(
             locator,
             admission,
-            Box::new(RuntimeWriterPersistence::new(executor)),
+            executor,
+            Arc::new(NoCheckpointBlockers),
         )
     }
 
@@ -563,31 +546,18 @@ impl PersistentWriter {
     where
         E: StorageOperationExecutor + Send + 'static,
     {
-        Self::start_with_persistence_and_checkpoint_blockers(
+        Self::open(
             locator,
             admission,
-            Box::new(RuntimeWriterPersistence::new(executor)),
+            RuntimeWriterPersistence::new(Box::new(executor)),
             checkpoint_blockers,
         )
     }
 
-    pub(crate) fn start_with_persistence(
+    fn open(
         locator: ExistingWriterLocator,
         config: AdmissionConfigV1,
-        persistence: Box<dyn WriterPersistence>,
-    ) -> Result<Self, WriterStartError> {
-        Self::start_with_persistence_and_checkpoint_blockers(
-            locator,
-            config,
-            persistence,
-            Arc::new(NoCheckpointBlockers),
-        )
-    }
-
-    fn start_with_persistence_and_checkpoint_blockers(
-        locator: ExistingWriterLocator,
-        config: AdmissionConfigV1,
-        persistence: Box<dyn WriterPersistence>,
+        persistence: RuntimeWriterPersistence<Box<dyn StorageOperationExecutor + Send>>,
         checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
     ) -> Result<Self, WriterStartError> {
         config

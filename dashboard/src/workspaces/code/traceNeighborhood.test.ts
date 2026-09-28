@@ -57,7 +57,9 @@ describe('expansionTargets', () => {
     // A recursive symbol is a real `calls` row from the focus to itself, so it
     // does appear in these lists.
     const recursive = { ...payload, callers: [{ ...row, id: 'sym-0' }, ...payload.callers] };
-    expect(expansionTargets(recursive, 'sym-0')).not.toContain('sym-0');
+    expect(expansionTargets(recursive, 'sym-0')).toEqual(
+      firstSeen(payload, 'sym-0').slice(0, TRACE_BUDGET.expand),
+    );
   });
 
   it('stops at the stated budget however many neighbours the payload names', () => {

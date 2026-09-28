@@ -16,7 +16,7 @@ use tracedecay_sessions::admission::{
 
 use super::tool_hints::ToolHint;
 use super::{HookWorkspaceStatus, claude, prompt_like_text};
-use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_domain::{HostIntegrationIdV1, NativeHostIdentityV1};
 
 pub(crate) const HOOK_ANALYTICS_FILENAME: &str = "hook_analytics.jsonl";
 
@@ -101,6 +101,7 @@ pub(crate) struct HookTimingSpan {
     root: Option<PathBuf>,
     agent: &'static str,
     hook_name: String,
+    session_id: Option<String>,
     prompt_category: Option<&'static str>,
     started: Instant,
     enabled: bool,
@@ -123,6 +124,7 @@ impl HookTimingSpan {
             root,
             agent.as_key(),
             hook_name,
+            None,
             prompt_category,
             payload_bytes,
         )
@@ -133,6 +135,7 @@ impl HookTimingSpan {
         root: Option<&Path>,
         agent: &'static str,
         hook_name: &str,
+        session_id: Option<String>,
         prompt_category: Option<&'static str>,
         payload_bytes: Option<u64>,
     ) -> Self {
@@ -153,6 +156,7 @@ impl HookTimingSpan {
             root: root.map(Path::to_path_buf),
             agent,
             hook_name: bounded_identifier(hook_name),
+            session_id,
             prompt_category,
             started: Instant::now(),
             enabled,
@@ -204,10 +208,11 @@ impl HookTimingSpan {
     }
 
     pub(crate) fn note_native_dispatch_disposition(&self, disposition: HookTransportDispositionV1) {
-        merge_disposition(
-            &mut self.state().disposition,
-            disposition_from_native_dispatch(disposition),
-        );
+        self.note_disposition(disposition_from_native_dispatch(disposition));
+    }
+
+    pub(crate) fn note_disposition(&self, disposition: HookDispositionTelemetry) {
+        merge_disposition(&mut self.state().disposition, disposition);
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, HookTimingState> {
@@ -264,6 +269,7 @@ impl Drop for HookTimingSpan {
                 "coverage": HostHookTelemetryCoverage::HostMeasured,
                 "agent": self.agent,
                 "hook_name": self.hook_name.as_str(),
+                "session_id": self.session_id,
                 "prompt_category": self.prompt_category,
                 "duration_us": elapsed_us,
                 "duration_ms": elapsed_us / 1000,
@@ -354,12 +360,25 @@ fn disposition_severity(disposition: &HookDispositionTelemetry) -> u8 {
     }
 }
 
-pub fn host_hook_telemetry_contract() -> Value {
+/// Every analytics `agent` key a hook row can carry: the fixture-backed
+/// integrations, the other native hook hosts, then the bounded `other`.
+fn telemetry_host_keys() -> Vec<&'static str> {
     let mut hosts = tracedecay_domain::HostIntegrationIdV1::ALL
         .into_iter()
         .map(tracedecay_domain::HostIntegrationIdV1::as_str)
         .collect::<Vec<_>>();
+    for host in super::NATIVE_HOOK_HOSTS {
+        let key = native_host_agent_key(*host);
+        if !hosts.contains(&key) {
+            hosts.push(key);
+        }
+    }
     hosts.push("other");
+    hosts
+}
+
+pub fn host_hook_telemetry_contract() -> Value {
+    let hosts = telemetry_host_keys();
     let provider_coverage = tracedecay_domain::HostIntegrationIdV1::ALL.map(|host| {
         serde_json::json!({
             "host": host.as_str(),
@@ -457,7 +476,7 @@ fn bounded_identifier(value: &str) -> String {
         || value.len() > MAX_IDENTIFIER_BYTES
         || !value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
     {
         return "unknown".to_string();
     }
@@ -486,9 +505,19 @@ fn disposition_from_daemon_error(error: &TraceDecayError) -> HookDispositionTele
     }
 }
 
-/// Shared implementation for [`record_hook_invoked`] and
-/// [`record_other_hook_invoked`], which differ only in how the analytics
-/// `agent` key is derived (a typed [`HostIntegrationIdV1`] vs. the literal `"other"`).
+/// Analytics `agent` key for the host that fired a hook. Cursor's desktop and
+/// cloud surfaces share one key; every other host records under its own hook
+/// key, which equals the [`HostIntegrationIdV1`] wire name where one exists.
+pub(crate) const fn native_host_agent_key(host: NativeHostIdentityV1) -> &'static str {
+    match host {
+        NativeHostIdentityV1::CursorDesktop | NativeHostIdentityV1::CursorCloud => {
+            HostIntegrationIdV1::Cursor.as_key()
+        }
+        host => host.hook_key(),
+    }
+}
+
+/// Shared implementation of every `hook_invoked` recorder.
 fn record_hook_invoked_named(
     runtime: &HookRuntimeV1,
     root: Option<&Path>,
@@ -498,8 +527,42 @@ fn record_hook_invoked_named(
     parsed: &Value,
 ) -> HookTimingSpan {
     // Length only, never persist event content, prompts, tools, credentials, or paths here.
-    let payload_bytes = measure_host_event_payload_bytes(event_json);
-    let prompt_category = inferred_prompt_category(parsed);
+    record_invocation(
+        runtime,
+        root,
+        agent_key,
+        hook_name,
+        payload_session_id(parsed),
+        inferred_prompt_category(parsed),
+        measure_host_event_payload_bytes(event_json),
+    )
+}
+
+/// The session a hook payload names: a top-level session or conversation key
+/// (Claude, Codex, Cursor, Kimi, Pi), else the nested session OpenCode's event
+/// bus (`properties`), tool callback (`input`), and Hermes (`route`) carry.
+fn payload_session_id(parsed: &Value) -> Option<String> {
+    const NESTED_SESSION_KEYS: &[&str] = &["sessionID", "session_id", "sessionId"];
+    super::event_session_id(parsed)
+        .or_else(|| super::text_field(parsed, &["sessionID"]))
+        .or_else(|| {
+            ["properties", "input", "route"]
+                .into_iter()
+                .find_map(|container| {
+                    super::text_field(parsed.get(container)?, NESTED_SESSION_KEYS)
+                })
+        })
+}
+
+fn record_invocation(
+    runtime: &HookRuntimeV1,
+    root: Option<&Path>,
+    agent_key: &'static str,
+    hook_name: &str,
+    session_id: Option<String>,
+    prompt_category: Option<&'static str>,
+    payload_bytes: Option<u64>,
+) -> HookTimingSpan {
     record_hook_analytics(
         runtime.profile.data_dir(),
         root,
@@ -509,6 +572,7 @@ fn record_hook_invoked_named(
             "coverage": HostHookTelemetryCoverage::HostMeasured,
             "agent": agent_key,
             "hook_name": bounded_identifier(hook_name),
+            "session_id": session_id,
             "prompt_category": prompt_category,
             "payload_bytes": payload_bytes,
         }),
@@ -518,9 +582,51 @@ fn record_hook_invoked_named(
         root,
         agent_key,
         hook_name,
+        session_id,
         prompt_category,
         payload_bytes,
     )
+}
+
+/// Why a hook's stdin was refused before its event could be parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HookStdinRefusal {
+    /// Stdin exceeded [`tracedecay_framing::MAX_WIRE_MESSAGE_BYTES`].
+    Oversized,
+    Unreadable,
+}
+
+/// Records the `hook_invoked`/`hook_completed` pair for an invocation whose
+/// stdin was refused. No payload was admitted, so the rows carry no session,
+/// prompt category, or payload size, only the host, the event the subcommand
+/// names, and the typed refusal.
+pub(crate) fn record_hook_stdin_refused(
+    runtime: &HookRuntimeV1,
+    root: Option<&Path>,
+    host: NativeHostIdentityV1,
+    hook_name: &str,
+    refusal: HookStdinRefusal,
+) {
+    let span = record_invocation(
+        runtime,
+        root,
+        native_host_agent_key(host),
+        hook_name,
+        None,
+        None,
+        None,
+    );
+    span.note_disposition(HookDispositionTelemetry::from_parts(
+        HostAdmissionStatus::Unavailable,
+        Some(false),
+        Some(
+            match refusal {
+                HookStdinRefusal::Oversized => "hook_stdin_oversized",
+                HookStdinRefusal::Unreadable => "hook_stdin_unreadable",
+            }
+            .to_owned(),
+        ),
+    ));
 }
 
 /// Records `hook_invoked` for a handler that has not parsed the event itself.
@@ -556,14 +662,23 @@ pub(crate) fn record_hook_invoked_parsed(
     record_hook_invoked_named(runtime, root, agent.as_key(), hook_name, event_json, parsed)
 }
 
-pub(crate) fn record_other_hook_invoked(
+/// [`record_hook_invoked_parsed`] keyed by the native host that fired the hook.
+pub(crate) fn record_native_hook_invoked_parsed(
     runtime: &HookRuntimeV1,
     root: Option<&Path>,
+    host: NativeHostIdentityV1,
     hook_name: &str,
     event_json: &str,
+    parsed: &Value,
 ) -> HookTimingSpan {
-    let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
-    record_hook_invoked_named(runtime, root, "other", hook_name, event_json, &parsed)
+    record_hook_invoked_named(
+        runtime,
+        root,
+        native_host_agent_key(host),
+        hook_name,
+        event_json,
+        parsed,
+    )
 }
 
 pub(super) fn mint_hint_id() -> String {

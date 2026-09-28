@@ -6,7 +6,7 @@ use super::*;
 
 const READINESS_AGGREGATION_SCHEMA_VERSION: u32 = 1;
 pub(super) const MAX_READINESS_INPUT_ROWS: usize = 10_000;
-pub(super) const READINESS_HOST_BUCKETS: usize = 7;
+pub(super) const READINESS_HOST_BUCKETS: usize = 10;
 const READINESS_DISPOSITION_CLASSES: usize = 5;
 const READINESS_DISPOSITION_STATUSES: usize = 8;
 const READINESS_RETRYABLE_STATES: usize = 3;
@@ -57,6 +57,10 @@ pub(crate) enum ReadinessHost {
     Hermes,
     Kiro,
     Pi,
+    Kimi,
+    #[serde(rename = "opencode")]
+    OpenCode,
+    Droid,
     Other,
 }
 
@@ -69,7 +73,13 @@ impl ReadinessHost {
             Some(tracedecay_domain::HostIntegrationIdV1::Hermes) => Self::Hermes,
             Some(tracedecay_domain::HostIntegrationIdV1::Kiro) => Self::Kiro,
             Some(tracedecay_domain::HostIntegrationIdV1::Pi) => Self::Pi,
-            Some(_) | None => Self::Other,
+            Some(_) => Self::Other,
+            None => match value {
+                "kimi" => Self::Kimi,
+                "opencode" => Self::OpenCode,
+                "droid" => Self::Droid,
+                _ => Self::Other,
+            },
         }
     }
 }
