@@ -20,7 +20,8 @@ CHECK = "Warm Linux snapshot"
 
 
 def setup_path(path):
-    return (path in {"rust-toolchain.toml", ".github/linux-test-partitions.json",
+    return (path in {"rust-toolchain.toml", ".github/workflows/ci.yml",
+                     ".github/linux-test-partitions.json",
                      "scripts/linux-test-partitions.py", "pnpm-workspace.yaml", ".npmrc"}
             or path.startswith((".github/actions/", ".config/nextest/", ".cargo/", ".pnpmfile")))
 
@@ -117,7 +118,7 @@ def current(entry):
 def checked(entry):
     runs = api(f"commits/{entry['sha']}/check-runs?check_name={CHECK.replace(' ', '%20')}&per_page=100")
     return any(run.get("name") == CHECK and run.get("head_sha") == entry["sha"]
-               and (run.get("external_id") or "").startswith(f"merge:{entry['merge']}:")
+               and (run.get("external_id") or "").startswith(f"merge:{entry['merge']}:v2:")
                and run.get("status") == "completed" and run.get("conclusion") != "cancelled"
                for run in runs.get("check_runs", []))
 
@@ -205,7 +206,9 @@ def run_head(worker, entry, group, output, state, partitions):
             if directory.exists():
                 shutil.rmtree(directory)
         script = worker / "scripts/linux-test-partitions.py"
-        row["precheck"] = command_log(["python3", str(script), "check"], worker,
+        row["precheck"] = command_log(["bash", "-e", "-c",
+                                       "python3 scripts/test-linux-test-partitions.py && "
+                                       "python3 scripts/linux-test-partitions.py check"], worker,
                                       env, destination / "precheck.log", timeout=10 * 60)
         if row["precheck"]["exit_code"] != 0:
             row["exit_code"] = row["precheck"]["exit_code"]
@@ -393,7 +396,7 @@ def report(plan_data, artifacts, worker_result):
                    f"{'Artifacts: ' + '; '.join(errors) if errors else ''}\n\n[Logs]({run_url})")[:6000]
         api("check-runs", dict(name=CHECK, head_sha=entry["sha"], status="completed",
                                conclusion=conclusion, details_url=run_url,
-                               external_id=f"merge:{entry['merge']}:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}:{entry['pr']}",
+                               external_id=f"merge:{entry['merge']}:v2:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}:{entry['pr']}",
                                output={"title": f"Warm Linux snapshot: {conclusion}", "summary": summary}))
         print(f"PR {entry['pr']} {entry['sha']}: {conclusion}")
 
