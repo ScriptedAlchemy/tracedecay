@@ -12,6 +12,7 @@ use tracedecay_agent_hosts::agents::host_bundle::{
 };
 use tracedecay_agent_hosts::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
 use tracedecay_agent_hosts::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
+use tracedecay_domain::errors::HostAbsence;
 use tracedecay_runtime_core::config::{HostProgramSearchPathGuard, ProfileRoot};
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
@@ -119,8 +120,12 @@ fn kiro_install_never_launches_a_kiro_cli_found_only_on_the_test_process_path() 
     );
     assert_eq!(
         outcome,
-        Err(HostBundleError::HostCliUnavailable {
-            host: HostKindV1::Kiro
+        Err(HostBundleError::HostAbsent {
+            host: HostKindV1::Kiro,
+            absence: HostAbsence::NotInstalled,
+            detail: "host CLI `kiro-cli` is unavailable for kiro MCP registry lifecycle; \
+                     install it or add it to PATH and retry"
+                .to_string(),
         }),
         "a kiro-cli reachable only through the process PATH is not installed for an in-process test"
     );
@@ -130,7 +135,7 @@ fn kiro_install_never_launches_a_kiro_cli_found_only_on_the_test_process_path() 
     let _ = install_kiro(admitted_home.path());
     assert_eq!(
         launches(&sentinel),
-        "mcp add --name tracedecay --command /bin/tracedecay --args serve --scope global --force\n",
+        "mcp list\nmcp add --name tracedecay --command /bin/tracedecay --args serve --scope global --force\n",
         "the same sentinel runs once a guard admits its directory"
     );
 }

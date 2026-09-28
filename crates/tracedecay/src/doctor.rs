@@ -1158,15 +1158,18 @@ fn check_host_integrations(
     for agent in agents::all_integrations() {
         let integrated = agent.has_tracedecay(home, profile);
         if !integrated && !tracked.iter().any(|id| id == agent.id()) {
-            if let Some(surface) = agent.detected_host_surface(home, profile) {
+            let surface = agent.detected_host_surface(home, profile);
+            if surface.is_some() || agent.is_detected(home) {
                 // The host itself is on this machine but carries no
                 // tracedecay integration, which an operator most likely
                 // wants wired up.
                 eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
                 dc.warn(&format!(
-                    "{} detected ({}) but tracedecay is not integrated, run `tracedecay install --agent {}`",
+                    "{} detected{} but tracedecay is not integrated, run `tracedecay install --agent {}`",
                     agent.name(),
-                    surface.display(),
+                    surface
+                        .map(|surface| format!(" ({})", surface.display()))
+                        .unwrap_or_default(),
                     agent.id()
                 ));
             }

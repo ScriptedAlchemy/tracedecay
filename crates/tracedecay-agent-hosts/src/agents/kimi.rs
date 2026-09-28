@@ -49,8 +49,8 @@ pub(crate) use web_refresh::{KimiWebRefreshError, refresh_installed_plugin};
 /// When unset, the home resolves to `~/.kimi-code`.
 pub const KIMI_CODE_HOME_ENV: &str = "KIMI_CODE_HOME";
 
-/// Kimi Code CLI's own executable. TraceDecay never runs it; its presence on
-/// `PATH` is what makes Kimi Code installed on this machine.
+/// Kimi Code CLI's own executable. Its presence on `PATH` is what makes Kimi
+/// Code installed on this machine; TraceDecay runs it only as `kimi web`.
 const KIMI_CLI: &str = "kimi";
 
 /// Plugin id read from Kimi Code CLI's official installed-plugin state.

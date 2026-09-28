@@ -184,7 +184,7 @@ impl HostLifecycleSummary {
         })
     }
 
-    fn line(&self, agent_id: &str, result: &HostLifecycleResult) -> String {
+    fn line(&self, result: &HostLifecycleResult) -> String {
         match result {
             HostLifecycleResult::Applied if self.dry_run => "previewed".to_string(),
             HostLifecycleResult::Applied => match self.operation {
@@ -227,7 +227,7 @@ impl HostLifecycleSummary {
         if !self.hosts.is_empty() {
             eprintln!("\nAgent {} summary:", operation_verb(self.operation));
             for (id, result) in &self.hosts {
-                eprintln!("  {id}: {}", self.line(id, result));
+                eprintln!("  {id}: {}", self.line(result));
             }
         }
         let failed: Vec<&str> = self

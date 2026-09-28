@@ -14,9 +14,9 @@
 //! * **VS Code's `settings.json`** (`mcp.servers.tracedecay`, plus the
 //!   Insiders profile) has **no host CLI at all**. VS Code exposes no
 //!   non-interactive command that writes an `mcp.servers` entry into a user
-//!   settings file, so that half stays TraceDecay-written exactly as it is
-//!   today and is only read back here by the doctor. Adopting a host command
-//!   for it is not an option that exists; this module must not invent one.
+//!   settings file, so no TraceDecay lifecycle writes it either. The doctor
+//!   only observes it: an entry there is reported, its absence is
+//!   informational, because no TraceDecay command could clear it.
 //!
 //! The launch arguments both spellings use live in one place
 //! (`MCP_SERVER_ARGS`) so the CLI-driven registration and the
@@ -49,9 +49,7 @@ const COPILOT_MCP_SERVER_NAME: &str = "tracedecay";
 ///
 /// Shared by the CLI-driven registration (the trailing `-- <command> <args…>`
 /// words) and by the doctor readback that verifies what actually landed, so
-/// the two spellings of the same server cannot drift apart. Any remaining
-/// TraceDecay-written registration surface (the VS Code `settings.json` half)
-/// must source its `args` array from here for the same reason.
+/// the two spellings of the same server cannot drift apart.
 const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 pub struct CopilotIntegration;
@@ -130,8 +128,7 @@ impl AgentIntegration for CopilotIntegration {
     /// the component-set transaction rollback
     /// authority over the host command's effect; without it the observation
     /// recorded in `run_mcp_registry_step` would have nothing to restore.
-    /// Any other component set keeps the default inventory, which is the
-    /// TraceDecay-written VS Code settings file.
+    /// Any other component set keeps the default inventory.
     fn host_component_registration_paths(
         &self,
         components: &[super::host_bundle::HostComponentV1],
@@ -260,8 +257,8 @@ fn vscode_mcp_servers_has_tracedecay(settings_path: &Path) -> bool {
 // Registration paths
 // ---------------------------------------------------------------------------
 
-/// VS Code user settings, the TraceDecay-written half. No host CLI writes
-/// this file; see the module documentation.
+/// VS Code user settings. Neither a host CLI nor TraceDecay writes this
+/// file; see the module documentation.
 fn vscode_settings_path(home: &Path) -> PathBuf {
     super::vscode_data_dir(home).join("User/settings.json")
 }
@@ -453,58 +450,54 @@ fn server_args_are_current(server: &serde_json::Map<String, serde_json::Value>) 
         .all(|expected| args.iter().any(|arg| arg.as_str() == Some(*expected)))
 }
 
+/// Observation only: no TraceDecay lifecycle writes VS Code's settings (see
+/// the module documentation), so nothing here can be an issue or a warning
+/// whose remedy is a TraceDecay command.
 fn doctor_check_vscode_settings(dc: &mut DoctorCounters, vscode_dir: &Path, label: &str) {
     let settings_path = vscode_dir.join("User/settings.json");
-    doctor_check_mcp_document(
-        dc,
-        &settings_path,
-        load_jsonc_file,
-        |settings| {
-            settings
-                .get("mcp")
-                .and_then(|mcp| mcp.get("servers"))
-                .and_then(|servers| servers.get("tracedecay"))
-        },
-        &format!(
-            "{} not found, run `tracedecay install --agent copilot` if you use GitHub Copilot in {label}",
+    let settings = settings_path
+        .exists()
+        .then(|| load_jsonc_file(&settings_path));
+    let server = settings.as_ref().and_then(|settings| {
+        settings
+            .get("mcp")
+            .and_then(|mcp| mcp.get("servers"))
+            .and_then(|servers| servers.get("tracedecay"))
+            .and_then(serde_json::Value::as_object)
+    });
+    match server {
+        Some(server) if server_args_are_current(server) => dc.pass(&format!(
+            "{label} MCP server registered in {}",
             settings_path.display()
-        ),
-    );
+        )),
+        Some(_) => dc.info(&format!(
+            "{label}'s MCP server in {} lacks the \"serve\" argument; edit it in {label}",
+            settings_path.display()
+        )),
+        None => dc.info(&format!(
+            "{label}: no tracedecay MCP server in {}; `tracedecay install --agent copilot` \
+             registers Copilot CLI only",
+            settings_path.display()
+        )),
+    }
 }
 
 /// Read-only: this document is written by `copilot mcp`, never by TraceDecay.
 fn doctor_check_cli_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = copilot_cli_mcp_config_path(home);
-    doctor_check_mcp_document(
-        dc,
-        &settings_path,
-        load_json_file,
-        |settings| {
-            settings
-                .get("mcpServers")
-                .and_then(|servers| servers.get("tracedecay"))
-        },
-        &format!(
+    if !settings_path.exists() {
+        dc.warn(&format!(
             "{} not found, run `tracedecay install --agent copilot` if you use Copilot CLI",
             settings_path.display()
-        ),
-    );
-}
-
-fn doctor_check_mcp_document(
-    dc: &mut DoctorCounters,
-    settings_path: &Path,
-    load: impl FnOnce(&Path) -> serde_json::Value,
-    lookup: impl FnOnce(&serde_json::Value) -> Option<&serde_json::Value>,
-    missing_file_warn: &str,
-) {
-    if !settings_path.exists() {
-        dc.warn(missing_file_warn);
+        ));
         return;
     }
-
-    let settings = load(settings_path);
-    let Some(server) = lookup(&settings).and_then(serde_json::Value::as_object) else {
+    let settings = load_json_file(&settings_path);
+    let Some(server) = settings
+        .get("mcpServers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .and_then(serde_json::Value::as_object)
+    else {
         dc.fail(&format!(
             "MCP server NOT registered in {}, run `tracedecay install --agent copilot`",
             settings_path.display()

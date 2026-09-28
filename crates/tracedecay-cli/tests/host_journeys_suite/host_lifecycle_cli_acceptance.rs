@@ -1796,7 +1796,7 @@ fn assert_no_plugin_backups(root: &std::path::Path) {
 /// Kimi Code's own `kimi` executable. TraceDecay only resolves it, so the
 /// fake never runs.
 #[cfg(unix)]
-pub(crate) fn install_kimi_cli(cli: &IsolatedCli) {
+fn install_kimi_cli(cli: &IsolatedCli) {
     use std::os::unix::fs::PermissionsExt;
 
     let path = cli.bin_dir.join("kimi");

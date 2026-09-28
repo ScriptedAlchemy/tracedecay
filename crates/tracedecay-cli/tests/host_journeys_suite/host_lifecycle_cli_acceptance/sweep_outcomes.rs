@@ -119,12 +119,12 @@ const KIRO_NOT_INSTALLED: &str = "  kiro: skipped, not installed (host CLI `kiro
 const KIRO_NOT_SIGNED_IN: &str = "kiro: skipped, not signed in (host CLI `kiro-cli` is not \
      signed in; run `kiro-cli login` to use it)\n";
 
-/// A `kiro-cli` on the isolated `PATH` running the shell `body`.
+/// A host CLI `program` on the isolated `PATH` running the shell `body`.
 #[cfg(unix)]
-fn install_kiro_cli(cli: &IsolatedCli, body: &str) {
+fn install_host_cli(cli: &IsolatedCli, program: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = cli.bin_dir.join("kiro-cli");
+    let path = cli.bin_dir.join(program);
     fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -316,7 +316,7 @@ fn a_kiro_cli_that_is_not_signed_in_is_skipped_everywhere() {
     install_cline(&cli);
     seed_leftover_kiro_registration(&cli);
     track_kiro(&cli);
-    install_kiro_cli(&cli, LOGGED_OUT_KIRO_CLI);
+    install_host_cli(&cli, "kiro-cli", LOGGED_OUT_KIRO_CLI);
     let _daemon = ProfileDaemon::start(&cli);
 
     let update = cli.run(&["update-plugin"]);
@@ -327,11 +327,7 @@ fn a_kiro_cli_that_is_not_signed_in_is_skipped_everywhere() {
         "{update_stderr}"
     );
 
-    let post_update = cli
-        .command(&["post-update"])
-        .env("PATH", post_update_path(&cli))
-        .output()
-        .unwrap();
+    let post_update = cli.run(&["post-update"]);
     let post_update_stderr = stderr(&post_update);
     assert_eq!(post_update.status.code(), Some(0), "{post_update_stderr}");
     assert!(
@@ -347,7 +343,7 @@ fn a_kiro_cli_that_is_not_signed_in_is_skipped_everywhere() {
         "{doctor_stderr}"
     );
 
-    install_kiro_cli(&cli, SIGNED_IN_KIRO_CLI);
+    install_host_cli(&cli, "kiro-cli", SIGNED_IN_KIRO_CLI);
     let signed_in = cli.run(&["update-plugin"]);
     let signed_in_stderr = stderr(&signed_in);
     assert_eq!(signed_in.status.code(), Some(0), "{signed_in_stderr}");
@@ -472,7 +468,7 @@ fn doctor_skips_an_absent_host_but_fails_a_reachable_hosts_malformed_registratio
         "{absent_stderr}"
     );
 
-    install_kiro_cli(&cli, SIGNED_IN_KIRO_CLI);
+    install_host_cli(&cli, "kiro-cli", SIGNED_IN_KIRO_CLI);
     let mcp = cli.home.path().join(".kiro/settings/mcp.json");
     fs::create_dir_all(mcp.parent().unwrap()).unwrap();
     fs::write(&mcp, "{ not valid JSON").unwrap();
@@ -593,4 +589,82 @@ fn post_update_reports_pending_operator_action_with_its_own_exit_code() {
         stderr.contains("kimi: pending operator action: `/plugins install"),
         "{stderr}"
     );
+}
+
+/// Copilot's own registry as `copilot mcp add` maintains it.
+#[cfg(unix)]
+const REGISTERING_COPILOT_CLI: &str = r#"case "$1 $2" in
+  "mcp add")
+    /bin/mkdir -p "$HOME/.copilot"
+    printf '{"mcpServers":{"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$5" > "$HOME/.copilot/mcp-config.json"
+    ;;
+esac
+exit 0"#;
+
+/// No TraceDecay lifecycle writes VS Code's `settings.json`, so after a
+/// completed Copilot install a VS Code profile without the server is an
+/// observation, not an issue whose remedy is a TraceDecay command.
+#[cfg(unix)]
+#[test]
+fn doctor_observes_copilots_vscode_settings_without_failing_on_them() {
+    let cli = IsolatedCli::new();
+    install_host_cli(&cli, "copilot", REGISTERING_COPILOT_CLI);
+    let vscode_settings =
+        tracedecay_agent_hosts::agents::vscode_data_dir(cli.home.path()).join("User/settings.json");
+    fs::create_dir_all(vscode_settings.parent().unwrap()).unwrap();
+    fs::write(&vscode_settings, "{}").unwrap();
+    assert_success(
+        "copilot",
+        "install",
+        cli.run(&["install", "--agent", "copilot"]),
+    );
+    let _daemon = ProfileDaemon::start(&cli);
+
+    let doctor = cli.run(&["doctor"]);
+
+    let doctor_stderr = stderr(&doctor);
+    assert_eq!(doctor.status.code(), Some(0), "{doctor_stderr}");
+    assert!(
+        doctor_stderr.contains(&format!(
+            "MCP server registered in {}\n",
+            cli.home.path().join(".copilot/mcp-config.json").display()
+        )),
+        "{doctor_stderr}"
+    );
+    assert!(
+        doctor_stderr.contains(&format!(
+            "    VS Code: no tracedecay MCP server in {}; `tracedecay install --agent copilot` \
+             registers Copilot CLI only\n",
+            vscode_settings.display()
+        )),
+        "{doctor_stderr}"
+    );
+    assert!(!doctor_stderr.contains("NOT registered"), "{doctor_stderr}");
+}
+
+/// Zed and Antigravity present on the machine without TraceDecay get the same
+/// "detected but not integrated" warning as every other host, never an issue.
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    fs::create_dir_all(cli.home.path().join(".config/zed")).unwrap();
+    fs::create_dir_all(cli.home.path().join(".gemini/antigravity")).unwrap();
+    let _daemon = ProfileDaemon::start(&cli);
+
+    let doctor = cli.run(&["doctor"]);
+
+    let doctor_stderr = stderr(&doctor);
+    assert_eq!(doctor.status.code(), Some(0), "{doctor_stderr}");
+    for (name, id) in [("Zed", "zed"), ("Antigravity", "antigravity")] {
+        assert!(
+            doctor_stderr.contains(&format!(
+                "{name} detected but tracedecay is not integrated, run `tracedecay install \
+                 --agent {id}`\n"
+            )),
+            "{doctor_stderr}"
+        );
+    }
+    assert!(!doctor_stderr.contains("NOT registered"), "{doctor_stderr}");
 }
