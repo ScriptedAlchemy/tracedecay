@@ -772,6 +772,45 @@ fn cursor_after_file_edit_hook_captures_bound_spool_record() {
     );
 }
 
+/// Cursor sends the edited text inline, so rewriting a large file produces an
+/// `afterFileEdit` payload far above the content-free envelope it spools.
+#[test]
+fn cursor_after_file_edit_hook_captures_a_large_edit() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = NativeHostIdentityV1::CursorDesktop;
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_cursor_large_edit_capture");
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    let edited = project_path.join("src/lib.rs");
+    let rewritten = "pub fn answer() -> u32 { 43 }\n".repeat(2_000);
+    std::fs::write(&edited, &rewritten).unwrap();
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-after-file-edit",
+        &json!({
+            "conversation_id": "conv-large",
+            "generation_id": "gen-large",
+            "model": "test-model",
+            "file_path": edited,
+            "edits": [{"old_string": "", "new_string": rewritten}],
+            "session_id": "session-large",
+            "hook_event_name": "afterFileEdit",
+            "cursor_version": "1.7.0",
+            "workspace_roots": [project_path],
+            "user_email": "dev@example.com",
+            "transcript_path": home_path.join("transcripts/session-large.jsonl"),
+        }),
+    );
+
+    assert_capture_transport_response("large afterFileEdit captured", &output, 0);
+    assert_eq!(native_capture_pending_records(&data_root, host), 1);
+}
+
 #[test]
 fn cursor_after_shell_hook_is_typed_unsupported_without_spool_record() {
     let home = TempDir::new().unwrap();

@@ -1154,6 +1154,52 @@ mod tests {
     }
 
     #[test]
+    fn native_events_carrying_large_host_content_still_decode() {
+        let content = "fn f() {}\n".repeat(4_000);
+        let enlarge = |fixture: &[u8], pointers: &[&str]| {
+            let mut payload = serde_json::from_slice::<Value>(fixture).unwrap();
+            for pointer in pointers {
+                *payload.pointer_mut(pointer).unwrap() = Value::String(content.clone());
+            }
+            serde_json::to_vec(&payload).unwrap()
+        };
+        let cases = [
+            (
+                NativeHostIdentityV1::ClaudeCode,
+                enlarge(
+                    include_bytes!("../fixtures/host_events/claude/post_tool_use_write.json"),
+                    &["/tool_input/content", "/tool_response/content"],
+                ),
+                NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
+            ),
+            (
+                NativeHostIdentityV1::Codex,
+                enlarge(
+                    include_bytes!("../fixtures/host_events/codex/stop.json"),
+                    &["/last_assistant_message"],
+                ),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+            (
+                NativeHostIdentityV1::CursorDesktop,
+                enlarge(
+                    include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
+                    &["/edits/0/new_string"],
+                ),
+                NativeHookSignalV1::SavedEdit,
+            ),
+        ];
+        for (host, payload, signal) in cases {
+            assert!(payload.len() > 40_000, "{host:?} payload lost its content");
+            assert_eq!(
+                decode_native_hook_event(host, &payload).map(|decoded| decoded.signal),
+                Ok(signal),
+                "{host:?}"
+            );
+        }
+    }
+
+    #[test]
     fn hermes_hook_discriminators_do_not_alias_event_bus_variants() {
         for fixture in [
             include_bytes!("../fixtures/host_events/hermes/saved-edit.json").as_slice(),
