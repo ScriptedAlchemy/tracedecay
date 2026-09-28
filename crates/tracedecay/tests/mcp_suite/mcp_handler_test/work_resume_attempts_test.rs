@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -35,6 +34,7 @@ use tracedecay_domain::{
     WorkFilesystemPolicy, WorkOrdinalBandV1, WorkProviderBackendV1, WorkRouteCandidateV1,
     WorkRouteExecutionProfileV1, WorkSandboxPolicy,
 };
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 const TASK_ID: &str = "task.resume-attempts";
 const RUN_ID: &str = "run.resume-attempts";
@@ -703,12 +703,7 @@ async fn configure_hold_provider(
 ) {
     let script = b"#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *resume-hold*)\n    while :; do sleep 30; done;;\nesac\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}'\nexit 0\n";
     let executable_path = isolation_root.join("work-resume-provider");
-    std::fs::write(&executable_path, script).expect("write hold provider");
-    let mut permissions = std::fs::metadata(&executable_path)
-        .expect("provider metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&executable_path, permissions).expect("provider mode");
+    write_executable_script(&executable_path, script).expect("write hold provider");
     let executable_path = executable_path
         .canonicalize()
         .expect("canonical hold provider");

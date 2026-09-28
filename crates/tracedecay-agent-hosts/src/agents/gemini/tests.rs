@@ -12,6 +12,8 @@ use super::extension::{
 use super::*;
 
 use tracedecay_domain::errors::TraceDecayError;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -31,15 +33,11 @@ fn stage_rendered_extension(home: &Path, tracedecay_bin: &str) -> PathBuf {
 /// then performs `body`.
 #[cfg(unix)]
 fn fake_gemini_cli(bin: &Path, log: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
         log = shell_single_quote(&log.to_string_lossy()),
     );
-    std::fs::write(bin, script).unwrap();
-    let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(bin, permissions).unwrap();
+    write_executable_script(bin, script).unwrap();
 }
 
 /// A fake body that behaves like the real CLI far enough to be observable:

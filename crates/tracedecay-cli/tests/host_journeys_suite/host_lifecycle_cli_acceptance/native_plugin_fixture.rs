@@ -1,14 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
+
 /// A stock-grammar `claude` that performs the plugin lifecycle the component
 /// transaction drives: marketplace registration, cache install, removal.
 #[cfg(unix)]
 pub fn install_current_claude_cli(home: &Path, bin_dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let cli = bin_dir.join("claude");
-    fs::write(
+    write_executable_script(
         &cli,
         r##"#!/usr/bin/env python3
 import json
@@ -98,9 +99,6 @@ else:
 "##,
     )
     .unwrap();
-    let mut permissions = fs::metadata(&cli).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&cli, permissions).unwrap();
     home.join(".claude-test-invocations")
 }
 
@@ -119,10 +117,8 @@ pub fn recorded_claude_invocations(path: &Path) -> Vec<String> {
 /// Codex 0.156 does.
 #[cfg(unix)]
 pub fn install_current_codex_cli(bin_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
     let cli = bin_dir.join("codex");
-    fs::write(
+    write_executable_script(
         &cli,
         r##"#!/usr/bin/env python3
 import json
@@ -159,19 +155,14 @@ else:
 "##,
     )
     .unwrap();
-    let mut permissions = fs::metadata(&cli).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&cli, permissions).unwrap();
 }
 
 /// A stock-grammar `droid` whose `mcp add` / `mcp remove` edit its own
 /// `~/.factory/mcp.json` registry, as Factory Droid does.
 #[cfg(unix)]
 pub fn install_current_droid_cli(bin_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
     let cli = bin_dir.join("droid");
-    fs::write(
+    write_executable_script(
         &cli,
         r##"#!/usr/bin/env python3
 import json
@@ -200,7 +191,4 @@ path.write_text(json.dumps(registry, indent=2) + "\n")
 "##,
     )
     .unwrap();
-    let mut permissions = fs::metadata(&cli).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&cli, permissions).unwrap();
 }

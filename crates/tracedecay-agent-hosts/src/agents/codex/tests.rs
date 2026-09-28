@@ -1,6 +1,8 @@
 use super::*;
 use crate::agents::host_bundle::HostComponentV1;
 use crate::agents::safe_write_json_file;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 /// The repo-local `hooks-codex.json` ships only an empty `hooks` object.
 /// Rendering the global bundle must fill the object from `CODEX_MANAGED_HOOKS`
@@ -1010,12 +1012,8 @@ fn install_fake_codex_cli(
     std::fs::write(dir.join("codex.cmd"), "@exit /b 0\r\n").unwrap();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let binary = dir.join("codex");
-        std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
-        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&binary, permissions).unwrap();
+        write_executable_script(&binary, "#!/bin/sh\nexit 0\n").unwrap();
     }
     tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
 }

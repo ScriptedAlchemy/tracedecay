@@ -224,18 +224,16 @@ fn read_config_observation(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     #[cfg(unix)]
     fn fake_codex_cli(bin: &Path, log: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
             log = shell_single_quote(&log.to_string_lossy()),
         );
-        std::fs::write(bin, script).unwrap();
-        let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(bin, permissions).unwrap();
+        write_executable_script(bin, script).unwrap();
     }
 
     #[cfg(unix)]
