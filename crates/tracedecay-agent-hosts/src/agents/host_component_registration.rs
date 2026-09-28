@@ -150,11 +150,12 @@ impl CatalogHostComponentRegistrationAuthority {
         host: crate::agents::host_bundle::HostKindV1,
         error: tracedecay_domain::errors::TraceDecayError,
     ) -> crate::agents::host_bundle::HostBundleError {
-        if matches!(
-            &error,
-            tracedecay_domain::errors::TraceDecayError::HostCliUnavailable { .. }
-        ) {
-            return crate::agents::host_bundle::HostBundleError::HostCliUnavailable { host };
+        if let Some(absence) = error.host_absence() {
+            return crate::agents::host_bundle::HostBundleError::HostAbsent {
+                host,
+                absence,
+                detail: error.to_string(),
+            };
         }
         // The transaction error vocabulary is fixed, so surface the
         // integration's own message here before it is collapsed into the
@@ -1201,10 +1202,32 @@ mod tests {
         );
         assert_eq!(
             unavailable,
-            HostBundleError::HostCliUnavailable {
+            HostBundleError::HostAbsent {
                 host: HostKindV1::Kiro,
+                absence: tracedecay_domain::errors::HostAbsence::NotInstalled,
+                detail: "host CLI `kiro-cli` is unavailable for kiro MCP registry lifecycle; \
+                         install it or add it to PATH and retry"
+                    .to_string(),
             },
             "a proven absent Kiro CLI must not be relabelled as a filesystem failure"
+        );
+
+        let signed_out = CatalogHostComponentRegistrationAuthority::registration_error(
+            HostKindV1::Kiro,
+            tracedecay_domain::errors::TraceDecayError::HostCliNotSignedIn {
+                program: "kiro-cli".to_string(),
+                login: "kiro-cli login".to_string(),
+            },
+        );
+        assert_eq!(
+            signed_out,
+            HostBundleError::HostAbsent {
+                host: HostKindV1::Kiro,
+                absence: tracedecay_domain::errors::HostAbsence::NotSignedIn,
+                detail: "host CLI `kiro-cli` is not signed in; run `kiro-cli login` to use it"
+                    .to_string(),
+            },
+            "a signed-out Kiro CLI must not be relabelled as a filesystem failure"
         );
 
         let config_failure = CatalogHostComponentRegistrationAuthority::registration_error(

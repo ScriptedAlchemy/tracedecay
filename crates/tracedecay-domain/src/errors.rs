@@ -68,6 +68,9 @@ pub enum TraceDecayError {
     )]
     HostCliUnavailable { program: String, lifecycle: String },
 
+    #[error("host CLI `{program}` is not signed in; run `{login}` to use it")]
+    HostCliNotSignedIn { program: String, login: String },
+
     #[error(
         "{component} profile schema {} is incompatible with required schema \
          {required_version}; reset the profile",
@@ -161,7 +164,35 @@ fn flatten_error_chain(source: &(dyn std::error::Error + 'static)) -> String {
     message
 }
 
+/// Why a host cannot be reached on this machine. An absent host is
+/// informational everywhere TraceDecay reports hosts: it is never an issue, a
+/// warning, a pending operator action, or a non-zero exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostAbsence {
+    NotInstalled,
+    NotSignedIn,
+}
+
+impl HostAbsence {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not installed",
+            Self::NotSignedIn => "not signed in",
+        }
+    }
+}
+
 impl TraceDecayError {
+    /// The host absence this error reports when it came from resolving or
+    /// probing a host's own CLI, `None` for every real failure.
+    pub fn host_absence(&self) -> Option<HostAbsence> {
+        match self {
+            Self::HostCliUnavailable { .. } => Some(HostAbsence::NotInstalled),
+            Self::HostCliNotSignedIn { .. } => Some(HostAbsence::NotSignedIn),
+            _ => None,
+        }
+    }
+
     pub fn reset_required(authority: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::ResetRequired {
             authority: authority.into(),

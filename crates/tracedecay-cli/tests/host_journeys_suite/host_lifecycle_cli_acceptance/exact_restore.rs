@@ -186,6 +186,8 @@ elif name == "kiro-cli":
         edit(registry, set_server(args[args.index("--name") + 1], command, server_args))
     elif args[:2] == ["mcp", "remove"] and "--name" in args:
         unedit(registry, pop_server(args[args.index("--name") + 1]))
+    elif args[:2] == ["mcp", "list"]:
+        print(json.dumps(load(registry).get("mcpServers", {})))
     else:
         fail()
 elif name == "droid":
@@ -291,7 +293,9 @@ pub(super) fn seed_operator_home(home: &Path) {
 }
 
 pub(super) fn install_fake_native_hosts(bin_dir: &Path) {
-    for name in ["claude", "codex", "gemini", "copilot", "kiro-cli", "droid"] {
+    for name in [
+        "claude", "codex", "gemini", "copilot", "kiro-cli", "droid", "kimi",
+    ] {
         write_executable_script(&bin_dir.join(name), FAKE_NATIVE_HOST).unwrap();
     }
 }

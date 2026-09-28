@@ -178,10 +178,6 @@ impl AgentIntegration for DevinIntegration {
         uninstall_mcp_if_selected(components, &config_path)
     }
 
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
-    }
-
     fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(&devin_mcp_config_path(home), "mcpServers", load_json_file)
     }

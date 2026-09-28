@@ -49,6 +49,10 @@ pub(crate) use web_refresh::{KimiWebRefreshError, refresh_installed_plugin};
 /// When unset, the home resolves to `~/.kimi-code`.
 pub const KIMI_CODE_HOME_ENV: &str = "KIMI_CODE_HOME";
 
+/// Kimi Code CLI's own executable. Its presence on `PATH` is what makes Kimi
+/// Code installed on this machine; TraceDecay runs it only as `kimi web`.
+const KIMI_CLI: &str = "kimi";
+
 /// Plugin id read from Kimi Code CLI's official installed-plugin state.
 const KIMI_PLUGIN_ID: &str = "tracedecay";
 
@@ -68,6 +72,11 @@ impl AgentIntegration for KimiIntegration {
 
     fn id(&self) -> &'static str {
         "kimi"
+    }
+
+    fn require_host(&self, _home: &Path) -> Result<super::HostPresence> {
+        super::host_cli::require_host_cli(KIMI_CLI, "Kimi Code plugin lifecycle")
+            .map(|_| super::HostPresence::HostCli)
     }
 
     fn preflight_non_interactive_install(
@@ -173,10 +182,6 @@ impl AgentIntegration for KimiIntegration {
             &[ctx.project_path.join("AGENTS.md")],
             tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Kimi,
         );
-    }
-
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
     }
 
     fn host_component_registration(

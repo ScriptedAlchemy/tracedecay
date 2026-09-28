@@ -131,6 +131,12 @@ fn add_codex_plugin_cli_shim(command: &mut Command, home: &Path) {
     command.env("PATH", hermetic_path(&[bin_dir]));
 }
 
+/// Kimi Code on the `PATH` [`add_tracedecay_path_shim`] set, which is what
+/// makes Kimi Code installed; its lifecycle only resolves `kimi`.
+fn add_kimi_cli_shim(home: &Path) {
+    provision_host_cli_fixture::install_compiled_host_cli_fixture(&home.join("bin"), "kimi");
+}
+
 fn arm_implicit_cursor_reinstall(home: &Path) {
     let profile = profile_root(home);
     std::fs::create_dir_all(&profile).unwrap();
@@ -831,6 +837,7 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
     let kimi_home = canonical_temp_path(home.path()).join(".kimi-code");
     let mut install = tracedecay_command_without_daemon(home.path(), project.path());
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
+    add_kimi_cli_shim(home.path());
     install
         .env(
             tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
@@ -866,6 +873,7 @@ fn detected_install_continues_past_a_host_waiting_on_the_operator() {
     std::fs::create_dir_all(home_path.join(".vibe")).unwrap();
     let mut install = tracedecay_command_without_daemon(home.path(), project.path());
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
+    add_kimi_cli_shim(home.path());
     install
         .env(
             tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
