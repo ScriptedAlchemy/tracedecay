@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::ops::Deref;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::Path;
 use std::sync::{
     Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock, TryLockError,
@@ -3380,8 +3382,6 @@ fn stable_artifact_file_state(
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-
         let information = tracedecay_private_fs::windows_file::information(file)
             .map_err(map_artifact_file_error)?;
         Ok(StableArtifactFileStateV1 {
