@@ -2103,7 +2103,6 @@ fn retained_scan_step(
                 )?;
                 match listed.next() {
                     Some(entry) => {
-                        directory_work += 1;
                         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
                             operation: "read Codex transcript directory entry",
                             path: dir.clone(),
@@ -2117,7 +2116,12 @@ fn retained_scan_step(
                                     path: entry.path(),
                                     source,
                                 })?;
+                        // Rollout files are not structural work. Charging them
+                        // here spends the pass on names that are not child
+                        // directories, so the newest sessions are not emitted
+                        // until every older day has been listed.
                         if file_type.is_dir() && !file_type.is_symlink() {
+                            directory_work += 1;
                             if *depth >= MAX_SCAN_DEPTH {
                                 return Err(TranscriptIngestError::ScanIo {
                                     operation: "traverse Codex transcript directory depth",

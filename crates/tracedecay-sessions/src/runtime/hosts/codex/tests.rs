@@ -2275,6 +2275,67 @@ mod recent_first_discovery_tests {
         assert!(pass.report.paths.len() <= bounds.max_files);
     }
 
+    /// A dated tree whose older days hold more rollouts than one structural
+    /// pass can charge must still surface today's session immediately. Listing
+    /// those older files is not allowed to postpone the newest rollout.
+    #[tokio::test]
+    async fn codex_catch_up_surfaces_the_newest_rollout_before_older_days_are_listed() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        for index in 0..800 {
+            write_dated_rollout(home, ("2026", "06", "01"), &format!("older-{index:04}"));
+        }
+        let newest = write_dated_rollout(home, ("2026", "09", "28"), "project-newest");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::default_walk();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut surfaced = false;
+        for _ in 0..2 {
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => {
+                    panic!("a single catch-up consumer must not wait on its own scan")
+                }
+            };
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+            if pass.report.paths.first() == Some(&newest) {
+                surfaced = true;
+                break;
+            }
+        }
+        assert!(
+            surfaced,
+            "catch-up must surface the newest rollout before it finishes listing older days"
+        );
+        for _ in 0..64 {
+            if frontier.is_complete() {
+                break;
+            }
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => continue,
+            };
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+        }
+        assert!(
+            frontier.is_complete(),
+            "catch-up must finish the rollout sweep after the newest session is visible"
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn codex_same_path_same_size_preserved_mtime_replacement_changes_epoch() {
