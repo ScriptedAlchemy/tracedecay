@@ -55,7 +55,9 @@ self-hosted runner.
 
 The execution job has read-only repository/PR permissions, no supplied secrets,
 no persisted checkout credentials, and native `cache-mode: none`; it cannot
-publish the warmed target into durable Actions caches. A fresh reporter runs
+publish the warmed target into durable Actions caches. Its job token rechecks
+the admitted heads, and both heads can read it: that token is why the job's
+permissions stay read-only. A fresh reporter runs
 only the pinned controller and uses planner outputs to choose the exact SHAs
 that may receive checks. It never executes artifact content. This separation
 protects check-writing credentials; it **does not sanitize hostile PR code or
