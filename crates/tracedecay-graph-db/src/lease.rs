@@ -335,6 +335,20 @@ impl VerifiedGraphSnapshot {
         &self.head.locator.generation
     }
 
+    /// Directory of the sealed generation artifact this snapshot serves.
+    /// Absent for a memory snapshot and for a staging database that has not
+    /// installed this generation's sealed store.
+    #[must_use]
+    pub fn sealed_artifact_directory(&self) -> Option<std::path::PathBuf> {
+        if let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator) {
+            return Some(sealed.directory().to_path_buf());
+        }
+        if self.direct_sealed {
+            return self.database.persistent_container_directory();
+        }
+        None
+    }
+
     /// Exact relational head whose lease backs this verified snapshot.
     #[must_use]
     pub fn verified_head(&self) -> &GraphVerifiedHeadV1 {

@@ -9,6 +9,10 @@ use std::{
 
 use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
+};
+use tracedecay_contracts::CancellationSignal;
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
     CodeIndexStalenessStateV1,
@@ -22,6 +26,7 @@ use tracedecay_domain::{
     CodeGenerationId, CommitId, ProjectId, PublicRetrieverStatus, RefId, RetrieverKind,
     SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros, WorktreeId,
 };
+use tracedecay_graph_db::NeverCancelled;
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentHoldingV1,
     ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerReleaseV1, ResidentOwnerSampleV1,
@@ -197,6 +202,162 @@ fn unchanged_mixed_roster_restart_retains_generation_pointer_and_artifact() {
             .expect("retained pointer"),
         pointer
     );
+}
+
+#[test]
+fn unchanged_restart_keeps_the_generation_and_reopens_the_name_file_catalog() {
+    let fixture = GitFixture::new(MIXED_SOURCE_ROSTER);
+    let store = TempDir::new().expect("store root");
+    let catalog_cache = TempDir::new().expect("catalog cache");
+    let mut initial = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let first = published(initial.reconcile_now().expect("initial immutable capture"));
+    let latest = initial.latest_complete().expect("initial generation");
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    let kept: BTreeSet<String> = latest
+        .generation()
+        .symbols()
+        .symbols
+        .iter()
+        .filter(|record| record.simple_name == "kept")
+        .map(|record| record.occurrence.as_str().to_owned())
+        .collect();
+    assert!(
+        !kept.is_empty(),
+        "the fixture publishes a kept symbol the catalog can resolve"
+    );
+    let publish_cancellation =
+        CancellationSignal::active("cancel.catalog-restart.publish").expect("cancellation");
+    let publisher =
+        HermeticCodeGraphProjectionStore::memory(&publish_cancellation).expect("graph publisher");
+    publisher
+        .publish_indexed_with_cancellation(
+            &generation_id,
+            latest.generation().edges(),
+            latest.generation().chunks().chunks(),
+            &latest.generation().snapshot().files,
+            latest.generation().symbols(),
+            Arc::new(NeverCancelled),
+        )
+        .expect("publish the generation's name and file graph");
+    while !latest.advance_text_serving(64).expect("seal text artifact") {}
+    let pointer =
+        std::fs::read(store.path().join("active-code-generation-v1.json")).expect("pointer");
+    let artifact_path = active_text_artifact_path(store.path());
+    let artifact_digest = content_digest(&std::fs::read(&artifact_path).expect("artifact"));
+    let artifact_modified = artifact_path
+        .metadata()
+        .expect("artifact metadata")
+        .modified()
+        .expect("mtime");
+    drop(latest);
+
+    let open_catalog = || {
+        publisher
+            .verified_store_with_catalog_cache(&generation_id, catalog_cache.path().to_path_buf())
+            .expect("projection store")
+    };
+    let first_catalog = open_catalog();
+    let ((), first_log) = super::publication_store::captured_tracing(|| {
+        first_catalog
+            .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
+            .expect("first process scans the projection into the catalog");
+    });
+    assert!(
+        first_log.contains("interactive catalog scanned"),
+        "the first warm of a generation scans the projection: {first_log}"
+    );
+    assert!(
+        !first_log.contains("interactive catalog reopened"),
+        "the first warm has no sealed catalog to reopen: {first_log}"
+    );
+    assert_catalog_serves_kept(&first_catalog, &generation_id, &kept);
+    drop(first_catalog);
+    drop(initial);
+
+    let mut restarted = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    assert!(matches!(
+        restarted.reconcile_now().expect("restart reconcile"),
+        CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    let restored = restarted.latest_complete().expect("restored generation");
+    assert_eq!(
+        restored.generation().manifest().generation_id,
+        first.generation_id
+    );
+    while !restored
+        .advance_text_serving(64)
+        .expect("open retained artifact")
+    {}
+    assert_eq!(
+        content_digest(&std::fs::read(&artifact_path).expect("retained artifact")),
+        artifact_digest
+    );
+    assert_eq!(
+        artifact_path
+            .metadata()
+            .expect("metadata")
+            .modified()
+            .expect("mtime"),
+        artifact_modified
+    );
+    assert_eq!(
+        std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("retained pointer"),
+        pointer
+    );
+    drop(restored);
+
+    let restarted_catalog = open_catalog();
+    let ((), restarted_log) = super::publication_store::captured_tracing(|| {
+        restarted_catalog
+            .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
+            .expect("restart reopens the catalog");
+    });
+    assert!(
+        restarted_log.contains("interactive catalog reopened"),
+        "restart over unchanged source reopens the catalog: {restarted_log}"
+    );
+    assert!(
+        !restarted_log.contains("interactive catalog scanned"),
+        "reopening the catalog must not scan the projection: {restarted_log}"
+    );
+    assert_catalog_serves_kept(&restarted_catalog, &generation_id, &kept);
+}
+
+fn assert_catalog_serves_kept(
+    store: &CodeGraphProjectionStore,
+    generation: &CodeGenerationId,
+    kept: &BTreeSet<String>,
+) {
+    let cancellation =
+        CancellationSignal::active("cancel.catalog-restart.lookup").expect("cancellation");
+    let reader = store
+        .interactive_reader(generation, &cancellation)
+        .expect("interactive reader");
+    let hits = reader
+        .resolve_simple_name("kept", None, 8, Arc::new(NeverCancelled))
+        .expect("simple name lookup");
+    let found: BTreeSet<_> = hits
+        .iter()
+        .map(|hit| hit.occurrence.as_str().to_owned())
+        .collect();
+    assert!(
+        kept.iter().all(|occurrence| found.contains(occurrence)),
+        "name lookup must return every published kept symbol"
+    );
+    let file = reader
+        .file_by_logical_path("src/lib.rs", Arc::new(NeverCancelled))
+        .expect("logical path lookup")
+        .expect("published file");
+    assert_eq!(file.logical_path, "src/lib.rs");
 }
 
 #[test]

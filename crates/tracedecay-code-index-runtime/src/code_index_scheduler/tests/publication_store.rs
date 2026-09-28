@@ -2425,7 +2425,7 @@ impl tracing_subscriber::fmt::MakeWriter<'_> for CapturedLogWriter {
     }
 }
 
-fn captured_tracing<T>(scope: impl FnOnce() -> T) -> (T, String) {
+pub(super) fn captured_tracing<T>(scope: impl FnOnce() -> T) -> (T, String) {
     let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)

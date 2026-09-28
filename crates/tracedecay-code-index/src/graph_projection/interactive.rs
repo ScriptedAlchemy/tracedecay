@@ -13,11 +13,16 @@
 //! lazily by one bounded, cancellable scan of the projection and cached on the
 //! owning [`CodeGraphProjectionStore`]. The catalog is derived from the
 //! verified snapshot and shares its lifetime, so it is a cache of the
-//! projection authority, not a second authority. Per-seed adjacency reads go
-//! straight to the snapshot's kind-filtered relation fan-outs.
+//! projection authority, not a second authority. When that snapshot serves a
+//! sealed artifact, the finished catalog is written beside it and a later
+//! process loads the file instead of scanning the projection. The file binds
+//! the generation, projector revision, and recovered digest; anything else is
+//! a miss and the snapshot is scanned. Per-seed adjacency reads go straight
+//! to the snapshot's kind-filtered relation fan-outs.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, TryLockError};
 use std::time::Instant;
 
@@ -41,6 +46,7 @@ use super::{
 use crate::lineage::LineageSymbolRecordV1;
 
 mod catalog;
+mod catalog_cache;
 mod imports;
 mod models;
 
@@ -83,6 +89,9 @@ pub(super) struct InteractiveCatalogCache {
     /// [`InteractiveCatalog::retained_bytes`] of the ready catalog, measured
     /// once when it is built.
     ready_bytes: std::sync::atomic::AtomicU64,
+    /// Sealed artifact directory whose `interactive-catalog.json` reopens
+    /// this generation's catalog. `None` for a memory snapshot.
+    directory: Option<PathBuf>,
 }
 
 /// Outcome of asking a store to give back its interactive catalog.
@@ -102,12 +111,13 @@ pub enum CodeGraphCatalogReleaseV1 {
 const SEMANTIC_NEIGHBOR_SEED_CHUNK: usize = 50_000;
 
 impl InteractiveCatalogCache {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(directory: Option<PathBuf>) -> Self {
         Self {
             state: RwLock::new(InteractiveCatalogState::Cold),
             build: Mutex::new(()),
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
             ready_bytes: std::sync::atomic::AtomicU64::new(0),
+            directory,
         }
     }
 
@@ -1445,24 +1455,55 @@ impl CodeGraphInteractiveReader {
                 }
             }
         };
-        self.catalog
-            .scan_builds
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let result = hotpath::measure_block!("code_graph.catalog.build", {
-            catalog::build_interactive_catalog(
-                &self.snapshot,
-                &self.projection,
-                self.projection_node_count,
-                Arc::clone(&cancellation),
-            )
-        })
-        .and_then(|catalog| {
-            if cancellation.is_cancelled() {
-                Err(CodeGraphProjectionError::Cancelled)
-            } else {
-                Ok(Arc::new(catalog))
-            }
-        });
+        let binding = catalog_cache::CatalogCacheBinding {
+            projector_revision: super::CODE_GRAPH_PROJECTOR_REVISION,
+            generation: self.generation.as_str(),
+            namespace: self.projection.namespace.as_str(),
+            projection: self.projection.projection.as_str(),
+            recovered_digest: self.snapshot.verified_head().recovered_digest.as_str(),
+        };
+        let loaded = self
+            .catalog
+            .directory
+            .as_deref()
+            .and_then(|directory| catalog_cache::load_interactive_catalog(directory, &binding));
+        let result = if let Some(catalog) = loaded {
+            tracing::info!(
+                event = "code_graph.catalog.reopened",
+                "interactive catalog reopened"
+            );
+            Ok(Arc::new(catalog))
+        } else {
+            self.catalog
+                .scan_builds
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            hotpath::measure_block!("code_graph.catalog.build", {
+                catalog::build_interactive_catalog(
+                    &self.snapshot,
+                    &self.projection,
+                    self.projection_node_count,
+                    Arc::clone(&cancellation),
+                )
+            })
+            .and_then(|catalog| {
+                if cancellation.is_cancelled() {
+                    Err(CodeGraphProjectionError::Cancelled)
+                } else {
+                    if let Some(directory) = self.catalog.directory.as_deref() {
+                        // The sidecar is a cache of this projection. A failed
+                        // write leaves the in-memory catalog serving; the next
+                        // process misses the file and scans the snapshot.
+                        let _ =
+                            catalog_cache::store_interactive_catalog(directory, &binding, &catalog);
+                    }
+                    tracing::info!(
+                        event = "code_graph.catalog.scanned",
+                        "interactive catalog scanned"
+                    );
+                    Ok(Arc::new(catalog))
+                }
+            })
+        };
         let mut state = self
             .catalog
             .state

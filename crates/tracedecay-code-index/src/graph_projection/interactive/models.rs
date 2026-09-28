@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, FileOccurrenceId, RelationEdgeKindV1, SanitizedCodeFileV1,
     SymbolOccurrenceId, UnmodeledImportShapeV1,
@@ -124,7 +124,7 @@ pub struct CodeGraphDegreeRankingV1 {
 }
 
 /// Symbol count of one logical file.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CodeGraphFileSymbolCountV1 {
     pub logical_path: String,
     pub symbols: u64,
@@ -146,7 +146,7 @@ pub struct CodeGraphCensusV1 {
 /// File-level `calls`/`uses` dependencies of one generation, folded once
 /// while the catalog is built from every such edge whose endpoints are
 /// bound to two different files.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CodeGraphFileDependenciesV1 {
     /// Every file's logical path to the logical paths it depends on.
     pub adjacency: Arc<HashMap<String, HashSet<String>>>,
@@ -204,7 +204,7 @@ impl UnresolvedCallerGapsV1 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct CatalogSymbol {
     pub(super) binding: Option<CodeGraphSymbolBindingV1>,
     pub(super) metadata: Option<LineageSymbolRecordV1>,
@@ -219,6 +219,7 @@ pub(super) struct CatalogSymbol {
 /// Generation-pinned catalog of every file, symbol, and import entity in one
 /// published graph. It is derived from the verified snapshot and remains a
 /// lookup cache rather than a second projection authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(in crate::graph_projection) struct InteractiveCatalog {
     pub(super) symbols: BTreeMap<SymbolOccurrenceId, CatalogSymbol>,
     pub(super) by_qualified_name: BTreeMap<String, Vec<SymbolOccurrenceId>>,

@@ -83,6 +83,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.11"
 thiserror = "2"
+tracing = "0.1"
 toml = "1"
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }

@@ -5761,6 +5761,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
+ "tracing",
  "tree-sitter",
 ]
 

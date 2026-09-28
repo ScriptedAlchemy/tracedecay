@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::path::PathBuf;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -381,6 +382,27 @@ impl CodeGraphProjectionStore {
         snapshot: VerifiedGraphSnapshot,
         generation: CodeGenerationId,
     ) -> Result<Self, CodeGraphProjectionError> {
+        let directory = snapshot.sealed_artifact_directory();
+        Self::open(snapshot, generation, directory)
+    }
+
+    /// Opens a store that reads and writes its name/file catalog under
+    /// `catalog_cache_dir`, including a memory snapshot that has no sealed
+    /// artifact of its own.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn from_verified_snapshot_with_catalog_cache(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+        catalog_cache_dir: PathBuf,
+    ) -> Result<Self, CodeGraphProjectionError> {
+        Self::open(snapshot, generation, Some(catalog_cache_dir))
+    }
+
+    fn open(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+        catalog_cache_dir: Option<PathBuf>,
+    ) -> Result<Self, CodeGraphProjectionError> {
         let projection = snapshot.projection().clone();
         let expected = code_graph_generation_id(
             &generation,
@@ -393,7 +415,7 @@ impl CodeGraphProjectionStore {
             snapshot: Arc::new(snapshot),
             projection,
             generation,
-            interactive_catalog: Arc::new(InteractiveCatalogCache::new()),
+            interactive_catalog: Arc::new(InteractiveCatalogCache::new(catalog_cache_dir)),
             serving_engine: Arc::new(Mutex::new(None)),
             released: Arc::new(AtomicBool::new(false)),
             rewarming: Arc::new(AtomicBool::new(false)),
@@ -733,12 +755,8 @@ impl InMemoryCodeGraphProjectionBuilder {
     }
 
     #[cfg(feature = "test-helpers")]
-    pub fn verified_store(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> Result<CodeGraphProjectionStore, CodeGraphProjectionError> {
-        let snapshot = self
-            .snapshot
+    fn published_snapshot(&self) -> Result<Arc<VerifiedGraphSnapshot>, CodeGraphProjectionError> {
+        self.snapshot
             .read()
             .map_err(|_| {
                 CodeGraphProjectionError::Unavailable(
@@ -750,10 +768,35 @@ impl InMemoryCodeGraphProjectionBuilder {
                 CodeGraphProjectionError::Unavailable(
                     "code graph generation is not published".to_owned(),
                 )
-            })?;
+            })
+    }
+
+    #[cfg(feature = "test-helpers")]
+    pub fn verified_store(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> Result<CodeGraphProjectionStore, CodeGraphProjectionError> {
+        let snapshot = self.published_snapshot()?;
         CodeGraphProjectionStore::from_verified_snapshot(
             snapshot.as_ref().clone(),
             generation.clone(),
+        )
+    }
+
+    /// Opens the published generation with its name/file catalog stored under
+    /// `catalog_cache_dir`. A memory snapshot has no sealed artifact directory
+    /// of its own; production opens take that directory from the sealed store.
+    #[cfg(feature = "test-helpers")]
+    pub fn verified_store_with_catalog_cache(
+        &self,
+        generation: &CodeGenerationId,
+        catalog_cache_dir: PathBuf,
+    ) -> Result<CodeGraphProjectionStore, CodeGraphProjectionError> {
+        let snapshot = self.published_snapshot()?;
+        CodeGraphProjectionStore::from_verified_snapshot_with_catalog_cache(
+            snapshot.as_ref().clone(),
+            generation.clone(),
+            catalog_cache_dir,
         )
     }
 
@@ -835,6 +878,15 @@ impl HermeticCodeGraphProjectionStore {
         generation: &CodeGenerationId,
     ) -> Result<CodeGraphProjectionStore, CodeGraphProjectionError> {
         self.inner.verified_store(generation)
+    }
+
+    pub fn verified_store_with_catalog_cache(
+        &self,
+        generation: &CodeGenerationId,
+        catalog_cache_dir: PathBuf,
+    ) -> Result<CodeGraphProjectionStore, CodeGraphProjectionError> {
+        self.inner
+            .verified_store_with_catalog_cache(generation, catalog_cache_dir)
     }
 
     pub fn evidence_reader(
