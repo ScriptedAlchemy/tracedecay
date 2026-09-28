@@ -196,10 +196,17 @@ tar -xzf "${tmp_dir}/${asset}" -C "$tmp_dir"
 [[ -f ${tmp_dir}/tracedecay ]] || fail "archive does not contain tracedecay"
 
 mkdir -p "$install_dir"
-install -m 0755 "${tmp_dir}/tracedecay" "${install_dir}/tracedecay"
+# Agent hooks and MCP hosts exec the installed path at any moment. `install`
+# onto it unlinks the old binary and writes the new one in place at mode 0600,
+# so a concurrent exec fails or runs a truncated file. Stage a sibling and
+# rename it over the path so every exec sees one complete binary.
+staged=$(mktemp "${install_dir}/.tracedecay.install.XXXXXX")
+trap 'rm -rf "$tmp_dir"; rm -f "$staged"' EXIT
+install -m 0755 "${tmp_dir}/tracedecay" "$staged"
 # After the archive checksum check. Re-signing changes the installed bytes
 # only; the published digest still matches the archive.
-stabilize_macos_adhoc_identity "${install_dir}/tracedecay"
+stabilize_macos_adhoc_identity "$staged"
+mv -f "$staged" "${install_dir}/tracedecay"
 printf 'Installed tracedecay %s to %s\n' "${tag#v}" "${install_dir}/tracedecay"
 
 case ":${PATH}:" in

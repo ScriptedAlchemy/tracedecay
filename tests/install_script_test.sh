@@ -237,6 +237,46 @@ expect_installer_failure \
   "$tmpdir/invalid-SHA256SUMS" \
   "SHA256SUMS has an invalid digest for ${BETA_ASSET}"
 
+# Replacing a live install must never expose a partial or non-executable
+# binary: hooks and MCP hosts exec the installed path while the installer runs.
+{
+  printf '#!/usr/bin/env bash\nprintf '"'"'tracedecay 9.8.7-beta.1\\n'"'"'\nexit 0\n'
+  head -c 67108864 /dev/zero | tr '\0' '#'
+} >"$tmpdir/archive/tracedecay"
+chmod +x "$tmpdir/archive/tracedecay"
+new_size=$(wc -c <"$tmpdir/archive/tracedecay" | tr -d ' ')
+tar -czf "$tmpdir/${BETA_ASSET}" -C "$tmpdir/archive" tracedecay
+(
+  cd "$tmpdir"
+  sha256sum "$BETA_ASSET" >SHA256SUMS
+)
+rm -rf "$tmpdir/install"
+mkdir -p "$tmpdir/install"
+printf '#!/usr/bin/env bash\nprintf "tracedecay old\\n"\n' >"$tmpdir/install/tracedecay"
+chmod 0755 "$tmpdir/install/tracedecay"
+old_size=$(wc -c <"$tmpdir/install/tracedecay" | tr -d ' ')
+(
+  while [[ ! -e $tmpdir/stop-sampling ]]; do
+    stat -c '%a %s' "$tmpdir/install/tracedecay" 2>/dev/null || echo missing
+  done
+) >"$tmpdir/replace-samples" &
+sampler=$!
+until [[ -s $tmpdir/replace-samples ]]; do sleep 0.01; done
+run_installer "$INSTALLER" >/dev/null
+touch "$tmpdir/stop-sampling"
+wait "$sampler"
+[[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7-beta.1" ]]
+[[ "$(ls -A "$tmpdir/install")" == "tracedecay" ]]
+grep -qx "755 $old_size" "$tmpdir/replace-samples"
+grep -qx "755 $new_size" "$tmpdir/replace-samples"
+grep -vx -e "755 $old_size" -e "755 $new_size" "$tmpdir/replace-samples" \
+  | sort | uniq -c >"$tmpdir/replace-torn" || true
+if [[ -s $tmpdir/replace-torn ]]; then
+  echo "installer exposed a torn binary while replacing it:" >&2
+  cat "$tmpdir/replace-torn" >&2
+  exit 1
+fi
+
 # The published binary has already been through release strip: its ad-hoc
 # identifier is the deps filename (`tracedecay-<hash>`), not the installed
 # name. install.sh signs the installed file.
@@ -274,6 +314,7 @@ CODESIGN_LOG="$codesign_log" \
 strip_line=$(head -n 1 "$codesign_log")
 stable_line=$(tail -n 1 "$codesign_log")
 [[ $strip_line == "--force --sign - --identifier tracedecay-${deps_hash} ${tmpdir}/archive/tracedecay" ]]
-[[ $stable_line == "--force --sign - --identifier dev.tracedecay.cli -r=designated => identifier \"dev.tracedecay.cli\" ${tmpdir}/install/tracedecay" ]]
+[[ $stable_line == "--force --sign - --identifier dev.tracedecay.cli -r=designated => identifier \"dev.tracedecay.cli\" ${tmpdir}/install/.tracedecay.install."* ]]
+[[ "$(ls -A "$tmpdir/install")" == "tracedecay" ]]
 [[ $strip_line != "$stable_line" ]]
 grep -Fq "Installed tracedecay ${BETA_TAG#v}" "$tmpdir/macho-install.log"
