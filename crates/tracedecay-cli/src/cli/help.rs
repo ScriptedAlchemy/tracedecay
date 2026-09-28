@@ -484,20 +484,6 @@ Examples:
 
 Related: tracedecay gain (savings ledger), tracedecay monitor.";
 
-pub(crate) const BENCH_LONG_ABOUT: &str = "\
-Runs a reproducible retrieval benchmark (a fixed query set against the \
-current project's index) and reports latency and result quality. Use it to \
-compare index configurations or verify a tracedecay upgrade did not regress \
-retrieval.";
-
-pub(crate) const BENCH_AFTER_HELP: &str = "\
-Examples:
-  tracedecay bench                               Shipped default query set
-  tracedecay bench --json                        Machine-readable results
-  tracedecay bench --queries my-queries.toml --max-nodes 10
-
-Related: tracedecay status (index size context).";
-
 pub(crate) const GAIN_LONG_ABOUT: &str = "\
 Reports token savings (and dollar estimates) recorded in the persistent \
 global ledger, the long-term view, unlike the resettable per-project \
