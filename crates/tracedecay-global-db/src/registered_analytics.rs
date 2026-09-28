@@ -5,8 +5,9 @@ use tracedecay_runtime_core::db::engine::{Value, opt_text};
 use super::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
     AnalyticsToolCounts, ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
-    RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, analytics_scope_query,
-    row_to_analytics_event,
+    ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
+    PreparedObservabilityEmissionV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
+    analytics_scope_query, row_to_analytics_event,
 };
 
 const OBSERVABILITY_DETAIL_RETENTION_SECONDS: i64 = 30 * 86_400;
@@ -461,6 +462,157 @@ impl RegisteredGlobalDb {
             format!("failed to commit observability outbox settlement: {error}")
         })?;
         Ok(id)
+    }
+
+    /// Claim and settle one run of worker-owned owner facts in a single write.
+    ///
+    /// The outbox lookup runs inside the transaction. `prepare_new` is invoked
+    /// only for a fact that has no outbox row, so a replay allocates no
+    /// producer sequence. A conflict or failed prepare rolls the whole run back.
+    #[hotpath::measure(future = true, label = "global_db.registered.analytics.claim_settle")]
+    pub async fn claim_and_settle_observability_emissions<F>(
+        &self,
+        emissions: &[ObservabilityOwnerEmissionWriteV1],
+        mut prepare_new: F,
+    ) -> Result<Vec<ObservabilityOwnerEmissionWriteOutcomeV1>, String>
+    where
+        F: FnMut(usize) -> Result<PreparedObservabilityEmissionV1, String>,
+    {
+        if emissions.is_empty() {
+            return Ok(Vec::new());
+        }
+        if emissions.len() > 1_024 {
+            return Err("invalid observability outbox batch".to_owned());
+        }
+        for emission in emissions {
+            validate_owner_fact_input(
+                &emission.project_id,
+                &emission.owner_event_id,
+                &emission.owner_fact_json,
+            )?;
+        }
+        let transaction = self.begin_write_transaction().await.map_err(|error| {
+            format!("failed to begin observability outbox claim and settlement: {error}")
+        })?;
+        let mut classified = Vec::with_capacity(emissions.len());
+        let mut seen = Vec::<(String, String, String)>::new();
+        for (index, emission) in emissions.iter().enumerate() {
+            if let Some((_, _, owner_fact_json)) =
+                seen.iter().find(|(project_id, owner_event_id, _)| {
+                    project_id == &emission.project_id && owner_event_id == &emission.owner_event_id
+                })
+            {
+                if owner_fact_json != &emission.owner_fact_json {
+                    return Err(rollback_observability_write(
+                        transaction,
+                        "observability owner fact conflict".to_owned(),
+                    )
+                    .await);
+                }
+                classified.push(ClassifiedOwnerEmission::Replayed);
+                continue;
+            }
+            match read_outbox_record(&transaction, &emission.project_id, &emission.owner_event_id)
+                .await
+            {
+                Ok(Some(stored)) => {
+                    if stored.owner_fact_json != emission.owner_fact_json {
+                        return Err(rollback_observability_write(
+                            transaction,
+                            "observability owner fact conflict".to_owned(),
+                        )
+                        .await);
+                    }
+                    seen.push((
+                        emission.project_id.clone(),
+                        emission.owner_event_id.clone(),
+                        emission.owner_fact_json.clone(),
+                    ));
+                    classified.push(ClassifiedOwnerEmission::Replayed);
+                }
+                Ok(None) => {
+                    let prepared = match prepare_new(index) {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            return Err(rollback_observability_write(transaction, error).await);
+                        }
+                    };
+                    if let Err(error) = validate_prepared_owner_emission(emission, &prepared) {
+                        return Err(rollback_observability_write(transaction, error).await);
+                    }
+                    seen.push((
+                        emission.project_id.clone(),
+                        emission.owner_event_id.clone(),
+                        emission.owner_fact_json.clone(),
+                    ));
+                    classified.push(ClassifiedOwnerEmission::Insert { prepared });
+                }
+                Err(error) => {
+                    return Err(rollback_observability_write(transaction, error).await);
+                }
+            }
+        }
+        let mut outcomes = Vec::with_capacity(classified.len());
+        let mut settled = 0_u64;
+        for (index, class) in classified.into_iter().enumerate() {
+            let emission = &emissions[index];
+            match class {
+                ClassifiedOwnerEmission::Replayed => {
+                    outcomes.push(ObservabilityOwnerEmissionWriteOutcomeV1::Replayed);
+                }
+                ClassifiedOwnerEmission::Insert { prepared } => {
+                    let analytics_event_id = match append_observability_event_in_existing_tx(
+                        &transaction,
+                        &prepared.event,
+                    )
+                    .await
+                    {
+                        Ok(id) => id,
+                        Err(error) => {
+                            return Err(rollback_observability_write(transaction, error).await);
+                        }
+                    };
+                    let inserted = match transaction
+                        .execute(
+                            "INSERT INTO observability_emission_outbox
+                                 (project_id, owner_event_id, owner_fact_json,
+                                  delivery_envelope_json, state, analytics_event_id)
+                             VALUES (?1, ?2, ?3, ?4, 'settled', ?5)",
+                            tracedecay_runtime_core::db::engine::params![
+                                emission.project_id.as_str(),
+                                emission.owner_event_id.as_str(),
+                                emission.owner_fact_json.as_str(),
+                                prepared.delivery_envelope_json.as_str(),
+                                analytics_event_id
+                            ],
+                        )
+                        .await
+                    {
+                        Ok(1) => Ok(()),
+                        Ok(changed) => Err(format!(
+                            "observability outbox settlement changed {changed} rows instead of one"
+                        )),
+                        Err(error) => Err(format!(
+                            "failed to settle observability outbox event: {error}"
+                        )),
+                    };
+                    if let Err(error) = inserted {
+                        return Err(rollback_observability_write(transaction, error).await);
+                    }
+                    settled = settled.saturating_add(1);
+                    outcomes.push(ObservabilityOwnerEmissionWriteOutcomeV1::Settled {
+                        analytics_event_id,
+                    });
+                }
+            }
+        }
+        if settled > 0 {
+            crate::hotpath_observe::record_transaction_rows(settled);
+        }
+        transaction.commit().await.map_err(|error| {
+            format!("failed to commit observability outbox claim and settlement: {error}")
+        })?;
+        Ok(outcomes)
     }
 
     /// Reads only producer-stamped [`tracedecay_domain::ObservabilityEnvelopeV1`]
@@ -926,6 +1078,59 @@ struct StoredObservabilityOutboxRecord {
     owner_fact_json: String,
     delivery_envelope_json: String,
     analytics_event_id: Option<i64>,
+}
+
+enum ClassifiedOwnerEmission {
+    Replayed,
+    Insert {
+        prepared: PreparedObservabilityEmissionV1,
+    },
+}
+
+fn validate_owner_fact_input(
+    project_id: &str,
+    owner_event_id: &str,
+    owner_fact_json: &str,
+) -> Result<(), String> {
+    if project_id.is_empty()
+        || owner_event_id.is_empty()
+        || project_id.len() > 256
+        || owner_event_id.len() > 256
+        || owner_fact_json.len() > MAX_OBSERVABILITY_OUTBOX_JSON_BYTES
+        || serde_json::from_str::<serde_json::Value>(owner_fact_json).is_err()
+    {
+        return Err("invalid observability outbox input".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_prepared_owner_emission(
+    emission: &ObservabilityOwnerEmissionWriteV1,
+    prepared: &PreparedObservabilityEmissionV1,
+) -> Result<(), String> {
+    validate_outbox_input(
+        &emission.project_id,
+        &emission.owner_event_id,
+        &emission.owner_fact_json,
+        &prepared.delivery_envelope_json,
+    )?;
+    if prepared.event.project_id != emission.project_id
+        || prepared.event.hint_id.as_deref() != Some(emission.owner_event_id.as_str())
+        || prepared.event.metadata_json.as_deref() != Some(prepared.delivery_envelope_json.as_str())
+    {
+        return Err("observability outbox delivery binding conflict".to_owned());
+    }
+    Ok(())
+}
+
+async fn rollback_observability_write(
+    transaction: RegisteredGlobalDbWriteTransaction<'_>,
+    error: String,
+) -> String {
+    match transaction.rollback().await {
+        Ok(()) => error,
+        Err(rollback_error) => format!("{error}; rollback failed: {rollback_error}"),
+    }
 }
 
 fn validate_outbox_input(

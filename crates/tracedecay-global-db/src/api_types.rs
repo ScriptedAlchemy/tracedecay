@@ -99,6 +99,31 @@ impl ObservabilityEmissionClaimV1 {
     }
 }
 
+/// One worker-owned owner fact looked up inside a claim-and-settle write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservabilityOwnerEmissionWriteV1 {
+    pub project_id: String,
+    pub owner_event_id: String,
+    pub owner_fact_json: String,
+}
+
+/// Delivery built only after the outbox lookup shows the fact is new.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedObservabilityEmissionV1 {
+    pub delivery_envelope_json: String,
+    pub event: AnalyticsEventInsert,
+}
+
+/// Result of claiming and settling one owner fact in a shared write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservabilityOwnerEmissionWriteOutcomeV1 {
+    /// An outbox row already owns this fact, so no new delivery was prepared.
+    Replayed,
+    Settled {
+        analytics_event_id: i64,
+    },
+}
+
 impl tracedecay_sessions::runtime::git_correlation::AnalyticsSessionTimestampSource
     for AnalyticsEventRecord
 {

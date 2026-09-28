@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
@@ -760,4 +761,187 @@ async fn shutdown_terminal_linearizes_after_concurrent_admission() {
     assert!(drop.clean_shutdown_observed);
     assert_eq!(drop.proved_drop_lower_bound, 0);
     assert_eq!(terminal.producer_sequence, admitted.saturating_add(1));
+}
+
+fn owner_envelope(scope: &str, id: u64) -> ObservabilityEnvelopeV1 {
+    let mut event = envelope(scope);
+    event.event_id = format!("event:owner:{id}");
+    event.idempotency_key = format!("idempotency:owner:{id}");
+    event.trace_id = format!("trace:owner:{id}");
+    let observed_at = i64::try_from(id).expect("owner id") + 1;
+    event.event_time_micros = observed_at;
+    event.observation_time_micros = observed_at;
+    event
+}
+
+#[tokio::test]
+async fn shutdown_drains_every_offered_owner_fact() {
+    const OWNERS: u64 = 512;
+    let (_project, runtime) = runtime().await;
+    let db = runtime.project_database_arc().expect("project database");
+    let scope = "project.observability.shutdown";
+    let boot = "boot:owner-drain";
+    let producer = BoundedObservabilityProducerV1::start(db.clone(), identity(scope, boot), 1_024)
+        .expect("producer");
+    for id in 0..OWNERS {
+        assert_eq!(
+            producer
+                .try_emit_owner_fact(owner_envelope(scope, id))
+                .expect("offer owner fact"),
+            ObservabilityEmissionOutcomeV1::Enqueued
+        );
+    }
+
+    let summary = producer.shutdown().await.expect("owner drain shutdown");
+    assert!(!summary.cancelled);
+    assert_eq!(summary.dropped, 0);
+
+    let page = RegisteredObservabilityPortV1::new(&db)
+        .query(ObservabilityQueryV1 {
+            authorized_scope_ref: scope.to_owned(),
+            event_kinds: vec!["retrieval.query.completed.v1".to_owned()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 1_000,
+        })
+        .await
+        .expect("owner drain query");
+    let mut delivered = BTreeSet::new();
+    for event in &page.events {
+        assert_eq!(event.process_boot_id, boot);
+        assert!(
+            delivered.insert(event.idempotency_key.clone()),
+            "owner fact delivered more than once: {}",
+            event.idempotency_key
+        );
+    }
+    for id in 0..OWNERS {
+        let key = format!("idempotency:owner:{id}");
+        assert!(
+            delivered.contains(&key),
+            "shutdown dropped owner fact {key}"
+        );
+    }
+
+    let replay_boot = "boot:owner-drain-replay";
+    let replay =
+        BoundedObservabilityProducerV1::start(db.clone(), identity(scope, replay_boot), 1_024)
+            .expect("replay producer");
+    for id in 0..OWNERS {
+        assert_eq!(
+            replay
+                .try_emit_owner_fact(owner_envelope(scope, id))
+                .expect("offer owner replay"),
+            ObservabilityEmissionOutcomeV1::Enqueued
+        );
+    }
+    let fresh_id = OWNERS;
+    assert_eq!(
+        replay
+            .try_emit_owner_fact(owner_envelope(scope, fresh_id))
+            .expect("offer fact after replay"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+    replay.shutdown().await.expect("replay shutdown");
+
+    let replayed = RegisteredObservabilityPortV1::new(&db)
+        .query(ObservabilityQueryV1 {
+            authorized_scope_ref: scope.to_owned(),
+            event_kinds: vec!["retrieval.query.completed.v1".to_owned()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 1_000,
+        })
+        .await
+        .expect("replay query");
+    let original = replayed
+        .events
+        .iter()
+        .find(|event| event.idempotency_key == "idempotency:owner:0")
+        .expect("original owner fact");
+    assert_eq!(original.process_boot_id, boot);
+    let fresh = replayed
+        .events
+        .iter()
+        .find(|event| event.idempotency_key == format!("idempotency:owner:{fresh_id}"))
+        .expect("fact offered after replay");
+    assert_eq!(fresh.process_boot_id, replay_boot);
+    assert_eq!(
+        fresh.producer_sequence, 1,
+        "replaying settled owner facts must not allocate producer sequences"
+    );
+}
+
+#[tokio::test]
+async fn conflicting_owner_settlement_does_not_remain_claimed_for_recovery() {
+    let (_project, runtime) = runtime().await;
+    let db = runtime.project_database_arc().expect("project database");
+    let scope = "project.observability.shutdown";
+    let owner = owner_envelope(scope, 7);
+    db.append_observability_event(&tracedecay_global_db::AnalyticsEventInsert {
+        provider: "tracedecay-observability".to_owned(),
+        project_id: scope.to_owned(),
+        session_id: None,
+        timestamp: owner.event_time_micros.div_euclid(1_000_000),
+        event_kind: owner.event_kind.clone(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: Some(owner.idempotency_key.clone()),
+        outcome: Some("succeeded".to_owned()),
+        metadata_json: Some("{\"canonical\":false}".to_owned()),
+    })
+    .await
+    .expect("conflicting analytics fact");
+
+    let producer = BoundedObservabilityProducerV1::start(
+        db.clone(),
+        identity(scope, "boot:owner-conflict"),
+        4,
+    )
+    .expect("producer");
+    assert_eq!(
+        producer
+            .try_emit_owner_fact(owner.clone())
+            .expect("offer conflicting owner fact"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+    let failed = producer
+        .shutdown()
+        .await
+        .expect_err("a conflicting owner fact stays a typed failure");
+    assert!(
+        failed.to_string().contains("idempotency conflict"),
+        "unexpected shutdown error: {failed}"
+    );
+
+    let restarted = BoundedObservabilityProducerV1::start(
+        db.clone(),
+        identity(scope, "boot:owner-conflict-restart"),
+        4,
+    )
+    .expect("restarted producer");
+    restarted
+        .shutdown()
+        .await
+        .expect("a rejected owner settlement must not leave a claim that recovery tries to settle");
+
+    let stored = db
+        .read_observability_event(scope, &owner.idempotency_key)
+        .await
+        .expect("read stored owner fact")
+        .expect("the conflicting fact remains stored");
+    assert_eq!(
+        stored.metadata_json.as_deref(),
+        Some("{\"canonical\":false}"),
+        "recovery must not replace the stored fact with a producer delivery"
+    );
 }
