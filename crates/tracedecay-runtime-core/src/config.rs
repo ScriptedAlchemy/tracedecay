@@ -363,14 +363,23 @@ pub use tracedecay_domain::source_path_policy::{GENERATED_DIR_SEGMENTS, is_gener
 /// the Git authority is process-wide and must never observe a test fixture.
 pub fn host_program_search_path() -> Option<OsString> {
     #[cfg(any(test, feature = "test-helpers"))]
-    if let Some(path) = HOST_PROGRAM_SEARCH_PATH_OVERRIDE
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-    {
+    if let Some(path) = host_program_search_path_override() {
         return Some(path);
     }
     std::env::var_os("PATH")
+}
+
+/// The search path a live [`HostProgramSearchPathGuard`] admits, never the
+/// ambient `PATH`.
+///
+/// In-process host lifecycle tests resolve through this so a test that sets
+/// no guard finds no host CLI instead of the operator's real one.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn host_program_search_path_override() -> Option<OsString> {
+    HOST_PROGRAM_SEARCH_PATH_OVERRIDE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

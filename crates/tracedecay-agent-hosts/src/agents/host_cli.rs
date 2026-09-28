@@ -103,8 +103,23 @@ impl HostCliOutcomeV1 {
 /// plugin lifecycle"), so the operator learns both what is missing and what it
 /// was needed for.
 pub(crate) fn require_host_cli(program: &str, lifecycle: &str) -> Result<PathBuf> {
-    let path_var = tracedecay_runtime_core::config::host_program_search_path();
+    let path_var = host_search_path();
     require_host_cli_from(program, lifecycle, path_var.as_deref())
+}
+
+/// The search path host CLIs and their interpreters resolve on.
+///
+/// Unit tests see only what a `HostProgramSearchPathGuard` admits: the test
+/// process's own `PATH` carries the operator's real host CLIs.
+fn host_search_path() -> Option<OsString> {
+    #[cfg(test)]
+    {
+        tracedecay_runtime_core::config::host_program_search_path_override()
+    }
+    #[cfg(not(test))]
+    {
+        tracedecay_runtime_core::config::host_program_search_path()
+    }
 }
 
 /// [`require_host_cli`] against an explicit `PATH`.
@@ -573,7 +588,7 @@ fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
         if interpreter.starts_with('-') || interpreter.contains('=') {
             return Ok((program.to_path_buf(), Vec::new()));
         }
-        let search_path = tracedecay_runtime_core::config::host_program_search_path();
+        let search_path = host_search_path();
         let interpreter_path = resolve_on_path(interpreter, search_path.as_deref())?.ok_or_else(
             || TraceDecayError::Config {
                 message: format!(

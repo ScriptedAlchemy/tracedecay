@@ -1,8 +1,17 @@
+use std::path::Path;
 use std::process::Command;
 
+use crate::common::apply_isolated_profile_env;
+
+fn sandboxed_command(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
+    let mut command = Command::new(program);
+    apply_isolated_profile_env(&mut command, home, &home.join(".tracedecay"));
+    command
+}
+
 #[cfg(feature = "hotpath")]
-fn hotpath_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+fn hotpath_command(home: &Path) -> Command {
+    let mut command = sandboxed_command(env!("CARGO_BIN_EXE_tracedecay"), home);
     command
         .env_remove("HOTPATH_OUTPUT_FORMAT")
         .env_remove("HOTPATH_OUTPUT_PATH")
@@ -14,7 +23,8 @@ fn hotpath_command() -> Command {
 #[cfg(unix)]
 #[test]
 fn shipped_binary_stops_quietly_when_a_pipeline_reader_exits() {
-    let output = Command::new("sh")
+    let home = tempfile::tempdir().expect("isolated home");
+    let output = sandboxed_command("/bin/sh", home.path())
         .args(["-c", r#""$TRACEDECAY_BIN" tool | head -n 4"#])
         .env("TRACEDECAY_BIN", env!("CARGO_BIN_EXE_tracedecay"))
         // A hotpath-enabled binary binds its metrics port on start; when a
@@ -38,10 +48,8 @@ fn shipped_binary_stops_quietly_when_a_pipeline_reader_exits() {
 #[test]
 fn context_help_describes_the_tool_without_a_project_size() {
     let home = tempfile::tempdir().expect("isolated home");
-    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+    let output = sandboxed_command(env!("CARGO_BIN_EXE_tracedecay"), home.path())
         .args(["tool", "context", "--help"])
-        .env("HOME", home.path())
-        .env("TRACEDECAY_HOME", home.path().join(".tracedecay"))
         .env("HOTPATH_METRICS_SERVER_OFF", "true")
         .output()
         .expect("run tool help");
@@ -66,7 +74,7 @@ fn production_feature_profile_ignores_hotpath_environment() {
     let report = temp.path().join("hotpath.json");
     std::fs::write(&report, b"sentinel").expect("seed report sentinel");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+    let output = sandboxed_command(env!("CARGO_BIN_EXE_tracedecay"), temp.path())
         .arg("--help")
         .env("TRACEDECAY_HOTPATH", "1")
         .env("HOTPATH_OUTPUT_FORMAT", "json")
@@ -87,7 +95,7 @@ fn compiled_hotpath_profiles_without_a_runtime_environment_gate() {
     let temp = tempfile::tempdir().expect("temporary report directory");
     let report = temp.path().join("hotpath.json");
 
-    let output = hotpath_command()
+    let output = hotpath_command(temp.path())
         .arg("--help")
         .env("HOTPATH_OUTPUT_FORMAT", "json")
         .env("HOTPATH_OUTPUT_PATH", &report)
@@ -120,7 +128,7 @@ fn native_hook_invalid_hotpath_config_preserves_protocol_and_output_path() {
     let report = temp.path().join("hotpath.json");
     std::fs::write(&report, b"sentinel").expect("seed report sentinel");
 
-    let output = hotpath_command()
+    let output = hotpath_command(temp.path())
         .arg("hook-pre-tool-use")
         .env("HOTPATH_OUTPUT_FORMAT", "invalid")
         .env("HOTPATH_OUTPUT_PATH", &report)
@@ -143,7 +151,7 @@ fn explicit_none_does_not_truncate_the_output_path() {
     let report = temp.path().join("hotpath.json");
     std::fs::write(&report, b"sentinel").expect("seed report sentinel");
 
-    let output = hotpath_command()
+    let output = hotpath_command(temp.path())
         .arg("hook-pre-tool-use")
         .env("HOTPATH_OUTPUT_FORMAT", "NoNe")
         .env("HOTPATH_OUTPUT_PATH", &report)

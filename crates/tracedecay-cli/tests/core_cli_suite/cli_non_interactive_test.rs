@@ -4,8 +4,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::common::{
-    MessageRecordBuilder, canonical_existing_path as canonical_temp_path, create_runtime,
-    global_session,
+    MessageRecordBuilder, apply_isolated_profile_env,
+    canonical_existing_path as canonical_temp_path, create_runtime, global_session, hermetic_path,
 };
 use crate::provision_host_cli_fixture;
 #[cfg(unix)]
@@ -88,15 +88,10 @@ pub(crate) fn remove_repo_local_marker_dir_if_present(project: &Path) {
 
 fn tracedecay_command_without_daemon(home: &std::path::Path, project: &std::path::Path) -> Command {
     let home = canonical_temp_path(home);
-    let profile_root = profile_root(&home);
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    apply_isolated_profile_env(&mut command, &home, &profile_root(&home));
     command
         .current_dir(project)
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("TRACEDECAY_DATA_DIR", &profile_root)
-        .env("TRACEDECAY_GLOBAL_DB", profile_root.join("global.db"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -129,10 +124,7 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&shim, permissions).unwrap();
     }
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let joined =
-        std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(&path))).unwrap();
-    command.env("PATH", joined);
+    command.env("PATH", hermetic_path(&[bin_dir]));
     shim
 }
 
@@ -143,14 +135,7 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
 fn add_codex_plugin_cli_shim(command: &mut Command, home: &Path) {
     let bin_dir = home.join("bin");
     provision_host_cli_fixture::install_compiled_host_cli_fixture(&bin_dir, "codex");
-    let path = command
-        .get_envs()
-        .find(|(key, _)| *key == "PATH")
-        .and_then(|(_, value)| value.map(|value| value.to_os_string()))
-        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-    let joined =
-        std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(&path))).unwrap();
-    command.env("PATH", joined);
+    command.env("PATH", hermetic_path(&[bin_dir]));
 }
 
 fn arm_implicit_cursor_reinstall(home: &Path) {
