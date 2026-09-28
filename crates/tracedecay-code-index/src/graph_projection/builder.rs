@@ -330,63 +330,112 @@ pub(crate) fn sample_code_graph_rows(
     generation: &CodeGenerationId,
     files: &[CodeGraphSampleFileV1<'_>],
 ) -> Result<CodeGraphRowSampleV1, CodeGraphProjectionError> {
-    let check = || Ok(());
     let projection = super::code_graph_projection_identity(GraphNamespace::new("code-graph")?)?;
+    let partials = if files.len() < 2 || crate::parallelism::indexing_workers() < 2 {
+        files
+            .iter()
+            .map(|file| sample_one_code_graph_file(generation, &projection, file))
+            .collect::<Result<Vec<_>, _>>()?
+    } else if rayon::current_thread_index().is_some() {
+        files
+            .par_iter()
+            .map(|file| sample_one_code_graph_file(generation, &projection, file))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        crate::parallelism::install(|| {
+            files
+                .par_iter()
+                .map(|file| sample_one_code_graph_file(generation, &projection, file))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| CodeGraphProjectionError::Unavailable(error.to_string()))??
+    };
     let mut sample = CodeGraphRowSampleV1::default();
-    for file in files {
-        let snapshot = BTreeMap::from([(&file.snapshot.file_occurrence_id, file.snapshot)]);
-        let bound = file
-            .chunks
-            .iter()
-            .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.clone())
-            .chain(file.symbols.iter().map(|symbol| symbol.occurrence.clone()))
-            .collect::<HashSet<_>>();
-        let references = file
-            .unresolved
-            .iter()
-            .map(|reference| (file.logical_path, reference))
-            .collect::<Vec<_>>();
-        let unresolved =
-            unresolved_call_limitations(&references, file.edges.iter(), Vec::new(), &check)?;
-        let unresolved_by_source = group_unresolved_calls(&unresolved, &check)?;
-        let rows = emit_code_graph_rows(
-            &CodeGraphRowContext {
-                projection: &projection,
-                generation,
-                files: Some(&snapshot),
-                bound: &bound,
-                unresolved_by_source: &unresolved_by_source,
-            },
-            &CodeGraphRowBatch {
-                files: &[file.snapshot],
-                imports: file.imports,
-                chunks: file.chunks,
-                symbols: file.symbols,
-                edges: file.edges,
-                bindings: None,
-            },
-            &check,
-        )?;
-        for entity in &rows.entities {
-            let footprint = GraphSpillRowFootprint::of_entity(entity)?;
-            if has_label(entity, FILE_LABEL) {
-                sample.file_entities.add(footprint);
-            } else if has_label(entity, IMPORT_LABEL) {
-                sample.import_entities.add(footprint);
-            } else {
-                sample.symbol_entities.add(footprint);
-            }
+    for part in partials {
+        add_row_sample(&mut sample, part);
+    }
+    Ok(sample)
+}
+
+fn sample_one_code_graph_file(
+    generation: &CodeGenerationId,
+    projection: &GraphProjectionIdentity,
+    file: &CodeGraphSampleFileV1<'_>,
+) -> Result<CodeGraphRowSampleV1, CodeGraphProjectionError> {
+    let check = || Ok(());
+    let snapshot = BTreeMap::from([(&file.snapshot.file_occurrence_id, file.snapshot)]);
+    let bound = file
+        .chunks
+        .iter()
+        .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.clone())
+        .chain(file.symbols.iter().map(|symbol| symbol.occurrence.clone()))
+        .collect::<HashSet<_>>();
+    let references = file
+        .unresolved
+        .iter()
+        .map(|reference| (file.logical_path, reference))
+        .collect::<Vec<_>>();
+    let unresolved =
+        unresolved_call_limitations(&references, file.edges.iter(), Vec::new(), &check)?;
+    let unresolved_by_source = group_unresolved_calls(&unresolved, &check)?;
+    let rows = emit_code_graph_rows(
+        &CodeGraphRowContext {
+            projection,
+            generation,
+            files: Some(&snapshot),
+            bound: &bound,
+            unresolved_by_source: &unresolved_by_source,
+        },
+        &CodeGraphRowBatch {
+            files: &[file.snapshot],
+            imports: file.imports,
+            chunks: file.chunks,
+            symbols: file.symbols,
+            edges: file.edges,
+            bindings: None,
+        },
+        &check,
+    )?;
+    let mut sample = CodeGraphRowSampleV1::default();
+    for entity in &rows.entities {
+        let footprint = GraphSpillRowFootprint::of_entity(entity)?;
+        if has_label(entity, FILE_LABEL) {
+            sample.file_entities.add(footprint);
+        } else if has_label(entity, IMPORT_LABEL) {
+            sample.import_entities.add(footprint);
+        } else {
+            sample.symbol_entities.add(footprint);
         }
-        for relation in &rows.relations {
-            let footprint = GraphSpillRowFootprint::of_relation(relation)?;
-            match relation.kind.as_str() {
-                FILE_IMPORT_EDGE_KIND => sample.import_relations.add(footprint),
-                FILE_SYMBOL_EDGE_KIND => sample.binding_relations.add(footprint),
-                _ => sample.edge_relations.add(footprint),
-            }
+    }
+    for relation in &rows.relations {
+        let footprint = GraphSpillRowFootprint::of_relation(relation)?;
+        match relation.kind.as_str() {
+            FILE_IMPORT_EDGE_KIND => sample.import_relations.add(footprint),
+            FILE_SYMBOL_EDGE_KIND => sample.binding_relations.add(footprint),
+            _ => sample.edge_relations.add(footprint),
         }
     }
     Ok(sample)
+}
+
+fn add_row_sample(total: &mut CodeGraphRowSampleV1, part: CodeGraphRowSampleV1) {
+    fn add(into: &mut CodeGraphRowKindSampleV1, part: CodeGraphRowKindSampleV1) {
+        into.rows = into.rows.saturating_add(part.rows);
+        into.footprint.buffered = into
+            .footprint
+            .buffered
+            .saturating_add(part.footprint.buffered);
+        into.footprint.resident = into
+            .footprint
+            .resident
+            .saturating_add(part.footprint.resident);
+    }
+    add(&mut total.file_entities, part.file_entities);
+    add(&mut total.import_entities, part.import_entities);
+    add(&mut total.symbol_entities, part.symbol_entities);
+    add(&mut total.import_relations, part.import_relations);
+    add(&mut total.binding_relations, part.binding_relations);
+    add(&mut total.edge_relations, part.edge_relations);
 }
 
 pub(super) struct BuiltProjection {
