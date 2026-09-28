@@ -413,9 +413,17 @@ fn logical_path_resolution_reports_an_unknown_path_as_empty_not_an_error() {
     let hits = reader
         .symbols_in_logical_file("src/absent.rs", 8, request())
         .expect("an unpublished logical path must not be an error");
-    assert!(
-        hits.is_empty(),
+    assert_eq!(
+        occurrences(&hits),
+        Vec::<String>::new(),
         "no file at this path in the generation means no symbols, not a refusal"
+    );
+    let published = reader
+        .symbols_in_logical_file("src/beta.rs", 8, request())
+        .expect("a published logical path lists its symbols");
+    assert_eq!(
+        occurrences(&published),
+        vec!["sym.beta.run".to_owned(), "sym.beta.runner".to_owned()]
     );
 }
 

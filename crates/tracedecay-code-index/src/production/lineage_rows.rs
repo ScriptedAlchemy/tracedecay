@@ -314,15 +314,37 @@ mod tests {
     fn rows_outside_the_roster_or_without_a_prior_generation_are_refused() {
         let symbols = [record("sym.a", 'a', '0')];
         let roster = occurrence_roster(symbols.iter());
-        let outside = PersistedLineageV1 {
+        let refusal =
+            |persisted: PersistedLineageV1| match persisted.expand(&generation(2), &roster) {
+                Err(CodeIndexProductionErrorV1::Contract(message)) => message,
+                other => panic!("expected a contract refusal, got {other:?}"),
+            };
+        assert_eq!(
+            refusal(PersistedLineageV1 {
+                prior_generation: Some(generation(1)),
+                rows: vec![PersistedLineageRowV1::Unchanged { start: 0, count: 2 }],
+            }),
+            "sealed lineage row names a symbol outside its roster"
+        );
+        assert_eq!(
+            refusal(PersistedLineageV1 {
+                prior_generation: None,
+                rows: vec![PersistedLineageRowV1::Unchanged { start: 0, count: 1 }],
+            }),
+            "sealed lineage has implicit rows without a prior generation"
+        );
+        let anchored = PersistedLineageV1 {
             prior_generation: Some(generation(1)),
-            rows: vec![PersistedLineageRowV1::Unchanged { start: 0, count: 2 }],
-        };
-        assert!(outside.expand(&generation(2), &roster).is_err());
-        let unanchored = PersistedLineageV1 {
-            prior_generation: None,
             rows: vec![PersistedLineageRowV1::Unchanged { start: 0, count: 1 }],
-        };
-        assert!(unanchored.expand(&generation(2), &roster).is_err());
+        }
+        .expand(&generation(2), &roster)
+        .expect("an in-roster row with a prior generation expands");
+        assert_eq!(
+            anchored
+                .iter()
+                .map(|candidate| candidate.current_occurrence.as_str())
+                .collect::<Vec<_>>(),
+            ["sym.a"]
+        );
     }
 }
