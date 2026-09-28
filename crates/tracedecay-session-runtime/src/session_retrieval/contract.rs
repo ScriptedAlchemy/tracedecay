@@ -22,8 +22,8 @@ use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
 use tracedecay_session_memory::session::{
-    SessionDataFreshness, SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
-    SessionTemporalQuery,
+    SessionCursorRequest, SessionDataFreshness, SessionRetrievalBudgetAccountingV1,
+    SessionRetrievalBudgetStageV1, SessionTemporalQuery,
 };
 use tracedecay_sessions::WorkflowScopeFilter;
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
@@ -204,6 +204,7 @@ pub struct LcmExpandServiceCommand {
     source_limit: Option<usize>,
     cursor: Option<String>,
     store_scope: SessionRetrievalStoreScope,
+    cursor_request: SessionCursorRequest,
 }
 
 impl LcmExpandServiceCommand {
@@ -227,6 +228,7 @@ impl LcmExpandServiceCommand {
             source_limit,
             cursor,
             store_scope,
+            cursor_request: SessionCursorRequest::new("lcm_expand"),
         }
     }
 
@@ -264,6 +266,18 @@ impl LcmExpandServiceCommand {
     #[hotpath::skip]
     pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
+    }
+
+    /// Names the user-facing operation, and its request fields, a summary
+    /// source continuation from this expansion is minted for.
+    #[must_use]
+    pub fn with_cursor_request(mut self, cursor_request: SessionCursorRequest) -> Self {
+        self.cursor_request = cursor_request;
+        self
+    }
+
+    pub fn cursor_request(&self) -> &SessionCursorRequest {
+        &self.cursor_request
     }
 }
 

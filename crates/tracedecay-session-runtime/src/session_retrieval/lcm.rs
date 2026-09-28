@@ -5,8 +5,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_contracts::RequestContext;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
-    CursorBindingV1, HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId,
-    TemporalModeV1,
+    HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
 use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_lcm::{
@@ -615,16 +614,20 @@ impl DaemonSessionRetrievalService {
                 ),
             );
         };
-        let Ok(source_cursor_binding) = CursorBindingV1::builder("lcm_expand")
-            .parameter("provider", command.provider())
-            .parameter("session_id", command.session_id())
-            .parameter("target", &Self::lcm_expand_target_key(&target))
-            .parameter("grain", &command.grain())
-            .parameter("content_offset", &command.content_slice().offset)
-            .parameter("content_limit", &command.content_slice().limit)
-            .parameter("source_limit", &command.source_limit())
-            .build()
-        else {
+        let source_cursor_binding = (|| {
+            command
+                .cursor_request()
+                .clone()
+                .parameter("provider", command.provider())?
+                .parameter("session_id", command.session_id())?
+                .parameter("target", &Self::lcm_expand_target_key(&target))?
+                .parameter("grain", &command.grain())?
+                .parameter("content_offset", &command.content_slice().offset)?
+                .parameter("content_limit", &command.content_slice().limit)?
+                .parameter("source_limit", &command.source_limit())?
+                .binding()
+        })();
+        let Ok(source_cursor_binding) = source_cursor_binding else {
             return LcmExpandServiceOutcome::Denied;
         };
         let source_offset = match command.cursor() {
