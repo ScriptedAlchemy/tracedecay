@@ -1134,7 +1134,7 @@ fn check_user_config(
     }
 }
 
-/// Reports every host TraceDecay tracks or finds integrated. A host that is
+/// Reports every host the profile tracks or finds integrated. A host that is
 /// not installed or not signed in is one skipped line, counted nowhere.
 fn check_host_integrations(
     dc: &mut DoctorCounters,
