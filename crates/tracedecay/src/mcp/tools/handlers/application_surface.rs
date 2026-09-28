@@ -33,7 +33,14 @@ pub(super) fn complete_protocol_controls(
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
-    complete_protocol_controls_for_tool(operation, request_id, deadline, cancellation)
+    let ceiling =
+        tracedecay_daemon_service::application_surface::application_operation_deadline_ceiling(
+            operation,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("could not resolve application surface deadline: {error}"),
+        })?;
+    complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
 }
 
 pub(super) fn complete_retained_protocol_controls(
@@ -44,25 +51,6 @@ pub(super) fn complete_retained_protocol_controls(
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
     let binding = super::retained_catalog::retained_mcp_binding(operation)?;
     let ceiling = std::time::Duration::from_millis(binding.maximum_millis());
-    complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
-}
-
-fn complete_protocol_controls_for_tool(
-    operation: ApplicationSurfaceOperation,
-    request_id: &RequestId,
-    deadline: Option<Deadline>,
-    cancellation: Option<CancellationSignal>,
-) -> Result<Option<(Deadline, CancellationSignal)>> {
-    // The capability manifest already records this ceiling. The MCP dispatch
-    // catalog copies it after generating every executable schema body, which
-    // a one-shot CLI call does not need in order to clamp its deadline.
-    let ceiling =
-        tracedecay_daemon_service::application_surface::application_operation_deadline_ceiling(
-            operation,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("could not resolve application surface deadline: {error}"),
-        })?;
     complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
 }
 
