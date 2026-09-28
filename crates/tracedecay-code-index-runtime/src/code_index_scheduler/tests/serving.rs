@@ -920,7 +920,7 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
         "positional fingerprints cover both eligible bodies at the first seal"
     );
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
-    let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+    let revision: u32 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
         .expect("open sealed artifact")
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
@@ -928,7 +928,11 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
             |row| row.get(0),
         )
         .expect("read sealed revision");
-    assert_eq!(revision, 30);
+    assert_eq!(
+        observation.artifact_format_revision,
+        Some(revision),
+        "clone readiness reports the revision the first seal wrote"
+    );
     let staging = std::fs::read_dir(code_text_artifact_staging_root(store.path()))
         .expect("artifacts root")
         .map(|entry| entry.expect("artifact entry").file_name())
