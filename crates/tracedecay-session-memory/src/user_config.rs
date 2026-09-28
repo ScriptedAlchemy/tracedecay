@@ -623,8 +623,14 @@ mod tests {
         }
 
         let saved = std::fs::read_to_string(&path).unwrap();
-        toml::from_str::<UserConfig>(&saved)
+        let parsed = toml::from_str::<UserConfig>(&saved)
             .expect("file must be parseable after concurrent saves");
+        assert_eq!(
+            parsed.pending_upload % 100,
+            19,
+            "the surviving file is one writer's final save, got {}",
+            parsed.pending_upload
+        );
     }
 
     #[test]
@@ -657,6 +663,13 @@ mod tests {
             config.save(profile).expect("writer save should succeed");
         }
         reader.join().expect("reader thread should not panic");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            toml::from_str::<UserConfig>(&saved)
+                .expect("final config parses")
+                .pending_upload,
+            149
+        );
     }
 
     #[test]

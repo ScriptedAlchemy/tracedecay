@@ -347,7 +347,7 @@ mod tests {
         let record = record_with_access(PayloadAccessState::Eligible);
         let other = RetrievalAnchorId::new("retrieval.other").unwrap();
         assert_ne!(record.anchor_id(), &other);
-        assert!(
+        assert!(matches!(
             EvidenceAnchorResolutionReport::from_observation(
                 other,
                 ObservedEvidenceAnchorResolution::Resolved {
@@ -355,8 +355,10 @@ mod tests {
                     observed_watermark: VectorWatermark::default(),
                 },
                 authorization(),
-            )
-            .is_err()
-        );
+            ),
+            Err(DomainError::UnknownReference {
+                field: "resolved anchor identity"
+            })
+        ));
     }
 }

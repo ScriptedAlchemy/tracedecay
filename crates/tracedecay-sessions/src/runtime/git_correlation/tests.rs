@@ -134,10 +134,11 @@ fn projection_is_canonical_and_normalizes_evidence() {
 #[test]
 fn projection_rejects_duplicate_or_dangling_evidence() {
     let duplicate = span("same", "claude", "session-a", Some("main"), "/repo", 1, 2);
-    assert!(
-        GitEvidenceProjectionV1::new("watermark", vec![duplicate.clone(), duplicate], Vec::new())
-            .is_err()
-    );
+    assert!(matches!(
+        GitEvidenceProjectionV1::new("watermark", vec![duplicate.clone(), duplicate], Vec::new()),
+        Err(GitCorrelationError::Contract(message))
+            if message == "Git evidence span identities must be unique"
+    ));
 
     let mut dangling = commit(
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -147,7 +148,11 @@ fn projection_rejects_duplicate_or_dangling_evidence() {
         100,
     );
     dangling.span_id = Some("missing".to_owned());
-    assert!(GitEvidenceProjectionV1::new("watermark", Vec::new(), vec![dangling]).is_err());
+    assert!(matches!(
+        GitEvidenceProjectionV1::new("watermark", Vec::new(), vec![dangling]),
+        Err(GitCorrelationError::Contract(message))
+            if message == "Git evidence relation references an absent span"
+    ));
 }
 
 #[test]
