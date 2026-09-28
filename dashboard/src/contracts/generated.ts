@@ -846,6 +846,11 @@ export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetai
   remedy: z.string(),
   required_version: z.number().int().safe().nullable(),
 }).strict(), z.object({
+  current: z.number().int().safe().min(0),
+  field: z.string(),
+  kind: z.literal("stale_precondition"),
+  requested: z.number().int().safe().min(0),
+}).strict(), z.object({
   active: z.number().int().safe().min(0),
   committed: z.number().int().safe().min(0),
   kind: z.literal("stale_refresh_frontier"),
@@ -880,6 +885,12 @@ export type ApplicationProblemDetailV1 =
     reason: string;
     remedy: string;
     required_version: number | null;
+  }
+  | {
+    current: number;
+    field: string;
+    kind: "stale_precondition";
+    requested: number;
   }
   | {
     active: number;

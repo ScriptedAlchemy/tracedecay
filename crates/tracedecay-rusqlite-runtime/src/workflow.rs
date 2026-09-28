@@ -838,7 +838,7 @@ fn decode_workflow_effect_record(
             let expected_digest =
                 sql_text(values, 5).ok_or_else(workflow_effect_codec_unavailable)?;
             let terminal: WorkflowEffectTerminalV1 =
-                decode_json(payload).map_err(|_| workflow_effect_codec_unavailable())?;
+                decode_json(payload).map_err(|_| WorkflowEffectAuthorityErrorV1::ResetRequired)?;
             terminal
                 .validate()
                 .map_err(|_| workflow_effect_codec_unavailable())?;
@@ -869,7 +869,7 @@ fn decode_workflow_effect_identity(
     let payload = sql_text(values, 3).ok_or_else(workflow_effect_codec_unavailable)?;
     let expected_digest = sql_text(values, 4).ok_or_else(workflow_effect_codec_unavailable)?;
     let identity: WorkflowEffectIdentityV1 =
-        decode_json(payload).map_err(|_| workflow_effect_codec_unavailable())?;
+        decode_json(payload).map_err(|_| WorkflowEffectAuthorityErrorV1::ResetRequired)?;
     identity
         .validate()
         .map_err(|_| workflow_effect_codec_unavailable())?;
@@ -893,7 +893,7 @@ fn decode_workflow_effect_preparation(
     let payload = sql_text(values, 7).ok_or_else(workflow_effect_codec_unavailable)?;
     let expected_digest = sql_text(values, 8).ok_or_else(workflow_effect_codec_unavailable)?;
     let prepared: WorkflowEffectPreparedV1 =
-        decode_json(payload).map_err(|_| workflow_effect_codec_unavailable())?;
+        decode_json(payload).map_err(|_| WorkflowEffectAuthorityErrorV1::ResetRequired)?;
     if prepared
         .payload_digest()
         .map_err(|_| workflow_effect_codec_unavailable())?

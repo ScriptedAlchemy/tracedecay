@@ -1397,6 +1397,36 @@
         },
         {
           "additionalProperties": false,
+          "description": "A compare-and-swap request named `requested` in `field`, but the\nauthority holds `current`. Resending with `current` is a new request.",
+          "properties": {
+            "current": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "stale_precondition",
+              "type": "string"
+            },
+            "requested": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "field",
+            "requested",
+            "current"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "A writer lock stayed held by other writers past its admission\ndeadline.",
           "properties": {
             "deadline_ms": {

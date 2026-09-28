@@ -872,7 +872,8 @@ impl ApplicationProblem {
     ///
     /// A parked code index cannot answer until the operator applies the
     /// park's remedy, so it is never retried and names reconcile. A stale
-    /// refresh frontier is revalidated from the committed frontier. A lock
+    /// refresh frontier or compare-and-swap precondition is revalidated from
+    /// the committed value. A lock
     /// deadline is capacity: the same request may succeed after a delay. A
     /// diagnostics scope no compiler owns is routed to publishing the
     /// project's own check; a pending producer answers after a delay.
@@ -889,7 +890,8 @@ impl ApplicationProblem {
                 legal_actions: vec![LegalAction::Reconcile],
                 detail: Some(Box::new(detail)),
             },
-            ApplicationProblemDetailV1::StaleRefreshFrontier { .. } => Self::Stale {
+            ApplicationProblemDetailV1::StaleRefreshFrontier { .. }
+            | ApplicationProblemDetailV1::StalePrecondition { .. } => Self::Stale {
                 diagnostic,
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],

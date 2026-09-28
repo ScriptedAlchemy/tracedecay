@@ -24,6 +24,7 @@ import {
   TraceDecayPartialEffectError,
   TraceDecayProtocolError,
   TraceDecayResetRequiredError,
+  TraceDecayStaleError,
   TraceDecayUnavailableError,
   TraceDecayUnsupportedError,
   createClient,
@@ -988,6 +989,50 @@ describe("TraceDecayClient transport envelopes", () => {
         const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
         expect(refusal).toBeInstanceOf(TraceDecayUnsupportedError);
         expect((refusal as TraceDecayUnsupportedError).problem.detail).toEqual(detail);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("surfaces the requested and current values of a stale precondition", async () => {
+    const detail = {
+      kind: "stale_precondition",
+      field: "expected_revision",
+      requested: 7,
+      current: 1,
+    };
+    const stale = problemEnvelope("stale", "application.precondition-stale", {
+      bindingId: "binding.http.workflow.list_definitions",
+      retry: "after_revalidate",
+      retryable: true,
+      legalActions: ["refresh"],
+      detail,
+    });
+    const malformed = problemEnvelope("stale", "application.precondition-stale", {
+      bindingId: "binding.http.workflow.list_definitions",
+      retry: "after_revalidate",
+      retryable: true,
+      legalActions: ["refresh"],
+      detail: { ...detail, current: "1" },
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 409, stale),
+        (_request, response) => json(response, 409, malformed),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(TraceDecayStaleError);
+        expect((refusal as TraceDecayStaleError).problem.detail).toEqual(detail);
         await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
           TraceDecayMalformedResponseError,
         );

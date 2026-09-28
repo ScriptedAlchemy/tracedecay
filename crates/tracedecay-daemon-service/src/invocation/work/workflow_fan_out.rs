@@ -5,9 +5,10 @@ use tracedecay_contracts::{ApplicationProblem, RequestContext};
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use tracedecay_daemon_protocol::DaemonInvocationProblem;
-
-use super::workflow_run_control::workflow_run_problem;
+use super::workflow_run_control::{
+    workflow_invalid_request, workflow_not_found, workflow_run_problem,
+    workflow_runtime_unavailable,
+};
 use super::{RegisteredWorkRuntime, work_background_context};
 use tracedecay_contracts::now_micros;
 
@@ -27,7 +28,7 @@ pub(super) fn reconcile_workflow_fan_out(
     observability_producer: Option<
         Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
-) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+) -> Result<tracedecay_domain::WorkflowRunProjection, ApplicationProblem> {
     let initial_sequence = projection.sequence();
     if projection.status() == tracedecay_domain::WorkflowRunStatus::Cancelling {
         let (projection, cancelled_children) = reconcile_cancelled_fan_out(
@@ -69,7 +70,7 @@ pub(super) fn reconcile_workflow_fan_out(
     let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let authority = tracedecay_domain::WorkAuthority::new(
         context.scope().project_id.clone(),
         context.scope().repository_id.clone(),
@@ -77,7 +78,7 @@ pub(super) fn reconcile_workflow_fan_out(
         context.actor().clone(),
         context.grant().digest.clone(),
     )
-    .map_err(|_| DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+    .map_err(|_| workflow_not_found())?;
     let plans = projection
         .fan_out_plans()
         .values()
@@ -86,7 +87,7 @@ pub(super) fn reconcile_workflow_fan_out(
     let mut cancelled_children = false;
     for plan in plans {
         if plan.authority != authority {
-            return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
+            return Err(workflow_not_found());
         }
         if projection
             .step(&plan.step_id)
@@ -106,7 +107,7 @@ pub(super) fn reconcile_workflow_fan_out(
                 projection.pinned_provider_registry_digest().clone(),
                 registered.work_topology_policy.placement.clone(),
             )
-            .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+            .map_err(|_| workflow_invalid_request())?;
             projection = apply_scheduler_command(
                 services,
                 &projection,
@@ -161,7 +162,7 @@ pub(super) fn reconcile_workflow_fan_out(
                     active += 1;
                 }
                 Err(ApplicationProblem::NotFoundOrNotAuthorized { .. }) => active += 1,
-                Err(_) => return Err(DaemonInvocationProblem::Unavailable),
+                Err(_) => return Err(workflow_runtime_unavailable()),
             }
         }
         let newly_settled = terminal_planned
@@ -251,7 +252,7 @@ pub(super) fn reconcile_workflow_fan_out(
                 &registered.database,
                 product_binding.clone(),
             )
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            .map_err(|_| workflow_runtime_unavailable())?;
             let revisions = workflow_product_revision_pins(registered)?;
             let attempt = product
                 .attempts()
@@ -268,7 +269,7 @@ pub(super) fn reconcile_workflow_fan_out(
                         execution_snapshot: plan.execution_snapshot.clone(),
                         worktree_root: project_root
                             .to_str()
-                            .ok_or(DaemonInvocationProblem::InvalidRequest)?
+                            .ok_or_else(workflow_invalid_request)?
                             .to_owned(),
                         reference: plan.reference.clone(),
                         commit: plan.commit.clone(),
@@ -277,7 +278,7 @@ pub(super) fn reconcile_workflow_fan_out(
                         occurred_at: observed_at,
                     },
                 )
-                .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+                .map_err(|_| workflow_runtime_unavailable())?;
             if attempt.state() == tracedecay_domain::WorkAttemptStateV1::Leased {
                 super::super::work_attempt_exec::spawn_attempt_execution(
                     registered.clone(),
@@ -318,11 +319,11 @@ fn reconcile_cancelled_fan_out(
     projection: tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
     attempt_processes: &super::super::work_attempt_exec::WorkAttemptProcessRegistryV1,
-) -> Result<(tracedecay_domain::WorkflowRunProjection, bool), DaemonInvocationProblem> {
+) -> Result<(tracedecay_domain::WorkflowRunProjection, bool), ApplicationProblem> {
     let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let mut all_terminal = true;
     let mut cancelled_children = false;
     for plan in projection.fan_out_plans().values() {
@@ -353,7 +354,7 @@ fn reconcile_cancelled_fan_out(
             ) {
                 Ok(attempt) => all_terminal &= attempt.is_terminal(),
                 Err(ApplicationProblem::NotFoundOrNotAuthorized { .. }) => {}
-                Err(_) => return Err(DaemonInvocationProblem::Unavailable),
+                Err(_) => return Err(workflow_runtime_unavailable()),
             }
         }
     }
@@ -365,7 +366,7 @@ fn reconcile_cancelled_fan_out(
         .values()
         .next()
         .map(|plan| &plan.plan_digest)
-        .ok_or(DaemonInvocationProblem::InvalidRequest)?;
+        .ok_or_else(workflow_invalid_request)?;
     let projection = apply_scheduler_command(
         services,
         &projection,
@@ -383,7 +384,7 @@ fn settle_workflow_fan_out(
     plan: &tracedecay_domain::WorkflowFanOutPlanV1,
     attempts: &[tracedecay_domain::WorkAttemptV1],
     observed_at: UtcMicros,
-) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+) -> Result<tracedecay_domain::WorkflowRunProjection, ApplicationProblem> {
     let succeeded = attempts
         .iter()
         .filter(|attempt| attempt.state() == tracedecay_domain::WorkAttemptStateV1::Succeeded)
@@ -400,7 +401,7 @@ fn settle_workflow_fan_out(
         .steps()
         .iter()
         .find(|step| step.step_id == plan.step_id)
-        .ok_or(DaemonInvocationProblem::InvalidRequest)?;
+        .ok_or_else(workflow_invalid_request)?;
     let outputs = if succeeded.len() >= required {
         definition_step
             .outputs
@@ -420,11 +421,11 @@ fn settle_workflow_fan_out(
                                     artifact,
                                 )
                             })
-                            .ok_or(DaemonInvocationProblem::Unavailable)
+                            .ok_or_else(workflow_runtime_unavailable)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 tracedecay_domain::WorkflowStepOutput::new(output_name.clone(), artifacts)
-                    .map_err(|_| DaemonInvocationProblem::Unavailable)
+                    .map_err(|_| workflow_runtime_unavailable())
             })
             .collect::<Result<Vec<_>, _>>()?
     } else {
@@ -432,18 +433,18 @@ fn settle_workflow_fan_out(
     };
     let step = projection
         .step(&plan.step_id)
-        .ok_or(DaemonInvocationProblem::InvalidRequest)?;
+        .ok_or_else(workflow_invalid_request)?;
     let placement_digest = step
         .placement_receipt()
         .map(|receipt| receipt.placement_digest().clone())
-        .ok_or(DaemonInvocationProblem::Unavailable)?;
+        .ok_or_else(workflow_runtime_unavailable)?;
     let effect_digest = canonical_sha256(&(
         "tracedecay.daemon.workflow-fan-out-terminal.v1",
         &plan.plan_digest,
         attempts,
         &outputs,
     ))
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let completed = succeeded.len() >= required;
     let outcome = if completed {
         tracedecay_domain::WorkflowStepEffectOutcome::Completed
@@ -458,7 +459,7 @@ fn settle_workflow_fan_out(
         effect_digest,
         &outputs,
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let command = if completed {
         tracedecay_domain::WorkflowRunCommand::CompleteStep {
             step_id: plan.step_id.clone(),
@@ -490,7 +491,7 @@ fn request_fan_out_cancellation(
     plan: &tracedecay_domain::WorkflowFanOutPlanV1,
     terminal: &[tracedecay_domain::WorkAttemptIdentityV1],
     occurred_at: UtcMicros,
-) -> Result<bool, DaemonInvocationProblem> {
+) -> Result<bool, ApplicationProblem> {
     let mut cancelled_children = false;
     for child in &plan.children {
         if terminal
@@ -523,7 +524,7 @@ fn request_fan_out_cancellation(
             plan.plan_digest.as_str(),
             child.attempt_identity.attempt_id().as_str()
         ))
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+        .map_err(|_| workflow_runtime_unavailable())?;
         let cancelled = services
             .attempts()
             .request_cancellation(
@@ -536,7 +537,7 @@ fn request_fan_out_cancellation(
                     occurred_at,
                 },
             )
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            .map_err(|_| workflow_runtime_unavailable())?;
         attempt_processes.signal_cancellation(&context.scope().worktree_id, cancelled.identity());
         cancelled_children = true;
     }
@@ -550,7 +551,7 @@ fn apply_scheduler_command(
     operation: &str,
     plan_digest: &ManifestDigest,
     occurred_at: UtcMicros,
-) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+) -> Result<tracedecay_domain::WorkflowRunProjection, ApplicationProblem> {
     let digest = canonical_sha256(&(
         "tracedecay.daemon.workflow-scheduler-command.v1",
         projection.run_id(),
@@ -559,12 +560,12 @@ fn apply_scheduler_command(
         plan_digest,
         &command,
     ))
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let command_id = tracedecay_domain::WorkCommandId::new(format!(
         "workflow-scheduler-{operation}:{}",
         digest.as_str()
     ))
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     tracedecay_contracts::WorkflowRunService::new(services.effects().clone())
         .apply(
             projection.run_id(),
@@ -585,7 +586,7 @@ pub(crate) fn admit_workflow_child(
     services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
     occurred_at: UtcMicros,
-) -> Result<(), DaemonInvocationProblem> {
+) -> Result<(), ApplicationProblem> {
     let selection = tracedecay_contracts::WorkProductSelectionScopeV1::relations(
         [
             tracedecay_contracts::WorkProductAuthorizedRelationScopeV1::Repository {
@@ -596,13 +597,13 @@ pub(crate) fn admit_workflow_child(
         .into_iter()
         .collect(),
     )
-    .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+    .map_err(|_| workflow_invalid_request())?;
     let binding = workflow_product_binding()?;
     let product = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
         &registered.database,
         binding.clone(),
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let graph = current_workflow_product_graph(&product, context, selection.clone(), occurred_at)?;
     match graph {
         None => {
@@ -613,7 +614,7 @@ pub(crate) fn admit_workflow_child(
                 vec![child.milestone.clone()],
                 vec![child.item.clone()],
             )
-            .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+            .map_err(|_| workflow_invalid_request())?;
             let revisions = workflow_product_revision_pins(registered)?;
             product
                 .mutations()
@@ -634,7 +635,7 @@ pub(crate) fn admit_workflow_child(
                         },
                     },
                 )
-                .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+                .map_err(|_| workflow_runtime_unavailable())?;
         }
         Some(graph) if graph.item(&child.task_id).is_none() => {
             apply_workflow_child_product_mutation(
@@ -654,16 +655,16 @@ pub(crate) fn admit_workflow_child(
             )?;
         }
         Some(graph) if !workflow_child_task_matches(&graph, child) => {
-            return Err(DaemonInvocationProblem::InvalidRequest);
+            return Err(workflow_invalid_request());
         }
         Some(_) => {}
     }
 
     let graph = current_workflow_product_graph(&product, context, selection.clone(), occurred_at)?
-        .ok_or(DaemonInvocationProblem::Unavailable)?;
+        .ok_or_else(workflow_runtime_unavailable)?;
     let item = graph
         .item(&child.task_id)
-        .ok_or(DaemonInvocationProblem::Unavailable)?;
+        .ok_or_else(workflow_runtime_unavailable)?;
     match item.accepted_proposal() {
         None => {
             let proposal = if child.proposal.based_on_version() == graph.version() {
@@ -692,14 +693,14 @@ pub(crate) fn admit_workflow_child(
                         && decision.disposition()
                             == &tracedecay_domain::WorkProposalDispositionV1::Accepted
                 }) => {}
-        Some(_) => return Err(DaemonInvocationProblem::InvalidRequest),
+        Some(_) => return Err(workflow_invalid_request()),
     }
 
     let graph = current_workflow_product_graph(&product, context, selection.clone(), occurred_at)?
-        .ok_or(DaemonInvocationProblem::Unavailable)?;
+        .ok_or_else(workflow_runtime_unavailable)?;
     let item = graph
         .item(&child.task_id)
-        .ok_or(DaemonInvocationProblem::Unavailable)?;
+        .ok_or_else(workflow_runtime_unavailable)?;
     if !item.is_execution_admitted() {
         apply_workflow_child_product_mutation(
             registered,
@@ -717,24 +718,23 @@ pub(crate) fn admit_workflow_child(
     services
         .run_control()
         .admit_reservation(context, &child.task_id, child.attempt_identity.run_id())
-        .map_err(|_| DaemonInvocationProblem::Unavailable)
+        .map_err(|_| workflow_runtime_unavailable())
 }
 
 pub(crate) fn workflow_product_binding()
--> Result<tracedecay_contracts::WorkProductBindingV1, DaemonInvocationProblem> {
+-> Result<tracedecay_contracts::WorkProductBindingV1, ApplicationProblem> {
     Ok(tracedecay_contracts::WorkProductBindingV1::new(
         CapabilityId::new("capability.work.mutate_graph")
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?,
-        UseCaseId::new("use-case.work.mutate_graph")
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?,
+            .map_err(|_| workflow_runtime_unavailable())?,
+        UseCaseId::new("use-case.work.mutate_graph").map_err(|_| workflow_runtime_unavailable())?,
     ))
 }
 
 pub(crate) fn workflow_product_revision_pins(
     registered: &RegisteredWorkRuntime,
-) -> Result<tracedecay_contracts::WorkProductRevisionPinsV1, DaemonInvocationProblem> {
+) -> Result<tracedecay_contracts::WorkProductRevisionPinsV1, ApplicationProblem> {
     super::preparation::current_work_product_revision_pins(registered)
-        .map_err(|_| DaemonInvocationProblem::Unavailable)
+        .map_err(|_| workflow_runtime_unavailable())
 }
 
 fn current_workflow_product_graph(
@@ -742,7 +742,7 @@ fn current_workflow_product_graph(
     context: &RequestContext,
     selection: tracedecay_contracts::WorkProductSelectionScopeV1,
     observed_at: UtcMicros,
-) -> Result<Option<tracedecay_domain::WorkProductGraphV1>, DaemonInvocationProblem> {
+) -> Result<Option<tracedecay_domain::WorkProductGraphV1>, ApplicationProblem> {
     match product.reads().read_graph(
         context,
         tracedecay_contracts::WorkGraphReadRequestV1::current(selection, observed_at),
@@ -751,7 +751,7 @@ fn current_workflow_product_graph(
             Ok(Some(snapshot.graph().clone()))
         }
         Ok(tracedecay_contracts::WorkGraphReadV1::Absent { .. }) => Ok(None),
-        Ok(_) | Err(_) => Err(DaemonInvocationProblem::Unavailable),
+        Ok(_) | Err(_) => Err(workflow_runtime_unavailable()),
     }
 }
 
@@ -781,7 +781,7 @@ fn apply_workflow_child_product_mutation(
     change: tracedecay_contracts::WorkProductChangeDraftV1,
     command_id: tracedecay_domain::WorkCommandId,
     occurred_at: UtcMicros,
-) -> Result<(), DaemonInvocationProblem> {
+) -> Result<(), ApplicationProblem> {
     let revisions = workflow_product_revision_pins(registered)?;
     let mutation = product
         .mutations()
@@ -804,7 +804,7 @@ fn apply_workflow_child_product_mutation(
                 stage = "prepare_mutation",
                 "workflow child product mutation prepare failed"
             );
-            DaemonInvocationProblem::Unavailable
+            workflow_runtime_unavailable()
         })?;
     product
         .mutations()
@@ -816,7 +816,7 @@ fn apply_workflow_child_product_mutation(
                 stage = "mutate",
                 "workflow child product mutation apply failed"
             );
-            DaemonInvocationProblem::Unavailable
+            workflow_runtime_unavailable()
         })
 }
 
@@ -865,11 +865,11 @@ pub(super) fn synchronize_fan_out_run_controls(
     projection: &tracedecay_domain::WorkflowRunProjection,
     paused: bool,
     occurred_at: UtcMicros,
-) -> Result<(), DaemonInvocationProblem> {
+) -> Result<(), ApplicationProblem> {
     let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     for plan in projection.fan_out_plans().values() {
         for child in &plan.children {
             if !projection
@@ -887,7 +887,7 @@ pub(super) fn synchronize_fan_out_run_controls(
             ) {
                 Ok(reading) => reading,
                 Err(ApplicationProblem::NotFoundOrNotAuthorized { .. }) => continue,
-                Err(_) => return Err(DaemonInvocationProblem::Unavailable),
+                Err(_) => return Err(workflow_runtime_unavailable()),
             };
             match (paused, reading) {
                 (true, tracedecay_contracts::WorkRunControlReadingV1::Uncontrolled { .. }) => {
@@ -902,7 +902,7 @@ pub(super) fn synchronize_fan_out_run_controls(
                                 occurred_at,
                             },
                         )
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+                        .map_err(|_| workflow_runtime_unavailable())?;
                 }
                 (
                     true,
@@ -919,7 +919,7 @@ pub(super) fn synchronize_fan_out_run_controls(
                                 occurred_at,
                             },
                         )
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+                        .map_err(|_| workflow_runtime_unavailable())?;
                 }
                 (
                     false,
@@ -936,7 +936,7 @@ pub(super) fn synchronize_fan_out_run_controls(
                                 occurred_at,
                             },
                         )
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+                        .map_err(|_| workflow_runtime_unavailable())?;
                 }
                 _ => {}
             }

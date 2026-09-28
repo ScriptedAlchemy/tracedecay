@@ -2948,6 +2948,7 @@ class WorkflowLifecycleTests(unittest.TestCase):
                     "receipt": {"actor": self.actor, "scope": self.scope},
                 }
             if name == "tracedecay_workflow_handoff_issue":
+                self.assert_active_run_scope(arguments["scope"])
                 grant = {
                     "scope": arguments["scope"],
                     "token_digest": self.owner.SHA_B,
@@ -2967,7 +2968,13 @@ class WorkflowLifecycleTests(unittest.TestCase):
                     "redeemed_at": 20,
                 })
             if name == "tracedecay_workflow_start_run":
-                run = {"run_id": arguments["run_id"], "status": "running", "sequence": 1}
+                run = {
+                    "run_id": arguments["run_id"],
+                    "definition_id": arguments["definition_id"],
+                    "definition_version": arguments["definition_version"],
+                    "status": "running",
+                    "sequence": 1,
+                }
                 self.runs[arguments["run_id"]] = run
                 return self.response(run)
             if name == "tracedecay_workflow_get_run":
@@ -2988,6 +2995,17 @@ class WorkflowLifecycleTests(unittest.TestCase):
                 self.runs[arguments["run_id"]] = run
                 return self.response(run)
             raise AssertionError(name)
+
+        def assert_active_run_scope(self, scope):
+            """Issue a handoff only the way the daemon admits one."""
+            key = (scope["definition_id"], scope["definition_version"])
+            run = self.runs.get(scope["run_id"])
+            if (
+                self.dispositions.get(key, {}).get("state") != "active"
+                or run is None
+                or (run["definition_id"], run["definition_version"]) != key
+            ):
+                raise AssertionError(("handoff scope is not an active run", scope))
 
         @staticmethod
         def assert_sequence(run, expected):
