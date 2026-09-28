@@ -113,17 +113,17 @@ fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
 
 #[tokio::test]
 async fn authentic_callback_to_all_delivery_surfaces() {
-    let (_environment, project) = common::IsolatedHome::new();
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
         "pub fn advisory_callback() {}\n",
     )
     .unwrap();
-    TraceDecay::init(&project)
+    TraceDecay::init_with_options(&project, environment.open_options())
         .await
         .expect("production project initialization");
-    let project_runtime = TraceDecay::open(&project)
+    let project_runtime = TraceDecay::open_with_options(&project, environment.open_options())
         .await
         .expect("production project-open startup");
 
