@@ -1115,21 +1115,3 @@ fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
         "a kernel without split RSS counters is unobserved, not zero"
     );
 }
-
-#[cfg(target_os = "linux")]
-#[test]
-fn a_resident_peak_reports_growth_a_pass_touched_and_released() {
-    const TOUCHED_BYTES: usize = 128 * 1024 * 1024;
-    let peak = ResidentMemoryPressureV1::new(NonZeroU64::MAX)
-        .start_peak()
-        .expect("sampler starts")
-        .expect("linux reports a resident set");
-    let touched = vec![1_u8; TOUCHED_BYTES];
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    drop(std::hint::black_box(touched));
-    let growth = peak.finish().expect("sampler joins");
-    assert!(
-        growth >= (TOUCHED_BYTES / 2) as u64,
-        "a pass that touched {TOUCHED_BYTES} bytes reported {growth} bytes of growth"
-    );
-}

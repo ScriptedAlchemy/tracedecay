@@ -3,6 +3,7 @@ use std::{
     fmt::Write as _,
     fs::File,
     io::{Read, Seek, SeekFrom},
+    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -28,6 +29,12 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::lexical::LexicalLaneRequest;
 use tracedecay_query::retrieval::ports::RetrievalPortError;
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ProcessResidentSampleV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryPressureV1,
+};
+
+use super::super::publication_store::{ActiveGenerationDecodeChargeV1, ActiveGenerationWorkV1};
 
 use super::{
     EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, downgrade_pointer_to_pre_segment_bytes_shape,
@@ -48,6 +55,79 @@ use crate::{
         SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     },
 };
+
+#[test]
+fn cached_generation_graph_build_reserves_transient_memory_and_retries_after_release() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish cached generation"),
+    );
+    let decoder = scheduler.active_generation_decoder().expect("decoder");
+    let _cached = decoder
+        .load_active_shared()
+        .expect("load generation")
+        .expect("published generation");
+    assert_eq!(
+        decoder
+            .active_generation_charge(ActiveGenerationWorkV1::Decode)
+            .expect("decode charge"),
+        ActiveGenerationDecodeChargeV1::Decoded,
+        "the fixture really has a decoded generation in the active cache"
+    );
+    let ActiveGenerationDecodeChargeV1::Measured { bytes, .. } = decoder
+        .active_generation_charge(ActiveGenerationWorkV1::SealedGraphBuild)
+        .expect("graph build charge")
+    else {
+        panic!("a cached decode does not contain the graph build's transient working set");
+    };
+    assert!(bytes > 0);
+    let limit = NonZeroU64::new(bytes * 4).expect("memory limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 0,
+                unreclaimable_bytes: 0,
+            })
+        }),
+    ));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    scheduler.bind_resident_memory(Arc::clone(&memory));
+    let other_owner = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("other-build").expect("component"),
+            NonZeroU64::new(bytes * 3).expect("other owner's bytes"),
+        )
+        .expect("other owner fits");
+    assert!(
+        matches!(
+            decoder.admit_sealed_graph_build(),
+            Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_))
+        ),
+        "cached graph builds still respect another owner's reservation"
+    );
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        bytes * 3,
+        "refusal leaks no charge"
+    );
+    drop(other_owner);
+    let admitted = decoder
+        .admit_sealed_graph_build()
+        .expect("released headroom admits the graph build")
+        .expect("graph build owns a reservation even with a cached decode");
+    assert_eq!(memory.snapshot().used_bytes, bytes);
+    drop(admitted);
+    assert_eq!(memory.snapshot().used_bytes, 0);
+}
 
 struct CancelledCodeIndexControlV1;
 

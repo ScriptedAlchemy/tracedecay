@@ -44,7 +44,6 @@ use super::{
     retained_noop_requires_follow_up_wake,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
-use tracedecay_runtime_core::resident_memory::ProcessResidentPeakV1;
 
 /// What the worker does with a reconcile pass that found the durable
 /// publication corrupt.
@@ -1804,7 +1803,6 @@ impl CodeIndexSchedulerRegistryV1 {
                         // needs no second build: only the decode is demanded.
                         if let Some(text) = graph_text.as_ref().filter(|_| !graph_already_serves) {
                             let generation_id = text.metadata().manifest().generation_id.clone();
-                            let built_generation_id = generation_id.clone();
                             let binding_scheduler = Arc::clone(&worker_scheduler);
                             let shutting_down = Arc::clone(&worker_shutting_down);
                             let binding_passes = Arc::clone(&worker_reconcile_in_progress);
@@ -1827,7 +1825,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                         DaemonCodeIndexPublicationStoreV1::admit_sealed_graph_build,
                                     )
                                     .transpose();
-                                Ok::<_, CodeIndexSchedulerErrorV1>((binding, admission, decoder))
+                                Ok::<_, CodeIndexSchedulerErrorV1>((binding, admission))
                             })
                             .await;
                             match admitted_binding {
@@ -1836,39 +1834,14 @@ impl CodeIndexSchedulerRegistryV1 {
                                     Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
                                         detail,
                                     )),
-                                    _,
                                 ))) => graph_publish_refusal = Some(detail),
-                                Ok(Ok((_, Err(error), _))) => tracing::warn!(
+                                Ok(Ok((_, Err(error)))) => tracing::warn!(
                                     event = "code_index_graph_publish_admission_failed",
                                     error = %error,
                                     "sealed graph build admission failed; activation publishes \
                                      the graph after the serving decode"
                                 ),
-                                Ok(Ok((replay_binding, Ok(reservation), decoder))) => {
-                                    // A text projection of this pass runs until
-                                    // the seat joins it, under its own
-                                    // reservation. Process growth measured
-                                    // beside it is not this build's to carry
-                                    // into the next build's charge.
-                                    let text_projection_overlaps = text_projection_running
-                                        || retained_text_projection.is_some();
-                                    let resident_peak = decoder
-                                        .as_ref()
-                                        .filter(|_| !text_projection_overlaps)
-                                        .and_then(|decoder| {
-                                            decoder
-                                                .start_sealed_graph_build_peak()
-                                                .inspect_err(|error| {
-                                                    tracing::warn!(
-                                                        event = "code_index_graph_build_peak_unsampled",
-                                                        error = %error,
-                                                        "sealed graph build resident peak \
-                                                         sampler did not start"
-                                                    );
-                                                })
-                                                .ok()
-                                                .flatten()
-                                        });
+                                Ok(Ok((replay_binding, Ok(reservation)))) => {
                                     let published = worker_graph_activation
                                         .publish_sealed_graph(
                                             &worker_project_id,
@@ -1879,17 +1852,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                             Arc::clone(&worker_shutting_down),
                                         )
                                         .await;
-                                    let growth =
-                                        resident_peak.and_then(ProcessResidentPeakV1::finish);
                                     drop(reservation);
-                                    if let (Ok(true), Some(decoder), Some(growth)) =
-                                        (&published, decoder.as_ref(), growth)
-                                    {
-                                        decoder.record_sealed_graph_build_growth(
-                                            &built_generation_id,
-                                            growth,
-                                        );
-                                    }
                                     match published {
                                         Ok(published) => graph_head_published = published,
                                         Err(error) if error.is_resident_memory_graph_refusal() => {
