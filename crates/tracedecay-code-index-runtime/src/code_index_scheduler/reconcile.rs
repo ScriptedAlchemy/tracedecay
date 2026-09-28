@@ -517,7 +517,6 @@ pub(super) struct SourceFreshnessFenceStateV1 {
     /// The ignored-source roster that proof was established under.
     source_roster: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     verified_against_source: bool,
-    freshness_unknown: bool,
     reconciled_without_generation: bool,
     reconciled_source_epoch: u64,
     /// A pass captured source that differs from the retained generation and
@@ -536,7 +535,6 @@ impl SourceFreshnessFenceV1 {
                 source_witness: None,
                 source_roster: Vec::new(),
                 verified_against_source: false,
-                freshness_unknown: true,
                 reconciled_without_generation: false,
                 reconciled_source_epoch: 0,
                 successor_build_in_flight: false,
@@ -566,7 +564,6 @@ impl SourceFreshnessFenceV1 {
         state.git_metadata = git_metadata;
         state.source_witness = source_witness;
         state.source_roster = source_roster.to_vec();
-        state.freshness_unknown = false;
         state.last_reconciled_at = Instant::now();
         state.verified_against_source = true;
         state.reconciled_without_generation = reconciled_without_generation;
@@ -618,11 +615,14 @@ impl SourceFreshnessFenceV1 {
     /// Whether canonical source input has advanced beyond the last completed
     /// proof, or a pass found it changed and is building the successor. Moved
     /// Git metadata alone leaves the epochs equal: its background pass is
-    /// verification, not evidence that a replacement is being built.
+    /// verification, not evidence that a replacement is being built. An
+    /// unverified mount has no proof for demand to advance past: a restart's
+    /// catch-up overflow asks for the verification its first pass performs.
     pub(super) fn source_change_pending(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.successor_build_in_flight
-            || self.source_epoch.load(Ordering::Acquire) != state.reconciled_source_epoch
+            || (state.verified_against_source
+                && self.source_epoch.load(Ordering::Acquire) != state.reconciled_source_epoch)
     }
 
     /// Whether Git metadata proves that the checkout moved past the last
@@ -743,7 +743,6 @@ impl SourceFreshnessFenceV1 {
         state.git_metadata = git_metadata;
         state.last_reconciled_at = Instant::now();
         state.verified_against_source = true;
-        state.freshness_unknown = false;
         self.last_reconciled_at_micros
             .store(micros, Ordering::Release);
     }
@@ -2195,6 +2194,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         // graph-on reconcile. An incompatible lightweight owner rebuilds here
         // without decoding the retained graph.
         if retained_is_reusable && !rebuild_changed_source_without_decode {
+            if has_hints && sealed_attribution_is_current && !self.verified_against_source() {
+                return self.verify_restored_generation_without_decode(metadata, witness);
+            }
             return Ok(None);
         }
 
@@ -2202,6 +2204,31 @@ impl CodeIndexWorktreeSchedulerV1 {
         let Some(capture) = self.capture_retained_reconcile_attempt()? else {
             return Ok(None);
         };
+        self.finish_retained_reconcile(metadata, witness, capture)
+    }
+
+    /// A restart's catch-up demand asks for an authoritative capture, which
+    /// proves an unchanged tree against the restored generation's sealed
+    /// identity without decoding it. A capture that differs is dropped,
+    /// restoring its hints, so the incremental reconcile rebuilds from the
+    /// decoded generation.
+    fn verify_restored_generation_without_decode(
+        &mut self,
+        metadata: &VerifiedSealedTextGenerationMetadataV1,
+        witness: Option<RestoreFreshnessWitnessV1>,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        let _worker_memory = self.reserve_incremental_rebuild_memory()?;
+        let Some(capture) = self.capture_retained_reconcile_attempt()? else {
+            return Ok(None);
+        };
+        let sealed = metadata.snapshot();
+        let captured = &capture.captured.snapshot;
+        if captured.reference != sealed.reference
+            || captured.source_revision != sealed.source_revision
+            || captured.content_identity != sealed.content_identity
+        {
+            return Ok(None);
+        }
         self.finish_retained_reconcile(metadata, witness, capture)
     }
 
@@ -3199,7 +3226,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Err(cancelled_code_index_reconcile());
         }
         let freshness = self.freshness_fence.snapshot();
-        if freshness.freshness_unknown
+        if !freshness.verified_against_source
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
                 .differs_from(&freshness.git_metadata)
         {

@@ -950,7 +950,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // its authenticated text owner is warming. Return that known answer
         // before entering the exact freshness probe: probing an unseated slot
         // cannot produce a decoded owner, and on an initial lightweight mount
-        // it would turn `freshness_unknown` into a fabricated overflow wake.
+        // it would turn an unverified fence into a fabricated overflow wake.
         let serving = serving_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
