@@ -1,11 +1,8 @@
-//! The single code-index search execution permit follows request settlement,
-//! not the blocking worker's natural completion.
+//! A cancelled code-index search stops at the candidate checkpoint that
+//! observed the request, instead of hydrating the rest of its corpus.
 //!
-//! `MAX_CONCURRENT_CODE_INDEX_SEARCHES` is one, so a request that its caller
-//! has already abandoned must release the permit as soon as its candidate scan
-//! observes the request control, otherwise every following search fails
-//! `search_capacity_unavailable` until the abandoned scan hydrates the rest of
-//! its candidate corpus.
+//! Searches on one project run together. A second search issued while the
+//! first is still inside its scan is admitted and can finish.
 
 use super::*;
 use std::sync::Mutex as StdMutex;
@@ -59,13 +56,11 @@ impl CodeIndexMcpReadGrantV1 for FixtureGrant {
 /// Read admission whose route check is the test seam into the running scan.
 ///
 /// The executor's request control consults `route_is_registered` on every
-/// `is_cancelled` check. Calls from the test's runtime thread (the pre-permit
-/// check and the executor's settlement poll) answer immediately; calls from
-/// other threads are the scan itself, running under
-/// `spawn_blocking` with the execution permit already held. The selected checkpoint reports
-/// the pause to the test and blocks until the test resumes it, so the test
-/// can observe the permit-held state and cancel the request at a point that
-/// is deterministic rather than timing-dependent.
+/// `is_cancelled` check. Calls from the test's runtime thread answer
+/// immediately; calls from other threads are the scan itself, running under
+/// `spawn_blocking`. The selected checkpoint reports the pause to the test and
+/// blocks until the test resumes it, so cancellation is observed at a
+/// deterministic point rather than a timing-dependent one.
 #[derive(Clone)]
 struct PausingAdmission {
     authority: CodeIndexSearchAuthorityV1,
@@ -123,10 +118,8 @@ impl CodeIndexMcpReadAdmissionV1 for OpenAdmission {
     }
 }
 
-/// Scope resolution is the last thing an admitted search does before it takes
-/// the execution permit, and nothing between the two awaits. Reporting from
-/// here therefore lets the test observe the request only once the permit is
-/// held, without polling for it.
+/// Scope resolution reports so a deadline test can see that a request has
+/// reached admission, without polling for it.
 #[derive(Clone)]
 struct AdmittingScopeResolver {
     scope: ResolvedScope,
@@ -172,12 +165,9 @@ fn unavailable_reason(
     }
 }
 
-/// Pause a candidate scan at its first control checkpoint after the permit is
-/// acquired, prove the permit is held (a concurrent search is refused with
-/// `search_capacity_unavailable`), cancel the paused request, and prove that
-/// resuming it unwinds with the typed cancellation reason, performs no further
-/// row checkpoints, and hands the permit to the next request, which is
-/// admitted and completes normally.
+/// Pause a candidate scan at its first control checkpoint, cancel it, and
+/// prove that resuming it unwinds with the typed cancellation reason and
+/// performs no further row checkpoints. A search issued after that completes.
 #[tokio::test]
 async fn cancelled_scan_releases_the_search_permit_to_the_next_request() {
     cancelled_scan_releases_permit("alpha", 0, 16).await;
@@ -235,18 +225,11 @@ async fn cancelled_scan_releases_permit(query: &str, pause_at: usize, source_cou
     request.query = query.to_owned();
     let abandoned = tokio::spawn(executor(request));
     // Deterministic rendezvous: the scan itself reports when it reaches its
-    // selected checkpoint holding the permit. The timeout only bounds a failure
-    // in which the scan never consults the control while it holds the permit.
+    // selected checkpoint. The timeout only bounds a failure in which the scan
+    // never consults the control.
     tokio::time::timeout(Duration::from_mins(1), admission.scan_paused.notified())
         .await
-        .expect("the candidate scan must consult the request control while holding the permit");
-
-    let refused = executor(search_request(fixture.path(), None)).await;
-    assert_eq!(
-        unavailable_reason(&refused),
-        Some(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable),
-        "the paused scan owns the single execution permit: {refused:?}"
-    );
+        .expect("the candidate scan must consult the request control");
 
     assert!(
         cancellation.cancel(tracedecay_contracts::clock::now_micros()),
@@ -272,7 +255,7 @@ async fn cancelled_scan_releases_permit(query: &str, pause_at: usize, source_cou
     let admitted = executor(search_request(fixture.path(), None)).await;
     assert!(
         matches!(admitted, CodeIndexSearchOutcomeV1::Complete(_)),
-        "the permit released by the cancelled scan admits the next request: {admitted:?}"
+        "the next search completes after the cancelled scan stops: {admitted:?}"
     );
 
     registry.shutdown().await;
@@ -386,8 +369,8 @@ async fn abandoned_request_reports_its_deadline(
     );
 }
 
-/// The expired request left neither the execution permit nor the mounted map
-/// held: an ordinary request issued after the staged hold ends completes.
+/// The expired request left the mounted map free: an ordinary request issued
+/// after the staged hold ends completes.
 async fn next_request_is_admitted(executor: &CodeIndexSearchExecutor, project_root: &Path) {
     let admitted = executor(search_request(project_root, None)).await;
     assert!(
@@ -397,23 +380,16 @@ async fn next_request_is_admitted(executor: &CodeIndexSearchExecutor, project_ro
 }
 
 /// A request whose dispatch deadline expires while its search is parked in
-/// generation resolution must release the execution permit to the next
-/// request.
+/// generation resolution reports that deadline, and the next search completes.
 ///
-/// Generation resolution runs with the single execution permit already held
-/// and consults no control: it parks on the scheduler's mounted map and, when
-/// nothing is servable, on the in-flight decode. Holding that map is exactly
-/// the window a busy daemon spends there. Before the permit followed request
-/// settlement, an expired request left the permit held by work nobody was
-/// waiting for, and the retry its `retryable=true` refusal invited was refused
-/// `search_capacity_unavailable` for as long as the abandoned scan sat there.
-///
-/// The map cannot simply be held for the whole test: an admitted search reads
-/// its ranking authority off that same map *before* it takes the permit, so a
-/// map held from the start parks the request short of the permit and deadlocks
-/// any second request issued to observe it. The hold is therefore staged
-/// through the map's own queue, so the request passes the pre-permit read,
-/// takes the permit, and only then finds the map gone.
+/// Generation resolution consults no control: it parks on the scheduler's
+/// mounted map and, when nothing is servable, on the in-flight decode. Holding
+/// that map is exactly the window a busy daemon spends there. The map cannot
+/// simply be held for the whole test: an admitted search reads its ranking
+/// authority off that same map before the scan, so a map held from the start
+/// parks the request short of the scan. The hold is staged through the map's
+/// own queue, so the request passes the authority read and only then finds the
+/// map gone.
 #[tokio::test]
 async fn expired_request_parked_in_generation_resolution_releases_the_permit() {
     let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 0 }\n")]);
@@ -532,18 +508,17 @@ const SHARED_BODY_SOURCE: &str = "pub fn shared_body(input: u32) -> u32 {\n    l
 /// Two clone-family reads dispatched together, the Shared Code page fires
 /// one per match class, must both settle the way either settles alone.
 ///
-/// The single execution permit bounds how many scans run at once. Its loser
-/// used to be refused outright with `CapacityUnavailable`, the reason a
-/// genuinely oversized bounded read is refused with, so the dashboard told the
-/// user a retained generation exceeded the bounded-read limits whenever two
-/// reads merely raced. A read that carries a deadline now waits for the permit
-/// up to that deadline; one whose deadline passes first reports the typed
-/// `TimedOut` state, not capacity.
+/// A read that loses a race used to be refused outright with
+/// `CapacityUnavailable`, the reason a genuinely oversized bounded read is
+/// refused with, so the dashboard told the user a retained generation exceeded
+/// the bounded-read limits whenever two reads merely raced. A read whose
+/// deadline passes while the mounted map is held reports the typed `TimedOut`
+/// state. The other read, which still has deadline left, completes once the
+/// map is released, the same way the first read does.
 ///
-/// The hold is deterministic: an admitted family read takes the permit and
-/// then parks on the scheduler's mounted map for its text-serving owner, so a
-/// map held before the first read is issued keeps the permit held until the
-/// test lets go of the map.
+/// The hold is deterministic: an admitted family read parks on the scheduler's
+/// mounted map for its text-serving owner, so a map held before the first read
+/// is issued keeps both reads there until the test lets go of the map.
 #[tokio::test]
 async fn a_family_read_that_loses_the_permit_race_waits_for_the_permit() {
     let fixture = GitFixture::new(&[
@@ -613,7 +588,7 @@ async fn a_family_read_that_loses_the_permit_race_waits_for_the_permit() {
     );
     assert!(
         !second.is_finished(),
-        "a read with deadline left must wait for the permit, not settle without it"
+        "a read with deadline left must stay in flight until the map is released"
     );
 
     drop(held_map);
@@ -635,6 +610,156 @@ async fn a_family_read_that_loses_the_permit_race_waits_for_the_permit() {
         SimilarSettlementV1::Complete,
         "the read that lost the permit race settles exactly as the winner did: {second:?}"
     );
+
+    registry.shutdown().await;
+}
+
+/// Counts blocking-pool threads that have entered the candidate scan and
+/// holds each of them there until the test releases the scan.
+#[derive(Clone)]
+struct OverlappingScanAdmission {
+    authority: CodeIndexSearchAuthorityV1,
+    runtime_thread: ThreadId,
+    entered_threads: Arc<StdMutex<Vec<ThreadId>>>,
+    entered: Arc<AtomicUsize>,
+    entered_notify: Arc<tokio::sync::Notify>,
+    release: Arc<(StdMutex<bool>, std::sync::Condvar)>,
+}
+
+impl CodeIndexMcpReadAdmissionV1 for OverlappingScanAdmission {
+    type Grant = FixtureGrant;
+
+    fn route_is_registered(&self) -> bool {
+        if std::thread::current().id() == self.runtime_thread {
+            return true;
+        }
+        let thread = std::thread::current().id();
+        let mut threads = self
+            .entered_threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !threads.contains(&thread) {
+            threads.push(thread);
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            self.entered_notify.notify_waiters();
+        }
+        drop(threads);
+        let (lock, condvar) = &*self.release;
+        let mut released = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*released {
+            released = condvar
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        true
+    }
+
+    fn admit_current(
+        &self,
+        _scope: &ResolvedScope,
+    ) -> Result<Self::Grant, CodeIndexMcpAdmissionUnavailableV1> {
+        Ok(FixtureGrant(self.authority.clone()))
+    }
+}
+
+async fn wait_until_entered(entered: &AtomicUsize, notify: &tokio::sync::Notify, target: usize) {
+    loop {
+        let notified = notify.notified();
+        if entered.load(Ordering::SeqCst) >= target {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// Eight searches on one project are inside the candidate scan at the same
+/// time, and each one completes.
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_searches_on_one_project_overlap_inside_the_scan() {
+    const WIDTH: usize = 8;
+    let sources = (0..16)
+        .map(|ordinal| {
+            (
+                format!("src/alpha_{ordinal:03}.rs"),
+                format!(
+                    "pub fn alpha_{ordinal:03}() -> u32 {{ let value = {ordinal}; return value; }}\n"
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let files = sources
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let entered = Arc::new(AtomicUsize::new(0));
+    let entered_notify = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+    let admission = OverlappingScanAdmission {
+        authority: CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.overlapping-search.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.overlapping-search.fixture",
+            )
+            .expect("authorization revision"),
+        },
+        runtime_thread: std::thread::current().id(),
+        entered_threads: Arc::new(StdMutex::new(Vec::new())),
+        entered: Arc::clone(&entered),
+        entered_notify: Arc::clone(&entered_notify),
+        release: Arc::clone(&release),
+    };
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        admission,
+        FixedScopeResolver(scope),
+    );
+    let mut tasks = Vec::with_capacity(WIDTH);
+    for _ in 0..WIDTH {
+        let executor = Arc::clone(&executor);
+        let root = fixture.path().to_path_buf();
+        tasks.push(tokio::spawn(async move {
+            executor(search_request(&root, None)).await
+        }));
+    }
+
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_until_entered(&entered, &entered_notify, 1),
+    )
+    .await
+    .expect("one search must enter the candidate scan");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_until_entered(&entered, &entered_notify, WIDTH),
+    )
+    .await
+    .expect("searches on one project must be inside the candidate scan together");
+
+    {
+        let (lock, condvar) = &*release;
+        let mut released = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *released = true;
+        condvar.notify_all();
+    }
+
+    for task in tasks {
+        let outcome = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("a search finishes once its scan is released")
+            .expect("search task joins");
+        assert!(
+            matches!(outcome, CodeIndexSearchOutcomeV1::Complete(_)),
+            "a search that overlapped another scan still completes: {outcome:?}"
+        );
+    }
 
     registry.shutdown().await;
 }

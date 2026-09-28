@@ -19,8 +19,6 @@ use code_index_task_support::{
     code_index_search_unavailable_for_generation, generation_for_hydration,
 };
 
-const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;
-
 struct McpRetrievalExecutionControlV1<A> {
     started: std::time::Instant,
     admission_provider: A,
@@ -40,17 +38,12 @@ impl<A> McpRetrievalExecutionControlV1<A> {
     /// Resolves with this request's terminal reason once it settles, the
     /// async twin of [`Self::request_termination`].
     ///
-    /// `request_termination` only answers where something asks it, and the
-    /// execution permit is acquired *before* generation resolution, which is
-    /// the one stretch of an admitted search that consults no control at all:
-    /// it parks on the scheduler's mounted map and, when nothing is servable,
-    /// on the in-flight decode. A request that settles inside that window has
-    /// no checkpoint to unwind at, so the single execution permit stayed held
-    /// by work no caller was waiting for, and every following search was
-    /// refused `search_capacity_unavailable`, a refusal the dispatch contract
-    /// advertises as retryable while guaranteeing the retry fails too.
-    /// Awaiting this alongside the execution drops the abandoned work at its
-    /// current await point and releases the permit with it.
+    /// `request_termination` only answers where something asks it, and
+    /// generation resolution consults no control at all: it parks on the
+    /// scheduler's mounted map and, when nothing is servable, on the in-flight
+    /// decode. A request that settles inside that window has no checkpoint to
+    /// unwind at. Awaiting this alongside the execution drops the abandoned
+    /// work at its current await point.
     async fn settled(&self) -> code_search::CodeIndexSearchUnavailableReasonV1 {
         mcp_search_request_settlement(self.deadline.as_ref(), self.cancellation.as_ref()).await
     }
@@ -103,15 +96,15 @@ async fn mcp_search_request_settlement(
 
 /// Await `work` under the request's own deadline and cancellation.
 ///
-/// Every scheduler read an admitted search takes, authority resolution before
-/// the execution permit, text-serving and cursor resolution after it, parks
-/// on the scheduler's mounted map, and none of them consults a request
-/// control while parked. A daemon holding that map across a mount, retire, or
-/// shutdown is exactly the window a settled request waited out with its caller
-/// already gone, returning long after the deadline it was dispatched under
-/// instead of the typed state that deadline names. Only the deadline itself
-/// can end that wait, so it bounds the await rather than a checkpoint inside
-/// it. `work` is polled first, so an unsettled request is unchanged.
+/// Every scheduler read an admitted search takes — authority resolution,
+/// text-serving, and cursor resolution — parks on the scheduler's mounted
+/// map, and none of them consults a request control while parked. A daemon
+/// holding that map across a mount, retire, or shutdown is exactly the window
+/// a settled request waited out with its caller already gone, returning long
+/// after the deadline it was dispatched under instead of the typed state that
+/// deadline names. Only the deadline itself can end that wait, so it bounds
+/// the await rather than a checkpoint inside it. `work` is polled first, so
+/// an unsettled request is unchanged.
 async fn bounded_by_settlement<F: std::future::Future>(
     deadline: Option<&tracedecay_contracts::Deadline>,
     cancellation: Option<&tracedecay_contracts::CancellationSignal>,
@@ -124,9 +117,8 @@ async fn bounded_by_settlement<F: std::future::Future>(
 
 /// [`bounded_by_settlement`] for executors that answer with a bare typed
 /// reason rather than a search outcome: the similar and redundancy reads take
-/// the same unguarded mounted-map read after their permit, and a request that
-/// queued for that permit has all the more reason to keep its deadline live
-/// through it.
+/// the same unguarded mounted-map read, and a request keeps its deadline live
+/// through that wait.
 async fn settled_or<F: std::future::Future>(
     deadline: Option<&tracedecay_contracts::Deadline>,
     cancellation: Option<&tracedecay_contracts::CancellationSignal>,
@@ -639,15 +631,11 @@ where
     A: CodeIndexMcpReadAdmissionV1,
     S: CodeIndexScopeResolverV1,
 {
-    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
-        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
-    ));
     Arc::new(move |request| {
         let schedulers = schedulers.clone();
         let project_id = project_id.clone();
         let admission_provider = admission_provider.clone();
         let scope_resolver = scope_resolver.clone();
-        let execution_admission = Arc::clone(&execution_admission);
         Box::pin(hotpath::future!(
             async move {
                 let scope = match scope_resolver
@@ -802,18 +790,6 @@ where
                 if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
                     return outcome;
                 }
-                let execution_permit = match acquire_execution_permit(
-                    execution_admission,
-                    control.deadline.as_ref(),
-                    control.cancellation.as_ref(),
-                )
-                .await
-                {
-                    Ok(permit) => permit,
-                    Err(reason) => {
-                        return code_index_search_unavailable(reason, reason.as_str());
-                    }
-                };
                 let execution_result = {
                     let execution_schedulers = schedulers.clone();
                     let execution_scope = scope.clone();
@@ -830,7 +806,6 @@ where
                     let runtime = tokio::runtime::Handle::current();
                     let settlement_control = Arc::clone(&control);
                     let execution = tokio::task::spawn_blocking(move || {
-                        let _execution_permit = execution_permit;
                         runtime.block_on(async move {
                         let work = async move {
                         let Some(revision) = execution_source_revision else {
@@ -894,16 +869,13 @@ where
                             )
                             .await
                         };
-                        // The permit follows request settlement, not this
-                        // work's natural completion. `work` is polled first, so
-                        // an unsettled request behaves exactly as before; a
-                        // settled one is dropped where it stands, including
-                        // mid-`mounted.lock()` or mid-decode, the awaits that
-                        // no checkpoint covers, and `_execution_permit` is
-                        // released with the task. `settle_owned_blocking_task`
-                        // below normally names the precise terminal reason
-                        // first; this only keeps the typed state when it did
-                        // not.
+                        // Request settlement drops this work where it stands,
+                        // including mid-`mounted.lock()` or mid-decode, the
+                        // awaits that no checkpoint covers. `work` is polled
+                        // first, so an unsettled request runs to completion.
+                        // `settle_owned_blocking_task` below normally names the
+                        // precise terminal reason first; this only keeps the
+                        // typed state when it did not.
                         tokio::pin!(work);
                         tokio::select! {
                             biased;
@@ -1413,15 +1385,11 @@ where
     A: CodeIndexMcpReadAdmissionV1,
     S: CodeIndexScopeResolverV1,
 {
-    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
-        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
-    ));
     Arc::new(move |request| {
         let schedulers = schedulers.clone();
         let project_id = project_id.clone();
         let admission_provider = admission_provider.clone();
         let scope_resolver = scope_resolver.clone();
-        let execution_admission = Arc::clone(&execution_admission);
         Box::pin(async move {
             let unavailable = |reason| code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason);
             if request.result_limit == 0
@@ -1479,16 +1447,6 @@ where
             if let Some(reason) = control.request_termination() {
                 return unavailable(reason);
             }
-            let permit = match acquire_execution_permit(
-                execution_admission,
-                control.deadline.as_ref(),
-                control.cancellation.as_ref(),
-            )
-            .await
-            {
-                Ok(permit) => permit,
-                Err(reason) => return unavailable(reason),
-            };
             let text_serving = match settled_or(
                 control.deadline.as_ref(),
                 control.cancellation.as_ref(),
@@ -1527,7 +1485,6 @@ where
             };
             let read_control = Arc::clone(&control);
             let read = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
                 owners.similar(&request, read_control.as_ref())
             })
             .await;
@@ -1563,15 +1520,11 @@ where
     A: CodeIndexMcpReadAdmissionV1,
     S: CodeIndexScopeResolverV1,
 {
-    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
-        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
-    ));
     Arc::new(move |request| {
         let schedulers = schedulers.clone();
         let project_id = project_id.clone();
         let admission_provider = admission_provider.clone();
         let scope_resolver = scope_resolver.clone();
-        let execution_admission = Arc::clone(&execution_admission);
         Box::pin(async move {
             let unavailable = |reason| Err(reason);
             let invalid_scope = match &request.scope {
@@ -1653,16 +1606,6 @@ where
             if let Some(reason) = control.request_termination() {
                 return unavailable(reason);
             }
-            let permit = match acquire_execution_permit(
-                execution_admission,
-                control.deadline.as_ref(),
-                control.cancellation.as_ref(),
-            )
-            .await
-            {
-                Ok(permit) => permit,
-                Err(reason) => return unavailable(reason),
-            };
             let text_serving = match settled_or(
                 control.deadline.as_ref(),
                 control.cancellation.as_ref(),
@@ -1701,7 +1644,6 @@ where
             };
             let read_control = Arc::clone(&control);
             let read = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
                 owners.redundancy(&request, read_control.as_ref())
             })
             .await;

@@ -1,10 +1,9 @@
 //! Large-candidate cancel journey on the production `rmcp` adapter.
 //!
-//! A unit checkpoint inside one scan finishes cancellation, and the search
-//! permit is released when the scan observes the signal. This journey starts
-//! at `notifications/cancelled` and ends at that same checkpoint: the request
-//! stops before the next candidate batch and the single search permit is free
-//! for the next call. It runs on a corpus larger than one candidate batch and
+//! A unit checkpoint inside one scan finishes cancellation. This journey
+//! starts at `notifications/cancelled` and ends at that same checkpoint: the
+//! request stops before the next candidate batch, and the next search returns
+//! a candidate. It runs on a corpus larger than one candidate batch and
 //! checks the result the caller sees.
 
 use std::collections::BTreeMap;
@@ -63,7 +62,7 @@ impl CodeIndexMcpReadGrantV1 for FixtureGrant {
 }
 
 /// Pause the blocking candidate scan at one control observation so the
-/// transport can deliver `notifications/cancelled` while the permit is held.
+/// transport can deliver `notifications/cancelled` while the scan is in flight.
 ///
 /// The runtime thread answers immediately. `spawn_blocking` is a different
 /// thread, which is the scan. This test stays on the current-thread runtime
@@ -510,7 +509,7 @@ async fn wait_for_batch_pause(admission: &PausingAdmission, label: &str) {
         .await
         .unwrap_or_else(|_| {
             panic!(
-                "{label}: the candidate scan never reached its batch checkpoint while holding the permit"
+                "{label}: the candidate scan never reached its batch checkpoint"
             )
         });
 }
@@ -533,7 +532,7 @@ fn assert_admitted_payload(payload: &Value, label: &str) {
     assert_ne!(
         payload["reason"],
         json!("search_capacity_unavailable"),
-        "{label}: the cancelled scan must release the search permit: {payload}"
+        "{label}: the next search must not be refused for search capacity: {payload}"
     );
     assert!(
         payload["results"]
