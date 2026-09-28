@@ -158,21 +158,30 @@ fn window_follow_up(
     publication_pending: bool,
     projection_moved: bool,
     holding: bool,
+    history_made_progress: bool,
 ) -> WindowFollowUp {
+    // A deliberate yield is often `Retryable` (`ingest_pass_backpressured`),
+    // not `Pending`. That continuation is a backoff, and taking it before the
+    // admitted window is published hands the worker back to the out-of-scope
+    // cursor sweep with the newest day still on a building generation.
+    let owed = publication_pending
+        && projection_moved
+        && match history {
+            HistoryContinuation::Immediate => true,
+            HistoryContinuation::Settled => holding,
+            // A retryable pass that wrote nothing keeps the backoff. A pass
+            // that admitted the newest day and yielded is also retryable, and
+            // that window still has to be published first.
+            HistoryContinuation::Backoff => history_made_progress,
+        };
+    if owed {
+        return WindowFollowUp::PublishBeforeNextHistory;
+    }
     match history {
+        HistoryContinuation::Immediate => WindowFollowUp::ContinueHistory,
         HistoryContinuation::Backoff => WindowFollowUp::BackoffHistory,
-        HistoryContinuation::Immediate | HistoryContinuation::Settled => {
-            let owed = publication_pending
-                && projection_moved
-                && (history == HistoryContinuation::Immediate || holding);
-            if owed {
-                WindowFollowUp::PublishBeforeNextHistory
-            } else if history == HistoryContinuation::Immediate || holding {
-                WindowFollowUp::ContinueHistory
-            } else {
-                WindowFollowUp::Settle
-            }
-        }
+        HistoryContinuation::Settled if holding => WindowFollowUp::ContinueHistory,
+        HistoryContinuation::Settled => WindowFollowUp::Settle,
     }
 }
 
@@ -482,6 +491,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     projection_still_unpublished(&report),
                     projection_published_work(&report),
                     holding_publication,
+                    history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress),
                 ) {
                     // The admitted window is not searchable until this backlog
                     // is published. Opening the next history window first is
@@ -1353,9 +1363,21 @@ mod tests {
                 projection_still_unpublished(&unpublished),
                 projection_published_work(&unpublished),
                 false,
+                true,
             ),
             WindowFollowUp::PublishBeforeNextHistory,
             "a progressing history window with a projection backlog must not open the next window"
+        );
+        assert_eq!(
+            window_follow_up(
+                HistoryContinuation::Backoff,
+                projection_still_unpublished(&unpublished),
+                projection_published_work(&unpublished),
+                false,
+                true,
+            ),
+            WindowFollowUp::PublishBeforeNextHistory,
+            "a progressing retryable yield must publish before the backoff opens the next window"
         );
 
         let still_moving = SessionTemporalRefreshPassReport {
@@ -1369,6 +1391,7 @@ mod tests {
                 projection_still_unpublished(&still_moving),
                 projection_published_work(&still_moving),
                 true,
+                false,
             ),
             WindowFollowUp::PublishBeforeNextHistory,
             "projection-only passes keep the hold while the admitted window is still unpublished"
@@ -1385,6 +1408,7 @@ mod tests {
                 projection_still_unpublished(&published),
                 projection_published_work(&published),
                 true,
+                false,
             ),
             WindowFollowUp::ContinueHistory,
             "a published window releases the next history window"
@@ -1400,13 +1424,14 @@ mod tests {
                 projection_still_unpublished(&stalled),
                 projection_published_work(&stalled),
                 true,
+                false,
             ),
             WindowFollowUp::ContinueHistory,
             "a projection pass that moves nothing must not spin ahead of history"
         );
 
         assert_eq!(
-            window_follow_up(HistoryContinuation::Backoff, true, true, true),
+            window_follow_up(HistoryContinuation::Backoff, true, true, true, false),
             WindowFollowUp::BackoffHistory
         );
     }
