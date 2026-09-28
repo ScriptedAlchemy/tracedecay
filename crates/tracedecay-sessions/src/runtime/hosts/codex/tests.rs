@@ -1489,11 +1489,16 @@ mod recent_first_discovery_tests {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
+    use serde_json::json;
     use tempfile::TempDir;
+    use tracedecay_domain::ProjectId;
 
     use super::CodexSource;
     use crate::admission::test_support::MemoryHostAdmission;
+    use crate::observation::ObservationCancellation;
+    use crate::runtime::hosts::codex::try_admit_codex_jsonl_observations_for_project_window;
     use crate::runtime::hosts::codex::{
         CodexCorpusEpoch, CodexDiscoveryDelivery, CodexDiscoveryFrontier, CodexDiscoveryHub,
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
@@ -1502,6 +1507,7 @@ mod recent_first_discovery_tests {
         MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
+    use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
     use crate::runtime::source::{
         HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
         persist_codex_history_frontier, persist_host_provider_coverage,
@@ -2777,5 +2783,125 @@ mod recent_first_discovery_tests {
                 .unwrap(),
             lower
         );
+    }
+
+    fn write_project_rollout(home: &Path, project: &Path, name: &str) -> PathBuf {
+        let path = write_dated_rollout(home, ("2026", "09", "28"), name);
+        let body = format!(
+            "{}\n{}\n",
+            json!({
+                "timestamp": "2026-09-28T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": name, "cwd": project}
+            }),
+            json!({
+                "timestamp": "2026-09-28T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "newest project turn"}
+            })
+        );
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// A ~9k Codex profile must surface and admit its newest project rollout on
+    /// the first catch-up pass, then finish the retained sweep. The historical
+    /// scheduler backs off 250ms only when a pass admits nothing; that wait is
+    /// part of the catch-up the operator observes.
+    #[tokio::test]
+    async fn codex_catch_up_admits_newest_rollout_on_a_large_profile() {
+        install_test_shared_jsonl_preparation_authority();
+
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let backlog = 9_000usize;
+        for index in 0..backlog {
+            write_dated_rollout(home, ("2025", "06", "15"), &format!("old-{index:05}"));
+        }
+        let newest = write_project_rollout(home, &project, "newest");
+
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::default_walk();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let started = Instant::now();
+        let mut first_path_ms = None;
+        let mut first_admit_ms = None;
+        let mut ready_passes = 0u32;
+        let project_id = ProjectId::new("project-large-codex").unwrap();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let deadline = Duration::from_secs(30);
+
+        loop {
+            if started.elapsed() > deadline {
+                panic!(
+                    "catch-up did not finish in {}s (ready_passes={ready_passes} first_admit_ms={first_admit_ms:?})",
+                    deadline.as_secs()
+                );
+            }
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .expect("codex discovery")
+            {
+                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+            };
+            ready_passes = ready_passes.saturating_add(1);
+            let includes_newest = pass.report.paths.iter().any(|path| path == &newest);
+            if ready_passes == 1 {
+                assert_eq!(
+                    pass.report.paths.first(),
+                    Some(&newest),
+                    "the first catch-up pass must lead with the newest project rollout"
+                );
+            }
+            if includes_newest && first_path_ms.is_none() {
+                first_path_ms = Some(started.elapsed().as_millis());
+                let progress = try_admit_codex_jsonl_observations_for_project_window(
+                    &newest,
+                    &project,
+                    project_id.clone(),
+                    &admission,
+                    u64::MAX,
+                    &cancellation,
+                )
+                .await
+                .expect("admit newest rollout");
+                assert!(
+                    progress.frames_persisted > 0,
+                    "newest project rollout must persist a frame"
+                );
+                first_admit_ms = Some(started.elapsed().as_millis());
+                eprintln!(
+                    "CATCHUP_MEASURE time_to_first_path_ms={} time_to_first_admit_ms={}",
+                    first_path_ms.unwrap_or(0),
+                    first_admit_ms.unwrap_or(0)
+                );
+            }
+            let empty = pass.report.paths.is_empty();
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+            if frontier.is_complete() {
+                eprintln!(
+                    "CATCHUP_MEASURE time_to_complete_ms={} ready_passes={ready_passes} time_to_first_admit_ms={first_admit_ms:?}",
+                    started.elapsed().as_millis()
+                );
+                break;
+            }
+            if empty {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+
+        assert!(
+            first_admit_ms.is_some(),
+            "catch-up never admitted the newest rollout"
+        );
+        assert!(frontier.is_complete());
     }
 }
