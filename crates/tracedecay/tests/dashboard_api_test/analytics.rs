@@ -506,7 +506,7 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     }
 
     let port = pick_free_port();
-    let base_url = format!("http://127.0.0.1:{port}");
+    let (access, base_url) = crate::dashboard_api_support::dashboard_access_for(port);
     let server_runtime = Arc::clone(&host_runtime);
     let server_graph = Arc::new(cg);
     let server_profile = profile.clone();
@@ -522,6 +522,7 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
             tracedecay_dashboard_api::DashboardTestEndpointV1 {
                 host: "127.0.0.1",
                 port,
+                access,
             },
             tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
             tracedecay_api::static_dashboard_router(std::sync::Arc::new(

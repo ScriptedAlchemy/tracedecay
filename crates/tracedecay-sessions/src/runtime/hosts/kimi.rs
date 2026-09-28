@@ -727,6 +727,7 @@ pub async fn capture_kimi_observations(
                     HostProviderCoverage::Complete
                 },
                 deferred_units,
+                None,
             )
             .await?;
             Ok(outcome)

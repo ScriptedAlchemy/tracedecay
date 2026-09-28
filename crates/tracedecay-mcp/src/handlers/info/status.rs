@@ -1408,6 +1408,7 @@ mod tests {
                 provider: provider.id().to_owned(),
                 state: SessionProviderCoverageState::Complete,
                 deferred_units: 0,
+                reason: None,
             })
             .collect();
         let state = historical_session_catch_up_state(&SessionIngestHealth {
@@ -1432,6 +1433,7 @@ mod tests {
                     SessionProviderCoverageState::Complete
                 },
                 deferred_units: u64::from(provider.id() == "opencode"),
+                reason: None,
             })
             .collect();
         let state = historical_session_catch_up_state(&SessionIngestHealth {

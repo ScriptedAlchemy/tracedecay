@@ -1421,11 +1421,11 @@ async fn start_daemon_hosted_dashboard(fixture: &RuntimeFixture) -> String {
         ),
         "dashboard did not start: {payload}"
     );
-    payload["url"]
-        .as_str()
-        .unwrap_or_else(|| panic!("dashboard tool returned no url: {payload}"))
-        .trim_end_matches('/')
-        .to_owned()
+    common::dashboard_api_base_url(
+        payload["url"]
+            .as_str()
+            .unwrap_or_else(|| panic!("dashboard tool returned no url: {payload}")),
+    )
 }
 
 fn get_dashboard_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {

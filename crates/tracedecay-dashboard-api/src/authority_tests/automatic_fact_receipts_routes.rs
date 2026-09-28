@@ -158,12 +158,7 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
             quarantined.receipt().apply_id().as_str().to_owned(),
         )
     };
-    let app = with_dashboard_http_admission(
-        router_with_active_application(fixture.state, None, Router::new()),
-        TEST_DASHBOARD_AUTHORITY
-            .parse()
-            .expect("loopback dashboard authority"),
-    );
+    let app = admitted_router(fixture.state);
 
     let list = app
         .clone()

@@ -24,12 +24,13 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
         let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -100,12 +101,13 @@ fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -265,7 +267,7 @@ for line in sys.stdin:
             .to_owned();
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         // User-job execution reads the pinned configuration snapshot, not
         // legacy UserConfig.save(). Mount the configuration runtime and
         // enable Codex through that authority, matching the retained
@@ -275,6 +277,7 @@ for line in sys.stdin:
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
         configure_codex_summarizer(&agent, &base_url, &project_id, &fake_codex_bin);

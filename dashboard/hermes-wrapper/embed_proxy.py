@@ -7,7 +7,9 @@ from another host or over HTTPS.
 
 from __future__ import annotations
 
+import base64
 import re
+import urllib.parse
 
 EMBED_MOUNT = "/api/plugins/tracedecay/embed"
 DASHBOARD_EMBED_PATH = f"{EMBED_MOUNT}/"
@@ -16,6 +18,18 @@ _ATTR_URL_RE = re.compile(
     r"""(?P<attr>\b(?:src|href))=(?P<quote>['"])/(?P<path>(?!/))""",
     re.IGNORECASE,
 )
+
+
+def dashboard_upstream(launch_url: str) -> tuple[str, dict[str, str]]:
+    """Split a dashboard launch URL into its origin and the Basic credential
+    its ``token`` grants; a URL without a token yields no credential."""
+    parts = urllib.parse.urlsplit(launch_url)
+    base = f"{parts.scheme}://{parts.netloc}"
+    tokens = urllib.parse.parse_qs(parts.query).get("token")
+    if not tokens:
+        return base, {}
+    credential = base64.b64encode(f"tracedecay:{tokens[0]}".encode()).decode()
+    return base, {"Authorization": f"Basic {credential}"}
 
 
 def embed_upstream_path(subpath: str) -> str:

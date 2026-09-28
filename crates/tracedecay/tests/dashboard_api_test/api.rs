@@ -789,12 +789,13 @@ fn lcm_serves_project_session_store_without_global_override() {
         seed_lcm_fixture(&session_store, &project_root).await;
 
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
 
         let agent = http_agent();
@@ -865,12 +866,13 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         seed_lcm_fixture(&session_store, &project_root).await;
 
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
 
         let agent = http_agent();

@@ -146,10 +146,14 @@ fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
         );
         assert_eq!(cross_origin["error"], "dashboard_request_forbidden");
 
+        let (_, authority) = fixture
+            .base_url
+            .rsplit_once('@')
+            .expect("fixture base URL carries the access token as userinfo");
         let (status, same_origin) = response_to_json(
             agent
                 .get(&capabilities_url)
-                .header("Origin", &fixture.base_url)
+                .header("Origin", &format!("http://{authority}"))
                 .call()
                 .expect("same-origin request should remain admitted"),
         );
@@ -158,5 +162,17 @@ fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
             "the dashboard's own Origin must remain admitted"
         );
         assert!(same_origin["features"].is_object(), "{same_origin}");
+
+        let (status, anonymous) = response_to_json(
+            agent
+                .get(&format!("http://{authority}/api/capabilities"))
+                .call()
+                .expect("an unauthenticated request should return a concealed HTTP response"),
+        );
+        assert_eq!(
+            status, 401,
+            "a same-host request without the listener token must be refused"
+        );
+        assert_eq!(anonymous["error"], "dashboard_request_unauthenticated");
     });
 }

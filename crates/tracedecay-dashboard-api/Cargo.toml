@@ -9,8 +9,10 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 axum = "0.8"
+base64 = "0.22"
 clru = "0.6"
 futures-util = "0.3.33"
+getrandom = "0.2"
 hotpath.workspace = true
 httpdate = "1.0.3"
 schemars.workspace = true

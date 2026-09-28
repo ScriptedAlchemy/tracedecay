@@ -70,6 +70,14 @@ pub trait SnapshotAdmissionRecord {
     fn native_record_id(&self) -> &str;
     fn order(&self) -> u64;
     fn payload(&self) -> &[u8];
+    /// Mutable native records can identify their bounded content independently
+    /// while retaining the same bulk admission and cursor authority.
+    fn source_generation(
+        &self,
+        batch_generation: ObservationSourceGenerationV1,
+    ) -> TranscriptIngestResult<ObservationSourceGenerationV1> {
+        Ok(batch_generation)
+    }
     fn source_identity(&self) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
         snapshot_source_identity(self.provider(), self.session_id())
     }
@@ -291,6 +299,7 @@ impl SnapshotAdmissionRunner {
             BTreeMap::new();
         let mut pending = Vec::new();
         for record in records {
+            let generation = record.source_generation(generation)?;
             let provider = record.provider();
             ensure_snapshot_admission_active(provider, cancellation)?;
             let source_identity = record.source_identity()?;
@@ -309,14 +318,14 @@ impl SnapshotAdmissionRunner {
             if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
                 continue;
             }
-            pending.push((record, source_identity, range));
+            pending.push((record, source_identity, range, generation));
         }
 
         for window in pending.chunks(SNAPSHOT_CAPTURE_WINDOW_RECORDS) {
             ensure_snapshot_admission_active(self.provider, cancellation)?;
             let mut chained_cursors = cursors.clone();
             let mut requests = Vec::with_capacity(window.len());
-            for (record, source_identity, range) in window {
+            for (record, source_identity, range, generation) in window {
                 let provider = record.provider();
                 let expected_cursor = source_cursor(
                     facade,
@@ -329,7 +338,7 @@ impl SnapshotAdmissionRunner {
                 .await?;
                 requests.push(record.capture_request(
                     scope.clone(),
-                    generation,
+                    *generation,
                     expected_cursor,
                     cancellation.clone(),
                 )?);
@@ -338,7 +347,7 @@ impl SnapshotAdmissionRunner {
                     Some(ObservationSourceCursorV1::for_ordering(
                         source_identity.clone(),
                         scope.clone(),
-                        generation,
+                        *generation,
                         ObservationOrderingDomainV1::SnapshotOrder,
                         range.end(),
                     )?),
@@ -364,7 +373,7 @@ impl SnapshotAdmissionRunner {
                     true
                 }
                 Ok(outcomes) => {
-                    for ((record, source_identity, _), outcome) in window.iter().zip(outcomes) {
+                    for ((record, source_identity, _, _), outcome) in window.iter().zip(outcomes) {
                         let outcome = match outcome {
                             CaptureObservationOutcome::Persisted { outcome, .. }
                             | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
@@ -402,10 +411,10 @@ impl SnapshotAdmissionRunner {
                 // surfacing a non-durable record. Re-read every affected
                 // source cursor before scalar replay so that prefix is
                 // classified as duplicate instead of violating the chain.
-                for (_, source_identity, _) in window {
+                for (_, source_identity, _, _) in window {
                     cursors.remove(source_identity);
                 }
-                for (record, source_identity, range) in window {
+                for (record, source_identity, range, generation) in window {
                     self.capture_scalar_record(
                         facade,
                         record,
@@ -413,7 +422,7 @@ impl SnapshotAdmissionRunner {
                         *range,
                         &mut cursors,
                         scope,
-                        generation,
+                        *generation,
                         cancellation,
                     )
                     .await?;
