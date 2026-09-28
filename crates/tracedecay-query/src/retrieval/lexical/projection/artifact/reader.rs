@@ -8,8 +8,10 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
+use std::mem::ManuallyDrop;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use roaring::RoaringBitmap;
 #[cfg(any(test, feature = "hotpath"))]
@@ -129,13 +131,56 @@ impl LexicalIndexedRow for ArtifactRowV1 {
 
 #[derive(Clone)]
 pub struct CodeLexicalArtifactReaderV1 {
-    connection: Arc<ArtifactConnectionMutex<Connection>>,
+    connections: Arc<ArtifactConnectionPoolV1>,
     metadata: super::super::CodeLexicalProjectionMetadataV1,
     receipt: VerifiedCodeLexicalArtifactV1,
     retained_owned_bytes: usize,
     /// Fuzzy expansion walks every in-fuzzy term; share one load across
     /// clones and later queries on this reader.
     fuzzy_vocabulary: Arc<OnceLock<Arc<Vec<String>>>>,
+}
+
+/// Read-only connections to one immutable lexical artifact.
+///
+/// An uncontended query takes the idle connection. An overlapping query opens
+/// another read-only connection to the same file instead of waiting, and drops
+/// that connection when it finishes so a burst does not keep a connection per
+/// historical peak. The idle mutex is plain: Hotpath 0.24 retains every
+/// instrumented mutex identity for the process lifetime, and a remount replaces
+/// the reader.
+struct ArtifactConnectionPoolV1 {
+    idle: StdMutex<Vec<Connection>>,
+    path: PathBuf,
+    cache_budget_bytes: usize,
+    retained_metadata_bytes: usize,
+    sealed_file_size_bytes: u64,
+}
+
+/// Exclusive use of one pooled connection for a single query.
+struct ArtifactConnectionLease<'a> {
+    pool: &'a ArtifactConnectionPoolV1,
+    connection: ManuallyDrop<Connection>,
+}
+
+impl Deref for ArtifactConnectionLease<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl Drop for ArtifactConnectionLease<'_> {
+    fn drop(&mut self) {
+        // SAFETY: `Drop` runs once and nothing reads `connection` afterward.
+        let connection = unsafe { ManuallyDrop::take(&mut self.connection) };
+        let Ok(mut idle) = self.pool.idle.lock() else {
+            return;
+        };
+        if idle.is_empty() {
+            idle.push(connection);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,8 +243,6 @@ fn clone_authority_digest(
     ))
     .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
-
-type ArtifactConnectionMutex<T> = StdMutex<T>;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -405,6 +448,7 @@ impl CodeLexicalArtifactReaderV1 {
         })?;
         let reader = Self::open_connection_with_control(
             connection,
+            path,
             &receipt,
             authority,
             cache_budget_bytes,
@@ -553,6 +597,7 @@ impl CodeLexicalArtifactReaderV1 {
             "query.artifact.open.reader_restore",
             Self::open_connection_with_control(
                 connection,
+                path,
                 &receipt,
                 authority,
                 CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
@@ -606,6 +651,7 @@ impl CodeLexicalArtifactReaderV1 {
             "query.artifact.open.reader_restore",
             Self::open_connection_with_control(
                 connection,
+                path,
                 expected,
                 authority,
                 cache_budget_bytes,
@@ -625,6 +671,7 @@ impl CodeLexicalArtifactReaderV1 {
     /// repository, freshness, and clone route.
     fn open_connection_with_control(
         connection: Connection,
+        artifact_path: &Path,
         expected: &VerifiedCodeLexicalArtifactV1,
         authority: &super::super::CodeLexicalProjectionMetadataV1,
         cache_budget_bytes: usize,
@@ -767,11 +814,13 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         let retained_owned_bytes = stored_metadata_bytes.len().saturating_add(page_cache_bytes);
         Ok(Self {
-            // Every clone shares one rusqlite handle. Readers are replaced on
-            // remount, while Hotpath 0.24 retains every instrumented mutex
-            // identity for the process lifetime, so this per-reader lock must
-            // remain plain. Static query spans retain operation visibility.
-            connection: Arc::new(StdMutex::new(connection)),
+            connections: Arc::new(ArtifactConnectionPoolV1 {
+                idle: StdMutex::new(vec![connection]),
+                path: artifact_path.to_path_buf(),
+                cache_budget_bytes,
+                retained_metadata_bytes: stored_metadata_bytes.len(),
+                sealed_file_size_bytes,
+            }),
             metadata,
             receipt: stored,
             retained_owned_bytes,
@@ -1209,17 +1258,72 @@ impl CodeLexicalArtifactReaderV1 {
         ))
     }
 
-    /// Reader queries serialize on this one connection; the wait span makes
-    /// cross-query contention (concurrent searches, hydration reads during
-    /// staging) attributable instead of vanishing into lane wall time.
-    fn lock_connection(&self) -> Result<StdMutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
+    /// Take one connection for this query.
+    ///
+    /// The idle connection is the common path. When another query already
+    /// holds it, open a second read-only connection to the immutable artifact
+    /// instead of parking this query behind the first. The wait span covers
+    /// that checkout, including a sibling open, so overlap stays visible.
+    fn lock_connection(&self) -> Result<ArtifactConnectionLease<'_>, CodeLexicalArtifactErrorV1> {
         hotpath::measure_block!("query.artifact.reader.lock_wait", {
-            self.connection.lock().map_err(|_| {
-                CodeLexicalArtifactErrorV1::Io(
-                    "lexical artifact reader lock is poisoned".to_owned(),
-                )
+            let idle = {
+                let mut idle = self.connections.idle.lock().map_err(|_| {
+                    CodeLexicalArtifactErrorV1::Io(
+                        "lexical artifact reader lock is poisoned".to_owned(),
+                    )
+                })?;
+                idle.pop()
+            };
+            let connection = match idle {
+                Some(connection) => connection,
+                None => self.open_sibling_connection()?,
+            };
+            Ok(ArtifactConnectionLease {
+                pool: &self.connections,
+                connection: ManuallyDrop::new(connection),
             })
         })
+    }
+
+    /// Open another read-only connection to the verified artifact file.
+    ///
+    /// The seated reader already authenticated the file. This checks the
+    /// embedded receipt digest so a replaced file is not served, and skips the
+    /// corpus-wide section walk that open already performed.
+    fn open_sibling_connection(&self) -> Result<Connection, CodeLexicalArtifactErrorV1> {
+        let path = &self.connections.path;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| map_reader_open_error(path, error))?;
+        connection
+            .pragma_update(None, "query_only", true)
+            .map_err(sqlite_error)?;
+        configure_reader_window(
+            &connection,
+            self.connections.cache_budget_bytes,
+            self.connections.retained_metadata_bytes,
+            self.connections.sealed_file_size_bytes,
+        )?;
+        let receipt_bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT receipt FROM artifact_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_corrupt)?;
+        let receipt = decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "content-addressed lexical artifact has no finalized receipt".to_owned(),
+            )
+        })?;
+        if receipt.artifact_digest() != self.receipt.artifact_digest() {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact changed while opening a concurrent reader".to_owned(),
+            ));
+        }
+        Ok(connection)
     }
 
     fn validate_generation(&self, generation: &CodeGenerationId) -> Result<(), RetrievalPortError> {

@@ -83,14 +83,9 @@ async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path)
     .await
 }
 /// One `tracedecay_search` read that consumes the executor's contract the way
-/// a production client does. Search execution is single-flight per project,
-/// and every dispatched `tracedecay_search` carries the daemon's operation
-/// deadline, so a request arriving while another holds the execution permit
-/// queues for it under that deadline and is served once the holder finishes,
-/// or settles with the typed `timed_out` state if the deadline passes first.
-/// `search_capacity_unavailable` is reserved for a request with no wait budget
-/// at all and for a bounded read that genuinely exceeds its limits; a
-/// concurrent reader here must never see it, so one is a failure, not a retry.
+/// a production client does. Independent searches on one project run together.
+/// `search_capacity_unavailable` is reserved for a bounded read that genuinely
+/// exceeds its limits; a concurrent reader here must never see it.
 async fn search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
