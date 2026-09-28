@@ -530,12 +530,18 @@ pub(crate) struct CodeGraphShardPublicationLocksV1 {
     build: Arc<tokio::sync::Mutex<()>>,
     flight: CodeGraphPublicationFlightV1,
     /// One published code graph per snapshot content identity and projector
-    /// revision. Linked worktrees of one tree share content identity but not
-    /// generation id or Grafeo namespace, so without this each scope builds
-    /// and pins a second corpus-sized graph. The map lives on the project
-    /// shard locks, which every worktree of the project already shares.
-    shared_graphs: Mutex<HashMap<String, Arc<VerifiedGraphSnapshot>>>,
+    /// revision. The `Arc` is owned by the session registry, not by this lock
+    /// cell: activation drops the retained runtime (and therefore this cell)
+    /// as soon as publish returns, and the next worktree must still find the
+    /// graph.
+    shared_graphs: SharedCodeGraphByContentV1,
 }
+
+/// Project-scoped map of content identity to the verified graph that already
+/// serves it. Strong on the session registry so it outlives each activation's
+/// retained runtime.
+pub(crate) type SharedCodeGraphByContentV1 =
+    Arc<Mutex<HashMap<String, Arc<VerifiedGraphSnapshot>>>>;
 
 /// The shard-wide corpus build permit; dropping it admits the next scope.
 type CodeGraphBuildPermitV1 = tokio::sync::OwnedMutexGuard<()>;
@@ -2576,7 +2582,16 @@ impl DaemonSessionRuntimeRegistryV1 {
         if let Some(existing) = gates.get(project_shard).and_then(Weak::upgrade) {
             return existing;
         }
-        let cell = Arc::new(CodeGraphShardPublicationLocksV1::default());
+        let shared_graphs = self
+            .code_graph_shared_content
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(project_shard.clone())
+            .or_default()
+            .clone();
+        let mut cell = CodeGraphShardPublicationLocksV1::default();
+        cell.shared_graphs = shared_graphs;
+        let cell = Arc::new(cell);
         gates.insert(project_shard.clone(), Arc::downgrade(&cell));
         cell
     }

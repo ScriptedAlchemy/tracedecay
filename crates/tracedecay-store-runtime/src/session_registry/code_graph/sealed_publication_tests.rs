@@ -2737,11 +2737,12 @@ fn isolated_resident_pressure(
     pressure
 }
 
-/// Identical linked worktrees serve one code graph. The second scope is
-/// already over the resident-memory watermark, so a second corpus build must
-/// not run: the second generation still resolves the shared symbol. A third
-/// worktree whose tree diverged is refused with the resident-memory budget
-/// instead of allocating that build.
+/// Identical linked worktrees serve one code graph. The publisher's retained
+/// runtime is dropped first, the way activation drops it after publish, and
+/// the next scope is already over the resident-memory watermark. A second
+/// corpus build must not run: that generation still resolves the shared
+/// symbol. A worktree whose tree diverged is refused with the resident-memory
+/// budget instead of allocating that build.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linked_worktree_serves_shared_graph_when_a_second_build_exceeds_resident_memory() {
     let temporary = tempfile::tempdir().expect("temporary fixture parent");
@@ -2842,6 +2843,11 @@ async fn linked_worktree_serves_shared_graph_when_a_second_build_exceeds_residen
         .await
         .expect("retain the primary code graph runtime")
         .with_resident_memory_pressure(&under_budget);
+    primary_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("primary worktree publishes the shared graph");
+    drop(primary_runtime);
+
     let linked_runtime = registry
         .retain_code_graph_runtime(
             project_id.clone(),
@@ -2869,9 +2875,6 @@ async fn linked_worktree_serves_shared_graph_when_a_second_build_exceeds_residen
         .expect("retain the diverged code graph runtime")
         .with_resident_memory_pressure(&over_budget);
 
-    primary_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
-        .expect("primary worktree publishes the shared graph");
     linked_runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("linked worktree serves the published graph without a second build");

@@ -2382,6 +2382,12 @@ pub struct DaemonSessionRuntimeRegistryV1 {
             Weak<code_graph::CodeGraphShardPublicationLocksV1>,
         >,
     >,
+    /// Verified code graphs already published for a project, keyed by snapshot
+    /// content. Strong for the registry lifetime: the publication lock cell is
+    /// weak and dies with each activation's retained runtime, but the next
+    /// linked worktree must reuse the graph instead of building another.
+    code_graph_shared_content:
+        StdMutex<BTreeMap<StoreShardIdV1, code_graph::SharedCodeGraphByContentV1>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     /// Registered stores whose last attach was refused with a typed reset.
     /// The refused store stays unmounted, so every open re-runs admission and
