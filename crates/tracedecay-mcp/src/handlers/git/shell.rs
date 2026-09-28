@@ -1,6 +1,8 @@
 //! The `git` subprocess calls: diffs, PR comparisons, commit logs, and the file-role classification applied to their output.
 
 use super::*;
+use tracedecay_domain::{GitChangeKindV1, GitStatusEntryV1};
+use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
 
 const PR_CONTEXT_MAX_ANCESTRY_COMMITS: usize = 100_000;
 const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
@@ -304,84 +306,39 @@ pub(super) fn default_pr_base_ref(project_root: &std::path::Path) -> String {
         .unwrap_or_else(|| "main".to_string())
 }
 
-/// Returns file paths changed in the working tree (unstaged + staged, or staged-only).
+/// Returns tracked file paths changed against HEAD (staged + unstaged, or
+/// staged-only), from the repository status authority. Its worktree side
+/// compares content for entries the index stat cannot vouch for, so an edit
+/// inside the index's own mtime second is still reported.
 #[hotpath::measure(label = "mcp.git.shell.changed_files")]
 pub(super) fn git_changed_files(
     project_root: &std::path::Path,
     staged_only: bool,
 ) -> std::result::Result<Vec<String>, String> {
-    let repo = open_project_repository(project_root)?;
-
-    let head_tree = repo
+    open_project_repository(project_root)?
         .head()
         .map_err(|e| format!("cannot read HEAD: {e}"))?
         .peel_to_commit()
-        .map_err(|e| format!("cannot peel HEAD to commit: {e}"))?
-        .tree()
-        .map_err(|e| format!("cannot read HEAD tree: {e}"))?;
-
-    // Compare HEAD tree against the index (staged changes)
-    let index = repo
-        .index()
-        .map_err(|e| format!("cannot read index: {e}"))?;
-
-    let mut changed = HashSet::new();
-
-    // Walk the index to find files that differ from HEAD
-    for entry in index.entries() {
-        let path = entry.path(&index);
-        let path_str = String::from_utf8_lossy(path.as_ref()).to_string();
-        if path_str.is_empty() {
-            continue;
-        }
-
-        let head_entry = head_tree
-            .lookup_entry_by_path(std::path::Path::new(&path_str))
-            .ok()
-            .flatten();
-
-        match head_entry {
-            Some(he) => {
-                // File exists in both - check if content differs
-                if he.object_id() != entry.id {
-                    changed.insert(path_str);
-                }
+        .map_err(|e| format!("cannot peel HEAD to commit: {e}"))?;
+    let status = GitRepositoryAuthority::discover(project_root)
+        .and_then(|repository| repository.status())
+        .map_err(|error| error.to_string())?;
+    let mut changed = status
+        .entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            GitStatusEntryV1::Tracked(tracked)
+                if tracked.index != GitChangeKindV1::Unmodified
+                    || (!staged_only && tracked.worktree != GitChangeKindV1::Unmodified) =>
+            {
+                Some(tracked.path)
             }
-            None => {
-                // New file (in index but not in HEAD)
-                changed.insert(path_str);
-            }
-        }
-    }
-
-    // If not staged_only, also check working-tree modifications via mtime
-    if !staged_only {
-        for entry in index.entries() {
-            let path = entry.path(&index);
-            let path_str = String::from_utf8_lossy(path.as_ref()).to_string();
-            if path_str.is_empty() {
-                continue;
-            }
-            let full_path = project_root.join(&path_str);
-            if let Ok(meta) = std::fs::metadata(&full_path) {
-                use std::time::UNIX_EPOCH;
-                let mtime = meta
-                    .modified()
-                    .unwrap_or(UNIX_EPOCH)
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as u32;
-                // gix index entry stores mtime; if disk mtime is newer, file is modified
-                if mtime > entry.stat.mtime.secs {
-                    changed.insert(path_str);
-                }
-            }
-        }
-    }
-
-    let mut result: Vec<String> = changed.into_iter().collect();
-    result.sort();
-    Ok(result)
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    changed.sort();
+    changed.dedup();
+    Ok(changed)
 }
 
 /// Returns the last N commit subjects from HEAD.
@@ -483,9 +440,8 @@ fn git_commit_log_controlled(
             .next()
             .unwrap_or("")
             .to_string();
-        let short_id = format!("{:.7}", commit.id);
         commits.push(GitCommitSubjectV1 {
-            hash: short_id,
+            hash: commit.id.to_string(),
             subject,
         });
     }

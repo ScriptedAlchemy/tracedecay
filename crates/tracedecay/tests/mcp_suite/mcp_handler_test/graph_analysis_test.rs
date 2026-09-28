@@ -1253,10 +1253,6 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
         ],
         "seed context",
     );
-    // gix compares the working-tree mtime, in whole seconds, with the index
-    // stat. A write in the same second as `git commit` is invisible, so the
-    // unstaged edit has to land in a later second.
-    std::thread::sleep(Duration::from_secs(2));
     write_project_file(project, "notes.txt", "unstaged note\n");
     write_project_file(
         project,
@@ -1323,6 +1319,64 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
             "suggested_category": "feature/fix/refactor",
             "recent_commits": ["seed context"],
             "summary": "2 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+}
+
+/// An unstaged edit whose mtime lands in the same second the index recorded
+/// for the file is still an uncommitted change.
+#[tokio::test]
+async fn commit_context_reports_an_edit_inside_the_index_mtime_second() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn clean() {}\n"),
+        ],
+        "seed context",
+    );
+    let host = init_test_project(project).await;
+    let source = project.join("src/lib.rs");
+    let indexed_mtime = fs::metadata(&source).unwrap().modified().unwrap();
+    write_project_file(project, "src/lib.rs", "pub fn clean() {}\n// pending\n");
+    fs::File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_modified(indexed_mtime)
+        .unwrap();
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "changed_files": [
+                {"file": "src/lib.rs", "role": "source", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "clean",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix/refactor",
+            "recent_commits": ["seed context"],
+            "summary": "1 file(s) changed, 1 symbol(s) affected",
         })
     );
 }
