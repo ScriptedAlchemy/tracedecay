@@ -254,6 +254,15 @@ pub fn export_managed_skills_to_agent_hosts(
 // ---------------------------------------------------------------------------
 
 /// A CLI agent that can be configured to use tracedecay via MCP.
+/// What [`AgentIntegration::require_host`] proved about the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostPresence {
+    /// The host's own CLI resolved and admits its commands: it is here.
+    HostCli,
+    /// TraceDecay configures the host without a host CLI.
+    NoHostCli,
+}
+
 pub trait AgentIntegration {
     /// Human-readable name (e.g. "Claude Code").
     fn name(&self) -> &'static str;
@@ -352,9 +361,9 @@ pub trait AgentIntegration {
     /// CLI refuses until the operator signs in with `HostCliNotSignedIn`;
     /// both classify through `TraceDecayError::host_absence` as an
     /// informational skip. Hosts TraceDecay configures without a host CLI
-    /// need none.
-    fn require_host(&self, _home: &Path) -> Result<()> {
-        Ok(())
+    /// need none, and only their files can show they are here.
+    fn require_host(&self, _home: &Path) -> Result<HostPresence> {
+        Ok(HostPresence::NoHostCli)
     }
 
     /// Evidence that the host application itself is present on this machine

@@ -74,8 +74,9 @@ impl AgentIntegration for KimiIntegration {
         "kimi"
     }
 
-    fn require_host(&self, _home: &Path) -> Result<()> {
-        super::host_cli::require_host_cli(KIMI_CLI, "Kimi Code plugin lifecycle").map(drop)
+    fn require_host(&self, _home: &Path) -> Result<super::HostPresence> {
+        super::host_cli::require_host_cli(KIMI_CLI, "Kimi Code plugin lifecycle")
+            .map(|_| super::HostPresence::HostCli)
     }
 
     fn preflight_non_interactive_install(

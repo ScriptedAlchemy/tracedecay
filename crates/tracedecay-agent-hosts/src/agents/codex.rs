@@ -166,8 +166,8 @@ impl AgentIntegration for CodexIntegration {
         ])
     }
 
-    fn require_host(&self, _home: &Path) -> Result<()> {
-        mcp_registry::require_codex_cli().map(drop)
+    fn require_host(&self, _home: &Path) -> Result<super::HostPresence> {
+        mcp_registry::require_codex_cli().map(|_| super::HostPresence::HostCli)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {

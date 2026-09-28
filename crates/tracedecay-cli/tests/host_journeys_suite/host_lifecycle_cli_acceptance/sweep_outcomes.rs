@@ -317,7 +317,6 @@ fn a_kiro_cli_that_is_not_signed_in_is_skipped_everywhere() {
     seed_leftover_kiro_registration(&cli);
     track_kiro(&cli);
     install_host_cli(&cli, "kiro-cli", LOGGED_OUT_KIRO_CLI);
-    let _daemon = ProfileDaemon::start(&cli);
 
     let update = cli.run(&["update-plugin"]);
     let update_stderr = stderr(&update);
@@ -335,6 +334,9 @@ fn a_kiro_cli_that_is_not_signed_in_is_skipped_everywhere() {
         "{post_update_stderr}"
     );
 
+    // `post-update` refuses while an unmanaged daemon listens; Doctor reads
+    // the daemon's canonical report.
+    let _daemon = ProfileDaemon::start(&cli);
     let doctor = cli.run(&["doctor"]);
     let doctor_stderr = stderr(&doctor);
     assert_eq!(doctor.status.code(), Some(0), "{doctor_stderr}");

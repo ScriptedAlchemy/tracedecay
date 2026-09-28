@@ -123,8 +123,8 @@ impl AgentIntegration for GeminiIntegration {
         }
     }
 
-    fn require_host(&self, _home: &Path) -> Result<()> {
-        require_gemini_cli().map(drop)
+    fn require_host(&self, _home: &Path) -> Result<super::HostPresence> {
+        require_gemini_cli().map(|_| super::HostPresence::HostCli)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {

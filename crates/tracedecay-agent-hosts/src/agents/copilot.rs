@@ -72,8 +72,8 @@ impl AgentIntegration for CopilotIntegration {
         false
     }
 
-    fn require_host(&self, _home: &Path) -> Result<()> {
-        require_copilot_cli().map(drop)
+    fn require_host(&self, _home: &Path) -> Result<super::HostPresence> {
+        require_copilot_cli().map(|_| super::HostPresence::HostCli)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {

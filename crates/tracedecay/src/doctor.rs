@@ -1158,26 +1158,13 @@ fn check_host_integrations(
     for agent in agents::all_integrations() {
         let integrated = agent.has_tracedecay(home, profile);
         if !integrated && !tracked.iter().any(|id| id == agent.id()) {
-            let surface = agent.detected_host_surface(home, profile);
-            if surface.is_some() || agent.is_detected(home) {
-                // The host itself is on this machine but carries no
-                // tracedecay integration, which an operator most likely
-                // wants wired up.
-                eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
-                dc.warn(&format!(
-                    "{} detected{} but tracedecay is not integrated, run `tracedecay install --agent {}`",
-                    agent.name(),
-                    surface
-                        .map(|surface| format!(" ({})", surface.display()))
-                        .unwrap_or_default(),
-                    agent.id()
-                ));
-            }
+            warn_detected_unintegrated_host(dc, agent.as_ref(), home, profile);
             continue;
         }
         let absence = match agent.require_host(home) {
-            Ok(()) if integrated || agent.is_detected(home) => None,
-            Ok(()) => Some((
+            Ok(agents::HostPresence::HostCli) => None,
+            Ok(agents::HostPresence::NoHostCli) if integrated || agent.is_detected(home) => None,
+            Ok(agents::HostPresence::NoHostCli) => Some((
                 tracedecay_domain::errors::HostAbsence::NotInstalled,
                 format!("{} is not detected under {}", agent.name(), home.display()),
             )),
@@ -1202,6 +1189,29 @@ fn check_host_integrations(
             }
         }
     }
+}
+
+/// A host that is on this machine but carries no tracedecay integration,
+/// which an operator most likely wants wired up; an absent one says nothing.
+fn warn_detected_unintegrated_host(
+    dc: &mut DoctorCounters,
+    agent: &dyn agents::AgentIntegration,
+    home: &Path,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+) {
+    let surface = agent.detected_host_surface(home, profile);
+    if surface.is_none() && !agent.is_detected(home) {
+        return;
+    }
+    eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+    dc.warn(&format!(
+        "{} detected{} but tracedecay is not integrated, run `tracedecay install --agent {}`",
+        agent.name(),
+        surface
+            .map(|surface| format!(" ({})", surface.display()))
+            .unwrap_or_default(),
+        agent.id()
+    ));
 }
 
 /// The hosts the profile tracks; an unreadable profile config is a warning,

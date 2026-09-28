@@ -311,8 +311,8 @@ impl AgentIntegration for KiroIntegration {
         Ok(())
     }
 
-    fn require_host(&self, home: &Path) -> Result<()> {
-        require_signed_in_kiro_cli(home).map(drop)
+    fn require_host(&self, home: &Path) -> Result<super::HostPresence> {
+        require_signed_in_kiro_cli(home).map(|_| super::HostPresence::HostCli)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
