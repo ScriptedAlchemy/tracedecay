@@ -5684,6 +5684,7 @@ dependencies = [
  "tracedecay-daemon-service",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
+ "tracedecay-framing",
  "tracedecay-global-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
@@ -6139,6 +6140,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracedecay-domain",
+ "tracedecay-framing",
  "tracedecay-private-fs",
  "tracing",
 ]

@@ -478,8 +478,8 @@ fn native_hook_delivery_settlement(
 }
 
 fn read_bounded_stdin() -> Result<Vec<u8>, ()> {
-    let bound = tracedecay_hooks::MAX_HOOK_PAYLOAD_BYTES;
-    let mut payload = Vec::with_capacity(bound);
+    let bound = tracedecay_framing::MAX_WIRE_MESSAGE_BYTES;
+    let mut payload = Vec::new();
     std::io::stdin()
         .lock()
         .take((bound + 1) as u64)
