@@ -15,11 +15,10 @@ SCRIPT = Path(__file__).with_name("check-release-artifacts.py")
 
 def run(
     root: Path,
-    expect_success: bool,
     profile: str = "stable",
     *,
     allow_missing: bool = False,
-) -> None:
+) -> subprocess.CompletedProcess[str]:
     command = [
         sys.executable,
         str(SCRIPT),
@@ -40,13 +39,29 @@ def run(
             str(root / "mcpbs"),
         ]
     )
-    completed = subprocess.run(
+    return subprocess.run(
         command,
         capture_output=True,
         text=True,
     )
-    if (completed.returncode == 0) != expect_success:
+
+
+def expect(
+    root: Path,
+    status: int,
+    message: str,
+    profile: str = "stable",
+    *,
+    allow_missing: bool = False,
+) -> None:
+    """Success reports on stdout and a refusal on stderr, each as one line."""
+    completed = run(root, profile, allow_missing=allow_missing)
+    output = completed.stdout if status == 0 else completed.stderr
+    if completed.returncode != status or output != f"{message}\n":
         raise AssertionError(completed.stdout + completed.stderr)
+
+
+BETA_PARTIAL = {"profile": "beta", "allow_missing": True}
 
 
 def main() -> int:
@@ -84,12 +99,12 @@ def main() -> int:
         for child, names in expected.items():
             for name in names:
                 (root / child / name).write_bytes(b"artifact")
-        run(root, True)
+        expect(root, 0, "release artifact coverage matches target manifest")
         (root / "mcpbs" / expected["mcpbs"][0]).unlink()
-        run(root, False)
+        expect(root, 1, "MCPB coverage mismatch: missing tracedecay-v1.2.3-linux.mcpb")
         (root / "mcpbs" / expected["mcpbs"][0]).write_bytes(b"artifact")
         (root / "binaries" / "unexpected.zip").write_bytes(b"artifact")
-        run(root, False)
+        expect(root, 1, "binary coverage mismatch: unexpected unexpected.zip")
         for item in (root / "binaries").iterdir():
             item.unlink()
         for item in (root / "mcpbs").iterdir():
@@ -101,22 +116,37 @@ def main() -> int:
             (root / "mcpbs" / (
                 f"tracedecay-beta-v1.2.3-{target['name']}.mcpb"
             )).write_bytes(b"artifact")
-        run(root, True, profile="beta")
+        expect(root, 0, "release artifact coverage matches target manifest", profile="beta")
         (root / "binaries" / "tracedecay-beta-v1.2.3-linux.tar.gz").unlink()
-        run(root, False, profile="beta")
+        expect(
+            root,
+            1,
+            "binary coverage mismatch: missing tracedecay-beta-v1.2.3-linux.tar.gz",
+            profile="beta",
+        )
 
         # Partial publish: a whole missing target is accepted, a half target
         # (archive without MCPB) is not, a foreign file is not, and an empty
         # set is not.
-        run(root, False, profile="beta", allow_missing=True)
+        expect(
+            root,
+            1,
+            "release target linux is half built: archive=missing, mcpb=present",
+            **BETA_PARTIAL,
+        )
         (root / "mcpbs" / "tracedecay-beta-v1.2.3-linux.mcpb").unlink()
-        run(root, True, profile="beta", allow_missing=True)
+        expect(
+            root,
+            0,
+            "release artifact coverage is partial; missing targets: linux",
+            **BETA_PARTIAL,
+        )
         (root / "binaries" / "stray.tar.gz").write_bytes(b"artifact")
-        run(root, False, profile="beta", allow_missing=True)
+        expect(root, 1, "unexpected release artifacts: stray.tar.gz", **BETA_PARTIAL)
         (root / "binaries" / "stray.tar.gz").unlink()
         (root / "binaries" / "tracedecay-beta-v1.2.3-windows.zip").unlink()
         (root / "mcpbs" / "tracedecay-beta-v1.2.3-windows.mcpb").unlink()
-        run(root, False, profile="beta", allow_missing=True)
+        expect(root, 1, "no release target is complete; nothing to publish", **BETA_PARTIAL)
         # An MCPB that leaked into the binaries directory (a `tracedecay-beta-*`
         # artifact glob did this) is foreign there, in both modes.
         for child in ("binaries", "mcpbs"):
@@ -130,8 +160,18 @@ def main() -> int:
                 f"tracedecay-beta-v1.2.3-{target['name']}.mcpb"
             )).write_bytes(b"artifact")
         (root / "binaries" / "tracedecay-beta-v1.2.3-linux.mcpb").write_bytes(b"artifact")
-        run(root, False, profile="beta")
-        run(root, False, profile="beta", allow_missing=True)
+        expect(
+            root,
+            1,
+            "binary coverage mismatch: unexpected tracedecay-beta-v1.2.3-linux.mcpb",
+            profile="beta",
+        )
+        expect(
+            root,
+            1,
+            "unexpected release artifacts: tracedecay-beta-v1.2.3-linux.mcpb",
+            **BETA_PARTIAL,
+        )
     print("release artifact validator tests passed")
     return 0
 
