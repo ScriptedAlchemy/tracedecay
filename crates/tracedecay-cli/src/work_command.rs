@@ -58,7 +58,11 @@ pub(crate) async fn run(
             return Err(error.into());
         }
     }
-    Ok(())
+    crate::application_cli::refused(
+        crate::application_cli::WORK,
+        operation.route_segment(),
+        &response.outcome,
+    )
 }
 
 fn write_work_output<W: Write>(writer: &mut W, rendered: &[u8]) -> std::io::Result<()> {

@@ -113,9 +113,7 @@ pub(crate) fn render(
     }
     let outcome = outcome
         .as_ref()
-        .map_err(|problem| TraceDecayError::Config {
-            message: format!("{}: {}", problem.problem.code, problem.problem.message),
-        })?;
+        .map_err(|problem| refusal(kind, operation, problem))?;
     Ok(format!(
         "{} {}\nProject: {}\n{}\n",
         kind.0,
@@ -123,6 +121,31 @@ pub(crate) fn render(
         project_root.display(),
         serde_json::to_string_pretty(outcome)?
     ))
+}
+
+/// Fails the process with the refusal an already-rendered `--json` outcome
+/// carries, so a typed problem never exits successfully.
+pub(crate) fn refused(
+    kind: ApplicationKind,
+    operation: &str,
+    outcome: &ApplicationResult<Value>,
+) -> Result<()> {
+    outcome
+        .as_ref()
+        .map(drop)
+        .map_err(|problem| refusal(kind, operation, problem))
+}
+
+fn refusal(
+    kind: ApplicationKind,
+    operation: &str,
+    envelope: &ApplicationProblemEnvelope,
+) -> TraceDecayError {
+    TraceDecayError::tool_refused(
+        format!("{} {operation}", kind.1),
+        Some(envelope.problem.code.clone()),
+        Some(envelope.problem.message.clone()),
+    )
 }
 
 pub(crate) fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
@@ -157,5 +180,30 @@ pub(crate) mod tests {
         assert_eq!(problem["request_id"], request_id);
         assert_eq!(problem["problem"]["kind"], "not_found_or_not_authorized");
         assert_eq!(rendered.lines().count(), 1);
+    }
+
+    #[test]
+    fn a_problem_outcome_fails_as_a_named_refusal_in_both_modes() {
+        let outcome: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.workflow.get_run.result").unwrap(), 1)
+                .unwrap(),
+            RequestId::new("request.cli.workflow.1").unwrap(),
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        )
+        .unwrap());
+        let expected = "workflow get-run refused the request (not_found_or_not_authorized): \
+                        The requested resource was not found or is not authorized";
+        let root = std::path::Path::new("/repo");
+
+        let human = super::render(super::WORKFLOW, "get-run", root, &outcome, false).unwrap_err();
+        assert_eq!(human.to_string(), expected);
+
+        let json = super::render(super::WORKFLOW, "get-run", root, &outcome, true).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(json.trim_end()).unwrap()["problem"]["kind"],
+            "not_found_or_not_authorized"
+        );
+        let refused = super::refused(super::WORKFLOW, "get-run", &outcome).unwrap_err();
+        assert_eq!(refused.to_string(), expected);
     }
 }

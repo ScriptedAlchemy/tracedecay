@@ -93,8 +93,8 @@ pub enum TraceDecayError {
         typed_detail: Option<Box<ApplicationProblemDetailV1>>,
     },
 
-    /// A tool call answered with a refusal the command already printed as its
-    /// result; the process boundary names the refusal without restating it.
+    /// A command answered with a typed refusal rather than failing; the
+    /// process boundary names the refusal and its stable code.
     #[error(transparent)]
     ToolRefused(Box<ToolRefusal>),
 
