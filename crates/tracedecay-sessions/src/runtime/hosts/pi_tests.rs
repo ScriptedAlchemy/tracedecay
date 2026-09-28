@@ -7,14 +7,12 @@ use tracedecay_domain::{
     CanonicalObservationFactV1, ObservationScopeV1,
 };
 
-use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
-use crate::observation::ObservationCancellation;
-use crate::runtime::source::HostProviderCoverage;
-
 use super::{
     PI_AGENT_RELATIVE, PiSource, capture_pi_observations, capture_pi_session, pi_agent_dir_for,
     session_dir_name,
 };
+use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
+use crate::observation::ObservationCancellation;
 
 const FIXTURE_NAME: &str = "2026-09-25T16-00-00-000Z_5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90.jsonl";
 const FIXTURE: &str = include_str!(
@@ -172,7 +170,7 @@ async fn fixture_session_lands_with_stable_entry_identities_and_messages() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(coverage.file_id, HostProviderCoverage::Complete as u64);
+    assert_eq!(coverage.file_id, 1);
 
     // An unchanged session resumes at its cursor and admits nothing twice.
     capture(&layout, &admission).await;
@@ -209,7 +207,7 @@ async fn malformed_session_file_is_refused_with_a_typed_failure() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(coverage.file_id, HostProviderCoverage::Partial as u64);
+    assert_eq!(coverage.file_id, 2);
 }
 
 #[tokio::test]

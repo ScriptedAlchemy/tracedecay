@@ -16,6 +16,7 @@ use tracedecay_global_db::tests::harness::{
     RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime,
 };
 use tracedecay_lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use super::{
     CODEX_APP_SERVER_UNCONFIGURED, CURSOR_AGENT_UNCONFIGURED, SUMMARIZER_CONFIGURATION_UNAVAILABLE,
@@ -43,7 +44,7 @@ impl TrapPath {
         let launches = directory.path().join("launches.log");
         for name in names {
             let trap = directory.path().join(name);
-            std::fs::write(
+            write_executable_script(
                 &trap,
                 format!(
                     "#!/bin/sh\nprintf '%s\\n' \"$0\" >> '{}'\nexit 0\n",
@@ -51,9 +52,6 @@ impl TrapPath {
                 ),
             )
             .unwrap();
-            let mut permissions = std::fs::metadata(&trap).unwrap().permissions();
-            std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
-            std::fs::set_permissions(&trap, permissions).unwrap();
         }
         let previous = std::env::var_os("PATH");
         let mut path = directory.path().as_os_str().to_owned();
@@ -208,14 +206,11 @@ async fn configured_executable_is_launched_instead_of_the_path_binary() {
 
     let configured = root.path().join("bin").join("cursor-agent");
     std::fs::create_dir_all(configured.parent().unwrap()).unwrap();
-    std::fs::write(
+    write_executable_script(
         &configured,
         "#!/bin/sh\nprintf '%s\\n' 'configured summary text'\n",
     )
     .unwrap();
-    let mut permissions = std::fs::metadata(&configured).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
-    std::fs::set_permissions(&configured, permissions).unwrap();
     tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
         &database,
         &project_root,
@@ -267,7 +262,7 @@ async fn configured_model_reaches_the_summarizer_in_a_private_workspace() {
     let configured = root.path().join("bin").join("cursor-agent");
     let argv = root.path().join("argv.log");
     std::fs::create_dir_all(configured.parent().unwrap()).unwrap();
-    std::fs::write(
+    write_executable_script(
         &configured,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' 'tuned summary text'\n",
@@ -275,9 +270,6 @@ async fn configured_model_reaches_the_summarizer_in_a_private_workspace() {
         ),
     )
     .unwrap();
-    let mut permissions = std::fs::metadata(&configured).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
-    std::fs::set_permissions(&configured, permissions).unwrap();
     tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
         &database,
         &project_root,

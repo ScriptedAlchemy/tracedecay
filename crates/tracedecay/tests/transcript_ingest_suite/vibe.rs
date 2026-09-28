@@ -8,6 +8,8 @@ use tracedecay_sessions::runtime::source::{
 
 use crate::restart_atomicity::{open_project_session_db, try_ingest_source};
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 fn write_vibe_session(
     home: &std::path::Path,
@@ -363,13 +365,11 @@ async fn vibe_unknown_project_membership_defers_persistence_and_offset() {
 /// times out into `Unknown` inside the child.
 #[cfg(unix)]
 pub(super) fn run_unknown_membership_child(child_env: &str, test_name: &str) {
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
     let tmp = TempDir::new().unwrap();
     let fake_git = tmp.path().join("git-timeout");
-    std::fs::write(&fake_git, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
-    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable_script(&fake_git, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
         .arg(test_name)
         .arg("--exact")

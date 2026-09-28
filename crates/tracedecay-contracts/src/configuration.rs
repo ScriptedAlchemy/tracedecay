@@ -36,6 +36,7 @@ use crate::result::ResultContractRef;
 use crate::retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 
 /// Typed input for the configuration list read through the daemon
 /// invocation boundary.
@@ -394,6 +395,12 @@ pub fn configuration_surface_operation_names() -> impl ExactSizeIterator<Item = 
 
 pub fn configuration_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
+    configuration_surface_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn configuration_surface_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(CONFIGURATION_SPECS.len());
     let mut bindings = Vec::with_capacity(CONFIGURATION_SPECS.len() * CONFIGURATION_SURFACES.len());
 
@@ -416,8 +423,7 @@ pub fn configuration_surface_catalog_contribution()
         capabilities,
         bindings,
     ))?;
-    let schemas = configuration_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(contribution, materialize, configuration_executable_schemas)
 }
 
 fn configuration_executable_schemas(

@@ -813,11 +813,11 @@ pub fn strip_reasoning_tags(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use tracedecay_lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     static APP_SERVER_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1019,13 +1019,7 @@ mod tests {
             requests = requests.display(),
             child_marker = CODEX_SUMMARY_CHILD_ENV,
         );
-        std::fs::write(&executable, script).expect("write fake app-server");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("fake app-server metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions)
-            .expect("make fake app-server executable");
+        write_executable_script(&executable, script).expect("write fake app-server");
 
         let admitted_environment = std::collections::BTreeMap::from([
             (
@@ -1138,17 +1132,11 @@ mod tests {
         );
         let temporary = tempfile::tempdir().expect("temporary app-server directory");
         let executable = temporary.path().join("fake-codex");
-        std::fs::write(
+        write_executable_script(
             &executable,
             "#!/bin/sh\nwhile IFS= read -r line; do sleep 30; done\n",
         )
         .expect("write timeout fake app-server");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("timeout fake app-server metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions)
-            .expect("make timeout fake app-server executable");
 
         let config = CodexAppServerSummaryConfig {
             codex_bin: executable.to_string_lossy().into_owned(),

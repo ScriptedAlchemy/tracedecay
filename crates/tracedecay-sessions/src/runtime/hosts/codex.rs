@@ -61,7 +61,11 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::Bound;
 #[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -95,7 +99,7 @@ use crate::runtime::shared::{
 use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptCursorKey,
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    stream_new_jsonl,
+    jsonl_change_token_settled, jsonl_file_change_token, stream_new_jsonl,
 };
 
 #[cfg(test)]
@@ -962,11 +966,17 @@ struct CodexDirectoryResume {
     current: Option<(PathBuf, u8, u8, std::fs::ReadDir)>,
 }
 
+#[derive(Clone, Copy)]
+struct CodexDirectoryWitness {
+    stat: [u8; 32],
+    entries: [u8; 32],
+}
+
 #[derive(Clone)]
 struct CodexDirectoryIdentity {
     path: PathBuf,
     root_order: u8,
-    identity: Option<[u8; 32]>,
+    identity: Option<CodexDirectoryWitness>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1635,12 +1645,14 @@ impl CodexSource {
                 .len()
                 .saturating_add(idle.active_files.len());
             // Hot prefix first: the newest bucket and its ancestors are where a
-            // new session lands, and only the parent directory's identity moves
-            // when one appears. Rotation alone would defer that discovery by a
+            // new session lands. A settled directory timestamp proves no entry
+            // was added; inside the kernel's coarse timestamp quantum that
+            // timestamp can stay put across a create, so the entry names are
+            // the witness. Rotation alone would defer that discovery by a
             // whole cycle, so probe the hot prefix on every poll.
             let hot = idle.directories.len().min(IDLE_HOT_DIRECTORIES);
             for directory in idle.directories.iter().take(hot) {
-                if codex_directory_identity(&directory.path)? != directory.identity {
+                if codex_directory_changed(&directory.path, directory.identity)? {
                     changed = true;
                     break;
                 }
@@ -1662,7 +1674,7 @@ impl CodexSource {
                     index + 1
                 };
                 if let Some(directory) = idle.directories.get(index) {
-                    if codex_directory_identity(&directory.path)? != directory.identity {
+                    if codex_directory_changed(&directory.path, directory.identity)? {
                         changed = true;
                         break;
                     }
@@ -2090,7 +2102,7 @@ fn retained_scan_step(
                             },
                         )?;
                     }
-                    let identity = codex_directory_identity(&path)?;
+                    let identity = codex_directory_witness(&path)?;
                     scan.directories.push(CodexDirectoryIdentity {
                         path: path.clone(),
                         root_order,
@@ -2475,7 +2487,41 @@ fn retain_active_file(
     }
 }
 
-fn codex_directory_identity(path: &Path) -> TranscriptIngestResult<Option<[u8; 32]>> {
+struct DirectoryStatWitness {
+    stat: [u8; 32],
+    settled: bool,
+}
+
+fn codex_directory_changed(
+    path: &Path,
+    stored: Option<CodexDirectoryWitness>,
+) -> TranscriptIngestResult<bool> {
+    let Some(current) = directory_stat_witness(path)? else {
+        return Ok(stored.is_some());
+    };
+    let Some(stored) = stored else {
+        return Ok(true);
+    };
+    if current.stat != stored.stat {
+        return Ok(true);
+    }
+    if current.settled {
+        return Ok(false);
+    }
+    Ok(directory_entry_fingerprint(path)? != stored.entries)
+}
+
+fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDirectoryWitness>> {
+    let Some(current) = directory_stat_witness(path)? else {
+        return Ok(None);
+    };
+    Ok(Some(CodexDirectoryWitness {
+        stat: current.stat,
+        entries: directory_entry_fingerprint(path)?,
+    }))
+}
+
+fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryStatWitness>> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -2497,7 +2543,63 @@ fn codex_directory_identity(path: &Path) -> TranscriptIngestResult<Option<[u8; 3
             ),
         });
     }
-    Ok(Some(codex_corpus_identity(path, &metadata)?))
+    Ok(Some(DirectoryStatWitness {
+        stat: codex_corpus_identity(path, &metadata)?,
+        settled: jsonl_change_token_settled(jsonl_file_change_token(&metadata)),
+    }))
+}
+
+fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> {
+    let listed = std::fs::read_dir(path).map_err(|source| TranscriptIngestError::ScanIo {
+        operation: "fingerprint Codex transcript directory",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut names = Vec::new();
+    for entry in listed {
+        let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
+            operation: "fingerprint Codex transcript directory entry",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| TranscriptIngestError::ScanIo {
+                operation: "fingerprint Codex transcript entry type",
+                path: entry.path(),
+                source,
+            })?;
+        let tag = if file_type.is_symlink() {
+            2_u8
+        } else if file_type.is_dir() {
+            1
+        } else {
+            0
+        };
+        names.push((entry.file_name(), tag));
+    }
+    names.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay-codex-directory-entries-v1");
+    for (name, tag) in names {
+        hasher.update([tag]);
+        hash_directory_name(&mut hasher, &name);
+        hasher.update([0xff]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn hash_directory_name(hasher: &mut Sha256, name: &std::ffi::OsStr) {
+    #[cfg(unix)]
+    hasher.update(name.as_bytes());
+    #[cfg(windows)]
+    {
+        for unit in name.encode_wide() {
+            hasher.update(unit.to_le_bytes());
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    hasher.update(name.to_string_lossy().as_bytes());
 }
 
 fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult<u64> {
@@ -2527,6 +2629,10 @@ fn codex_corpus_identity(
         hasher.update(metadata.ctime_nsec().to_le_bytes());
         hasher.update(metadata.mtime().to_le_bytes());
         hasher.update(metadata.mtime_nsec().to_le_bytes());
+        // Ext4 reuses the inode inside one coarse timestamp quantum, and a
+        // caller can restore mtime. The allocation generation is what still
+        // changes across that replacement.
+        hash_linux_inode_generation(&mut hasher, path)?;
     }
     #[cfg(windows)]
     {
@@ -2550,6 +2656,37 @@ fn codex_corpus_identity(
         )?;
     }
     Ok(hasher.finalize().into())
+}
+
+#[cfg(unix)]
+fn hash_linux_inode_generation(hasher: &mut Sha256, path: &Path) -> TranscriptIngestResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let file = std::fs::File::open(path).map_err(|source| TranscriptIngestError::ScanIo {
+            operation: "open Codex transcript for inode generation",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let generation = tracedecay_private_fs::inode_generation(&file).map_err(|source| {
+            TranscriptIngestError::ScanIo {
+                operation: "read Codex transcript inode generation",
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        match generation {
+            Some(generation) => {
+                hasher.update([1]);
+                hasher.update(generation.to_le_bytes());
+            }
+            None => hasher.update([0]),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (hasher, path);
+    }
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]

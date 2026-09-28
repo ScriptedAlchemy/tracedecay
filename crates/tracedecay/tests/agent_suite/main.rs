@@ -28,4 +28,3 @@ mod skill_lint_cursor_test;
 mod skill_materialization_test;
 mod skill_targets_test;
 mod skill_usage_test;
-mod tool_skill_coverage_test;

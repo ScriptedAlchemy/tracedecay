@@ -304,20 +304,18 @@ mod tests {
     //! shown to reverse installation rather than merely being spelled correctly.
 
     use super::*;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     /// Install a fake `codex` that appends each invocation's argv to `log` and
     /// then performs `body`.
     #[cfg(unix)]
     fn fake_codex_cli(bin: &Path, log: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
             log = shell_single_quote(&log.to_string_lossy()),
         );
-        std::fs::write(bin, script).unwrap();
-        let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(bin, permissions).unwrap();
+        write_executable_script(bin, script).unwrap();
     }
 
     /// Body for a fake `codex` that emulates the registry's own writes, so a

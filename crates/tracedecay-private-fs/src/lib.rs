@@ -6,10 +6,15 @@ use std::fs::File;
 use std::io;
 
 pub mod capability_dir;
+mod coarse_time;
 mod file_lease;
 pub mod framed_log;
+mod inode_generation;
 mod lock_admission;
 mod rename_noreplace;
+
+pub use coarse_time::change_time_settled;
+pub use inode_generation::inode_generation;
 
 pub use file_lease::FileLease;
 pub use lock_admission::{LockAdmissionError, lock_until};

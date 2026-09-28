@@ -31,6 +31,7 @@ use crate::git::{
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 
 struct SurfaceSpec {
     capability: &'static str,
@@ -155,6 +156,12 @@ const SURFACE_SPECS: [SurfaceSpec; 8] = [
 /// Catalog contribution for public Git read and preview/apply bindings.
 pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
 {
+    git_surface_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn git_surface_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(SURFACE_SPECS.len());
     let mut bindings = Vec::new();
 
@@ -177,8 +184,7 @@ pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, Appli
         capabilities,
         bindings,
     ))?;
-    let schemas = git_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(contribution, materialize, git_executable_schemas)
 }
 
 /// Rust-owned request/result schema bodies for every public Git surface.

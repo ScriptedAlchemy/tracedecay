@@ -54,6 +54,8 @@ use tracedecay_domain::{
     WorkRelationReplanProposalV1, WorkflowOperationRef,
 };
 use tracedecay_runtime_core::storage::PrivateStoreIo;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 /// The one Work task this journey drives from creation to acceptance.
 const TASK_ID: &str = "task.work-loop-journey";
@@ -599,15 +601,8 @@ where
 /// paths because the spawn path calls `env_clear()`.
 #[cfg(unix)]
 fn pinned_executable(directory: &Path, name: &str, body: &str) -> (PathBuf, ManifestDigest) {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = directory.join(name);
-    fs::write(&path, body).expect("fixture executable");
-    let mut permissions = fs::metadata(&path)
-        .expect("executable metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&path, permissions).expect("executable mode");
+    write_executable_script(&path, body).expect("fixture executable");
     let digest = ManifestDigest::new(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(body.as_bytes()))

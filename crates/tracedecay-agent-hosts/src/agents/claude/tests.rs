@@ -1,6 +1,8 @@
 use super::super::{load_json_file_strict, safe_write_json_file, safe_write_text_file};
 use super::*;
 use serde_json::json;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 /// Writes the rendered marketplace source exactly where the component
 /// catalog deploys it.
@@ -398,15 +400,11 @@ fn claude_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
 /// the real CLI would).
 #[cfg(unix)]
 fn fake_claude_cli(bin: &Path, log: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
         log = shell_single_quote(&log.to_string_lossy()),
     );
-    std::fs::write(bin, script).unwrap();
-    let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(bin, permissions).unwrap();
+    write_executable_script(bin, script).unwrap();
 }
 
 #[cfg(unix)]
