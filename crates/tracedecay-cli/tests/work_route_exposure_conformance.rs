@@ -337,7 +337,7 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
                 if let Some(rest) = line.split_once("listening on ")
                     && let Some(url) = rest.1.split_whitespace().next()
                 {
-                    listening = Some(url.trim_end_matches('/').to_owned());
+                    listening = Some(dashboard_api_base_url(url));
                     break;
                 }
             }
@@ -362,6 +362,18 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
         let _ = piped.read_to_string(&mut stderr);
     }
     panic!("dashboard never announced a listen URL\nstdout:\n{seen}\nstderr:\n{stderr}");
+}
+
+/// The API base for a dashboard launch URL (`http://ADDR/?token=T`): its
+/// userinfo carries the token, so ureq sends it as the Basic password.
+fn dashboard_api_base_url(launch_url: &str) -> String {
+    let (origin, token) = launch_url
+        .split_once("/?token=")
+        .unwrap_or_else(|| panic!("dashboard launch URL carries no token: {launch_url}"));
+    let authority = origin
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("dashboard launch URL is not loopback HTTP: {launch_url}"));
+    format!("http://tracedecay:{token}@{authority}")
 }
 
 fn isolated(home: &Path, profile: &Path) -> Command {
@@ -615,7 +627,8 @@ fn post_envelope(
 }
 
 /// Posts to the dashboard's public mount, which needs no daemon credentials of
-/// its own: it resolves the active project and forwards through the same owner.
+/// its own: the listener's access token rides in the base URL's userinfo, and
+/// the mount resolves the active project and forwards through the same owner.
 fn post_dashboard_envelope(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) {
     let mut response = agent
         .post(url)

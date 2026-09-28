@@ -5,8 +5,8 @@ mod authority;
 mod checkpoint;
 mod connection;
 pub use connection::{
-    ConnectionPolicyError, OpenedDatabaseFileError, VerifiedImmutableReader,
-    VerifiedImmutableReaderError, open_immutable_reader, open_verified_immutable_reader,
+    ConnectionPolicyError, OpenedDatabaseFileError, VerifiedReader, VerifiedReaderError,
+    open_immutable_reader, open_verified_immutable_reader, open_verified_read_snapshot,
 };
 mod content_digest;
 pub use content_digest::{CanonicalContentDigestError, canonical_session_domain_content_sha256};

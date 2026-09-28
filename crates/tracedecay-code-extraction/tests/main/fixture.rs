@@ -1170,8 +1170,18 @@ fn test_fixture_ruby() {
     assert_eq!(
         ref_names(&result, EdgeKind::Calls),
         [
-            "puts", "class", "name", "raise", "super", "log", "super", "empty?", "new", "connect",
-            "pop", "push",
+            "puts",
+            "class",
+            "self.class.name",
+            "raise",
+            "super",
+            "log",
+            "super",
+            "@connections.empty?",
+            "Connection.new",
+            "conn.connect",
+            "@connections.pop",
+            "@connections.push",
         ]
     );
 }

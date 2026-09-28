@@ -987,9 +987,11 @@ fn relation_traversal(
     scope: &SymbolGraphScope,
 ) -> Result<(Vec<SymbolRelationRecord>, UnresolvedCallerGapsV1), ()> {
     let seed = SymbolOccurrenceId::new(seed.to_owned()).map_err(|_| ())?;
+    let seed_occurrence = seed.clone();
     let mut seen = HashSet::from([seed.clone()]);
     let mut frontier = vec![seed];
     let mut records = Vec::new();
+    let mut records_seed_recursion = false;
     let mut unresolved_callers = UnresolvedCallerGapsV1::default();
     for depth in 1..=maximum_depth {
         if frontier.is_empty() || records.len() >= MAX_COMPATIBILITY_RESULTS {
@@ -1026,7 +1028,14 @@ fn relation_traversal(
         .map_err(|_| ())?;
         let mut next = Vec::new();
         for edge in batches.into_iter().flatten() {
-            if !seen.insert(edge.neighbor.occurrence.clone()) {
+            // A directly recursive seed is its own caller and callee; it is
+            // listed once and not walked again.
+            let direct_recursion = depth == 1
+                && edge.neighbor.occurrence == seed_occurrence
+                && !records_seed_recursion;
+            if direct_recursion {
+                records_seed_recursion = true;
+            } else if !seen.insert(edge.neighbor.occurrence.clone()) {
                 continue;
             }
             let occurrence = edge.neighbor.occurrence.clone();
@@ -1039,7 +1048,9 @@ fn relation_traversal(
                     depth: Some(depth),
                 });
             }
-            next.push(occurrence);
+            if !direct_recursion {
+                next.push(occurrence);
+            }
             if records.len() >= MAX_COMPATIBILITY_RESULTS {
                 break;
             }

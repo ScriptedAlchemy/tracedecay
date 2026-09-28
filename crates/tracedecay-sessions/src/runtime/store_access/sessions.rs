@@ -17,6 +17,7 @@ use tracedecay_lcm::retrieval_content::{
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
 use super::super::shared::{durable_project_path_key, path_identity_key};
+use super::super::source::HostProviderCoverage;
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -205,19 +206,25 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             })?;
             let deferred_units = u64::try_from(deferred)
                 .map_err(|_| format!("negative deferred units for provider {provider_name}"))?;
-            let state = match row
+            let file_id = row
                 .get::<i64>(2)
-                .map_err(|error| format!("failed to decode host ingest coverage state: {error}"))?
-            {
-                1 => SessionProviderCoverageState::Complete,
-                2 => SessionProviderCoverageState::Partial,
-                3 => SessionProviderCoverageState::Unavailable,
-                _ => continue,
+                .map_err(|error| format!("failed to decode host ingest coverage state: {error}"))?;
+            let Ok(file_id) = u64::try_from(file_id) else {
+                continue;
+            };
+            let state = match HostProviderCoverage::from_file_id(file_id) {
+                Some(HostProviderCoverage::Complete) => SessionProviderCoverageState::Complete,
+                Some(HostProviderCoverage::Partial) => SessionProviderCoverageState::Partial,
+                Some(HostProviderCoverage::Unavailable) => {
+                    SessionProviderCoverageState::Unavailable
+                }
+                None => continue,
             };
             health.provider_coverage.push(SessionProviderCoverage {
                 provider: provider_name.to_owned(),
                 state,
                 deferred_units,
+                reason: HostProviderCoverage::coverage_reason_name(file_id).map(str::to_owned),
             });
         }
         drop(coverage_rows);

@@ -9,11 +9,29 @@ from embed_proxy import (
     DASHBOARD_EMBED_PATH,
     EMBED_MOUNT,
     dashboard_bridge_script,
+    dashboard_upstream,
     embed_upstream_path,
     is_event_stream,
     is_html_content_type,
     rewrite_dashboard_html,
 )
+
+
+class DashboardUpstreamTests(unittest.TestCase):
+    def test_launch_token_becomes_the_basic_credential(self) -> None:
+        self.assertEqual(
+            dashboard_upstream("http://127.0.0.1:7341/?token=ab12"),
+            (
+                "http://127.0.0.1:7341",
+                {"Authorization": "Basic dHJhY2VkZWNheTphYjEy"},
+            ),
+        )
+
+    def test_tokenless_url_carries_no_credential(self) -> None:
+        self.assertEqual(
+            dashboard_upstream("http://127.0.0.1:7341/"),
+            ("http://127.0.0.1:7341", {}),
+        )
 
 
 class EmbedPathTests(unittest.TestCase):

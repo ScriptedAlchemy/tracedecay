@@ -1380,6 +1380,7 @@ where
             HostProviderCoverage::Partial
         },
         merged.deferred_sources,
+        None,
     )
     .await?;
     Ok(merged)

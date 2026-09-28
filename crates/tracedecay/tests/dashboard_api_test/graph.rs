@@ -789,7 +789,7 @@ async fn start_dashboard_fixture_seeded(
         compose_graph_authority(&cg, graph_seed, freshness);
 
     let port = pick_free_port();
-    let base_url = format!("http://127.0.0.1:{port}");
+    let (access, base_url) = crate::dashboard_api_support::dashboard_access_for(port);
     let server_graph = std::sync::Arc::new(cg);
     let authority = host_runtime
         .dashboard_test_authority_with_session_reads(&server_graph)
@@ -806,6 +806,7 @@ async fn start_dashboard_fixture_seeded(
             tracedecay_dashboard_api::DashboardTestEndpointV1 {
                 host: "127.0.0.1",
                 port,
+                access,
             },
             tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
             tracedecay_api::static_dashboard_router(std::sync::Arc::new(

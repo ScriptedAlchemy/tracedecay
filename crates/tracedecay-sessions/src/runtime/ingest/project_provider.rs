@@ -10,9 +10,9 @@ use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{
-    HostProviderCoverage, TranscriptDiscoveryBounds, persist_codex_history_frontier,
-    persist_host_provider_coverage, read_codex_history_frontier, read_host_provider_coverage,
-    run_blocking_transcript_section,
+    HostCoverageReason, HostProviderCoverage, TranscriptDiscoveryBounds,
+    persist_codex_history_frontier, persist_host_provider_coverage, read_codex_history_frontier,
+    read_host_provider_coverage, run_blocking_transcript_section,
 };
 use crate::runtime::{
     SessionProvider, hosts::claude, hosts::claude_observation, hosts::cline_like, hosts::codex,
@@ -355,6 +355,7 @@ impl<'a> ProjectProviderRun<'a> {
                 "codex",
                 coverage,
                 u64::from(coverage != HostProviderCoverage::Complete),
+                None,
             )
             .await
         {
@@ -459,6 +460,7 @@ impl<'a> ProjectProviderRun<'a> {
                     "kimi",
                     HostProviderCoverage::Unavailable,
                     1,
+                    None,
                 )
                 .await
                 {
@@ -519,6 +521,7 @@ impl<'a> ProjectProviderRun<'a> {
                     "pi",
                     HostProviderCoverage::Unavailable,
                     1,
+                    None,
                 )
                 .await
                 {
@@ -583,6 +586,7 @@ impl<'a> ProjectProviderRun<'a> {
                     "opencode",
                     HostProviderCoverage::Unavailable,
                     1,
+                    Some(HostCoverageReason::DatabaseUnreadable),
                 )
                 .await
                 {
@@ -701,6 +705,7 @@ impl<'a> ProjectProviderRun<'a> {
                         HostProviderCoverage::Partial
                     },
                     outcome.deferred_units,
+                    None,
                 )
                 .await
                 {
@@ -800,6 +805,7 @@ impl<'a> ProjectProviderRun<'a> {
                 HostProviderCoverage::Partial
             },
             outcome.deferred_units,
+            None,
         )
         .await
         {

@@ -7,7 +7,8 @@ use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{
-    HostProviderCoverage, persist_host_provider_coverage, read_host_provider_coverage,
+    HostCoverageReason, HostProviderCoverage, persist_host_provider_coverage,
+    read_host_provider_coverage,
 };
 use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{
@@ -216,6 +217,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                         "codex",
                         coverage,
                         u64::from(coverage != HostProviderCoverage::Complete),
+                        None,
                     )
                     .await
                 {
@@ -403,6 +405,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                     "kimi",
                     HostProviderCoverage::Unavailable,
                     1,
+                    None,
                 )
                 .await
                 {
@@ -464,6 +467,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                     "pi",
                     HostProviderCoverage::Unavailable,
                     1,
+                    None,
                 )
                 .await
                 {
@@ -528,6 +532,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                     "opencode",
                     HostProviderCoverage::Unavailable,
                     1,
+                    Some(HostCoverageReason::DatabaseUnreadable),
                 )
                 .await
                 {

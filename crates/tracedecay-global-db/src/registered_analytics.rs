@@ -5,8 +5,9 @@ use tracedecay_runtime_core::db::engine::{Value, opt_text};
 use super::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
     AnalyticsToolCounts, ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
-    RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, analytics_scope_query,
-    row_to_analytics_event,
+    ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
+    PreparedObservabilityEmissionV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
+    analytics_scope_query, row_to_analytics_event,
 };
 
 const OBSERVABILITY_DETAIL_RETENTION_SECONDS: i64 = 30 * 86_400;
@@ -214,7 +215,11 @@ impl RegisteredGlobalDb {
             AnalyticsAppendKind::Observability => {
                 let mut ids = Vec::with_capacity(events.len());
                 for event in events {
-                    ids.push(append_observability_event_in_existing_tx(&transaction, event).await?);
+                    ids.push(
+                        append_observability_event_in_existing_tx(&transaction, event)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    );
                 }
                 ids
             }
@@ -433,7 +438,9 @@ impl RegisteredGlobalDb {
         {
             return Err("observability outbox settlement conflict".to_owned());
         }
-        let id = append_observability_event_in_existing_tx(&transaction, event).await?;
+        let id = append_observability_event_in_existing_tx(&transaction, event)
+            .await
+            .map_err(|error| error.to_string())?;
         if let Some(settled_id) = stored.analytics_event_id {
             if settled_id != id {
                 return Err("observability outbox receipt conflict".to_owned());
@@ -461,6 +468,127 @@ impl RegisteredGlobalDb {
             format!("failed to commit observability outbox settlement: {error}")
         })?;
         Ok(id)
+    }
+
+    /// Claim and settle one run of worker-owned owner facts in a single write.
+    ///
+    /// The outbox lookup runs inside the transaction. `prepare_new` is invoked
+    /// only for a fact that has no outbox row, so a replay allocates no
+    /// producer sequence. Invalid or conflicting facts are rejected individually;
+    /// storage failures roll the whole transaction back.
+    #[hotpath::measure(future = true, label = "global_db.registered.analytics.claim_settle")]
+    pub async fn claim_and_settle_observability_emissions<F>(
+        &self,
+        emissions: &[ObservabilityOwnerEmissionWriteV1],
+        mut prepare_new: F,
+    ) -> Result<Vec<ObservabilityOwnerEmissionWriteOutcomeV1>, String>
+    where
+        F: FnMut(usize) -> Result<PreparedObservabilityEmissionV1, String>,
+    {
+        if emissions.is_empty() {
+            return Ok(Vec::new());
+        }
+        if emissions.len() > 1_024 {
+            return Err("invalid observability outbox batch".to_owned());
+        }
+        let transaction = self.begin_write_transaction().await.map_err(|error| {
+            format!("failed to begin observability outbox claim and settlement: {error}")
+        })?;
+        let mut outcomes = Vec::with_capacity(emissions.len());
+        let mut settled = 0_u64;
+        for (index, emission) in emissions.iter().enumerate() {
+            if let Err(error) = validate_owner_fact_input(
+                &emission.project_id,
+                &emission.owner_event_id,
+                &emission.owner_fact_json,
+            ) {
+                outcomes.push(ObservabilityOwnerEmissionWriteOutcomeV1::Rejected { error });
+                continue;
+            }
+            match read_outbox_record(&transaction, &emission.project_id, &emission.owner_event_id)
+                .await
+            {
+                Ok(Some(stored)) => {
+                    outcomes.push(if stored.owner_fact_json == emission.owner_fact_json {
+                        ObservabilityOwnerEmissionWriteOutcomeV1::Replayed
+                    } else {
+                        ObservabilityOwnerEmissionWriteOutcomeV1::Rejected {
+                            error: "observability owner fact conflict".to_owned(),
+                        }
+                    });
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(rollback_observability_write(transaction, error).await);
+                }
+            }
+            let prepared = match prepare_new(index).and_then(|prepared| {
+                validate_prepared_owner_emission(emission, &prepared)?;
+                Ok(prepared)
+            }) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    outcomes.push(ObservabilityOwnerEmissionWriteOutcomeV1::Rejected { error });
+                    continue;
+                }
+            };
+            let analytics_event_id = match append_observability_event_in_existing_tx(
+                &transaction,
+                &prepared.event,
+            )
+            .await
+            {
+                Ok(id) => id,
+                // Identity conflicts are detected before any mutation. Reject
+                // this independently offered fact without discarding siblings.
+                Err(ObservabilityAppendError::Conflict) => {
+                    outcomes.push(ObservabilityOwnerEmissionWriteOutcomeV1::Rejected {
+                        error: ObservabilityAppendError::Conflict.to_string(),
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    return Err(rollback_observability_write(transaction, error.to_string()).await);
+                }
+            };
+            let inserted = match transaction
+                .execute(
+                    "INSERT INTO observability_emission_outbox
+                         (project_id, owner_event_id, owner_fact_json,
+                          delivery_envelope_json, state, analytics_event_id)
+                     VALUES (?1, ?2, ?3, ?4, 'settled', ?5)",
+                    tracedecay_runtime_core::db::engine::params![
+                        emission.project_id.as_str(),
+                        emission.owner_event_id.as_str(),
+                        emission.owner_fact_json.as_str(),
+                        prepared.delivery_envelope_json.as_str(),
+                        analytics_event_id
+                    ],
+                )
+                .await
+            {
+                Ok(1) => Ok(()),
+                Ok(changed) => Err(format!(
+                    "observability outbox settlement changed {changed} rows instead of one"
+                )),
+                Err(error) => Err(format!(
+                    "failed to settle observability outbox event: {error}"
+                )),
+            };
+            if let Err(error) = inserted {
+                return Err(rollback_observability_write(transaction, error).await);
+            }
+            settled = settled.saturating_add(1);
+            outcomes.push(ObservabilityOwnerEmissionWriteOutcomeV1::Settled { analytics_event_id });
+        }
+        if settled > 0 {
+            crate::hotpath_observe::record_transaction_rows(settled);
+        }
+        transaction.commit().await.map_err(|error| {
+            format!("failed to commit observability outbox claim and settlement: {error}")
+        })?;
+        Ok(outcomes)
     }
 
     /// Reads only producer-stamped [`tracedecay_domain::ObservabilityEnvelopeV1`]
@@ -928,6 +1056,53 @@ struct StoredObservabilityOutboxRecord {
     analytics_event_id: Option<i64>,
 }
 
+fn validate_owner_fact_input(
+    project_id: &str,
+    owner_event_id: &str,
+    owner_fact_json: &str,
+) -> Result<(), String> {
+    if project_id.is_empty()
+        || owner_event_id.is_empty()
+        || project_id.len() > 256
+        || owner_event_id.len() > 256
+        || owner_fact_json.len() > MAX_OBSERVABILITY_OUTBOX_JSON_BYTES
+        || serde_json::from_str::<serde_json::Value>(owner_fact_json).is_err()
+    {
+        return Err("invalid observability outbox input".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_prepared_owner_emission(
+    emission: &ObservabilityOwnerEmissionWriteV1,
+    prepared: &PreparedObservabilityEmissionV1,
+) -> Result<(), String> {
+    validate_observability_event(&prepared.event)?;
+    validate_outbox_input(
+        &emission.project_id,
+        &emission.owner_event_id,
+        &emission.owner_fact_json,
+        &prepared.delivery_envelope_json,
+    )?;
+    if prepared.event.project_id != emission.project_id
+        || prepared.event.hint_id.as_deref() != Some(emission.owner_event_id.as_str())
+        || prepared.event.metadata_json.as_deref() != Some(prepared.delivery_envelope_json.as_str())
+    {
+        return Err("observability outbox delivery binding conflict".to_owned());
+    }
+    Ok(())
+}
+
+async fn rollback_observability_write(
+    transaction: RegisteredGlobalDbWriteTransaction<'_>,
+    error: String,
+) -> String {
+    match transaction.rollback().await {
+        Ok(()) => error,
+        Err(rollback_error) => format!("{error}; rollback failed: {rollback_error}"),
+    }
+}
+
 fn validate_outbox_input(
     project_id: &str,
     owner_event_id: &str,
@@ -984,11 +1159,19 @@ async fn read_outbox_record(
     Ok(stored)
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ObservabilityAppendError {
+    #[error("observability idempotency conflict")]
+    Conflict,
+    #[error("{0}")]
+    Failed(String),
+}
+
 async fn append_observability_event_in_existing_tx(
     transaction: &RegisteredGlobalDbWriteTransaction<'_>,
     event: &AnalyticsEventInsert,
-) -> Result<i64, String> {
-    validate_observability_event(event)?;
+) -> Result<i64, ObservabilityAppendError> {
+    validate_observability_event(event).map_err(ObservabilityAppendError::Failed)?;
     let mut rows = transaction
         .query(
             "SELECT id, provider, project_id, session_id, timestamp, event_kind,
@@ -1004,21 +1187,30 @@ async fn append_observability_event_in_existing_tx(
             ],
         )
         .await
-        .map_err(|error| format!("failed to read observability idempotency key: {error}"))?;
-    if let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| format!("failed to decode observability idempotency row: {error}"))?
-    {
-        let stored = row_to_analytics_event(&row)
-            .ok_or_else(|| "failed to decode observability canonical input".to_owned())?;
+        .map_err(|error| {
+            ObservabilityAppendError::Failed(format!(
+                "failed to read observability idempotency key: {error}"
+            ))
+        })?;
+    if let Some(row) = rows.next().await.map_err(|error| {
+        ObservabilityAppendError::Failed(format!(
+            "failed to decode observability idempotency row: {error}"
+        ))
+    })? {
+        let stored = row_to_analytics_event(&row).ok_or_else(|| {
+            ObservabilityAppendError::Failed(
+                "failed to decode observability canonical input".to_owned(),
+            )
+        })?;
         if !analytics_record_matches_insert(&stored, event) {
-            return Err("observability idempotency conflict".to_string());
+            return Err(ObservabilityAppendError::Conflict);
         }
         return Ok(stored.id);
     }
     drop(rows);
-    append_analytics_event_in_existing_tx(transaction, event).await
+    append_analytics_event_in_existing_tx(transaction, event)
+        .await
+        .map_err(ObservabilityAppendError::Failed)
 }
 
 fn validate_observability_event(event: &AnalyticsEventInsert) -> Result<(), String> {

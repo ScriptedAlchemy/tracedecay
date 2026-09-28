@@ -452,26 +452,25 @@ impl std::error::Error for ConnectionPolicyError {
 }
 
 #[derive(Debug)]
-pub enum VerifiedImmutableReaderError {
+pub enum VerifiedReaderError {
     Resolve(io::Error),
     Identity(OpenedDatabaseFileError),
     Policy(ConnectionPolicyError),
 }
 
-impl fmt::Display for VerifiedImmutableReaderError {
+impl fmt::Display for VerifiedReaderError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Resolve(error) => write!(
-                formatter,
-                "could not resolve immutable SQLite path: {error}"
-            ),
-            Self::Identity(error) => write!(formatter, "immutable SQLite identity failed: {error}"),
+            Self::Resolve(error) => {
+                write!(formatter, "could not resolve SQLite reader path: {error}")
+            }
+            Self::Identity(error) => write!(formatter, "SQLite reader identity failed: {error}"),
             Self::Policy(error) => error.fmt(formatter),
         }
     }
 }
 
-impl std::error::Error for VerifiedImmutableReaderError {
+impl std::error::Error for VerifiedReaderError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Resolve(error) => Some(error),
@@ -481,15 +480,16 @@ impl std::error::Error for VerifiedImmutableReaderError {
     }
 }
 
-/// Immutable foreign-database reader bound to the physical file actually
+/// Foreign-database reader bound to the physical file actually
 /// opened by SQLite rather than a later pathname observation.
-pub struct VerifiedImmutableReader {
+pub struct VerifiedReader {
+    _opened_file: OpenedDatabaseFile,
     connection: Connection,
     canonical_path: PathBuf,
     file_identity: u64,
 }
 
-impl VerifiedImmutableReader {
+impl VerifiedReader {
     pub fn connection(&self) -> &Connection {
         &self.connection
     }
@@ -570,6 +570,26 @@ fn finish_open(
     })
 }
 
+/// Opens a verified live database in a retained, query-only SQLite read transaction.
+/// The caller bounds its lifetime; dropping the connection releases the snapshot.
+pub fn open_verified_read_snapshot(path: &Path) -> Result<VerifiedReader, VerifiedReaderError> {
+    open_verified_reader(
+        path,
+        |path| {
+            let connection = open(path, ConnectionMode::Reader)?;
+            connection
+                .execute_batch("BEGIN DEFERRED")
+                .map_err(|source| policy("begin read snapshot", source))?;
+            connection
+                .query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
+                .map_err(|source| policy("pin read snapshot", source))?;
+            Ok(connection)
+        },
+        || {},
+        || {},
+    )
+}
+
 /// Opens an immutable, query-only connection for a foreign or health database.
 ///
 /// Uses `file:…?immutable=1&mode=ro` so diagnosis never creates WAL/SHM
@@ -595,36 +615,32 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
     })
 }
 
-pub fn open_verified_immutable_reader(
-    path: &Path,
-) -> Result<VerifiedImmutableReader, VerifiedImmutableReaderError> {
-    open_verified_immutable_reader_with_hooks(path, || {}, || {})
+pub fn open_verified_immutable_reader(path: &Path) -> Result<VerifiedReader, VerifiedReaderError> {
+    open_verified_reader(path, open_immutable_reader, || {}, || {})
 }
 
-fn open_verified_immutable_reader_with_hooks(
+fn open_verified_reader(
     path: &Path,
+    open_reader: impl FnOnce(&Path) -> Result<Connection, ConnectionPolicyError>,
     after_pin: impl FnOnce(),
     after_open: impl FnOnce(),
-) -> Result<VerifiedImmutableReader, VerifiedImmutableReaderError> {
-    let canonical_path = path
-        .canonicalize()
-        .map_err(VerifiedImmutableReaderError::Resolve)?;
-    let pinned =
-        OpenedDatabaseFile::pin(&canonical_path).map_err(VerifiedImmutableReaderError::Identity)?;
+) -> Result<VerifiedReader, VerifiedReaderError> {
+    let canonical_path = path.canonicalize().map_err(VerifiedReaderError::Resolve)?;
+    let pinned = OpenedDatabaseFile::pin(&canonical_path).map_err(VerifiedReaderError::Identity)?;
     let open_path = pinned
         .reader_open_path(&canonical_path)
-        .map_err(VerifiedImmutableReaderError::Identity)?;
+        .map_err(VerifiedReaderError::Identity)?;
     after_pin();
-    let connection =
-        open_immutable_reader(&open_path).map_err(VerifiedImmutableReaderError::Policy)?;
+    let connection = open_reader(&open_path).map_err(VerifiedReaderError::Policy)?;
     after_open();
     pinned
         .verify_connection(&connection, &canonical_path)
-        .map_err(VerifiedImmutableReaderError::Identity)?;
-    Ok(VerifiedImmutableReader {
+        .map_err(VerifiedReaderError::Identity)?;
+    Ok(VerifiedReader {
         connection,
         canonical_path,
         file_identity: pinned.identity(),
+        _opened_file: pinned,
     })
 }
 

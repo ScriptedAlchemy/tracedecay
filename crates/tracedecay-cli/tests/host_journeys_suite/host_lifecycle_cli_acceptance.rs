@@ -1542,6 +1542,10 @@ fn claude_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
             .get("tracedecay@tracedecay")
             .is_none()
     );
+    assert_eq!(
+        removed_settings["permissions"], settings_before_install["permissions"],
+        "uninstall must take back the plugin allow rule install added"
+    );
     assert!(removed_marketplaces.get("foreign").is_some());
     assert!(removed_marketplaces.get("tracedecay").is_none());
     let uninstall_receipt = latest_receipt(&cli, case.host);

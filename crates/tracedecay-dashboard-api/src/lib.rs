@@ -100,6 +100,8 @@ pub(crate) mod test_support {
     }
 }
 
+mod access;
+pub use access::DashboardAccessToken;
 pub mod analytics_api;
 pub mod application_surface;
 mod automation_authority;
@@ -1074,6 +1076,7 @@ pub fn config_error(message: impl Into<String>) -> TraceDecayError {
 pub struct DashboardTestEndpointV1<'a> {
     pub host: &'a str,
     pub port: u16,
+    pub access: DashboardAccessToken,
 }
 
 #[doc(hidden)]
@@ -1096,6 +1099,7 @@ where
         DashboardRunRequest {
             host: endpoint.host,
             port: endpoint.port,
+            access: endpoint.access,
             build_version,
             spa_routes,
             test_authority: Some(&authority),
@@ -1111,6 +1115,7 @@ where
 struct DashboardRunRequest<'a> {
     host: &'a str,
     port: u16,
+    access: DashboardAccessToken,
     /// The owning composition's build version; served surfaces must report the
     /// caller's product runtime, never a crate-local substitute.
     build_version: &'static str,
@@ -1132,6 +1137,7 @@ where
     let DashboardRunRequest {
         host,
         port,
+        access,
         build_version,
         spa_routes,
         test_authority,
@@ -1201,9 +1207,9 @@ where
     .await?;
     let app = router(cg, state, spa_routes).await?;
     let (listener, addr) = bind_dashboard(host, port).await?;
-    let app = with_dashboard_http_admission(app, addr);
+    let url = access.launch_url(addr);
+    let app = with_dashboard_http_admission(app, addr, access);
 
-    let url = format!("http://{addr}/");
     // Stable, parseable line for wrappers (the Hermes plugin reads this).
     println!("tracedecay dashboard listening on {url}");
     eprintln!("Serving project {}", cg.store_layout.project_root.display());
@@ -1244,6 +1250,7 @@ pub fn validate_dashboard_host(host: &str) -> Result<&str> {
 #[derive(Clone)]
 struct DashboardHttpAdmission {
     port: u16,
+    access: DashboardAccessToken,
 }
 
 const DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS: i64 = 30_000_000;
@@ -1391,9 +1398,16 @@ impl Drop for DashboardHttpCancellationGuard {
     }
 }
 
-pub fn with_dashboard_http_admission(app: Router, addr: std::net::SocketAddr) -> Router {
+pub fn with_dashboard_http_admission(
+    app: Router,
+    addr: std::net::SocketAddr,
+    access: DashboardAccessToken,
+) -> Router {
     let app = app.layer(middleware::from_fn_with_state(
-        DashboardHttpAdmission { port: addr.port() },
+        DashboardHttpAdmission {
+            port: addr.port(),
+            access,
+        },
         admit_dashboard_http_request,
     ));
     with_hotpath_server_layer(app)
@@ -1476,6 +1490,23 @@ fn admit_dashboard_http_control(
         }
     }
 
+    match access::classify_credential(
+        &admission.access,
+        admission.port,
+        request.method(),
+        request.uri(),
+        &headers,
+    ) {
+        access::DashboardCredential::Admitted => {}
+        access::DashboardCredential::Launch {
+            location,
+            set_cookie,
+        } => return Err(Box::new(dashboard_launch_redirect(&location, set_cookie))),
+        access::DashboardCredential::Missing => {
+            return Err(Box::new(dashboard_request_unauthenticated()));
+        }
+    }
+
     let observed_at = tracedecay_session_memory::context::application_observed_at();
     let sequence = DASHBOARD_HTTP_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let identity = format!("dashboard.http.{}.{}", observed_at.0, sequence);
@@ -1522,6 +1553,33 @@ fn internal_error_response(error: impl std::fmt::Display) -> Response {
         })),
     )
         .into_response()
+}
+
+fn dashboard_request_unauthenticated() -> Response {
+    crate::observe::record_error_class("unauthenticated");
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "error": "dashboard_request_unauthenticated",
+            "detail": "open the launch URL that `tracedecay dashboard` printed",
+        })),
+    )
+        .into_response()
+}
+
+fn dashboard_launch_redirect(location: &str, set_cookie: header::HeaderValue) -> Response {
+    let mut response = axum::response::Redirect::to(location).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::SET_COOKIE, set_cookie);
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 fn dashboard_request_forbidden(detail: &'static str) -> Response {
@@ -2356,6 +2414,7 @@ mod authority_tests {
                 )
                 .route("/api/automation/runs", get(deadline_budget)),
             std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            test_dashboard_access().clone(),
         );
         for (method, path, expected) in [
             (
@@ -2376,6 +2435,10 @@ mod authority_tests {
                         .method(method)
                         .uri(path)
                         .header(header::HOST, format!("127.0.0.1:{port}"))
+                        .header(
+                            header::AUTHORIZATION,
+                            test_dashboard_access().basic_authorization(),
+                        )
                         .body(Body::empty())
                         .expect("request"),
                 )
@@ -2397,13 +2460,146 @@ mod authority_tests {
     /// them.
     const TEST_DASHBOARD_AUTHORITY: &str = "127.0.0.1:43127";
 
+    fn test_dashboard_access() -> &'static DashboardAccessToken {
+        static ACCESS: std::sync::LazyLock<DashboardAccessToken> = std::sync::LazyLock::new(|| {
+            DashboardAccessToken::mint().expect("dashboard test access token")
+        });
+        &ACCESS
+    }
+
     /// A GET that the dashboard HTTP admission layer admits.
     fn admitted_request(uri: impl AsRef<str>) -> Request<Body> {
         Request::builder()
             .uri(uri.as_ref())
             .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
+            .header(
+                header::AUTHORIZATION,
+                test_dashboard_access().basic_authorization(),
+            )
             .body(Body::empty())
             .expect("admitted dashboard request")
+    }
+
+    /// Other local accounts reach the same loopback port, so the Host and
+    /// Origin checks alone must not admit a request: only the listener's
+    /// token does, as a Basic password, a session cookie, or a launch URL.
+    #[tokio::test]
+    async fn loopback_requests_need_the_listener_access_token() {
+        async fn probe() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+        let port = 43_128;
+        let access = test_dashboard_access();
+        let other = DashboardAccessToken::mint().expect("second access token");
+        let app = with_dashboard_http_admission(
+            Router::new()
+                .route("/", get(probe))
+                .route("/api/automation/scheduler/pause", post(probe)),
+            std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            access.clone(),
+        );
+        let host = format!("127.0.0.1:{port}");
+        let send = |request: Request<Body>| {
+            let app = app.clone();
+            async move { app.oneshot(request).await.expect("admission response") }
+        };
+        let request = |method: Method, uri: &str| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::HOST, &host)
+        };
+
+        let bare = send(
+            request(Method::POST, "/api/automation/scheduler/pause")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(bare.status(), StatusCode::UNAUTHORIZED);
+        let foreign = send(
+            request(Method::POST, "/api/automation/scheduler/pause")
+                .header(header::AUTHORIZATION, other.basic_authorization())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(foreign.status(), StatusCode::UNAUTHORIZED);
+        let basic = send(
+            request(Method::POST, "/api/automation/scheduler/pause")
+                .header(header::AUTHORIZATION, access.basic_authorization())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(basic.status(), StatusCode::NO_CONTENT);
+
+        let launch_url = access.launch_url(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+        let launch_path = launch_url
+            .strip_prefix(&format!("http://{host}"))
+            .expect("launch URL names the bound listener");
+        let wrong_launch = send(
+            request(Method::GET, &format!("/?token={}", "0".repeat(64)))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(wrong_launch.status(), StatusCode::UNAUTHORIZED);
+        let posted_launch = send(
+            request(Method::POST, launch_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(posted_launch.status(), StatusCode::UNAUTHORIZED);
+        let launch = send(
+            request(Method::GET, &format!("{launch_path}&view=brain"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(launch.status(), StatusCode::SEE_OTHER);
+        assert_eq!(launch.headers()[header::LOCATION], "/?view=brain");
+        let set_cookie = launch.headers()[header::SET_COOKIE]
+            .to_str()
+            .expect("cookie text");
+        let token = launch_path.strip_prefix("/?token=").expect("launch token");
+        assert_eq!(
+            set_cookie,
+            format!("tracedecay_dashboard_{port}={token}; Path=/; HttpOnly; SameSite=Strict")
+        );
+
+        let session = send(
+            request(Method::POST, "/api/automation/scheduler/pause")
+                .header(
+                    header::COOKIE,
+                    format!("theme=dark; tracedecay_dashboard_{port}={token}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(session.status(), StatusCode::NO_CONTENT);
+        let relaunch = send(
+            request(Method::GET, launch_path)
+                .header(
+                    header::COOKIE,
+                    format!("tracedecay_dashboard_{port}={token}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(relaunch.status(), StatusCode::SEE_OTHER);
+        assert_eq!(relaunch.headers()[header::LOCATION], "/");
+        let other_port_cookie = send(
+            request(Method::POST, "/api/automation/scheduler/pause")
+                .header(header::COOKIE, format!("tracedecay_dashboard_1={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(other_port_cookie.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// The router as production serves it.
@@ -2422,6 +2618,10 @@ mod authority_tests {
                 Request::builder()
                     .uri(uri)
                     .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
+                    .header(
+                        header::AUTHORIZATION,
+                        test_dashboard_access().basic_authorization(),
+                    )
                     .body(Body::empty())
                     .expect("dashboard GET request"),
             )
@@ -2441,6 +2641,7 @@ mod authority_tests {
             TEST_DASHBOARD_AUTHORITY
                 .parse()
                 .expect("loopback dashboard authority"),
+            test_dashboard_access().clone(),
         )
     }
 
@@ -3336,6 +3537,10 @@ mod authority_tests {
                     .method(Method::POST)
                     .uri("/api/automation/jobs")
                     .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
+                    .header(
+                        header::AUTHORIZATION,
+                        test_dashboard_access().basic_authorization(),
+                    )
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
@@ -3357,6 +3562,10 @@ mod authority_tests {
                     .method(Method::POST)
                     .uri("/api/automation/jobs/observation-required/run")
                     .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
+                    .header(
+                        header::AUTHORIZATION,
+                        test_dashboard_access().basic_authorization(),
+                    )
                     .body(Body::empty())
                     .expect("run automation job request"),
             )

@@ -1,4 +1,4 @@
-import type { z } from 'zod';
+import type { WireSchema } from '../../data/query/wireSchema.ts';
 import { ResolvedScopeSchema, type ResolvedScope } from '../../contracts/index.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
@@ -36,8 +36,8 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
 export interface WorkRoute<Request, Response> {
   readonly operation: string;
   readonly path: string;
-  readonly request: z.ZodType<Request>;
-  readonly response: z.ZodType<Response>;
+  readonly request: WireSchema<Request>;
+  readonly response: WireSchema<Response>;
 }
 
 /** What a Work call produced: the contract, or a reason there is no contract.

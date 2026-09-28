@@ -1,33 +1,24 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 use crate::runtime::host_scan::HostScanBudget;
 use crate::runtime::source::TranscriptIngestResult;
 
 use super::opencode::{
     MAX_ID_BYTES, MAX_MESSAGES_PER_PAGE, OpenCodeMessageRef, OpenCodePageCursor,
-    OpenCodeReferencePage, OpenCodeScanSource, install_progress_handler, invalid_frame,
-    open_scan_connection, scan_error, sql_text,
+    OpenCodeReferencePage, OpenCodeScanSource, install_progress_handler, invalid_frame, scan_error,
+    sql_text,
 };
 
 pub(super) fn scan_part_reference_page(
+    connection: &Connection,
     source: &OpenCodeScanSource,
     cursor: OpenCodePageCursor,
     mut budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenCodeReferencePage, HostScanBudget)> {
-    let Some(connection) = open_scan_connection(source, &mut budget)? else {
-        return Ok((
-            OpenCodeReferencePage {
-                references: Vec::new(),
-                next: cursor,
-                source_complete: true,
-            },
-            budget,
-        ));
-    };
-    install_progress_handler(&connection, &source.source_path, &budget)?;
+    install_progress_handler(connection, &source.source_path, &budget)?;
     let matcher = source.scope_matcher();
     let mut statement = connection
         .prepare(
