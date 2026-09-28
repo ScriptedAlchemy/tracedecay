@@ -400,7 +400,6 @@ import type {
   LoomBranchSpanV1,
   LoomCommitV1,
   LoomEditedFileV1,
-  LoomEventKindV1,
   LoomEventV1,
   LoomFileSessionProjectionV1,
   LoomSessionModelV1,
@@ -409,6 +408,7 @@ import type {
   LoomSourceStatusV1,
   LoomTemporalPayloadV1,
   LoomTemporalRefreshV1,
+  LoomTestRunOutcomeV1,
   ManagedSkill,
   ManagedSkillMaterializationScope,
   ManagedSkillMetadata,
@@ -5733,20 +5733,25 @@ export const LoomEditedFileV1Schema: z.ZodObject<{
   session_id: z.string(),
 });
 
-export const LoomEventKindV1Schema: z.ZodEnum<["pull_request", "tool_call"]> = z.enum(["pull_request", "tool_call"]);
-
-/** One event a host transcript recorded for a displayed session. */
-export const LoomEventV1Schema: z.ZodObject<{
-  kind: z.ZodType<LoomEventKindV1, z.ZodTypeDef, unknown>;
-  label: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  message_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  ordinal: z.ZodType<number, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  recorded_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  tool_use_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-}> = z.object({
-  kind: z.lazy(() => LoomEventKindV1Schema),
+/** One recorded event on a displayed session's lane. */
+export const LoomEventV1Schema: z.ZodType<LoomEventV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("pull_request"),
+  label: z.string().nullable().optional(),
+  message_id: z.string(),
+  ordinal: z.number().int().safe(),
+  provider: z.string(),
+  recorded_at: z.number().int().safe(),
+  session_id: z.string(),
+}), z.object({
+  kind: z.literal("test_run"),
+  operation_id: z.string(),
+  outcome: z.union([z.lazy(() => LoomTestRunOutcomeV1Schema), z.null()]).optional(),
+  provider: z.string(),
+  recorded_at: z.number().int().safe(),
+  session_id: z.string(),
+  started_at_micros: z.number().int().safe(),
+}), z.object({
+  kind: z.literal("tool_call"),
   label: z.string().nullable().optional(),
   message_id: z.string(),
   ordinal: z.number().int().safe(),
@@ -5754,7 +5759,7 @@ export const LoomEventV1Schema: z.ZodObject<{
   recorded_at: z.number().int().safe(),
   session_id: z.string(),
   tool_use_id: z.string().nullable().optional(),
-});
+})]);
 
 export const LoomFileSessionProjectionV1Schema: z.ZodObject<{
   authority: z.ZodType<string, z.ZodTypeDef, unknown>;
@@ -5880,6 +5885,23 @@ export const LoomTemporalRefreshV1Schema: z.ZodObject<{
   authority: z.string(),
   latest_activated_at_micros: z.number().int().safe().nullable(),
   state: z.lazy(() => DashboardDomainStateV1Schema),
+});
+
+/** The outcome a finished managed test run recorded. */
+export const LoomTestRunOutcomeV1Schema: z.ZodObject<{
+  exit_code: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
+  failed: z.ZodType<number, z.ZodTypeDef, unknown>;
+  finished_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
+  ignored: z.ZodType<number, z.ZodTypeDef, unknown>;
+  passed: z.ZodType<number, z.ZodTypeDef, unknown>;
+  termination: z.ZodType<string, z.ZodTypeDef, unknown>;
+}> = z.object({
+  exit_code: z.number().int().safe().nullable().optional(),
+  failed: z.number().int().safe().min(0),
+  finished_at_micros: z.number().int().safe(),
+  ignored: z.number().int().safe().min(0),
+  passed: z.number().int().safe().min(0),
+  termination: z.string(),
 });
 
 export const ManagedSkillSchema: z.ZodObject<{

@@ -1,25 +1,19 @@
 //! Typed terminal results for failed managed affected-test executions.
 
+use tracedecay_contracts::OperationTermination;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{AffectedTestErrorV1, RunAffectedTestsResultV1};
-use tracedecay_contracts::{Deadline, OperationTermination};
-use tracedecay_domain::UtcMicros;
 
-use tracedecay_application::operation_stream::OperationEmitter;
 use tracedecay_domain::errors::Result;
 
 use super::{
-    TestTarget, emit_observed_test_results, finish_test_run, managed_test_terminal,
-    parse_libtest_output, run_affected_tests_body,
+    ManagedTestRun, TestTarget, emit_observed_test_results, parse_libtest_output,
+    run_affected_tests_body,
 };
 use crate::handlers::graph::graph_tool_completion;
 use crate::{TestRunFailure, TestRunOutput};
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.failure")]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Failure settlement retains the admitted emitter and deadline alongside the exact dispatched target set and observed failure"
-)]
 #[cfg_attr(
     not(feature = "hotpath"),
     expect(
@@ -28,9 +22,7 @@ use crate::{TestRunFailure, TestRunOutput};
     )
 )]
 pub(super) async fn terminal_failure(
-    emitter: &OperationEmitter,
-    started_at: UtcMicros,
-    effective_deadline: &Deadline,
+    managed: &ManagedTestRun,
     timeout_secs: u64,
     failure: TestRunFailure,
     test_names: &[String],
@@ -115,21 +107,19 @@ pub(super) async fn terminal_failure(
             format!("test identity `{test_identity}` is not executable"),
         ),
     };
-    let results = partial.as_ref().map_or_else(Vec::new, |output| {
+    let report = partial.as_ref().map_or_else(Default::default, |output| {
         hotpath::measure_block!(
             "mcp.workflow.affected_tests.parse",
             parse_libtest_output(&output.stdout)
         )
     });
-    emit_observed_test_results(emitter, &results, test_names.len()).await?;
-    let receipt = finish_test_run(
-        emitter,
-        started_at,
-        effective_deadline,
-        termination,
-        output_bytes,
-    )
-    .await?;
+    emit_observed_test_results(&managed.emitter, &report, test_names.len()).await?;
+    let exit_code = partial
+        .as_ref()
+        .map_or(failure_exit_code, |output| output.exit_code);
+    let receipt = managed
+        .finish(termination, output_bytes, exit_code, &report)
+        .await?;
     let partial = partial.unwrap_or(TestRunOutput {
         exit_code: failure_exit_code,
         stdout: String::new(),
@@ -139,11 +129,11 @@ pub(super) async fn terminal_failure(
     let run = hotpath::measure_block!("mcp.workflow.affected_tests.assemble", {
         let mut run = run_affected_tests_body(
             &partial,
-            &results,
+            &report,
             test_names,
             truncated,
             selected_targets,
-            managed_test_terminal(emitter, receipt),
+            managed.terminal(receipt),
         );
         run.error = Some(AffectedTestErrorV1 {
             kind: kind.to_owned(),
