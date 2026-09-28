@@ -8,8 +8,9 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_domain::{
-    ContextOmissionReasonV1, CursorBindingV1, CursorManifestLimitKindV1, RetrievalAnchorId,
-    RetrievalGrainV1, SessionId, TemporalModeV1,
+    ContextOmissionReasonV1, CursorBindingMismatchV1, CursorBindingV1, CursorManifestLimitKindV1,
+    DomainError, ManifestDigest, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
+    canonical_sha256,
 };
 use tracedecay_temporal_query::context::{ContextBudget, ContextError, VersionedTokenEstimator};
 use tracedecay_temporal_query::cursor::CursorError;
@@ -43,6 +44,11 @@ use tracedecay_session_temporal_store::{
 
 mod task_session;
 pub use task_session::TaskSessionRetrievalOutcomeV1;
+
+/// The operation of retrievals that never hand a caller a continuation
+/// (automation context, Work evidence); user-facing operations name
+/// themselves with [`SessionTemporalQuery::with_cursor_request`].
+const INTERNAL_SESSION_RETRIEVAL_OPERATION: &str = "session_retrieval";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionRetrievalConfiguration {
@@ -78,8 +84,51 @@ impl SessionRetrievalConfiguration {
     }
 }
 
+/// The operation a session retrieval continuation belongs to and the
+/// caller-visible request parameters that shape its result set.
+///
+/// The caller names its own request fields, so a refused cursor names the
+/// field the caller changed; the query's own normalized fields are bound
+/// after them and catch anything the caller did not name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionCursorRequest {
+    operation: &'static str,
+    parameters: Vec<(&'static str, ManifestDigest)>,
+}
+
+impl SessionCursorRequest {
+    #[must_use]
+    pub const fn new(operation: &'static str) -> Self {
+        Self {
+            operation,
+            parameters: Vec::new(),
+        }
+    }
+
+    /// Binds the caller-visible request field `name` to `value`.
+    pub fn parameter<T: Serialize + ?Sized>(
+        mut self,
+        name: &'static str,
+        value: &T,
+    ) -> Result<Self, DomainError> {
+        self.parameters.push((name, canonical_sha256(&value)?));
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn operation(&self) -> &'static str {
+        self.operation
+    }
+
+    /// The binding over the caller's parameters.
+    pub fn binding(self) -> Result<CursorBindingV1, DomainError> {
+        CursorBindingV1::new(self.operation, self.parameters)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionTemporalQuery {
+    cursor_request: SessionCursorRequest,
     session_id: SessionId,
     retrieval_scope: SessionRetrievalScope,
     provider: Option<String>,
@@ -132,6 +181,7 @@ impl SessionTemporalQuery {
         }
         let retrieval_scope = SessionRetrievalScope::Session(session_id.clone());
         Ok(Self {
+            cursor_request: SessionCursorRequest::new(INTERNAL_SESSION_RETRIEVAL_OPERATION),
             session_id,
             retrieval_scope,
             provider,
@@ -148,6 +198,14 @@ impl SessionTemporalQuery {
             execution_limits: ExecutionLimits::default(),
             freshness_policy: SessionFreshnessPolicy::AllowStored,
         })
+    }
+
+    /// Names the user-facing operation, and its request fields, a
+    /// continuation from this query is minted for.
+    #[must_use]
+    pub fn with_cursor_request(mut self, cursor_request: SessionCursorRequest) -> Self {
+        self.cursor_request = cursor_request;
+        self
     }
 
     #[must_use]
@@ -650,19 +708,21 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         },
         TemporalKernelError::Cursor(error) => match error {
             CursorError::Binding(mismatch) => SessionRetrievalOutcome::CursorRefused(mismatch),
+            // Unverifiable, or authentic with a matching binding but minted
+            // for another admitted request: no retry repairs either.
+            CursorError::Malformed | CursorError::Tampered | CursorError::WrongRequest => {
+                SessionRetrievalOutcome::CursorRefused(CursorBindingMismatchV1::Foreign)
+            }
             CursorError::RootMismatch
             | CursorError::SessionMismatch
             | CursorError::WrongAccess
             | CursorError::FilterMismatch
             | CursorError::TemporalModeMismatch
             | CursorError::GrainMismatch => SessionRetrievalOutcome::WrongScope,
-            CursorError::Malformed
-            | CursorError::Tampered
-            | CursorError::Expired
+            CursorError::Expired
             | CursorError::UnknownOrExpiredKey
             | CursorError::SortKeyMismatch => SessionRetrievalOutcome::Denied,
-            CursorError::WrongRequest
-            | CursorError::SchemaMismatch
+            CursorError::SchemaMismatch
             | CursorError::RankingMismatch
             | CursorError::ConfigurationMismatch
             | CursorError::GenerationMismatch
@@ -929,25 +989,26 @@ fn digest_request(
     })
 }
 
-/// The request parameters a session retrieval continuation is minted for.
-fn session_cursor_binding(
-    query: &SessionTemporalQuery,
-) -> Result<CursorBindingV1, tracedecay_domain::DomainError> {
-    CursorBindingV1::builder("session_retrieval")
-        .parameter("query", &query.query)
-        .parameter("scope", &query.retrieval_scope.kind())
+/// The operation and request parameters a session retrieval continuation is
+/// minted for: the caller's named fields first, then the normalized query.
+fn session_cursor_binding(query: &SessionTemporalQuery) -> Result<CursorBindingV1, DomainError> {
+    query
+        .cursor_request
+        .clone()
+        .parameter("query", &query.query)?
+        .parameter("scope", &query.retrieval_scope.kind())?
         .parameter(
             "session_id",
             &query.retrieval_scope.session_id().map(SessionId::as_str),
-        )
-        .parameter("provider", &query.provider)
-        .parameter("direct_anchor", &query.direct_anchor)
-        .parameter("filters", &query.semantic_filter)
-        .parameter("compatibility_filter", &query.compatibility_filter_digest)
-        .parameter("temporal_mode", &query.temporal_mode)
-        .parameter("grain", &query.grain)
-        .parameter("limit", &query.limit)
-        .build()
+        )?
+        .parameter("provider", &query.provider)?
+        .parameter("direct_anchor", &query.direct_anchor)?
+        .parameter("filters", &query.semantic_filter)?
+        .parameter("compatibility_filter", &query.compatibility_filter_digest)?
+        .parameter("temporal_mode", &query.temporal_mode)?
+        .parameter("grain", &query.grain)?
+        .parameter("limit", &query.limit)?
+        .binding()
 }
 
 fn digest_filters(query: &SessionTemporalQuery) -> String {
@@ -1409,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_refusals_split_into_scope_denial_and_unavailability() {
+    fn cursor_refusals_split_into_scope_denial_refusal_and_unavailability() {
         for error in [
             CursorError::RootMismatch,
             CursorError::SessionMismatch,
@@ -1422,18 +1483,21 @@ mod tests {
                 SessionRetrievalOutcome::WrongScope
             );
         }
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Cursor(CursorError::SortKeyMismatch)),
+            SessionRetrievalOutcome::Denied
+        );
         for error in [
             CursorError::Malformed,
             CursorError::Tampered,
-            CursorError::SortKeyMismatch,
+            CursorError::WrongRequest,
         ] {
             assert_eq!(
                 map_kernel_error(TemporalKernelError::Cursor(error)),
-                SessionRetrievalOutcome::Denied
+                SessionRetrievalOutcome::CursorRefused(CursorBindingMismatchV1::Foreign)
             );
         }
         for error in [
-            CursorError::WrongRequest,
             CursorError::SchemaMismatch,
             CursorError::RankingMismatch,
             CursorError::ConfigurationMismatch,

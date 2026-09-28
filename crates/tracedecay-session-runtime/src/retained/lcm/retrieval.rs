@@ -19,7 +19,9 @@ use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeTarget, LcmExpandQueryPagination, LcmExpandQueryResponse,
     LcmExpandTarget, LcmSourceRef,
 };
-use tracedecay_session_memory::session::{SessionRetrievalScope, SessionTemporalQuery};
+use tracedecay_session_memory::session::{
+    SessionCursorRequest, SessionRetrievalScope, SessionTemporalQuery,
+};
 use tracedecay_sessions::runtime::git_correlation::{GitScopeFilter, git_scope_filter_from_args};
 use tracedecay_sessions::runtime::{
     SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
@@ -29,8 +31,8 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 
 use super::output;
 use super::{
-    cursor, message_type, optional_provider, optional_usize, relationship_scope, required,
-    session_id, specific_provider, time_filter, trimmed, unsigned_i64,
+    cursor, cursor_request, message_type, optional_provider, optional_usize, relationship_scope,
+    required, session_id, specific_provider, time_filter, trimmed, unsigned_i64,
 };
 use crate::retained::session_retrieval_unavailable_detail;
 use crate::session_retrieval::{
@@ -94,13 +96,23 @@ pub(super) async fn execute_load_session(
     {
         roles.push(role.to_owned());
     }
+    let temporal_mode = request.temporal_mode.unwrap_or(TemporalModeV1::Forensic);
+    let limit = bounded_limit(request.limit, 50)?;
+    // Roles and the time range are bound through the query's filters; only
+    // the per-message content slice shapes this page beyond the query.
+    let cursor_request = cursor_request("lcm_load_session", |bound| {
+        bound
+            .parameter("content_offset", &slice.offset)?
+            .parameter("content_limit", &slice.limit)
+    })?;
     let query = retrieval_query(
+        cursor_request,
         &session_id,
         provider,
         "",
         cursor(request.cursor.as_deref())?,
-        request.temporal_mode.unwrap_or(TemporalModeV1::Forensic),
-        bounded_limit(request.limit, 50)?,
+        temporal_mode,
+        limit,
         default_context_budget(),
         SessionRetrievalScope::Session(session_id.clone()),
         SessionSearchScope::All,
@@ -185,32 +197,57 @@ pub(super) async fn execute_grep(
         .role
         .map(|role| vec![role.as_str().to_owned()])
         .unwrap_or_default();
-    let start = request.start_time.as_ref().or(request.since.as_ref());
-    let end = request.end_time.as_ref().or(request.until.as_ref());
+    let start_time = time_filter(
+        request.start_time.as_ref().or(request.since.as_ref()),
+        SearchTimeBound::Start,
+    )?;
+    let end_time = time_filter(
+        request.end_time.as_ref().or(request.until.as_ref()),
+        SearchTimeBound::End,
+    )?;
     let git_filter = git_scope_filter_from_args(
         trimmed(request.branch.as_deref())?,
         trimmed(request.worktree.as_deref())?,
         trimmed(request.commit.as_deref())?,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+    let temporal_mode = request.temporal_mode.unwrap_or(TemporalModeV1::Current);
+    let limit = bounded_limit(request.limit, 10)?;
+    let source = trimmed(request.source.as_deref())?.map(str::to_owned);
+    let include_summaries = request.include_summaries.unwrap_or(false);
+    let cursor_request = cursor_request("lcm_grep", |bound| {
+        bound
+            .parameter("sort", &request.sort.unwrap_or(LcmGrepSortV1::Relevance))?
+            .parameter("relationship_scope", &request.relationship_scope)?
+            .parameter("message_type", &request.message_type)?
+            .parameter("role", &request.role)?
+            .parameter("since", &start_time)?
+            .parameter("until", &end_time)?
+            .parameter("source", &source)?
+            .parameter("include_summaries", &include_summaries)?
+            .parameter("branch", &request.branch)?
+            .parameter("worktree", &request.worktree)?
+            .parameter("commit", &request.commit)
+    })?;
     let query = retrieval_query(
+        cursor_request,
         &anchor,
         provider,
         query_text,
         cursor(request.cursor.as_deref())?,
-        request.temporal_mode.unwrap_or(TemporalModeV1::Current),
-        bounded_limit(request.limit, 10)?,
+        temporal_mode,
+        limit,
         default_context_budget(),
         retrieval_scope,
         relationship_scope,
         message_type,
         roles,
         SessionSearchTimeRange {
-            start_time: time_filter(start, SearchTimeBound::Start)?,
-            end_time: time_filter(end, SearchTimeBound::End)?,
+            start_time,
+            end_time,
         },
-        trimmed(request.source.as_deref())?.map(str::to_owned),
-        request.include_summaries.unwrap_or(false),
+        source,
+        include_summaries,
         git_filter,
     )?;
     let (results, temporal, status, omitted) = retrieval_page(
@@ -539,10 +576,20 @@ pub(super) async fn execute_expand_query(
     if cursor.is_some() && node_ids.len() > 1 {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
+    let cursor_request = cursor_request("lcm_expand_query", |bound| {
+        bound
+            .parameter("prompt", &prompt)?
+            .parameter("query", &query)?
+            .parameter("node_ids", &node_ids)?
+            .parameter("max_results", &max_results)?
+            .parameter("max_tokens", &max_tokens)?
+            .parameter("context_max_tokens", &context_max_tokens)
+    })?;
     let (response, status, omitted, temporal) = if node_ids.is_empty() {
         expand_query_from_search(
             service,
             context,
+            cursor_request,
             provider,
             &session_id,
             &prompt,
@@ -557,6 +604,7 @@ pub(super) async fn execute_expand_query(
         expand_query_from_nodes(
             service,
             context,
+            cursor_request,
             provider,
             &session_id,
             &prompt,
@@ -604,6 +652,7 @@ fn clamped_text(
     reason = "Maps independent retained request filters into the canonical temporal query; no additional request authority is introduced."
 )]
 fn retrieval_query(
+    cursor_request: SessionCursorRequest,
     session_id: &SessionId,
     provider: Option<&str>,
     query_text: &str,
@@ -641,6 +690,7 @@ fn retrieval_query(
         context_budget,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
+    .with_cursor_request(cursor_request)
     .with_retrieval_scope(retrieval_scope)
     .with_execution_limits(crate::session_retrieval::admitted_execution_limits(limit));
     Ok(SessionRetrievalCommand::new(
@@ -924,6 +974,7 @@ fn expand_result(
 async fn expand_query_from_search(
     service: &dyn SessionApplicationRetrievalPortV1,
     context: &RetainedSurfaceExecutionContextV1<'_>,
+    cursor_request: SessionCursorRequest,
     provider: &str,
     session_id: &SessionId,
     prompt: &str,
@@ -942,6 +993,7 @@ async fn expand_query_from_search(
     RetainedSurfaceExecutionErrorV1,
 > {
     let temporal_query = retrieval_query(
+        cursor_request,
         session_id,
         Some(provider),
         query.unwrap_or(prompt),
@@ -987,6 +1039,7 @@ async fn expand_query_from_search(
 async fn expand_query_from_nodes(
     service: &dyn SessionApplicationRetrievalPortV1,
     context: &RetainedSurfaceExecutionContextV1<'_>,
+    cursor_request: SessionCursorRequest,
     provider: &str,
     session_id: &SessionId,
     prompt: &str,
@@ -1014,6 +1067,7 @@ async fn expand_query_from_nodes(
     let expansions = stream::iter(selected.into_iter().enumerate())
         .map(|(index, node_id)| {
             let cursor = cursor.clone();
+            let cursor_request = cursor_request.clone();
             async move {
                 let outcome = hotpath::future!(
                     service.expand_lcm_admitted(
@@ -1033,7 +1087,8 @@ async fn expand_query_from_nodes(
                             Some(max_results),
                             cursor,
                             SessionRetrievalStoreScope::Profile,
-                        ),
+                        )
+                        .with_cursor_request(cursor_request),
                     ),
                     label = "daemon.store_runtime.lcm.expand_query.node"
                 )

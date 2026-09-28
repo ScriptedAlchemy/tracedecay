@@ -560,6 +560,23 @@ impl MessageSearchInput {
             &semantic_filter,
         ))
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+        let cursor_request = super::lcm::cursor_request("message_search", |bound| {
+            bound
+                .parameter("goals", &self.goals)?
+                .parameter("project_key", &self.project_key)?
+                .parameter("include_subagents", &self.include_subagents)?
+                .parameter("require_fresh", &self.require_fresh)?
+                .parameter("parent_session_id", &self.parent_session_id)?
+                .parameter("since", &self.since)?
+                .parameter("until", &self.until)?
+                .parameter("scope", &temporal_session_scope(self.scope))?
+                .parameter("message_type", &temporal_message_type(self.message_type))?
+                .parameter("branch", &self.git.branch)?
+                .parameter("worktree", &self.git.worktree)?
+                .parameter("commit", &self.git.commit)?
+                .parameter("workflow_run", &self.workflow_run)?
+                .parameter("workflow_agent", &self.workflow_agent)
+        })?;
         SessionTemporalQuery::new(
             SessionId::new(MESSAGE_SEARCH_ROOT_SESSION_ID).map_err(|_| {
                 RetainedSurfaceExecutionErrorV1::unavailable(
@@ -582,6 +599,7 @@ impl MessageSearchInput {
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
         .map(|query| {
             query
+                .with_cursor_request(cursor_request)
                 .with_retrieval_scope(SessionRetrievalScope::AllSessionsInAuthorizedRoot)
                 .with_freshness_policy(if self.require_fresh {
                     SessionFreshnessPolicy::RequireFresh

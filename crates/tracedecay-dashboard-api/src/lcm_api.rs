@@ -85,6 +85,9 @@ pub enum DashboardLcmReadStateV1 {
     Redacted,
     Unavailable,
     CursorManifestLimitExceeded,
+    /// The page cursor was minted for another route or query; the reason is
+    /// the cursor refusal code and the caller restarts without the cursor.
+    CursorRefused,
     BudgetExhausted,
     TimedOut,
     Cancelled,
@@ -650,6 +653,9 @@ where
                 DashboardLcmReadStateV1::Denied => DashboardEnvelopeV1::denied(scope, None),
                 DashboardLcmReadStateV1::Redacted => {
                     typed_not_ready_envelope(scope, DashboardDomainStateV1::Redacted, reason)
+                }
+                DashboardLcmReadStateV1::CursorRefused => {
+                    DashboardEnvelopeV1::error(scope, None, reason)
                 }
                 DashboardLcmReadStateV1::Unavailable
                 | DashboardLcmReadStateV1::CursorManifestLimitExceeded

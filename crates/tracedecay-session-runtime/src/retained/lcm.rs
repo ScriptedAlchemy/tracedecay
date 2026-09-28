@@ -20,7 +20,7 @@ use tracedecay_contracts::{
     RetainedLcmRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1,
 };
-use tracedecay_domain::SessionId;
+use tracedecay_domain::{DomainError, SessionId};
 use tracedecay_lcm::LcmStatus;
 use tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState;
 use tracedecay_lcm::types::LcmPayloadCoverageState;
@@ -49,7 +49,7 @@ use crate::session_retrieval::{
 use tracedecay_contracts::retained_receipts::evidence_outcome;
 use tracedecay_runtime_core::timeutil::SearchTimeBound;
 use tracedecay_session_memory::context::ResolvedSessionIdentity;
-use tracedecay_session_memory::session::SessionTemporalQuery;
+use tracedecay_session_memory::session::{SessionCursorRequest, SessionTemporalQuery};
 
 mod output;
 mod retrieval;
@@ -162,7 +162,8 @@ impl SessionApplicationRetrievalPortV1 for ScopedRetrieval<'_> {
             command.source_limit(),
             command.cursor().map(str::to_owned),
             self.scope,
-        );
+        )
+        .with_cursor_request(command.cursor_request().clone());
         self.inner
             .expand_lcm_admitted(context, self.cancellation, command)
     }
@@ -1017,6 +1018,17 @@ pub(super) fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> S
 
 pub(super) fn message_type(value: Option<MessageTypeFilterV1>) -> SessionMessageType {
     SessionMessageType::from(value.unwrap_or(MessageTypeFilterV1::All))
+}
+
+/// The continuation binding of `operation` over the request fields `bind`
+/// names; a relative time filter is bound as the instant it resolved to, so
+/// replaying its cursor after the window moved is refused naming that field.
+pub(super) fn cursor_request(
+    operation: &'static str,
+    bind: impl FnOnce(SessionCursorRequest) -> Result<SessionCursorRequest, DomainError>,
+) -> Result<SessionCursorRequest, RetainedSurfaceExecutionErrorV1> {
+    bind(SessionCursorRequest::new(operation))
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
 pub(super) fn time_filter(

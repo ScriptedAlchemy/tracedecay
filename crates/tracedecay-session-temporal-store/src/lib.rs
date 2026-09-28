@@ -54,7 +54,8 @@ use tracedecay_contracts::retrieval::{
     SessionRetrievalBudgetStageV1,
 };
 use tracedecay_domain::{
-    CursorBindingV1, HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1,
+    CursorBindingMismatchV1, CursorBindingV1, HydrationStateV1, RetrievalAnchorId, SessionId,
+    SignedCursorKeyRefV1,
 };
 
 use self::execution::{
@@ -1396,16 +1397,23 @@ fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
         CursorError::Binding(_) => SessionTemporalExecutionError::Kernel(
             tracedecay_temporal_query::TemporalKernelError::Cursor(error),
         ),
+        // Unverifiable, or authentic but minted for another request: either
+        // way this operation did not issue it for this request.
+        CursorError::Malformed | CursorError::Tampered | CursorError::WrongRequest => {
+            SessionTemporalExecutionError::Kernel(
+                tracedecay_temporal_query::TemporalKernelError::Cursor(CursorError::Binding(
+                    CursorBindingMismatchV1::Foreign,
+                )),
+            )
+        }
         CursorError::RootMismatch
         | CursorError::SessionMismatch
         | CursorError::WrongAccess
         | CursorError::TemporalModeMismatch
         | CursorError::GrainMismatch => SessionTemporalExecutionError::WrongScope,
-        CursorError::Malformed
-        | CursorError::Tampered
-        | CursorError::WrongRequest
-        | CursorError::FilterMismatch
-        | CursorError::SortKeyMismatch => SessionTemporalExecutionError::Denied,
+        CursorError::FilterMismatch | CursorError::SortKeyMismatch => {
+            SessionTemporalExecutionError::Denied
+        }
         CursorError::Expired
         | CursorError::UnknownOrExpiredKey
         | CursorError::SchemaMismatch
@@ -1431,10 +1439,14 @@ mod cursor_access_tests {
     use super::*;
 
     #[test]
-    fn request_rebinding_is_denied_while_missing_key_authority_is_unavailable() {
+    fn request_rebinding_is_refused_while_missing_key_authority_is_unavailable() {
         assert!(matches!(
             map_lcm_cursor_error(CursorError::WrongRequest),
-            SessionTemporalExecutionError::Denied
+            SessionTemporalExecutionError::Kernel(
+                tracedecay_temporal_query::TemporalKernelError::Cursor(CursorError::Binding(
+                    CursorBindingMismatchV1::Foreign
+                ))
+            )
         ));
         assert!(matches!(
             map_lcm_cursor_error(CursorError::KeyUnavailable),

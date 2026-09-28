@@ -556,9 +556,9 @@ mod tests {
         .with_provider_scope(Some("codex".to_string()))
         .expect("provider scope");
         AuthorizedTemporalExecutionRequest::new(
+            snapshot,
             tracedecay_domain::CursorBindingV1::new("session_retrieval", Vec::new())
                 .expect("cursor binding"),
-            snapshot,
             "graph stale".to_string(),
             None,
             10,
@@ -586,9 +586,9 @@ mod tests {
         let request = root_execution_request(query);
         let snapshot = request.snapshot_request().clone();
         AuthorizedTemporalExecutionRequest::new(
+            snapshot.with_execution_control(control),
             tracedecay_domain::CursorBindingV1::new("session_retrieval", Vec::new())
                 .expect("cursor binding"),
-            snapshot.with_execution_control(control),
             query.to_string(),
             None,
             10,
@@ -624,9 +624,9 @@ mod tests {
         .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot)
         .with_limits(limits);
         AuthorizedTemporalExecutionRequest::new(
+            snapshot,
             tracedecay_domain::CursorBindingV1::new("session_retrieval", Vec::new())
                 .expect("cursor binding"),
-            snapshot,
             query.to_string(),
             None,
             10,
