@@ -1845,6 +1845,20 @@ impl CodeIndexSchedulerRegistryV1 {
                                      the graph after the serving decode"
                                 ),
                                 Ok(Ok((replay_binding, Ok(reservation), decoder))) => {
+                                    // The sampler reads whole-process resident
+                                    // memory. A text projection that is still
+                                    // running owns its own admission and keeps
+                                    // allocating in this window; recording that
+                                    // rise would charge the next graph build for
+                                    // memory it did not use. A projection that
+                                    // has already finished is in the baseline,
+                                    // so the rise from here is the graph build.
+                                    let graph_growth_is_exclusive = published_text_projection
+                                        .as_ref()
+                                        .is_none_or(tokio::task::JoinHandle::is_finished)
+                                        && retained_text_projection
+                                            .as_ref()
+                                            .is_none_or(tokio::task::JoinHandle::is_finished);
                                     let resident_peak = ProcessResidentPeakV1::start()
                                         .inspect_err(|error| {
                                             tracing::warn!(
@@ -1856,6 +1870,11 @@ impl CodeIndexSchedulerRegistryV1 {
                                         })
                                         .ok()
                                         .flatten();
+                                    // The sampler reads the whole process. A test
+                                    // parks here once that window is open so a
+                                    // lexical resident spike lands inside it.
+                                    #[cfg(test)]
+                                    Self::wait_for_graph_growth_sample(&worker_project_root).await;
                                     let published = worker_graph_activation
                                         .publish_sealed_graph(
                                             &worker_project_id,
@@ -1866,17 +1885,50 @@ impl CodeIndexSchedulerRegistryV1 {
                                             Arc::clone(&worker_shutting_down),
                                         )
                                         .await;
+                                    // Unit tests mount a memory authority, which
+                                    // abstains without building. An armed
+                                    // measurement still runs the sealed row build
+                                    // in this window and reports it published, so
+                                    // the recorder sees the same overlap the
+                                    // persistent authority produces.
+                                    #[cfg(test)]
+                                    let published = if matches!(published, Ok(false))
+                                        && Self::take_graph_measurement_publish(
+                                            &worker_project_root,
+                                        ) {
+                                        Self::build_overlapping_sealed_graph(
+                                            &worker_scheduler,
+                                            &built_generation_id,
+                                        )
+                                        .expect("overlapping sealed graph build");
+                                        Ok(true)
+                                    } else {
+                                        published
+                                    };
                                     let growth =
                                         resident_peak.and_then(ProcessResidentPeakV1::finish);
                                     drop(reservation);
-                                    if let (Ok(true), Some(decoder), Some(growth)) =
-                                        (&published, decoder.as_ref(), growth)
-                                    {
-                                        decoder.record_sealed_graph_build_growth(
-                                            &built_generation_id,
-                                            growth,
+                                    if graph_growth_is_exclusive {
+                                        if let (Ok(true), Some(decoder), Some(growth)) =
+                                            (&published, decoder.as_ref(), growth)
+                                        {
+                                            decoder.record_sealed_graph_build_growth(
+                                                &built_generation_id,
+                                                growth,
+                                            );
+                                        }
+                                    } else if matches!(&published, Ok(true)) {
+                                        tracing::info!(
+                                            event = "code_index_graph_build_measurement_withheld",
+                                            generation_id = %built_generation_id,
+                                            growth_bytes = ?growth,
+                                            "sealed graph build overlapped another reserved build; \
+                                             its resident growth was not charged forward"
                                         );
                                     }
+                                    #[cfg(test)]
+                                    Self::wait_for_graph_growth_recorded(&worker_project_root)
+                                        .await;
                                     match published {
                                         Ok(published) => graph_head_published = published,
                                         Err(error) if error.is_resident_memory_graph_refusal() => {

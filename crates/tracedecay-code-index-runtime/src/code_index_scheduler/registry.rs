@@ -2609,6 +2609,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 && let Some(opened) = opened.take()
             {
                 let _ = opened.send(());
+                // The publication's lexical build keeps running after it has
+                // opened its reservation. A test can hold that task, and a
+                // resident spike it owns, across the graph measurement window.
+                #[cfg(test)]
+                if installed.is_none() {
+                    Self::wait_for_published_text_overlap_hold(&project_root).await;
+                }
             }
             match advance {
                 Ok(Ok(true)) => {

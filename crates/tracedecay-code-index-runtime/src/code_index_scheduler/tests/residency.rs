@@ -5,14 +5,17 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentHoldingV1,
+    ProcessResidentMemoryV1, ProcessResidentSampleV1, ProcessSharedMemoryReservationV1,
+    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1, ResidentHoldingV1,
     ResidentMemoryComponentIdV1, ResidentMemoryPressureV1, ResidentOwnerBytesV1,
     ResidentOwnerKindV1, ResidentOwnerReleaseCauseV1, ResidentOwnerReleaseV1,
     ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersReportV1,
-    ResidentOwnersV1,
+    ResidentOwnersV1, resident_memory_watermark_bytes_v1,
 };
 
+use super::super::publication_store::{ActiveGenerationDecodeChargeV1, ActiveGenerationWorkV1};
 use super::super::{
     CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1, CodeIndexWorkerPhaseV1,
 };
@@ -571,4 +574,140 @@ async fn readers_of_a_build_waiting_for_memory_do_not_spin_the_worker() {
     assert!(text.query_owners_are_ready());
 
     registry.shutdown().await;
+}
+
+/// Resident bytes the publication's lexical projection holds while the sealed
+/// graph build is measured. Large enough that a process-wide sample cannot
+/// confuse it with the one-file graph build's own working set.
+const OVERLAPPING_LEXICAL_HOLD_BYTES: usize = 64 * 1024 * 1024;
+
+/// A publication runs the lexical projection and the sealed graph build in one
+/// process. The graph build's next charge is its own structural bound; memory
+/// the lexical projection holds during that window is already its admission
+/// and must not refuse the graph build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_lexical_resident_growth_is_not_charged_to_the_next_graph_build() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let canonical = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry.arm_graph_measurement_publish(canonical.clone());
+    let (overlap_entered, allocate, held, release_hold) = registry
+        .pause_published_text_overlap_hold(canonical.clone(), OVERLAPPING_LEXICAL_HOLD_BYTES);
+    let (sampled, release_sample, recorded, release_recorded) =
+        registry.pause_graph_growth_window(canonical.clone());
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+
+    tokio::time::timeout(Duration::from_mins(1), overlap_entered)
+        .await
+        .expect("lexical projection did not open during the graph window")
+        .expect("overlap hold stayed armed");
+    tokio::time::timeout(Duration::from_mins(1), sampled)
+        .await
+        .expect("graph growth sampler did not start")
+        .expect("growth window stayed armed");
+    allocate
+        .send(())
+        .expect("lexical projection is waiting to allocate");
+    tokio::time::timeout(Duration::from_mins(1), held)
+        .await
+        .expect("lexical projection did not retain its resident hold")
+        .expect("overlap hold stayed armed");
+    release_sample
+        .send(())
+        .expect("graph build is waiting on the open sampler");
+    tokio::time::timeout(Duration::from_mins(2), recorded)
+        .await
+        .expect("graph growth was not recorded")
+        .expect("growth window stayed armed");
+    release_hold
+        .send(())
+        .expect("lexical projection is waiting to drop its hold");
+
+    let hold = u64::try_from(OVERLAPPING_LEXICAL_HOLD_BYTES).expect("hold fits u64");
+    let (bound, charged, admitted) = {
+        let scheduler = registry
+            .scheduler_handle(fixture.path())
+            .await
+            .expect("scheduler handle");
+        let mut scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let decoder = scheduler
+            .active_generation_decoder()
+            .expect("publication store");
+        // The seal drops the in-memory generation before graph measurement.
+        // Decoding it again preserves a growth sample already stored for this
+        // content, which is what the next graph build is charged.
+        let generation = decoder
+            .load_active_shared()
+            .expect("decode the sealed generation")
+            .expect("a generation is published");
+        let bound = generation
+            .graph_build_bound()
+            .expect("graph build bound")
+            .peak_bytes();
+        drop(generation);
+        assert!(
+            bound > 0 && bound < hold / 2,
+            "the one-file graph bound {bound} must sit below the {hold}-byte lexical hold"
+        );
+        assert!(decoder.release_decoded_active().is_some());
+        let target_watermark = bound.saturating_add(hold / 8);
+        assert!(target_watermark < hold);
+        let limit = NonZeroU64::new(target_watermark.saturating_mul(1000).div_ceil(900).max(1))
+            .expect("admission limit");
+        let watermark = resident_memory_watermark_bytes_v1(
+            limit,
+            RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
+        );
+        assert!(
+            watermark >= bound && watermark < hold,
+            "watermark {watermark} must fit the graph bound {bound} and refuse the lexical hold {hold}"
+        );
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| {
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: 0,
+                    unreclaimable_bytes: 0,
+                })
+            }),
+        ));
+        scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
+            limit, pressure,
+        )));
+        let decoder = scheduler
+            .active_generation_decoder()
+            .expect("publication store after rebind");
+        let charged = match decoder
+            .active_generation_charge(ActiveGenerationWorkV1::SealedGraphBuild)
+            .expect("graph build charge")
+        {
+            ActiveGenerationDecodeChargeV1::Measured { bytes, .. } => bytes,
+            other => panic!("the next graph build has no measured charge: {other:?}"),
+        };
+        let admitted = decoder.admit_sealed_graph_build();
+        (bound, charged, admitted)
+    };
+    release_recorded
+        .send(())
+        .expect("worker is waiting to leave the growth window");
+    registry.shutdown().await;
+
+    assert!(
+        matches!(admitted, Ok(Some(_))),
+        "the next graph build was charged {charged} bytes after a {hold}-byte lexical hold overlapped its measurement; its own structural bound is {bound}: {admitted:?}"
+    );
+    assert!(
+        charged <= bound,
+        "graph charge {charged} includes the overlapping lexical hold; the structural bound is {bound}"
+    );
 }
