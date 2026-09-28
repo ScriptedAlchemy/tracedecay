@@ -377,13 +377,35 @@ pub(super) fn advance_provider_transcript_participant_generation(
         .expect("open provider transcript for participant refresh");
     writeln!(transcript, "{record}").expect("append provider transcript participant refresh");
     drop(transcript);
+    import_provider_transcript(
+        home,
+        project,
+        "refreshed through the public sessions import authority",
+        PROVIDER_TRANSCRIPT_REFRESH_MESSAGE_ID,
+    );
+}
+
+/// `sessions import` only schedules catch-up, so the journey reads nothing
+/// until the imported message is searchable through the same public CLI.
+fn import_provider_transcript(home: &Path, project: &Path, query: &str, message_id: &str) {
     run(
         common::tracedecay_command_with_home(home)
             .args(["sessions", "import", "--project-path"])
             .arg(project)
             .current_dir(project),
-        "tracedecay sessions import participant refresh",
+        "tracedecay sessions import",
     );
+    wait_until(&format!("{message_id} to become searchable"), || {
+        let output = common::tracedecay_command_with_home(home)
+            .args(["sessions", "search", query, "--project-path"])
+            .arg(project)
+            .current_dir(project)
+            .output()
+            .expect("tracedecay sessions search");
+        String::from_utf8_lossy(&output.stdout)
+            .contains(message_id)
+            .then_some(())
+    });
 }
 
 fn initialize_project(home: &Path, project: &Path) -> (String, CommitId) {
@@ -1279,12 +1301,11 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             .filter(|attempt| attempt.state() == WorkAttemptStateV1::Succeeded)
     });
     write_provider_transcript(&home, &project, completed_synthesis.identity());
-    run(
-        common::tracedecay_command_with_home(&home)
-            .args(["sessions", "import", "--project-path"])
-            .arg(&project)
-            .current_dir(&project),
-        "tracedecay sessions import",
+    import_provider_transcript(
+        &home,
+        &project,
+        "completed through the typed SDK provider session",
+        PROVIDER_TRANSCRIPT_ASSISTANT_MESSAGE_ID,
     );
     let graph = client
         .execute::<WorkViews>(&WorkGraphReadRequestV1::current(
