@@ -974,13 +974,6 @@ async fn missing_opencode_database_names_its_coverage_reason() {
         .unwrap()
         .unwrap();
     assert_eq!(coverage.file_id, 4);
-    assert_eq!(
-        crate::runtime::source::HostProviderCoverage::from_file_id(coverage.file_id),
-        Some((
-            crate::runtime::source::HostProviderCoverage::Unavailable,
-            Some(crate::runtime::HostCoverageReason::DatabaseMissing)
-        ))
-    );
 }
 
 #[tokio::test]

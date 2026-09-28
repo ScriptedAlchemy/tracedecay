@@ -397,36 +397,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            health.provider_coverage,
-            [
-                SessionProviderCoverage {
-                    provider: "claude".into(),
-                    state: SessionProviderCoverageState::Unavailable,
-                    deferred_units: 1,
-                    reason: None,
+            serde_json::to_value(&health.provider_coverage).unwrap(),
+            serde_json::json!([
+                {"provider": "claude", "state": "unavailable", "deferred_units": 1},
+                {
+                    "provider": "kimi",
+                    "state": "unavailable",
+                    "deferred_units": 1,
+                    "reason": "source_identity_unavailable",
                 },
-                SessionProviderCoverage {
-                    provider: "kimi".into(),
-                    state: SessionProviderCoverageState::Unavailable,
-                    deferred_units: 1,
-                    reason: Some(crate::HostCoverageReason::SourceIdentityUnavailable),
+                {
+                    "provider": "pi",
+                    "state": "unavailable",
+                    "deferred_units": 1,
+                    "reason": "database_missing",
                 },
-                SessionProviderCoverage {
-                    provider: "pi".into(),
-                    state: SessionProviderCoverageState::Unavailable,
-                    deferred_units: 1,
-                    reason: Some(crate::HostCoverageReason::DatabaseMissing),
-                },
-            ]
-        );
-        assert_eq!(
-            serde_json::to_value(&health.provider_coverage[2]).unwrap(),
-            serde_json::json!({
-                "provider": "pi",
-                "state": "unavailable",
-                "deferred_units": 1,
-                "reason": "database_missing",
-            })
+            ])
         );
     }
 

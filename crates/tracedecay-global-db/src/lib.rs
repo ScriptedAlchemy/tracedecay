@@ -147,7 +147,7 @@ pub use tracedecay_sessions::runtime::TranscriptPersistenceError;
 
 pub use api_types::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
-    AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, HostCoverageReason,
+    AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert,
     ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
     ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
     PreparedObservabilityEmissionV1, ProjectAliasRecord, ProjectRegistryContext,
