@@ -192,6 +192,42 @@ else
 fi
 [[ $actual == "$expected" ]] || fail "checksum mismatch for ${asset}"
 
+# SHA256SUMS is uploaded to the same release as the archive, so it proves only
+# that the download is intact: whoever can replace one asset can replace both.
+# The release workflow's build-provenance attestation proves who built the
+# archive, and gh verifies that Sigstore bundle. The accepted identities are
+# the ones `tracedecay update` accepts: the channel's release workflow,
+# dispatched from master or run on the release tag.
+if [[ $tag == *-beta.* ]]; then
+  signer_workflow="https://github.com/${repository}/.github/workflows/release-beta.yml"
+else
+  signer_workflow="https://github.com/${repository}/.github/workflows/release.yml"
+fi
+verify_build_provenance() {
+  local identity
+  for identity in "${signer_workflow}@refs/heads/master" "${signer_workflow}@refs/tags/${tag}"; do
+    if gh attestation verify "${tmp_dir}/${asset}" \
+      --repo "$repository" \
+      --cert-identity "$identity" \
+      --cert-oidc-issuer https://token.actions.githubusercontent.com \
+      >/dev/null 2>>"${tmp_dir}/attestation.log"; then
+      printf 'Verified build provenance: %s\n' "$identity"
+      return 0
+    fi
+  done
+  return 1
+}
+if command -v gh >/dev/null 2>&1; then
+  verify_build_provenance ||
+    fail "the build-provenance attestation of ${asset} did not verify as ${signer_workflow}:
+$(cat "${tmp_dir}/attestation.log")"
+elif [[ ${TRACEDECAY_INSTALL_UNATTESTED:-} == 1 ]]; then
+  printf 'tracedecay installer: WARNING: gh is not installed, so the build-provenance attestation of %s was NOT verified; only the same-release SHA256SUMS was checked (TRACEDECAY_INSTALL_UNATTESTED=1)\n' \
+    "$asset" >&2
+else
+  fail "gh (GitHub CLI) is required to verify the build-provenance attestation of ${asset}. Install gh and run \`gh auth login\`, then rerun the installer; or set TRACEDECAY_INSTALL_UNATTESTED=1 to install with only the same-release SHA256SUMS check"
+fi
+
 tar -xzf "${tmp_dir}/${asset}" -C "$tmp_dir"
 [[ -f ${tmp_dir}/tracedecay ]] || fail "archive does not contain tracedecay"
 

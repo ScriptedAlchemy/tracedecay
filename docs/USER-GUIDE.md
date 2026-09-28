@@ -44,6 +44,25 @@ Pick whichever method suits your platform.
 curl -fsSL https://raw.githubusercontent.com/ScriptedAlchemy/tracedecay/master/install.sh | bash
 ```
 
+The installer verifies the archive's build-provenance attestation with the
+[GitHub CLI](https://cli.github.com/) (`gh attestation verify`), so `gh` must
+be installed and signed in (`gh auth login`). Without `gh` it refuses, because
+the release's `SHA256SUMS` sits beside the archive in the same release and
+proves only that the download is intact, not who built it. To install on
+that checksum alone, set `TRACEDECAY_INSTALL_UNATTESTED=1`; the installer then
+warns that provenance was not verified. Later `tracedecay upgrade` runs verify
+the attestation themselves and need no `gh`.
+
+To verify a downloaded archive by hand:
+
+```bash
+gh attestation verify tracedecay-beta-<tag>-<platform>.tar.gz --repo ScriptedAlchemy/tracedecay \
+  --signer-workflow ScriptedAlchemy/tracedecay/.github/workflows/release-beta.yml
+```
+
+Stable archives (`tracedecay-<tag>-<platform>`) are signed by
+`.github/workflows/release.yml`.
+
 **Windows:**
 
 Download the x86_64 Windows archive from the
@@ -967,6 +986,18 @@ tracedecay upgrade
 ```
 
 Beta and stable are separate update channels, a beta build only sees beta releases and vice versa. Any attached MCP servers will continue running with the previous binary until you restart your agent.
+
+Before anything is unpacked, `upgrade` checks the archive against the
+release's `SHA256SUMS` and then against its build-provenance attestation:
+it fetches the attestations GitHub holds for the archive's SHA-256 digest
+and verifies one of them against the Sigstore public-good trust root built
+into the binary (Fulcio certificate chain, Rekor transparency-log entry, DSSE
+signature, and an in-toto subject equal to the archive digest). The signing
+certificate must name this repository's release workflow for the channel
+(`release-beta.yml` or `release.yml`) run from `master` or from the release
+tag. On success it prints `Build provenance verified: <workflow identity>`.
+A missing attestation, one that fails verification, or one signed by any
+other identity refuses the upgrade; the checksum alone never suffices.
 
 Release lookups send the same GitHub credential as project reads (`GH_TOKEN`,
 then `gh auth token`, then the git credential helper), which raises GitHub's
