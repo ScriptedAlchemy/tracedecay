@@ -626,15 +626,9 @@ async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for()
     assert_invalid(&zero_content_limit);
     assert_invalid(&zero_limit);
     assert_invalid(&over_limit);
-    assert_eq!(
-        as_of_without_cutoff["error"]["code"], -32603,
-        "{as_of_without_cutoff}"
-    );
-    assert!(
-        as_of_without_cutoff["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("missing field `cutoff`")),
-        "an as-of mode without its cutoff must fail decode: {as_of_without_cutoff}"
+    assert_decode(
+        &as_of_without_cutoff,
+        "temporal_mode: missing field `cutoff`",
     );
 
     assert_decode(&missing_session, "missing field `session_id`");

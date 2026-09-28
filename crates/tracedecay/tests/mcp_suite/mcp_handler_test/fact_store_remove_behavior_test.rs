@@ -304,11 +304,11 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
 
     assert_protocol_error(
         call_tool(&server, TOOL, json!({})).await,
-        MISSING_FACT_ID_MESSAGE,
+        MISSING_FACT_ID_DETAIL,
     );
     assert_protocol_error(
         call_tool(&server, TOOL, json!({"fact_id": 41})).await,
-        NUMERIC_FACT_ID_MESSAGE,
+        NUMERIC_FACT_ID_DETAIL,
     );
     assert_protocol_error(
         call_tool(
@@ -317,7 +317,7 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
             json!({"fact_id": "not-a-fact", "action": "remove"}),
         )
         .await,
-        UNKNOWN_FIELD_MESSAGE,
+        UNKNOWN_FIELD_DETAIL,
     );
 
     let empty = payload(

@@ -245,7 +245,7 @@ async fn files_lists_the_indexed_census_and_filters() {
     );
     assert_malformed_call(
         &call(&fixture, json!([])).await,
-        "tool execution failed: config error: invalid arguments: tracedecay_files expects a JSON object",
+        "invalid arguments: tracedecay_files expects a JSON object",
     );
 
     fixture.harness.shutdown().await;
@@ -332,18 +332,12 @@ fn assert_tool_error(response: &tracedecay_mcp::JsonRpcResponse, message: &str) 
 
 /// A non-object argument list never reaches the owner's typed parser: the
 /// MCP boundary rejects the call itself.
-fn assert_malformed_call(response: &tracedecay_mcp::JsonRpcResponse, message: &str) {
+fn assert_malformed_call(response: &tracedecay_mcp::JsonRpcResponse, detail: &str) {
     assert!(response.result.is_none(), "{response:?}");
     let error = response.error.as_ref().expect("tool error");
-    assert_eq!(error.code, -32603, "{error:?}");
-    assert_eq!(error.message, message, "{error:?}");
     assert_eq!(
-        error
-            .data
-            .as_ref()
-            .and_then(|data| data.get("tool"))
-            .and_then(Value::as_str),
-        Some(TOOL),
+        json!({"code": error.code, "message": error.message, "data": error.data}),
+        crate::support::application_invalid_request_error(TOOL, detail),
         "{error:?}"
     );
 }

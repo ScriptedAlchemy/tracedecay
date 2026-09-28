@@ -54,8 +54,6 @@ const MISSING_NODE: &str =
     "symbol.v1.sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const EVIDENCE_ANCHOR: &str =
     "code-graph:symbol.v1.sha256:0000000000000000000000000000000000000000000000000000000000000000";
-const NODE_CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool node ...` (`tracedecay tool node --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.";
-
 #[tokio::test]
 async fn tracedecay_node_reports_declared_symbols_and_typed_refusals() {
     assert_eq!(
@@ -169,7 +167,7 @@ async fn tracedecay_node_reports_declared_symbols_and_typed_refusals() {
     );
     assert_malformed_call(
         &node_call(&server, json!([fetch_id])).await,
-        "tool execution failed: config error: invalid arguments: tracedecay_node expects a JSON object",
+        "invalid arguments: tracedecay_node expects a JSON object",
     );
     assert_execution_failed(
         &node_call(&server, json!({"node_id": EVIDENCE_ANCHOR})).await,
@@ -517,15 +515,10 @@ fn parse_json(text: &str) -> Value {
 
 /// A non-object argument list never reaches the owner's typed parser: the
 /// MCP boundary rejects the call itself.
-fn assert_malformed_call(response: &Value, message: &str) {
-    assert_eq!(response["error"]["code"], -32603, "{response}");
-    assert_eq!(response["error"]["message"], message, "{response}");
+fn assert_malformed_call(response: &Value, detail: &str) {
     assert_eq!(
-        response["error"]["data"],
-        json!({
-            "tool": "tracedecay_node",
-            "cli_fallback": NODE_CLI_FALLBACK,
-        }),
+        response["error"],
+        crate::support::application_invalid_request_error("tracedecay_node", detail),
         "{response}"
     );
 }

@@ -569,21 +569,31 @@ where
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
-                let seed = match relation_seed(&graph, &request.node_id) {
+                let seed = match relation_seed(&request.node_id) {
                     Ok(seed) => seed,
                     Err(failure) => return failed_with(context, failure),
                 };
                 let (records, unresolved) = match relation_traversal(
                     &graph.reader,
                     Arc::clone(&graph.cancellation),
-                    seed,
+                    seed.clone(),
                     request.maximum_depth,
                     true,
                     &request.scope,
                 ) {
                     Ok(records) => records,
-                    Err(()) => return failed(context, "caller traversal failed"),
+                    Err(()) => {
+                        return match absent_seed(&graph, &seed) {
+                            Some(failure) => failed_with(context, failure),
+                            None => failed(context, "caller traversal failed"),
+                        };
+                    }
                 };
+                if records.is_empty()
+                    && let Some(failure) = absent_seed(&graph, &seed)
+                {
+                    return failed_with(context, failure);
+                }
                 let mut gaps = if unresolved.exact_target_unavailable {
                     // Unresolved Rust receiver calls and TypeScript imports the
                     // seal could not bind share one disclosure; the gap is the
@@ -649,21 +659,31 @@ where
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
-                let seed = match relation_seed(&graph, &request.node_id) {
+                let seed = match relation_seed(&request.node_id) {
                     Ok(seed) => seed,
                     Err(failure) => return failed_with(context, failure),
                 };
                 let (mut records, _) = match relation_traversal(
                     &graph.reader,
                     Arc::clone(&graph.cancellation),
-                    seed,
+                    seed.clone(),
                     request.maximum_depth,
                     false,
                     &request.scope,
                 ) {
                     Ok(records) => records,
-                    Err(()) => return failed(context, "callee traversal failed"),
+                    Err(()) => {
+                        return match absent_seed(&graph, &seed) {
+                            Some(failure) => failed_with(context, failure),
+                            None => failed(context, "callee traversal failed"),
+                        };
+                    }
                 };
+                if records.is_empty()
+                    && let Some(failure) = absent_seed(&graph, &seed)
+                {
+                    return failed_with(context, failure);
+                }
 
                 if request.resolve_trait_dispatch {
                     let mut seen = records
@@ -986,31 +1006,34 @@ fn return_region(signature: &str) -> &str {
         .map_or("", |(_, returns)| returns.trim())
 }
 
-/// The relation seed a caller named: a malformed id is the caller's error and
-/// an id absent from the admitted graph is not found, so neither is reported
-/// as a retryable outage.
-fn relation_seed(
-    graph: &OpenSymbolGraph,
-    node_id: &str,
-) -> Result<SymbolOccurrenceId, PrimitiveFailure> {
-    let seed = SymbolOccurrenceId::new(node_id.to_owned()).map_err(|_| {
+/// The relation seed a caller named. A malformed id is the caller's error, not
+/// a retryable outage.
+fn relation_seed(node_id: &str) -> Result<SymbolOccurrenceId, PrimitiveFailure> {
+    SymbolOccurrenceId::new(node_id.to_owned()).map_err(|_| {
         primitive_failure(
             PrimitiveFailureKind::InvalidRequest,
             "application.symbol-graph.node-id-invalid",
             "node_id is not a symbol occurrence id",
         )
-    })?;
+    })
+}
+
+/// Why an empty or failed relation walk cannot be answered as "no relations"
+/// or an outage: the seed is absent from the admitted graph, or its lookup
+/// failed. Only those pages pay this read; a related row already proves the
+/// seed exists.
+fn absent_seed(graph: &OpenSymbolGraph, seed: &SymbolOccurrenceId) -> Option<PrimitiveFailure> {
     match graph
         .reader
-        .symbol_summary(&seed, Arc::clone(&graph.cancellation))
+        .symbol_summary(seed, Arc::clone(&graph.cancellation))
     {
-        Ok(Some(_)) => Ok(seed),
-        Ok(None) => Err(primitive_failure(
+        Ok(Some(_)) => None,
+        Ok(None) => Some(primitive_failure(
             PrimitiveFailureKind::NotFoundOrNotAuthorized,
             "application.symbol-graph.node-not-found",
             "node_id is not in the admitted graph",
         )),
-        Err(_) => Err(primitive_failure(
+        Err(_) => Some(primitive_failure(
             PrimitiveFailureKind::Unavailable,
             "application.symbol-graph.query-unavailable",
             "relation seed lookup failed",

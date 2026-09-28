@@ -553,7 +553,12 @@ pub(crate) fn graph_tool_error_problem(
             retryable,
             detail,
             ..
-        } => match tracedecay_mcp::tool_errors::project_route_problem_kind(reason_code) {
+        } => match (!*retryable)
+            .then(|| tracedecay_mcp::tool_errors::project_route_problem_kind(reason_code))
+            .flatten()
+        {
+            // A retryable route refusal is a transient state the caller
+            // rides out, whatever reason code it carries.
             Some("invalid_request") => {
                 tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
                     reason_code.clone(),
