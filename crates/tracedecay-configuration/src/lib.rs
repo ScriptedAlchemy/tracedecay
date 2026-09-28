@@ -16,9 +16,9 @@ pub use config::model::{
 };
 pub use config::{
     OpenedRuntimeConfiguration, PinnedRuntimeConfiguration, PinnedRuntimeConfigurationCachePort,
-    RuntimeConfigurationTarget, cached_pinned_runtime_configuration,
-    install_pinned_runtime_configuration_cache, lcm_summarizer_executables_for_project,
-    publish_pinned_runtime_configuration,
+    RuntimeConfigurationTarget, install_pinned_runtime_configuration_cache,
+    lcm_summarizer_executables_for_database, publish_pinned_runtime_configuration,
+    registered_configuration_owner,
 };
 pub use configuration::{
     ConfigurationControlPlane, ConfigurationControlPlaneOperations,

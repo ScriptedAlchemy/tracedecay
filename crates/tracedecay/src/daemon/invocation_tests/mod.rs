@@ -71,6 +71,7 @@ pub(super) fn empty_work_proposal_routing(
     let digest = snapshot.effective_behavior_digest.clone();
     let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
         tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: std::path::PathBuf::from("/profile"),
             project_id: scope.project_id.clone(),
             project_root: std::env::current_dir().expect("test project root"),
         },

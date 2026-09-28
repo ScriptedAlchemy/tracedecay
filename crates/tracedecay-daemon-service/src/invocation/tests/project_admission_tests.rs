@@ -553,6 +553,7 @@ async fn same_authority_source_edit_owners_alias_one_incumbent() {
     .expect("configuration resolution");
     let pinned = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
         tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: profile_root.clone(),
             project_id: project_id.clone(),
             project_root: project_root.clone(),
         },

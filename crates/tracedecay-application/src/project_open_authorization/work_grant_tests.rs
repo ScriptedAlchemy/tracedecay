@@ -55,6 +55,7 @@ fn project_source_access_uses_the_configured_binding_and_refuses_foreign_configu
     .snapshot;
     let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
         tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: root.path().join("profile"),
             project_id: project_id.clone(),
             project_root: root.path().to_path_buf(),
         },

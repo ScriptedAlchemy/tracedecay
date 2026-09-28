@@ -178,6 +178,7 @@ pub(super) fn configured_work_proposal_routing(
     let configuration_digest = snapshot.effective_behavior_digest.clone();
     let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
         tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: project.join("profile"),
             project_id: scope.project_id.clone(),
             project_root: project.to_path_buf(),
         },

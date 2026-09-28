@@ -200,7 +200,7 @@ async fn configured_executable_is_launched_instead_of_the_path_binary() {
     let runtime = RegisteredGlobalDbTestRuntime::project(
         root.path().join("profile"),
         &project_root,
-        project_id.clone(),
+        project_id,
     )
     .await
     .unwrap();
@@ -217,7 +217,7 @@ async fn configured_executable_is_launched_instead_of_the_path_binary() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
     std::fs::set_permissions(&configured, permissions).unwrap();
     tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
-        project_id,
+        &database,
         &project_root,
         LcmSummarizerExecutablesV1 {
             cursor_agent: LcmSummarizerExecutableV1::configured(configured.clone()).unwrap(),
@@ -258,7 +258,7 @@ async fn configured_model_reaches_the_summarizer_in_a_private_workspace() {
     let runtime = RegisteredGlobalDbTestRuntime::project(
         root.path().join("profile"),
         &project_root,
-        project_id.clone(),
+        project_id,
     )
     .await
     .unwrap();
@@ -279,7 +279,7 @@ async fn configured_model_reaches_the_summarizer_in_a_private_workspace() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
     std::fs::set_permissions(&configured, permissions).unwrap();
     tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
-        project_id,
+        &database,
         &project_root,
         LcmSummarizerExecutablesV1 {
             cursor_agent: LcmSummarizerExecutableV1::configured_with(

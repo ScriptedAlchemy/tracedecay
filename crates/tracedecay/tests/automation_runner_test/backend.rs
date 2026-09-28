@@ -1,12 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use std::thread;
 use std::time::Duration;
 
 use serde_json::json;
 use tempfile::TempDir;
+use tracing_subscriber::layer::SubscriberExt;
 
 use tracedecay_automation_runtime::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
@@ -706,12 +708,6 @@ impl FakeCodexAppServer {
 }
 
 fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32) {
-    let (err, fake) = run_backend_for_behavior(behavior, timeout);
-    let pid = fake.child_pid();
-    (err, pid)
-}
-
-fn run_backend_for_behavior(behavior: &str, timeout: Duration) -> (String, FakeCodexAppServer) {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior(behavior);
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
@@ -726,8 +722,72 @@ fn run_backend_for_behavior(behavior: &str, timeout: Duration) -> (String, FakeC
         None,
         json!({}),
     );
-    let err = backend.run_task(&request).unwrap_err().to_string();
-    (err, fake)
+    // The backend can time out and reap the child before a slow interpreter
+    // runs its first line, so the pid comes from the spawn event, not from a
+    // file the child may never write.
+    let started = StartedCodexProcesses::default();
+    let err = tracing::subscriber::with_default(
+        tracing_subscriber::registry().with(started.clone()),
+        || backend.run_task(&request).unwrap_err().to_string(),
+    );
+    let pid = started.pid_of(&fake.bin);
+    (err, pid)
+}
+
+/// Records the `codex app-server process started` event each spawn emits.
+#[derive(Clone, Default)]
+struct StartedCodexProcesses(Arc<Mutex<Vec<(String, u64)>>>);
+
+impl StartedCodexProcesses {
+    fn pid_of(&self, codex_bin: &Path) -> u32 {
+        let started = self.0.lock().unwrap();
+        let pids = started
+            .iter()
+            .filter(|(bin, _)| Path::new(bin) == codex_bin)
+            .map(|(_, pid)| u32::try_from(*pid).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pids.len(),
+            1,
+            "exactly one codex app-server spawn: {started:?}"
+        );
+        pids[0]
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StartedCodexProcesses {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        #[derive(Default)]
+        struct Started {
+            message: bool,
+            pid: Option<u64>,
+            codex_bin: Option<String>,
+        }
+        impl tracing::field::Visit for Started {
+            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                if field.name() == "pid" {
+                    self.pid = Some(value);
+                }
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "codex_bin" {
+                    self.codex_bin = Some(value.to_owned());
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = format!("{value:?}") == "codex app-server process started";
+                }
+            }
+        }
+        let mut started = Started::default();
+        event.record(&mut started);
+        if let (true, Some(pid), Some(codex_bin)) =
+            (started.message, started.pid, started.codex_bin)
+        {
+            self.0.lock().unwrap().push((codex_bin, pid));
+        }
+    }
 }
 
 impl FakeCodexAppServer {
@@ -763,11 +823,13 @@ impl FakeCodexAppServer {
 
     #[cfg(target_os = "linux")]
     fn child_pid(&self) -> u32 {
-        fs::read_to_string(&self.pid)
-            .expect("completed fake codex app-server must publish its pid")
-            .trim()
-            .parse()
-            .unwrap()
+        for _ in 0..100 {
+            if let Ok(raw) = fs::read_to_string(&self.pid) {
+                return raw.trim().parse().unwrap();
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("fake codex app-server did not write pid file");
     }
 
     #[cfg(not(target_os = "linux"))]

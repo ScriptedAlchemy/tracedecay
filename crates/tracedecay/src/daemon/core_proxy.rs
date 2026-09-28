@@ -543,12 +543,14 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 // enabled), not fail-closed: treating a missing snapshot as
                 // "disabled" contradicted the config default and left explicit
                 // initialize-roots repos unable to open at all.
-                let allow_init =
-                    tracedecay_project::config::cached_sync_config(&identity.worktree_root)
-                        .map_or_else(
-                            |_| tracedecay_configuration::SyncConfig::default().auto_init,
-                            |config| config.auto_init,
-                        );
+                let allow_init = tracedecay_project::config::cached_sync_config(
+                    profile.data_dir(),
+                    &identity.worktree_root,
+                )
+                .map_or_else(
+                    |_| tracedecay_configuration::SyncConfig::default().auto_init,
+                    |config| config.auto_init,
+                );
                 return Ok(Some(InitializeRouteMetadata {
                     project_path: identity.worktree_root,
                     allow_init,

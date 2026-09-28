@@ -118,10 +118,11 @@ fn proxy_serve_handshake(
     // mirrors the same default fallback in `resolve_daemon_initialize_route`.
     let auto_init_root = (!ambient_discovery
         && !initialized
-        && tracedecay_project::config::cached_sync_config(&resolved_path).map_or_else(
-            |_| tracedecay_configuration::SyncConfig::default().auto_init,
-            |config| config.auto_init,
-        ))
+        && tracedecay_project::config::cached_sync_config(profile.data_dir(), &resolved_path)
+            .map_or_else(
+                |_| tracedecay_configuration::SyncConfig::default().auto_init,
+                |config| config.auto_init,
+            ))
     .then(|| tracedecay_runtime_core::worktree::git_worktree_root(&resolved_path))
     .flatten()
     .filter(|root| !profile.is_ambient_project_root(root));
@@ -135,7 +136,7 @@ fn proxy_serve_handshake(
         .and_then(|project_path| serve_scope_prefix(original_cwd, project_path));
     let telemetry_timings = timings
         || project_path.as_deref().is_some_and(|path| {
-            tracedecay_project::config::cached_telemetry_config(path)
+            tracedecay_project::config::cached_telemetry_config(profile.data_dir(), path)
                 .is_ok_and(|telemetry| telemetry.timings)
         });
     let mut handshake = tracedecay::daemon::handshake_for_current_client(

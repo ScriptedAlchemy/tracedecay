@@ -615,16 +615,15 @@ async fn normalized_equivalent_add_is_the_only_no_write_near_duplicate() {
 async fn add_succeeds_past_ten_thousand_eligible_facts() {
     let (_directory, database) = database().await;
     let owner = FactOwnerV1::Profile;
-    // Stay within the ordinary write lease while crossing the former
-    // 10,000-row materialization boundary.
-    const FIXTURE_CHUNK: usize = 250;
-    for chunk_start in (0..10_001).step_by(FIXTURE_CHUNK) {
+    // Bounded transactions: one transaction holding all 10,001 commits
+    // outlives the writer transaction lease on a loaded host.
+    let seed = (0..10_001).collect::<Vec<i32>>();
+    for chunk in seed.chunks(500) {
         let transaction = database
             .begin_memory_write_transaction("seed content-digest limit fixture")
             .await
-            .expect("begin content-digest limit fixture chunk");
-        let chunk_end = (chunk_start + FIXTURE_CHUNK).min(10_001);
-        for index in chunk_start..chunk_end {
+            .expect("begin content-digest limit fixture");
+        for &index in chunk {
             let content = format!("Distinct content-digest limit fixture {index}");
             let sanitized = sanitize_payload(
                 &content,
@@ -645,10 +644,7 @@ async fn add_succeeds_past_ten_thousand_eligible_facts() {
                 sanitized.access,
                 Confidence::new(0.5).expect("content-digest limit trust"),
                 None,
-                UtcMicros(
-                    1_000_000
-                        + i64::try_from(index).expect("content-digest fixture index fits i64"),
-                ),
+                UtcMicros(1_000_000 + i64::from(index)),
             )
             .expect("build content-digest limit batch");
             commit_batch_tx(&transaction, &batch)
@@ -658,7 +654,7 @@ async fn add_succeeds_past_ten_thousand_eligible_facts() {
         transaction
             .commit()
             .await
-            .expect("commit content-digest limit fixture chunk");
+            .expect("commit content-digest limit transaction");
     }
 
     let store = DatabaseFactStore::new(&database);

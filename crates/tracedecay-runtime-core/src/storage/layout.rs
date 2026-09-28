@@ -70,6 +70,17 @@ pub fn profile_sharded_data_root(profile_root: &Path, project_id: &str) -> PathB
     profile_root.join("projects").join(project_id)
 }
 
+/// The profile that owns `data_root` as its shard for `project_id`: the
+/// inverse of [`profile_sharded_data_root`], or `None` when `data_root` is
+/// not such a shard.
+pub fn profile_root_of_sharded_data_root<'a>(
+    data_root: &'a Path,
+    project_id: &str,
+) -> Option<&'a Path> {
+    let profile_root = data_root.parent()?.parent()?;
+    (profile_sharded_data_root(profile_root, project_id) == data_root).then_some(profile_root)
+}
+
 fn project_id_for_identity_root(identity_root: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(identity_root.to_string_lossy().as_bytes());
