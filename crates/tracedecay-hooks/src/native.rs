@@ -11,11 +11,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{NativeHostIdentityV1, ObservationId, SessionId, UtcMicros};
+use tracedecay_framing::MAX_WIRE_MESSAGE_BYTES;
 
 use crate::{
     HOOK_EVENT_SCHEMA_VERSION, HookBoundaryV1, HookContractError, HookEventEnvelopeV2,
     HookEventFamily, HookEventSupportV1, HookEventV2, HookLifecyclePhaseV1, HookOrderingV1,
-    HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES, stock_event_support,
+    HookScopeBindingV1, stock_event_support,
 };
 
 /// The bounded, content-free signal yielded from one native host event.
@@ -197,7 +198,7 @@ impl ProfileScopedNativeHookAdmissionV1 {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum NativeHookDecodeError {
-    #[error("native hook payload exceeds the Hook V2 bound")]
+    #[error("native hook payload exceeds the host wire bound")]
     PayloadTooLarge,
     #[error("native hook payload is malformed")]
     MalformedPayload,
@@ -288,7 +289,10 @@ fn parse_native_payload(payload: &[u8]) -> Result<Value, NativeHookDecodeError> 
     const MAX_NATIVE_DEPTH: usize = 32;
     const MAX_NATIVE_VALUES: usize = 2_048;
 
-    if payload.len() > MAX_HOOK_PAYLOAD_BYTES {
+    // Decoders keep only typed identity, never host content, so the raw
+    // payload is bounded by the host wire authority rather than by the
+    // content-free envelope a spool record holds.
+    if payload.len() > MAX_WIRE_MESSAGE_BYTES {
         return Err(NativeHookDecodeError::PayloadTooLarge);
     }
     let raw: Value =
@@ -1145,10 +1149,56 @@ mod tests {
                 Err(NativeHookDecodeError::StructureLimit)
             );
 
-            let oversized = vec![b' '; MAX_HOOK_PAYLOAD_BYTES + 1];
+            let oversized = vec![b' '; MAX_WIRE_MESSAGE_BYTES + 1];
             assert_eq!(
                 decode_native_hook_event(host, &oversized),
                 Err(NativeHookDecodeError::PayloadTooLarge)
+            );
+        }
+    }
+
+    #[test]
+    fn native_events_carrying_large_host_content_still_decode() {
+        let content = "fn f() {}\n".repeat(4_000);
+        let enlarge = |fixture: &[u8], pointers: &[&str]| {
+            let mut payload = serde_json::from_slice::<Value>(fixture).unwrap();
+            for pointer in pointers {
+                *payload.pointer_mut(pointer).unwrap() = Value::String(content.clone());
+            }
+            serde_json::to_vec(&payload).unwrap()
+        };
+        let cases = [
+            (
+                NativeHostIdentityV1::ClaudeCode,
+                enlarge(
+                    include_bytes!("../fixtures/host_events/claude/post_tool_use_write.json"),
+                    &["/tool_input/content", "/tool_response/content"],
+                ),
+                NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
+            ),
+            (
+                NativeHostIdentityV1::Codex,
+                enlarge(
+                    include_bytes!("../fixtures/host_events/codex/stop.json"),
+                    &["/last_assistant_message"],
+                ),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+            (
+                NativeHostIdentityV1::CursorDesktop,
+                enlarge(
+                    include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
+                    &["/edits/0/new_string"],
+                ),
+                NativeHookSignalV1::SavedEdit,
+            ),
+        ];
+        for (host, payload, signal) in cases {
+            assert!(payload.len() > 40_000, "{host:?} payload lost its content");
+            assert_eq!(
+                decode_native_hook_event(host, &payload).map(|decoded| decoded.signal),
+                Ok(signal),
+                "{host:?}"
             );
         }
     }
