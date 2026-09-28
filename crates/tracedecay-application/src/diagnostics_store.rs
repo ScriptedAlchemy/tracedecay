@@ -1754,12 +1754,14 @@ mod tests {
             .publish_clean_generation(&id(gen2), &[])
             .await
             .unwrap();
-        assert!(
-            store
-                .publish_clean_generation(&id(gen1), std::slice::from_ref(&cleared))
-                .await
-                .is_err(),
-            "a cleared generation must stay historical"
+        let error = store
+            .publish_clean_generation(&id(gen1), std::slice::from_ref(&cleared))
+            .await
+            .expect_err("a cleared generation must stay historical");
+        assert_eq!(
+            error.to_string(),
+            "database error: generation generation.clean.1 is already historical and cannot be \
+             republished (operation: diagnostics publish_clean_generation)"
         );
     }
 

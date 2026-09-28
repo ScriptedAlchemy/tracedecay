@@ -93,7 +93,12 @@ fn a_committed_worktree_reports_its_full_head_and_is_clean() {
         resolved.full_sha
     );
     assert!(!resolved.dirty, "a freshly committed tree is not dirty");
-    assert!(!watch_paths(dir.path()).is_empty());
+    assert_eq!(
+        watch_paths(dir.path()),
+        [".git/HEAD", ".git/index", ".git/logs/HEAD", "tracked.txt"]
+            .map(|relative| dir.path().join(relative))
+            .to_vec()
+    );
 }
 
 #[test]

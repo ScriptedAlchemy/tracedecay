@@ -750,15 +750,18 @@ fn refresh_cli_accepts_begin_status_cancel_only() {
                 .chain(["--handle", "opaque-handle"]),
         )
         .unwrap_or_else(|error| panic!("refresh action `{action}` should parse: {error}"));
-        assert!(
-            Cli::try_parse_from(
-                ["tracedecay", "sessions", "refresh", action]
-                    .into_iter()
-                    .chain(selectors)
-                    .chain(["--operation-id", "opaque-handle"]),
-            )
-            .is_err(),
-            "the removed --operation-id alias must not parse for `{action}`"
+        let Err(error) = Cli::try_parse_from(
+            ["tracedecay", "sessions", "refresh", action]
+                .into_iter()
+                .chain(selectors)
+                .chain(["--operation-id", "opaque-handle"]),
+        ) else {
+            panic!("the removed --operation-id alias must not parse for `{action}`");
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{error}"
         );
     }
     for removed in ["start", "join", "resume"] {

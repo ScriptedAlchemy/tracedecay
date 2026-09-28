@@ -1081,7 +1081,10 @@ mod tests {
             ),
         ] {
             let wire = serde_json::to_value(event).unwrap();
-            assert!(wire.get("command").is_none());
+            assert!(wire.get("command").is_none(), "{wire}");
+            let parsed = parse_hook_event(Some(&wire)).expect("emitted event parses");
+            assert_eq!(parsed.kind, HookEventKind::Shell);
+            assert!(!parsed.had_command);
         }
     }
 
@@ -1093,6 +1096,9 @@ mod tests {
         });
 
         assert!(parse_hook_event(Some(&params)).is_none());
+        let known = parse_or_panic(&json!({ "agent": "cursor", "event": "postToolUse" }));
+        assert_eq!(known.agent, HostIntegrationIdV1::Cursor);
+        assert_eq!(known.kind, HookEventKind::IncrementalSync);
     }
 
     #[test]
@@ -1103,6 +1109,9 @@ mod tests {
         });
 
         assert!(parse_hook_event(Some(&params)).is_none());
+        let known = parse_or_panic(&json!({ "agent": "codex", "event": "postToolUse" }));
+        assert_eq!(known.agent, HostIntegrationIdV1::Codex);
+        assert_eq!(known.kind, HookEventKind::IncrementalSync);
     }
 
     /// Regression: the receiver used to keep its own agent string match, so
@@ -1469,7 +1478,15 @@ mod tests {
             "event": "afterFileEdit",
             "rel_paths": ["src/two.rs"]
         }));
-        assert_eq!(fallback.admission_source(), fallback.admission_source());
+        let fallback_again = parse_or_panic(&json!({
+            "agent": "cursor",
+            "event": "afterFileEdit",
+            "rel_paths": ["src/one.rs"]
+        }));
+        assert_eq!(
+            fallback.admission_source(),
+            fallback_again.admission_source()
+        );
         assert_ne!(
             fallback.admission_source(),
             other_fallback.admission_source()
