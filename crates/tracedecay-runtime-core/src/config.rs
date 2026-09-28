@@ -353,35 +353,49 @@ pub use tracedecay_domain::source_path_policy::{GENERATED_DIR_SEGMENTS, is_gener
 /// The search path for host and service program resolution (`kiro-cli`,
 /// `gemini`, `systemctl`, env-shebang interpreters, ...).
 ///
-/// Production reads the ambient `PATH` at each call. Tests substitute a
-/// fixture directory through [`HostProgramSearchPathGuard`] instead of
-/// mutating the process environment: a narrowed process-global `PATH` is
-/// visible to every concurrently running test, so unrelated `sh`/`git` spawns
-/// fail with `NotFound` for the guard's lifetime.
+/// Production reads the ambient `PATH` at each call.
+///
+/// Test builds (`test-helpers`) resolve only what a live
+/// [`HostProgramSearchPathGuard`] admits, or the ambient `PATH` of a process
+/// whose entrypoint called [`admit_process_host_program_search_path`]. An
+/// in-process test that sets no guard therefore finds no host program: the
+/// test process's own `PATH` carries the operator's real host CLIs. Guards
+/// substitute a fixture directory instead of mutating the process
+/// environment, because a narrowed process-global `PATH` is visible to every
+/// concurrently running test and unrelated `sh`/`git` spawns would fail.
 ///
 /// [`crate::git::try_git_program`] deliberately does not consult this seam:
 /// the Git authority is process-wide and must never observe a test fixture.
 pub fn host_program_search_path() -> Option<OsString> {
     #[cfg(any(test, feature = "test-helpers"))]
-    if let Some(path) = host_program_search_path_override() {
-        return Some(path);
+    {
+        let guarded = HOST_PROGRAM_SEARCH_PATH_OVERRIDE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if guarded.is_some()
+            || !PROCESS_HOST_PROGRAM_SEARCH_PATH_ADMITTED.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return guarded;
+        }
     }
     std::env::var_os("PATH")
 }
 
-/// The search path a live [`HostProgramSearchPathGuard`] admits, never the
-/// ambient `PATH`.
+/// Admits this process's own `PATH` for [`host_program_search_path`].
 ///
-/// In-process host lifecycle tests resolve through this so a test that sets
-/// no guard finds no host CLI instead of the operator's real one.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn host_program_search_path_override() -> Option<OsString> {
-    HOST_PROGRAM_SEARCH_PATH_OVERRIDE
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+/// Called once by the shipped binary's entrypoint, whose environment is the
+/// operator's (or a test harness's hermetic child `PATH`). Production builds
+/// always read the ambient `PATH`, so this changes only test builds, where
+/// in-process tests never reach that entrypoint.
+pub fn admit_process_host_program_search_path() {
+    #[cfg(any(test, feature = "test-helpers"))]
+    PROCESS_HOST_PROGRAM_SEARCH_PATH_ADMITTED.store(true, std::sync::atomic::Ordering::Release);
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
+static PROCESS_HOST_PROGRAM_SEARCH_PATH_ADMITTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(any(test, feature = "test-helpers"))]
 static HOST_PROGRAM_SEARCH_PATH_OVERRIDE: std::sync::RwLock<Option<OsString>> =
     std::sync::RwLock::new(None);
@@ -638,8 +652,9 @@ mod host_program_search_path_tests {
     use super::*;
 
     #[test]
-    fn fixture_search_path_leaves_process_path_untouched() {
+    fn test_builds_resolve_only_a_guard_or_the_admitted_process_path() {
         let ambient = std::env::var_os("PATH");
+        assert!(ambient.is_some(), "the test process must carry a PATH");
         let fixture = tempfile::tempdir().expect("fixture search directory");
         {
             let _guard = HostProgramSearchPathGuard::set(fixture.path());
@@ -649,6 +664,9 @@ mod host_program_search_path_tests {
             );
             assert_eq!(std::env::var_os("PATH"), ambient);
         }
+        assert_eq!(host_program_search_path(), None);
+
+        admit_process_host_program_search_path();
         assert_eq!(host_program_search_path(), ambient);
     }
 }

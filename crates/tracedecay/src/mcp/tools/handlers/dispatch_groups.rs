@@ -316,14 +316,14 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                 )
                 .await;
             }
-            tracedecay_mcp::handlers::graph_tool::compute_graph_tool(
+            Box::pin(tracedecay_mcp::handlers::graph_tool::compute_graph_tool(
                 &ctx,
                 &open,
                 operation,
                 args,
                 scope_prefix,
                 options.code_index_ignored_dependency_admission.as_deref(),
-            )
+            ))
             .await
         };
         let mut completion = match tokio::time::timeout(budget, computed).await {
