@@ -1003,13 +1003,15 @@ async fn restart_after_sigterm_rebuilds_only_changed_files() {
         &["src/resume_corpus/file_0000.rs"],
     )
     .await;
+    // The serving generation is still the committed corpus. A dirty edit does
+    // not rewrite that generation's source revision until the successor seals.
     let _refreshing = wait_for_refreshing_old_generation(
         &socket,
         &handshake,
         &project,
         &identity,
         "refs/heads/main",
-        None,
+        Some(&revision),
         &indexed.generation_id,
     )
     .await;
