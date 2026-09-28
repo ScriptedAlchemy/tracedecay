@@ -844,10 +844,40 @@ pub struct SessionTemporalRefreshWake {
     route: Arc<SessionTemporalRefreshWakeRoute>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SessionHistoricalRefreshReceipt {
-    pub stats: tracedecay_sessions::TranscriptIngestStats,
-    pub committed: bool,
+/// What historical catch-up has already settled, read before this call's wake.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum HistoricalAdmissionView {
+    Current,
+    InProgress,
+    Blocked { reason_code: String },
+    Unavailable,
+}
+
+fn historical_admission_view(status: &SessionProjectionServingStatus) -> HistoricalAdmissionView {
+    match &status.state {
+        SessionProjectionServingState::Current => HistoricalAdmissionView::Current,
+        SessionProjectionServingState::Stale { reason } => match reason {
+            SessionProjectionStaleReason::HistoricalConvergence
+            | SessionProjectionStaleReason::HistoricalRetry { .. } => {
+                HistoricalAdmissionView::InProgress
+            }
+            SessionProjectionStaleReason::HistoricalBlocked { reason_code } => {
+                HistoricalAdmissionView::Blocked {
+                    reason_code: reason_code.clone(),
+                }
+            }
+        },
+        SessionProjectionServingState::Unavailable { reason } => match reason {
+            SessionProjectionUnavailableReason::WorkerRecovering => {
+                HistoricalAdmissionView::InProgress
+            }
+            SessionProjectionUnavailableReason::WorkerMissing
+            | SessionProjectionUnavailableReason::WorkerStalled
+            | SessionProjectionUnavailableReason::WorkerStopped => {
+                HistoricalAdmissionView::Unavailable
+            }
+        },
+    }
 }
 
 impl SessionTemporalRefreshWake {
@@ -932,62 +962,27 @@ impl SessionTemporalRefreshWake {
         }
     }
 
-    /// Requests a fresh bounded historical-ingest cycle from the retained
-    /// owner and waits through its existing continuation passes.
+    /// Schedules another historical pass and reports the admission already
+    /// settled by the worker.
+    ///
+    /// Callers that must return inside a bound, such as `sessions import`,
+    /// use this instead of waiting for the pass just queued. Waiting for that
+    /// pass is historical convergence: a large Codex home does not finish it
+    /// before the import deadline, so the operation was recorded as timed out
+    /// while catch-up was still admitting rollouts.
     #[hotpath::skip]
-    pub async fn wake_history_and_wait_until_idle(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Option<SessionHistoricalRefreshReceipt> {
-        let state = self.target()?;
-        if state.cancelled.load(Ordering::Acquire) {
-            return None;
+    pub(crate) fn observe_and_schedule_historical_admission(&self) -> HistoricalAdmissionView {
+        let Some(state) = self.target() else {
+            return HistoricalAdmissionView::Unavailable;
+        };
+        let view = historical_admission_view(&state.serving_status());
+        if matches!(
+            view,
+            HistoricalAdmissionView::Current | HistoricalAdmissionView::InProgress
+        ) {
+            state.wake_history();
         }
-        let requested = state
-            .history_requested_sequence
-            .fetch_add(1, Ordering::AcqRel)
-            .saturating_add(1);
-        let before_sessions = state.history_sessions_upserted.load(Ordering::Acquire);
-        let before_messages = state.history_messages_upserted.load(Ordering::Acquire);
-        let before_commits = state.history_commit_count.load(Ordering::Acquire);
-        state.mark_history_pending();
-        state.wake_history();
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let idle = hotpath::future!(
-                enabled_idle_notification(&state),
-                label = "daemon.scheduler.session_temporal.history_idle_wait"
-            );
-            let settled = state.history_completed_sequence.load(Ordering::Acquire) >= requested;
-            if settled {
-                if !matches!(
-                    state
-                        .telemetry
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .historical_state,
-                    SessionHistoricalServingState::Current
-                ) {
-                    return None;
-                }
-                return Some(SessionHistoricalRefreshReceipt {
-                    stats: tracedecay_sessions::TranscriptIngestStats {
-                        sessions_upserted: state
-                            .history_sessions_upserted
-                            .load(Ordering::Acquire)
-                            .saturating_sub(before_sessions),
-                        messages_upserted: state
-                            .history_messages_upserted
-                            .load(Ordering::Acquire)
-                            .saturating_sub(before_messages),
-                    },
-                    committed: state.history_commit_count.load(Ordering::Acquire) > before_commits,
-                });
-            }
-            if tokio::time::timeout_at(deadline, idle).await.is_err() {
-                return None;
-            }
-        }
+        view
     }
 
     pub fn status(&self) -> SessionTemporalRefreshWorkerStatus {

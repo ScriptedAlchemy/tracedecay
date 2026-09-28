@@ -491,23 +491,23 @@ impl SessionSyncProjectContext {
         request: &SessionSyncRequestV1,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
-        let history = match service.await_import_history(self, request).await {
-            Ok(progress) => Some(progress),
+        let observation = match service
+            .await_import_history(self, request, &project_sessions)
+            .await
+        {
+            Ok(observation) => observation,
             Err(Some(interruption)) => {
                 return SessionSyncWorkResult::Interrupted(interruption);
             }
-            Err(None) => None,
+            Err(None) => super::ImportHistoryObservation {
+                coverage: super::transcript_import_requested_coverage(),
+                failure_codes: vec!["session_history_not_current".to_owned()],
+            },
         };
         let pass = async {
-            let stats = import_transcript_stats(
-                history.map_or_else(Default::default, |progress| progress.stats),
-            );
-            let mut coverage = super::transcript_import_requested_coverage();
-            if history.is_some() {
-                for source in &mut coverage {
-                    source.coverage = SessionSyncCoverageV1::Complete;
-                }
-            }
+            let stats =
+                import_transcript_stats(tracedecay_sessions::TranscriptIngestStats::default());
+            let coverage = observation.coverage.clone();
             let source_frontiers = hotpath::future!(
                 service.persist_progress(
                     self,
@@ -530,15 +530,11 @@ impl SessionSyncProjectContext {
             }
         };
         let (stats, coverage, source_frontiers) = outcomes;
-        let mut failure_codes = Vec::new();
-        if history.is_none() {
-            failure_codes.push("session_history_not_current".to_owned());
-        }
+        let mut failure_codes = observation.failure_codes;
         if source_frontiers.is_err() {
             failure_codes.push("session_sync_frontier_persist_failed".to_owned());
         }
-        let committed = history.is_some_and(|progress| progress.committed)
-            || stats != SessionSyncStatsV1::default();
+        let committed = stats != SessionSyncStatsV1::default();
         SessionSyncWorkResult::Finished {
             interruption: interrupted,
             committed,
