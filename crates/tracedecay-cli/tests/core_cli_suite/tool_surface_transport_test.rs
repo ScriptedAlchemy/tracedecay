@@ -70,6 +70,7 @@ fn init_indexed_git_project(home: &Path, project: &Path) {
 
 struct SurfaceOutcome {
     success: bool,
+    code: Option<i32>,
     stdout: String,
     stderr: String,
 }
@@ -121,6 +122,44 @@ fn tool_dry_run_reads_piped_args_in_either_order() {
         );
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
     }
+}
+
+/// A flag the tool's schema cannot bind is the caller's invalid request, not a
+/// configuration error: `--json` prints the typed problem, stderr names its
+/// reason code, and the process exits 1 before any daemon is contacted.
+#[test]
+fn tool_argument_errors_are_typed_invalid_requests() {
+    let home = TempDir::new().expect("isolated home");
+    let project = TempDir::new().expect("working directory");
+    let detail = "--limit: expected integer, got `abc`";
+    let outcome = run_tool_from(
+        home.path(),
+        project.path(),
+        "fact_store_list",
+        &["--limit", "abc", "--json"],
+    );
+    assert_eq!(
+        outcome.payload(),
+        serde_json::json!({
+            "problem": {
+                "tool": "tracedecay_fact_store_list",
+                "code": "tool_arguments_invalid",
+                "reason_code": "tool_arguments_invalid",
+                "kind": "invalid_request",
+                "retryable": false,
+                "detail": detail,
+            }
+        }),
+        "stderr:\n{}",
+        outcome.stderr
+    );
+    assert_eq!(
+        (outcome.code, outcome.stderr.as_str()),
+        (
+            Some(1),
+            format!("Error: project route error (tool_arguments_invalid): {detail}\n").as_str()
+        )
+    );
 }
 
 /// The diagnostics read answers to its MCP spelling, with or without the
@@ -205,6 +244,7 @@ fn run_tool_from(
     let output = child.wait_with_output().expect("collect tool output");
     SurfaceOutcome {
         success: output.status.success(),
+        code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
@@ -246,6 +286,7 @@ fn run_git_read_from(
     let output = child.wait_with_output().expect("collect git output");
     SurfaceOutcome {
         success: output.status.success(),
+        code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
@@ -828,6 +869,16 @@ fn tool_json_reports_argument_refusals_as_typed_problems() {
             r#"{"path":"src/lib.rs","old_str":"42","new_str":"43"}"#,
             "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
         ),
+        (
+            "fact_store_get",
+            r#"{"fact_id":7}"#,
+            "application surface request does not match its reviewed schema: fact_id: invalid type: integer `7`, expected a string",
+        ),
+        (
+            "lcm_doctor",
+            r#"{"storage_scope":"hermes_profile"}"#,
+            "application surface request does not match its reviewed schema: storage_scope must be one of project, user",
+        ),
     ] {
         let outcome = run_surface_tool_json_from(&home_path, &project_path, tool, args);
         assert!(
@@ -847,6 +898,20 @@ fn tool_json_reports_argument_refusals_as_typed_problems() {
                     "detail": detail,
                 }
             }),
+            "stderr:\n{}",
+            outcome.stderr
+        );
+        assert_eq!(
+            (outcome.code, outcome.stderr.lines().last()),
+            (
+                Some(1),
+                Some(
+                    format!(
+                        "Error: project route error (application_surface_invalid_request): {detail}"
+                    )
+                    .as_str()
+                )
+            ),
             "stderr:\n{}",
             outcome.stderr
         );

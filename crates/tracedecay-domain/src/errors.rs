@@ -93,6 +93,16 @@ pub enum TraceDecayError {
         typed_detail: Option<Box<ApplicationProblemDetailV1>>,
     },
 
+    /// A tool call answered with a refusal the command already printed as its
+    /// result. `code` is the refusal record's own code when the result carries
+    /// one; the process boundary names the refusal without restating it.
+    #[error("{tool} refused the request{}", refusal_suffix(code.as_deref(), reason.as_deref()))]
+    ToolRefused {
+        tool: String,
+        code: Option<String>,
+        reason: Option<String>,
+    },
+
     #[error("sync lock: {message}")]
     SyncLock { message: String },
 
@@ -118,6 +128,15 @@ pub enum TraceDecayError {
 }
 
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
+
+fn refusal_suffix(code: Option<&str>, reason: Option<&str>) -> String {
+    match (code, reason) {
+        (Some(code), Some(reason)) => format!(" ({code}): {reason}"),
+        (Some(code), None) => format!(" ({code})"),
+        (None, Some(reason)) => format!(": {reason}"),
+        (None, None) => String::new(),
+    }
+}
 
 /// The one command that resets every profile-scoped persisted shape. Refused
 /// shapes are never migrated or backed up: the reset deletes the old data and

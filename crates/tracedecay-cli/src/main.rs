@@ -630,9 +630,11 @@ fn main() -> ExitCode {
         Err(e) => {
             let code = if tracedecay_daemon_identity::daemon_unreachable(&e) {
                 ExitCode::from(tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE)
-            } else if e.project_route_context().is_some_and(|(code, _, _)| {
-                code == tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT
-            }) {
+            } else if matches!(
+                &e,
+                tracedecay_domain::errors::TraceDecayError::ToolRefused { code: Some(code), .. }
+                    if code == tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT
+            ) {
                 ExitCode::from(READINESS_WAIT_TIMED_OUT_EXIT_CODE)
             } else {
                 ExitCode::FAILURE

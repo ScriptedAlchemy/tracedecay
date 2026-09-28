@@ -955,11 +955,16 @@ fn print_cli_application_surface(
     result: ApplicationSurfaceInvocationResult,
     raw_json: bool,
 ) -> Result<()> {
-    let application_problem = result
-        .result
-        .as_ref()
-        .err()
-        .map(|problem| format!("{}: {}", problem.problem.code, problem.problem.message));
+    let application_problem =
+        result
+            .result
+            .as_ref()
+            .err()
+            .map(|problem| TraceDecayError::ToolRefused {
+                tool: result.operation.mcp_tool_name().to_owned(),
+                code: Some(problem.problem.code.clone()),
+                reason: Some(problem.problem.message.clone()),
+            });
     let response_handle_root = cli_response_handle_root(profile, project)?;
     let mut rendered = tracedecay::mcp::tools::render_application_surface_result(
         response_handle_root.as_deref(),
@@ -976,7 +981,7 @@ fn print_cli_application_surface(
         std::io::stdout().flush()?;
     }
     match application_problem {
-        Some(message) => Err(TraceDecayError::Config { message }),
+        Some(refusal) => Err(refusal),
         None => Ok(()),
     }
 }
@@ -1147,27 +1152,25 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
         let wait: CodeIndexReadinessWaitOutcomeV1 = serde_json::from_value(wait.clone())?;
         let refusal = match wait {
             CodeIndexReadinessWaitOutcomeV1::Reached => None,
-            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => {
-                Some(TraceDecayError::project_route(
-                    CODE_INDEX_READINESS_WAIT_TIMED_OUT,
-                    true,
-                    format!(
-                        "{tool_name} wait_for timed out before the index reached the requested \
-                         state; last state: {last_state}"
-                    ),
-                ))
-            }
-            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
-                Some(TraceDecayError::project_route(
-                    CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
-                    false,
-                    format!("{tool_name} wait_for cannot reach the requested state: {reason}"),
-                ))
-            }
+            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => Some((
+                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+                format!(
+                    "wait_for timed out before the index reached the requested state; last \
+                     state: {last_state}"
+                ),
+            )),
+            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => Some((
+                CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+                format!("wait_for cannot reach the requested state: {reason}"),
+            )),
         };
-        if let Some(refusal) = refusal {
+        if let Some((code, reason)) = refusal {
             std::io::stdout().flush()?;
-            return Err(refusal);
+            return Err(TraceDecayError::ToolRefused {
+                tool: tool_name.to_owned(),
+                code: Some(code.to_owned()),
+                reason: Some(reason),
+            });
         }
     }
     if result_value.get("isError").and_then(Value::as_bool) != Some(true) {
@@ -1177,8 +1180,19 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
     // returning the status-only error so the process boundary can drop its
     // profiling guard and then return the nonzero `ExitCode`.
     std::io::stdout().flush()?;
-    Err(TraceDecayError::Config {
-        message: format!("{tool_name} reported an application failure."),
+    let problem = result_value
+        .get("problem")
+        .or_else(|| result_value.pointer("/structuredContent/problem"));
+    let problem_text = |key: &str| {
+        problem
+            .and_then(|problem| problem.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    Err(TraceDecayError::ToolRefused {
+        tool: tool_name.to_owned(),
+        code: problem_text("code"),
+        reason: problem_text("message"),
     })
 }
 

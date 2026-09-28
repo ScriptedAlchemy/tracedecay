@@ -77,6 +77,7 @@ fn public_inventory_problem(error: &TraceDecayError) -> (&'static str, &'static 
         | TraceDecayError::ProfileResetRequired { .. }
         | TraceDecayError::ResetRequired { .. }
         | TraceDecayError::ProjectRoute { .. }
+        | TraceDecayError::ToolRefused { .. }
         | TraceDecayError::SyncLock { .. }
         | TraceDecayError::LockDeadline { .. }
         | TraceDecayError::Io(_)
@@ -121,6 +122,7 @@ pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
         | TraceDecayError::ProfileResetRequired { .. }
         | TraceDecayError::ResetRequired { .. }
         | TraceDecayError::ProjectRoute { .. }
+        | TraceDecayError::ToolRefused { .. }
         | TraceDecayError::SyncLock { .. }
         | TraceDecayError::LockDeadline { .. }
         | TraceDecayError::Io(_)
@@ -406,6 +408,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::HostCliNotSignedIn { .. } => "host_cli_not_signed_in",
         TraceDecayError::ProfileResetRequired { .. } => "profile_reset_required",
         TraceDecayError::ProjectRoute { .. } => "project_route",
+        TraceDecayError::ToolRefused { .. } => "tool_refused",
         TraceDecayError::SyncLock { .. } => "sync_lock",
         TraceDecayError::LockDeadline { .. } => "lock_deadline",
         TraceDecayError::Io(_) => "io",

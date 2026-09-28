@@ -1584,31 +1584,23 @@ fn tool_status_exit_follows_the_wait_outcome() {
         })
     };
     let refusal = |wait: Value| {
-        let error = tool_result_process_outcome(&status(wait), "tracedecay_status")
-            .expect_err("an unreached wait exits non-zero");
-        error
-            .project_route_context()
-            .map(|(code, retryable, detail)| (code.to_owned(), retryable, detail.to_owned()))
-            .unwrap_or_else(|| panic!("the wait refusal is a typed route error: {error}"))
+        tool_result_process_outcome(&status(wait), "tracedecay_status")
+            .expect_err("an unreached wait exits non-zero")
+            .to_string()
     };
 
     assert_eq!(
         refusal(json!({"outcome": "timed_out", "last_state": "warming"})),
-        (
-            CODE_INDEX_READINESS_WAIT_TIMED_OUT.to_owned(),
-            true,
-            "tracedecay_status wait_for timed out before the index reached the requested \
-             state; last state: warming"
-                .to_owned(),
+        format!(
+            "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_TIMED_OUT}): \
+             wait_for timed out before the index reached the requested state; last state: warming"
         )
     );
     assert_eq!(
         refusal(json!({"outcome": "unavailable", "reason": "scheduler_not_mounted"})),
-        (
-            CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned(),
-            false,
-            "tracedecay_status wait_for cannot reach the requested state: scheduler_not_mounted"
-                .to_owned(),
+        format!(
+            "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_UNAVAILABLE}): \
+             wait_for cannot reach the requested state: scheduler_not_mounted"
         )
     );
     tool_result_process_outcome(&status(json!({"outcome": "reached"})), "tracedecay_status")

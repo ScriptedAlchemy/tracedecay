@@ -10,6 +10,10 @@ use crate::response_handles::{
 use crate::tools::ToolResult;
 use crate::transport::{ErrorCode, JsonRpcResponse};
 
+/// Reason code for `tracedecay tool` flags or an `--args` payload that do not
+/// form a request for the named tool.
+pub const TOOL_ARGUMENTS_INVALID: &str = "tool_arguments_invalid";
+
 fn plain_text_tool_failure(text: &str) -> bool {
     text.starts_with("git error:") || text.starts_with("git diff failed:")
 }
@@ -151,7 +155,8 @@ pub fn mark_semantic_tool_error(result: &mut ToolResult) {
 /// and application-surface layers. The boundary owns this translation so
 /// clients (and the catalog sweep) can read a truthful `kind` alongside the
 /// machine `code` instead of inferring from prose.
-fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
+#[must_use]
+pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
     match reason_code {
         "tool_dispatch_deadline_exceeded" => Some("deadline_exceeded"),
         "tool_dispatch_cancelled" => Some("cancelled"),
@@ -163,6 +168,7 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         | "mcp_dispatch_effect_journey_unverified"
         | "application_surface_unavailable" => Some("unavailable"),
         "application_surface_invalid_request"
+        | TOOL_ARGUMENTS_INVALID
         | "project_required"
         | "project_not_enrolled"
         | "unknown_tool" => Some("invalid_request"),
