@@ -43,8 +43,13 @@ if [[ -n "$unexpected_paths" ]]; then
   exit 1
 fi
 
-git config user.name "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+# The bot identity applies to this one commit only. `git config` would write
+# the shared .git/config of every linked worktree and re-author the operator's
+# later commits when the script runs locally.
+bot_name="github-actions[bot]"
+bot_email="41898282+github-actions[bot]@users.noreply.github.com"
 git add Cargo.lock
-git commit -m "chore(release): update root lockfile"
+GIT_AUTHOR_NAME=$bot_name GIT_AUTHOR_EMAIL=$bot_email \
+  GIT_COMMITTER_NAME=$bot_name GIT_COMMITTER_EMAIL=$bot_email \
+  git commit -m "chore(release): update root lockfile"
 git push origin "HEAD:$RELEASE_PR_BRANCH"
