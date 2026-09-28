@@ -28,7 +28,7 @@ use crate::runtime::snapshot_observation::{
 };
 use crate::runtime::source::{
     HostProviderCoverage, TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
-    persist_host_provider_coverage,
+    content_hash64, persist_host_provider_coverage,
 };
 
 const PROVIDER: &str = "opencode";
@@ -55,7 +55,6 @@ enum OpenCodeSourceScope {
 
 #[derive(Clone)]
 pub(super) struct OpenCodeScanSource {
-    pub(super) database_path: PathBuf,
     pub(super) source_path: PathBuf,
     scope: OpenCodeSourceScope,
 }
@@ -144,6 +143,14 @@ impl SnapshotAdmissionRecord for OpenCodeRecord {
 
     fn payload(&self) -> &[u8] {
         &self.payload
+    }
+
+    fn source_generation(
+        &self,
+        _batch_generation: ObservationSourceGenerationV1,
+    ) -> TranscriptIngestResult<ObservationSourceGenerationV1> {
+        ObservationSourceGenerationV1::new(content_hash64(&self.native_record_id).max(1))
+            .map_err(TranscriptIngestError::from)
     }
 
     fn capture_request(
@@ -252,7 +259,7 @@ pub(crate) async fn capture_opencode_observations(
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<OpenCodeCaptureOutcome> {
     let open_budget = HostScanBudget::new(
-        crate::runtime::hosts::opencode_snapshot::SOURCE_OPEN_READ_BUDGET,
+        0,
         8,
         Instant::now() + HOST_SCAN_WINDOW,
         cancellation.clone(),
@@ -294,10 +301,10 @@ pub(crate) async fn capture_opencode_observations(
         }
     };
     let scan_source = OpenCodeScanSource {
-        database_path: database.path.clone(),
         source_path: source.database_path.clone(),
         scope: source.scope.clone(),
     };
+    drop(database.reader);
     let max_input_bytes = max_new_bytes
         .unwrap_or(MAX_SNAPSHOT_CAPTURE_UNIT_BYTES)
         .min(MAX_SNAPSHOT_CAPTURE_UNIT_BYTES);
@@ -355,25 +362,22 @@ pub(crate) async fn capture_opencode_observations(
             }
             let owned_source = scan_source.clone();
             let scan = tokio::task::spawn_blocking(move || {
-                scan_reference_page(&owned_source, scan_kind, cursor, scan_budget)
+                scan_materialized_page(
+                    &owned_source,
+                    scan_kind,
+                    cursor,
+                    scan_budget,
+                    initialize_part_frontier,
+                    database.source_file_identity,
+                )
             })
             .await
             .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
-            let (page, mut returned_budget) = scan;
+            let (page, materialized, mut returned_budget) = scan;
             let previous_cursor = cursor;
             cursor = page.next;
             let mut page_fully_processed = returned_budget.checkpoint();
-            if page_fully_processed && !page.references.is_empty() && !initialize_part_frontier {
-                let owned_source = scan_source.clone();
-                let materialized = tokio::task::spawn_blocking(move || {
-                    materialize_reference_page(&owned_source, page.references, returned_budget)
-                })
-                .await
-                .map_err(|_| {
-                    TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER }
-                })??;
-                let (materialized, budget) = materialized;
-                returned_budget = budget;
+            if let Some(materialized) = materialized {
                 page_fully_processed = materialized.fully_processed;
                 runner
                     .admit_batch(
@@ -516,39 +520,85 @@ pub(crate) async fn capture_opencode_observations(
     Ok(outcome)
 }
 
+/// Scope selection and payload hydration share one native snapshot, released
+/// before durable admission can await another database or a busy worker.
+fn scan_materialized_page(
+    source: &OpenCodeScanSource,
+    scan_kind: OpenCodeScanKind,
+    cursor: OpenCodePageCursor,
+    mut budget: HostScanBudget,
+    initialize_part_frontier: bool,
+    source_file_identity: u64,
+) -> TranscriptIngestResult<(
+    OpenCodeReferencePage,
+    Option<OpenCodeMaterializedPage>,
+    HostScanBudget,
+)> {
+    if !budget.checkpoint() {
+        return Ok((
+            OpenCodeReferencePage {
+                references: Vec::new(),
+                next: cursor,
+                source_complete: false,
+            },
+            None,
+            budget,
+        ));
+    }
+    let reader = tracedecay_rusqlite_runtime::open_verified_read_snapshot(&source.source_path)
+        .map_err(|error| scan_error("open OpenCode page snapshot", &source.source_path, error))?;
+    if reader.file_identity() != source_file_identity {
+        return Err(TranscriptIngestError::ScanGenerationChanged {
+            path: source.source_path.clone(),
+        });
+    }
+    let (mut page, mut budget) =
+        scan_reference_page(reader.connection(), source, scan_kind, cursor, budget)?;
+    let materialized =
+        if budget.checkpoint() && !page.references.is_empty() && !initialize_part_frontier {
+            let (materialized, returned_budget) = materialize_reference_page(
+                reader.connection(),
+                source,
+                std::mem::take(&mut page.references),
+                budget,
+            )?;
+            budget = returned_budget;
+            Some(materialized)
+        } else {
+            None
+        };
+    Ok((page, materialized, budget))
+}
+
 fn scan_reference_page(
+    connection: &Connection,
     source: &OpenCodeScanSource,
     scan_kind: OpenCodeScanKind,
     cursor: OpenCodePageCursor,
     budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenCodeReferencePage, HostScanBudget)> {
     match scan_kind {
-        OpenCodeScanKind::Messages => scan_message_reference_page(source, cursor, budget),
+        OpenCodeScanKind::Messages => {
+            scan_message_reference_page(connection, source, cursor, budget)
+        }
         OpenCodeScanKind::Parts => {
             crate::runtime::hosts::opencode_part_scan::scan_part_reference_page(
-                source, cursor, budget,
+                connection, source, cursor, budget,
             )
         }
-        OpenCodeScanKind::Rewrite => scan_message_reference_page(source, cursor, budget),
+        OpenCodeScanKind::Rewrite => {
+            scan_message_reference_page(connection, source, cursor, budget)
+        }
     }
 }
 
 fn scan_message_reference_page(
+    connection: &Connection,
     source: &OpenCodeScanSource,
     cursor: OpenCodePageCursor,
     mut budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenCodeReferencePage, HostScanBudget)> {
-    let Some(connection) = open_scan_connection(source, &mut budget)? else {
-        return Ok((
-            OpenCodeReferencePage {
-                references: Vec::new(),
-                next: cursor,
-                source_complete: true,
-            },
-            budget,
-        ));
-    };
-    install_progress_handler(&connection, &source.source_path, &budget)?;
+    install_progress_handler(connection, &source.source_path, &budget)?;
     let matcher = source.scope_matcher();
     let mut statement = connection
         .prepare(
@@ -693,22 +743,12 @@ fn scan_message_reference_page(
 }
 
 fn materialize_reference_page(
+    connection: &Connection,
     source: &OpenCodeScanSource,
     references: Vec<OpenCodeMessageRef>,
     mut budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenCodeMaterializedPage, HostScanBudget)> {
-    let Some(connection) = open_scan_connection(source, &mut budget)? else {
-        budget.mark_unavailable();
-        return Ok((
-            OpenCodeMaterializedPage {
-                records: Vec::new(),
-                input_bytes: 0,
-                fully_processed: false,
-            },
-            budget,
-        ));
-    };
-    install_progress_handler(&connection, &source.source_path, &budget)?;
+    install_progress_handler(connection, &source.source_path, &budget)?;
     let max_native_json_bytes =
         u64::try_from(MAX_NATIVE_JSON_BYTES).map_err(|_| invalid_frame())?;
     let before = budget.consumed_input_bytes();
@@ -731,7 +771,7 @@ fn materialize_reference_page(
             fully_processed = false;
             break;
         }
-        match load_record(&connection, &reference, &source.source_path)? {
+        match load_record(connection, &reference, &source.source_path)? {
             Some(record) => records.push(record),
             None => budget.mark_non_durable(),
         }
@@ -875,20 +915,6 @@ fn load_parts(
         values.push(value);
     }
     Ok(LoadedParts { values, deferred })
-}
-
-pub(super) fn open_scan_connection(
-    source: &OpenCodeScanSource,
-    budget: &mut HostScanBudget,
-) -> TranscriptIngestResult<Option<Connection>> {
-    if !budget.checkpoint() {
-        return Ok(None);
-    }
-    // `immutable=1` skips WAL frames, so a live OpenCode database is read with
-    // ordinary query-only locking and paged by rowid instead of copied.
-    tracedecay_rusqlite_runtime::open_query_only_reader(&source.database_path)
-        .map(Some)
-        .map_err(|error| scan_error("open query-only database", &source.source_path, error))
 }
 
 pub(super) fn install_progress_handler(

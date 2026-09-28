@@ -5,9 +5,8 @@ use tempfile::NamedTempFile;
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 use super::{
-    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, VerifiedImmutableReaderError,
-    open, open_immutable_reader, open_verified_immutable_reader_with_hooks, open_writer,
-    with_progress_cancellation,
+    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, VerifiedReaderError, open,
+    open_immutable_reader, open_verified_reader, open_writer, with_progress_cancellation,
 };
 
 fn database() -> NamedTempFile {
@@ -456,8 +455,9 @@ fn verified_immutable_reader_never_binds_transient_b_to_restored_a_identity() {
         })
     };
 
-    let result = open_verified_immutable_reader_with_hooks(
+    let result = open_verified_reader(
         &path,
+        open_immutable_reader,
         || {
             pinned.wait();
             swapped.wait();
@@ -481,7 +481,7 @@ fn verified_immutable_reader_never_binds_transient_b_to_restored_a_identity() {
                 "a"
             );
         }
-        Err(VerifiedImmutableReaderError::Identity(OpenedDatabaseFileError::Replaced)) => {}
+        Err(VerifiedReaderError::Identity(OpenedDatabaseFileError::Replaced)) => {}
         Err(error) => panic!("unexpected verified immutable open failure: {error}"),
     }
 }
@@ -533,4 +533,43 @@ fn windows_discard_created_removes_the_complete_sqlite_family() {
 
     assert!(!path.exists());
     assert!(sidecars.iter().all(|sidecar| !sidecar.exists()));
+}
+
+#[test]
+fn verified_live_snapshot_retains_committed_wal_view_and_denies_writes() {
+    let file = database();
+    let writer = Connection::open(file.path()).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    let reader = super::open_verified_read_snapshot(file.path()).unwrap();
+    writer.execute("UPDATE items SET value = 2", []).unwrap();
+    assert_eq!(
+        reader
+            .connection()
+            .query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(
+        reader
+            .connection()
+            .execute("UPDATE items SET value = 3", [])
+            .is_err()
+    );
+    drop(reader);
+    let reader = super::open_verified_read_snapshot(file.path()).unwrap();
+    assert_eq!(
+        reader
+            .connection()
+            .query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(reader);
+    let busy: i64 = writer
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        busy, 0,
+        "dropping the reader must release its checkpoint lock"
+    );
 }
