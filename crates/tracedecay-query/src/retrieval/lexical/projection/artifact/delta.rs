@@ -7,7 +7,7 @@
 //! files instead of replaying the sealed corpus.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use roaring::RoaringBitmap;
 use rusqlite::{Connection, OptionalExtension, Params, Transaction, params};
@@ -17,7 +17,7 @@ use tracedecay_private_fs::create_private_file_retained;
 
 use super::builder::{
     BuilderMutationGuardV1, append_staged_run, drop_seal_triggers, ensure_carried_builder_triggers,
-    register_builder_mutation_gate,
+    register_builder_mutation_gate, staging_sibling,
 };
 use super::format::{
     PostingListDecoderV1, PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, content_metadata_bytes,
@@ -124,7 +124,7 @@ pub(super) fn stage_carried_parent(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<bool, CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
-    let carrying = sqlite_sibling(staging, CARRYING_SUFFIX)?;
+    let carrying = staging_sibling(staging, CARRYING_SUFFIX)?;
     remove_sqlite_family(&carrying)?;
     copy_private_file(parent, &carrying)?;
     let mut connection = Connection::open(&carrying).map_err(sqlite_error)?;
@@ -236,22 +236,9 @@ fn copy_private_file(parent: &Path, staging: &Path) -> Result<(), CodeLexicalArt
     Ok(())
 }
 
-fn sqlite_sibling(path: &Path, suffix: &str) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
-    let mut name = path
-        .file_name()
-        .ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Contract(
-                "carried lexical staging path has no file name".to_owned(),
-            )
-        })?
-        .to_os_string();
-    name.push(suffix);
-    Ok(path.with_file_name(name))
-}
-
 fn remove_sqlite_family(path: &Path) -> Result<(), CodeLexicalArtifactErrorV1> {
     for suffix in ["", "-journal", "-wal", "-shm"] {
-        let candidate = sqlite_sibling(path, suffix)?;
+        let candidate = staging_sibling(path, suffix)?;
         match std::fs::remove_file(&candidate) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

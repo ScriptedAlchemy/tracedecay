@@ -2232,7 +2232,10 @@ fn compacting_staging_sibling(path: &Path) -> Result<PathBuf, CodeLexicalArtifac
     staging_sibling(path, "-compacting")
 }
 
-fn staging_sibling(path: &Path, suffix: &str) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
+pub(super) fn staging_sibling(
+    path: &Path,
+    suffix: &str,
+) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
     let mut name = path
         .file_name()
         .ok_or_else(|| {
