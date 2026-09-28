@@ -795,10 +795,33 @@ fn normalized_field_text<'a>(
     }
 }
 
-fn matches_phrase(row: &impl LexicalFieldTextV1, phrase: &str) -> bool {
-    row.field_lengths().keys().any(|field| {
-        normalized_field_text(row, *field).is_some_and(|text| substring_count(&text, phrase) > 0)
-    })
+fn phrase_field_counts(
+    row: &impl LexicalFieldTextV1,
+    phrase: &str,
+) -> Vec<(LexicalFieldV1, usize)> {
+    row.field_lengths()
+        .keys()
+        .filter_map(|field| {
+            let text = normalized_field_text(row, *field)?;
+            let count = substring_count(&text, phrase);
+            (count > 0).then_some((*field, count))
+        })
+        .collect()
+}
+
+fn proximity_field_counts(
+    row: &impl LexicalFieldTextV1,
+    terms: &[String],
+    maximum_gap: u32,
+) -> Vec<(LexicalFieldV1, usize)> {
+    row.field_lengths()
+        .keys()
+        .filter_map(|field| {
+            let text = normalized_field_text(row, *field)?;
+            let count = proximity_count(&text, terms, maximum_gap);
+            (count > 0).then_some((*field, count))
+        })
+        .collect()
 }
 
 fn proximity_count(text: &str, terms: &[String], maximum_gap: u32) -> usize {
@@ -881,12 +904,14 @@ fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, 
         .or_insert(score);
 }
 
-/// Exact/fuzzy/phrase/proximity scoring for artifact rows. Callers supply
-/// term frequencies and BM25 inputs;
-/// the loop, fuzzy discount, phrase boost, and echo penalty stay one place.
+/// Exact/fuzzy/phrase/proximity scoring. Callers supply field lengths,
+/// term frequencies, phrase and proximity counts, and BM25 inputs; the
+/// loop, fuzzy discount, phrase boost, and echo penalty stay one place.
+/// `echo_penalty` is the caller's normalized-text comparison: the penalty
+/// only decreases field scores.
 #[allow(clippy::too_many_arguments)]
 fn score_lexical_row(
-    row: &impl LexicalFieldTextV1,
+    field_lengths: &BTreeMap<LexicalFieldV1, usize>,
     exact_terms: &[ExactTechnicalTermV1],
     prepared: &PreparedLexicalQueryV1<'_>,
     fuzzy: &FuzzyExpansionsV1,
@@ -894,6 +919,9 @@ fn score_lexical_row(
     mut term_frequency: impl FnMut(LexicalFieldV1, &str) -> usize,
     mut document_frequency: impl FnMut(LexicalFieldV1, &str) -> usize,
     mut bm25: impl FnMut(LexicalFieldV1, usize, usize) -> u64,
+    mut phrase_tf: impl FnMut(LexicalFieldV1, &str) -> usize,
+    mut proximity_tf: impl FnMut(LexicalFieldV1, &PreparedLexicalProximityV1<'_>) -> usize,
+    echo_penalty: bool,
 ) -> LexicalRowScoreV1 {
     let mut field_scores = BTreeMap::new();
     let mut matched_whole_terms = BTreeSet::new();
@@ -903,7 +931,7 @@ fn score_lexical_row(
     let mut spelling_variants = BTreeSet::new();
     let mut matched_kinds = BTreeSet::new();
     let mut typo_recovery_applied = false;
-    for field in row.field_lengths().keys().copied() {
+    for field in field_lengths.keys().copied() {
         if field != LexicalFieldV1::Subtoken {
             for (query_term, normalized) in &prepared.whole_terms {
                 let exact_tf = term_frequency(field, normalized);
@@ -951,11 +979,8 @@ fn score_lexical_row(
         }
     }
     for (phrase, normalized) in &prepared.phrases {
-        for field in row.field_lengths().keys().copied() {
-            let Some(text) = normalized_field_text(row, field) else {
-                continue;
-            };
-            let tf = substring_count(&text, normalized);
+        for field in field_lengths.keys().copied() {
+            let tf = phrase_tf(field, normalized);
             if tf == 0 {
                 continue;
             }
@@ -974,11 +999,8 @@ fn score_lexical_row(
         }
     }
     for proximity in &prepared.proximities {
-        for field in row.field_lengths().keys().copied() {
-            let Some(text) = normalized_field_text(row, field) else {
-                continue;
-            };
-            let tf = proximity_count(&text, &proximity.terms, proximity.original.maximum_gap);
+        for field in field_lengths.keys().copied() {
+            let tf = proximity_tf(field, proximity);
             if tf == 0 {
                 continue;
             }
@@ -987,8 +1009,7 @@ fn score_lexical_row(
             matched_proximities.insert(proximity.original.clone());
         }
     }
-    let echo_penalty_applied =
-        !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text().trim();
+    let echo_penalty_applied = echo_penalty;
     if echo_penalty_applied {
         for score in field_scores.values_mut() {
             *score = score.saturating_mul(ECHO_SCORE_MILLIS) / 1_000;
