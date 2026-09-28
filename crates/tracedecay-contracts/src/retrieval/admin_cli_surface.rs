@@ -112,6 +112,31 @@ pub enum AdminCliSurfaceRequestV1 {
     },
 }
 
+impl AdminCliSurfaceRequestV1 {
+    /// Whether this action runs on the project's session stores and session
+    /// sync owner, which only the project's full server mounts.
+    pub fn needs_session_stores(&self) -> bool {
+        match self {
+            Self::SessionsImport {}
+            | Self::SessionsGitSync { .. }
+            | Self::SessionsSyncStatus { .. }
+            | Self::SessionsSyncCancel { .. }
+            | Self::SessionsUnfinished { .. } => true,
+            Self::CostSummary { .. }
+            | Self::AnalyticsSync { .. }
+            | Self::AnalyticsDiagnostics { .. }
+            | Self::RegistryUpdate { .. }
+            | Self::RegistryList { .. }
+            | Self::RegistryContext { .. }
+            | Self::RegistryEmpty {}
+            | Self::RegistryProjectTokens { .. }
+            | Self::RegistryGc { .. }
+            | Self::StorageReport { .. }
+            | Self::GainQuery { .. } => false,
+        }
+    }
+}
+
 /// One action's answer.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(untagged)]

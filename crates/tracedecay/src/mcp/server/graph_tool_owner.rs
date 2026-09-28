@@ -5,15 +5,19 @@
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
+use serde_json::Value;
 use tracedecay_contracts::ApplicationProblem;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
-use tracedecay_contracts::retrieval::{HookRuntimeResultV1, hook_runtime_needs_session_stores};
+use tracedecay_contracts::retrieval::{
+    AdminCliSurfaceRequestV1, HookRuntimeResultV1, hook_runtime_needs_session_stores,
+};
 use tracedecay_daemon_service::{
     DaemonInvocationService, GraphToolFuture, GraphToolInvocationV1, ProjectGraphToolPortV1,
     RegisteredGraphToolOwnerV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::handlers::decode_primitive_request;
 use tracedecay_mcp::server::join_hook_ingest_refresh;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -37,12 +41,10 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
                 )));
             };
             // Project open registers the core server as owner before the
-            // full server, which mounts the session stores, replaces it. A
-            // hook that records session evidence meanwhile is still mounting.
-            if invocation.operation == ApplicationSurfaceOperation::HookRuntime
-                && server.project_session_db.is_none()
-                && hook_runtime_needs_session_stores(&invocation.arguments)
-            {
+            // full server, which mounts the session stores and session sync
+            // owner, replaces it. A call that needs them meanwhile is still
+            // mounting.
+            if server.project_session_db.is_none() && needs_session_stores(&invocation) {
                 return Err(ApplicationProblem::runtime_mounting());
             }
             server
@@ -50,6 +52,23 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
                 .await
                 .map_err(|error| graph_tool_error_problem(&error))
         })
+    }
+}
+
+fn needs_session_stores(invocation: &GraphToolInvocationV1) -> bool {
+    match invocation.operation {
+        ApplicationSurfaceOperation::HookRuntime => {
+            hook_runtime_needs_session_stores(&invocation.arguments)
+        }
+        // An undecodable request is refused by the owner's own decode.
+        ApplicationSurfaceOperation::AdminCli => {
+            decode_primitive_request::<AdminCliSurfaceRequestV1>(
+                &Value::Object(invocation.arguments.clone()),
+                invocation.operation.mcp_tool_name(),
+            )
+            .is_ok_and(|request| request.needs_session_stores())
+        }
+        _ => false,
     }
 }
 
