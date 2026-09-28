@@ -572,6 +572,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     let view = Arc::new(Mutex::new(ProcessResidentSampleV1 {
         resident_bytes: GIB,
         unreclaimable_bytes: GIB,
+        cgroup_committed_bytes: None,
     }));
     let sampled = Arc::clone(&view);
     let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
@@ -594,6 +595,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     *view.lock().expect("view") = ProcessResidentSampleV1 {
         resident_bytes: high_watermark - 1,
         unreclaimable_bytes: 2 * GIB,
+        cgroup_committed_bytes: None,
     };
     let decoded = scheduler
         .latest_complete()
@@ -618,6 +620,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     *view.lock().expect("view") = ProcessResidentSampleV1 {
         resident_bytes: high_watermark - 1,
         unreclaimable_bytes: high_watermark - 1,
+        cgroup_committed_bytes: None,
     };
     assert!(matches!(
         scheduler.publication.load_active_shared(),

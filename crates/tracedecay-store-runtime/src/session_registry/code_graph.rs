@@ -242,6 +242,10 @@ impl GraphCancellation for ResidentMemoryGuardedGraphCancellationV1 {
         if self.tripped.load(Ordering::Acquire) {
             return true;
         }
+        // The maintenance sampler's cadence is longer than a sealed graph
+        // build. A checkpoint that trusts the last published state keeps
+        // allocating until the cgroup kill line. Read the process here.
+        let _ = self.pressure.sample_and_publish();
         if let tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1::OverBudget {
             observed_bytes,
             limit_bytes,
