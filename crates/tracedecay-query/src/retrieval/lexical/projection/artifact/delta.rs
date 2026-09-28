@@ -7,7 +7,7 @@
 //! files instead of replaying the sealed corpus.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use roaring::RoaringBitmap;
 use rusqlite::{Connection, OptionalExtension, Params, Transaction, params};
@@ -41,6 +41,9 @@ use super::CodeLexicalArtifactErrorV1;
 const CARRIED_SHIFT_TABLE: &str = "carried_document_shift";
 const CARRIED_REBUILD_TABLE: &str = "carried_rebuild_occurrence";
 const CARRIED_RETIRED_NGRAM_TABLE: &str = "carried_retired_ngram";
+/// Staging-name suffix of a carry still being copied and planned. Retention
+/// and the staging sweep treat it as a sidecar of its staging database.
+const CARRYING_SUFFIX: &str = "-carrying";
 /// Past this multiple of changed documents, rewriting every n-gram list is
 /// smaller than patching the keys those documents touch.
 const CARRIED_NGRAM_PATCH_DOCUMENT_FACTOR: i64 = 4;
@@ -108,7 +111,12 @@ pub(super) fn read_carried_rebuild_occurrences(
 
 /// Copy `parent` onto `staging` and retire occurrences the child metadata no
 /// longer names. Returns false when no unchanged occurrence can be carried;
-/// the staging path is removed in that case.
+/// the staging path is absent in that case.
+///
+/// The copy and its carry plan are written beside `staging` and renamed onto
+/// it only after the plan commits. A process killed mid-copy leaves a torn
+/// file under that sibling name, which the next carry or staging sweep
+/// removes, never a torn staging database a restart would try to resume.
 pub(super) fn stage_carried_parent(
     parent: &Path,
     staging: &Path,
@@ -116,8 +124,10 @@ pub(super) fn stage_carried_parent(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<bool, CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
-    copy_private_file(parent, staging)?;
-    let mut connection = Connection::open(staging).map_err(sqlite_error)?;
+    let carrying = sqlite_sibling(staging, CARRYING_SUFFIX)?;
+    remove_sqlite_family(&carrying)?;
+    copy_private_file(parent, &carrying)?;
+    let mut connection = Connection::open(&carrying).map_err(sqlite_error)?;
     connection
         .pragma_update(None, "journal_mode", "DELETE")
         .map_err(sqlite_error)?;
@@ -156,13 +166,21 @@ pub(super) fn stage_carried_parent(
     })();
     drop(connection);
     match carried {
-        Ok(true) => Ok(true),
+        Ok(true) => {
+            std::fs::rename(&carrying, staging).map_err(|error| {
+                CodeLexicalArtifactErrorV1::Io(format!(
+                    "install carried lexical staging {}: {error}",
+                    staging.display()
+                ))
+            })?;
+            Ok(true)
+        }
         Ok(false) => {
-            remove_sqlite_family(staging)?;
+            remove_sqlite_family(&carrying)?;
             Ok(false)
         }
         Err(error) => {
-            remove_sqlite_family(staging)?;
+            remove_sqlite_family(&carrying)?;
             Err(error)
         }
     }
@@ -218,22 +236,22 @@ fn copy_private_file(parent: &Path, staging: &Path) -> Result<(), CodeLexicalArt
     Ok(())
 }
 
+fn sqlite_sibling(path: &Path, suffix: &str) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "carried lexical staging path has no file name".to_owned(),
+            )
+        })?
+        .to_os_string();
+    name.push(suffix);
+    Ok(path.with_file_name(name))
+}
+
 fn remove_sqlite_family(path: &Path) -> Result<(), CodeLexicalArtifactErrorV1> {
-    for suffix in ["", "-wal", "-shm"] {
-        let candidate = if suffix.is_empty() {
-            path.to_path_buf()
-        } else {
-            let mut name = path
-                .file_name()
-                .ok_or_else(|| {
-                    CodeLexicalArtifactErrorV1::Contract(
-                        "carried lexical staging path has no file name".to_owned(),
-                    )
-                })?
-                .to_os_string();
-            name.push(suffix);
-            path.with_file_name(name)
-        };
+    for suffix in ["", "-journal", "-wal", "-shm"] {
+        let candidate = sqlite_sibling(path, suffix)?;
         match std::fs::remove_file(&candidate) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

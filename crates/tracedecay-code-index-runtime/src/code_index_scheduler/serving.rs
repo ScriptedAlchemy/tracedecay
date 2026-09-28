@@ -3701,12 +3701,15 @@ fn clear_text_artifact_staging_sidecars(staging_path: &Path) -> std::io::Result<
     };
     // The compacted rewrite's own rollback journal goes before the rewrite,
     // for the same reason the staging journal goes before the staging file.
+    // A parent carry killed before its rename leaves the same pair.
     for suffix in [
         "-journal",
         "-wal",
         "-shm",
         "-compacting-journal",
         "-compacting",
+        "-carrying-journal",
+        "-carrying",
     ] {
         let mut sidecar_name = name.to_os_string();
         sidecar_name.push(suffix);
@@ -3776,6 +3779,16 @@ mod staging_sidecar_tests {
         assert!(!journal.exists());
         assert!(!compacting.exists());
         assert!(!compacting_journal.exists());
+
+        let carrying = root.path().join(".text-artifact-ab.staging-carrying");
+        let carrying_journal = root
+            .path()
+            .join(".text-artifact-ab.staging-carrying-journal");
+        std::fs::write(&carrying, b"torn parent copy").expect("plant torn carry");
+        std::fs::write(&carrying_journal, b"carry rollback").expect("plant carry journal");
+        prepare_absent_text_artifact_staging(&staging).expect("clear torn carry");
+        assert!(!carrying.exists());
+        assert!(!carrying_journal.exists());
 
         std::fs::write(root.path().join(".text-artifact-ab.staging-wal"), b"wal")
             .expect("plant wal");
