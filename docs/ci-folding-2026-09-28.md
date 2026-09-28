@@ -67,7 +67,7 @@ jobs and per-partition evidence. Local framing measurements below remain a
 separate experiment.
 
 [PR #2443](https://github.com/ScriptedAlchemy/tracedecay/pull/2443) records the
-independent review, rollout and manual hosted probe results.
+independent review and rollout, with manual hosted probe results when available.
 
 ## What was measured
 
@@ -316,7 +316,8 @@ smaller public shape; consumers needing the old detailed record use `result`.
 
 The six-worker Linux integration has completed its hosted treatment run.
 The manual Action runs the separate warm-snapshot probe and publishes its
-measurement artifact. Its hosted result is recorded on PR #2443. The demand
+measurement artifact. Each successful dispatch retains its JSON result in
+Actions. The demand
 controller and multi-head check publisher below remain a design. Production
 workers do not persist across workflow runs. Release workflows retain their
 current behavior.
