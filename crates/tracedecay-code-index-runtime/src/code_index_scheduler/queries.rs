@@ -2341,6 +2341,10 @@ fn graph_relation_keys(
     let mut keys = Vec::new();
     let mut complete = true;
     let mut depth = 0_u32;
+    // A call hierarchy lists a directly recursive seed as its own neighbor.
+    // Walks over other relation kinds describe the seed's surroundings, which
+    // never include the seed.
+    let mut direct_recursion_pending = kinds == [RelationEdgeKindV1::Calls];
     'walk: while !frontier.is_empty() && depth < maximum_depth {
         let remaining = cap.saturating_sub(keys.len());
         if remaining == 0 {
@@ -2362,7 +2366,11 @@ fn graph_relation_keys(
         let mut next = Vec::new();
         for (current, seed_keys) in frontier.iter().zip(step.per_seed) {
             for key in seed_keys {
-                if !visited.insert(key.neighbor.clone()) {
+                let direct_recursion =
+                    direct_recursion_pending && depth == 0 && key.neighbor == *current;
+                if direct_recursion {
+                    direct_recursion_pending = false;
+                } else if !visited.insert(key.neighbor.clone()) {
                     continue;
                 }
                 if keys.len() == cap {
@@ -2390,7 +2398,9 @@ fn graph_relation_keys(
                         .then(|| current.clone()),
                     depth: depth + 1,
                 });
-                next.push(key.neighbor);
+                if !direct_recursion {
+                    next.push(key.neighbor);
+                }
             }
         }
         if !complete {

@@ -242,8 +242,11 @@ impl StaticLanguageRegistry {
             // docstring stopped absorbing trailing or blank-line-detached
             // comments and `///` lost its stray `/`; QBasic dialects moved when
             // CONST names stopped losing their text before an underscore.
+            // Ruby v6 names a receiver call `recv.m`, so `x.clamp` inside
+            // `clamp` is no longer bound as recursion.
             let extractor_revision = match language.as_str() {
                 "rust" => 16,
+                "ruby" => 6,
                 "typescript" => 9,
                 "protobuf" => 7,
                 "sql" => 6,
