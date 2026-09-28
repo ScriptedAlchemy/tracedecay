@@ -59,6 +59,8 @@ fn definition(
     })
 }
 
+const IMMUTABLE_CONFLICT: &str = "definition_id and definition_version already identify different immutable content; register a new definition_version";
+
 fn pin_request_identity(actual: &Value, expected: &mut Value) {
     let request_id = actual
         .pointer("/value/request_id")
@@ -107,7 +109,7 @@ fn registered_payload(body: &Value) -> &Value {
 /// An unknown request body is an adapter refusal, a foreign project is hidden
 /// as not-found, the admitted definition is returned verbatim, an exact retry
 /// returns that same definition, and a different body under the same id and
-/// version is a runtime invalid request that still names the binding.
+/// version is an immutable-content conflict that still names the binding.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn register_definition_returns_the_submitted_definition_and_typed_refusals() {
     let production = crate::support::production_composition_fixture().await;
@@ -202,7 +204,7 @@ async fn register_definition_returns_the_submitted_definition_and_typed_refusals
                     "diagnostic": null,
                     "detail": null,
                     "committed_receipt": null,
-                    "owning_layer": "runtime",
+                    "owning_layer": "application",
                     "terminality": "pre_admission",
                     "retryable": false,
                     "retry": "never",
@@ -340,16 +342,16 @@ async fn register_definition_returns_the_submitted_definition_and_typed_refusals
                 "request_id": "request.placeholder",
                 "problem": {
                     "revision": 1,
-                    "kind": "invalid_request",
-                    "code": "workflow.invalid_request",
-                    "message": "The Workflow application request is invalid",
+                    "kind": "conflict",
+                    "code": "workflow.definition.immutable_conflict",
+                    "message": IMMUTABLE_CONFLICT,
                     "diagnostic": {
-                        "code": "workflow.invalid_request",
-                        "message": "The Workflow application request is invalid"
+                        "code": "workflow.definition.immutable_conflict",
+                        "message": IMMUTABLE_CONFLICT
                     },
                     "detail": null,
                     "committed_receipt": null,
-                    "owning_layer": "runtime",
+                    "owning_layer": "application",
                     "terminality": "pre_admission",
                     "retryable": false,
                     "retry": "never",

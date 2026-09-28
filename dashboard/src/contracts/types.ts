@@ -351,6 +351,12 @@ export type ApplicationProblemDetailV1 =
     required_version: number | null;
   }
   | {
+    current: number;
+    field: string;
+    kind: "stale_precondition";
+    requested: number;
+  }
+  | {
     active: number;
     committed: number;
     kind: "stale_refresh_frontier";

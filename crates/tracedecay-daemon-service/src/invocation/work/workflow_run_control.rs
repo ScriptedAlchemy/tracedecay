@@ -7,10 +7,12 @@ use std::sync::atomic::AtomicBool;
 
 use tracedecay_application::work::workflow_topology::WorkflowTopologyError;
 use tracedecay_contracts::{
-    ApplicationProblem, RequestContext, SafeDiagnostic, WorkflowCatalogAdmissionError,
-    WorkflowCoordinationError, WorkflowRunStoragePort,
+    ApplicationProblem, ApplicationProblemDetailV1, LegalAction, RequestContext, RetryDirective,
+    SafeDiagnostic, WorkflowCatalogAdmissionError, WorkflowCoordinationError,
+    WorkflowDefinitionLifecycleState, WorkflowRunServiceError, WorkflowRunStorageError,
+    WorkflowRunStoragePort,
 };
-use tracedecay_domain::{ManifestDigest, UtcMicros};
+use tracedecay_domain::{ManifestDigest, UtcMicros, WorkflowRunStateError};
 
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
@@ -39,17 +41,19 @@ pub(super) fn start_workflow_run(
     observability_producer: Option<
         Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
-) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+) -> Result<tracedecay_domain::WorkflowRunProjection, ApplicationProblem> {
     match services.effects().projection(&request.run_id) {
         Ok(existing) => {
             let admitted = existing
                 .history()
                 .first()
-                .ok_or(DaemonInvocationProblem::ResetRequired)?;
+                .ok_or_else(workflow_reset_required)?;
             if admitted.command_id() != &request.command_id
                 || admitted.input_digest() != input_digest
             {
-                return Err(DaemonInvocationProblem::InvalidRequest);
+                return Err(workflow_run_command_conflict(
+                    "run_id already names a run admitted by a different command_id or input",
+                ));
             }
             return reconcile_workflow_fan_out(
                 registered,
@@ -70,14 +74,19 @@ pub(super) fn start_workflow_run(
         .get(&request.definition_id, request.definition_version)
         .map_err(workflow_coordination_problem)?;
     if definition.project_id() != &context.scope().project_id {
-        return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
+        return Err(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
     }
     let disposition = services
         .definitions()
         .disposition(&request.definition_id, request.definition_version)
         .map_err(workflow_coordination_problem)?;
-    if disposition.state != tracedecay_contracts::WorkflowDefinitionLifecycleState::Active {
-        return Err(DaemonInvocationProblem::InvalidRequest);
+    if disposition.state != WorkflowDefinitionLifecycleState::Active {
+        return Err(definition_not_active(
+            request.definition_version,
+            disposition.state,
+        ));
     }
     let provider_registration = request.provider.clone();
     let registry = tracedecay_contracts::WorkflowProviderRegistry::new(
@@ -102,12 +111,12 @@ pub(super) fn start_workflow_run(
         )
         .map_err(workflow_topology_problem)?;
     if ready_steps.is_empty() {
-        return Err(DaemonInvocationProblem::ResetRequired);
+        return Err(workflow_reset_required());
     }
     let topology = &registered.work_topology_policy;
     let topology_digest = topology
         .compute_digest()
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?
+        .map_err(|_| workflow_runtime_unavailable())?
         .0;
     let placement = tracedecay_contracts::WorkflowProviderPlacementService::new(registry.clone());
     for step_id in &ready_steps {
@@ -127,7 +136,7 @@ pub(super) fn start_workflow_run(
         policy_digest: registered.policy_digest.clone(),
         configuration_digest: registered.configuration_digest.clone(),
         catalog_digest: tracedecay_contracts::work_executable_catalog_digest()
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?,
+            .map_err(|_| workflow_runtime_unavailable())?,
         topology_digest: topology_digest.clone(),
         provider_registry_digest: registry.digest().clone(),
     };
@@ -138,13 +147,13 @@ pub(super) fn start_workflow_run(
                 || fan_out.execution_snapshot.backend() != provider_registration.backend()
                 || fan_out.execution_snapshot.model() != provider_registration.model()
             {
-                return Err(DaemonInvocationProblem::InvalidRequest);
+                return Err(workflow_invalid_request());
             }
             tracedecay_contracts::require_registered_work_topology(
                 &fan_out.execution_snapshot,
                 topology,
             )
-            .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+            .map_err(|_| workflow_invalid_request())?;
             let mut fan_out_steps = ready_steps.iter().filter(|step_id| {
                 definition
                     .steps()
@@ -155,9 +164,9 @@ pub(super) fn start_workflow_run(
             let entry_step = fan_out_steps
                 .next()
                 .cloned()
-                .ok_or(DaemonInvocationProblem::InvalidRequest)?;
+                .ok_or_else(workflow_invalid_request)?;
             if fan_out_steps.next().is_some() {
-                return Err(DaemonInvocationProblem::InvalidRequest);
+                return Err(workflow_invalid_request());
             }
             let provider = tracedecay_contracts::WorkflowProviderAdmission {
                 execution_snapshot: fan_out.execution_snapshot,
@@ -183,7 +192,7 @@ pub(super) fn start_workflow_run(
                     inputs: fan_out.inputs,
                 },
             )
-            .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+            .map_err(|_| workflow_invalid_request())?;
             vec![
                 tracedecay_contracts::durable_workflow_fan_out_plan(
                     &plan,
@@ -195,9 +204,11 @@ pub(super) fn start_workflow_run(
                         context.actor().clone(),
                         context.grant().digest.clone(),
                     )
-                    .map_err(|_| DaemonInvocationProblem::NotFoundOrNotAuthorized)?,
+                    .map_err(|_| {
+                        ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+                    })?,
                 )
-                .map_err(|_| DaemonInvocationProblem::InvalidRequest)?,
+                .map_err(|_| workflow_invalid_request())?,
             ]
         }
     };
@@ -234,7 +245,7 @@ pub(super) fn apply_workflow_run_command(
     command_id: tracedecay_domain::WorkCommandId,
     input_digest: &ManifestDigest,
     observed_at: UtcMicros,
-) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+) -> Result<tracedecay_domain::WorkflowRunProjection, ApplicationProblem> {
     tracedecay_contracts::WorkflowRunService::new(services.effects().clone())
         .apply(
             run_id,
@@ -246,7 +257,21 @@ pub(super) fn apply_workflow_run_command(
                 occurred_at: observed_at,
             },
         )
-        .map_err(workflow_run_problem)
+        .map_err(|error| match error {
+            WorkflowRunServiceError::Storage(WorkflowRunStorageError::VersionConflict) => {
+                match services.effects().projection(run_id) {
+                    Ok(current) => ApplicationProblem::from_detail(
+                        ApplicationProblemDetailV1::StalePrecondition {
+                            field: "expected_sequence".to_owned(),
+                            requested: expected_sequence,
+                            current: current.sequence(),
+                        },
+                    ),
+                    Err(error) => workflow_run_storage_problem(error),
+                }
+            }
+            error => workflow_run_problem(error),
+        })
 }
 
 /// Requests cooperative cancellation and, when no step is still running,
@@ -264,12 +289,12 @@ pub(super) fn cancel_workflow_run(
     observability_producer: Option<
         Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
-) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+) -> Result<tracedecay_domain::WorkflowRunProjection, ApplicationProblem> {
     let reconcile_command_id = tracedecay_domain::WorkCommandId::try_from(format!(
         "{}.reconcile",
         request.command_id.as_str()
     ))
-    .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+    .map_err(|_| workflow_invalid_request())?;
     let cancelling = apply_workflow_run_command(
         services,
         &request.run_id,
@@ -310,45 +335,179 @@ pub(super) fn cancel_workflow_run(
     )
 }
 
-pub(super) fn workflow_run_problem(
-    error: tracedecay_contracts::WorkflowRunServiceError,
-) -> DaemonInvocationProblem {
+pub(super) fn workflow_runtime_unavailable() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "workflow.unavailable".to_owned(),
+        message: "The Workflow application runtime is unavailable".to_owned(),
+    })
+}
+
+pub(super) fn workflow_invalid_request() -> ApplicationProblem {
+    ApplicationProblem::invalid_request(
+        "workflow.invalid_request",
+        "The Workflow application request is invalid",
+    )
+}
+
+pub(super) fn workflow_not_found() -> ApplicationProblem {
+    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+}
+
+pub(super) fn workflow_reset_required() -> ApplicationProblem {
+    ApplicationProblem::reset_required(SafeDiagnostic {
+        code: "workflow.reset_required".to_owned(),
+        message: "The Workflow store requires an explicit reset".to_owned(),
+    })
+}
+
+/// A shared-authority problem outside the Workflow owner, answered with the
+/// Workflow family's codes.
+pub(super) fn workflow_invocation_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
+    match problem {
+        DaemonInvocationProblem::InvalidRequest | DaemonInvocationProblem::UnsupportedRevision => {
+            workflow_invalid_request()
+        }
+        DaemonInvocationProblem::NotFoundOrNotAuthorized => workflow_not_found(),
+        DaemonInvocationProblem::ResetRequired => workflow_reset_required(),
+        DaemonInvocationProblem::ApplicationContractViolation => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "workflow.application_contract_violation".to_owned(),
+                message: "The Workflow application result violated its canonical contract"
+                    .to_owned(),
+            })
+        }
+        DaemonInvocationProblem::Unavailable => workflow_runtime_unavailable(),
+    }
+}
+
+/// A conflict that resending the same request can never clear; `action` is
+/// the one way forward.
+pub(super) fn workflow_final_conflict(
+    code: &str,
+    message: impl Into<String>,
+    action: LegalAction,
+) -> ApplicationProblem {
+    ApplicationProblem::Conflict {
+        diagnostic: SafeDiagnostic {
+            code: code.to_owned(),
+            message: message.into(),
+        },
+        retry: RetryDirective::Never,
+        legal_actions: vec![action],
+    }
+}
+
+/// The same identity already names different input.
+fn workflow_run_command_conflict(message: &str) -> ApplicationProblem {
+    workflow_final_conflict(
+        "workflow.run.command_conflict",
+        message,
+        LegalAction::CorrectRequest,
+    )
+}
+
+fn definition_not_active(
+    definition_version: u64,
+    state: WorkflowDefinitionLifecycleState,
+) -> ApplicationProblem {
+    workflow_final_conflict(
+        "workflow.definition.not_active",
+        format!(
+            "definition_version {definition_version} is {state}; runs start only from an active definition version",
+            state = state.as_str()
+        ),
+        LegalAction::CorrectRequest,
+    )
+}
+
+pub(super) fn workflow_run_problem(error: WorkflowRunServiceError) -> ApplicationProblem {
+    let pin_mismatch = |pin: &str| {
+        ApplicationProblem::invalid_request(
+            format!("workflow.{pin}.pin_mismatch"),
+            format!(
+                "the definition's pinned_{pin}_digest no longer matches the live registered {pin} digest; register a new immutable definition version with the live digest"
+            ),
+        )
+    };
     match error {
-        tracedecay_contracts::WorkflowRunServiceError::PolicyDigestMismatch
-        | tracedecay_contracts::WorkflowRunServiceError::ConfigurationDigestMismatch
-        | tracedecay_contracts::WorkflowRunServiceError::CatalogDigestMismatch
-        | tracedecay_contracts::WorkflowRunServiceError::State(_) => {
-            DaemonInvocationProblem::InvalidRequest
+        WorkflowRunServiceError::PolicyDigestMismatch => pin_mismatch("policy"),
+        WorkflowRunServiceError::ConfigurationDigestMismatch => pin_mismatch("configuration"),
+        WorkflowRunServiceError::CatalogDigestMismatch => pin_mismatch("catalog"),
+        WorkflowRunServiceError::State(WorkflowRunStateError::InvalidTransition) => {
+            ApplicationProblem::conflict(
+                "workflow.run.illegal_transition",
+                "the run's current status has no transition for this command; read the run and resend against its current status",
+            )
         }
-        tracedecay_contracts::WorkflowRunServiceError::Storage(error) => {
-            workflow_run_storage_problem(error)
+        WorkflowRunServiceError::State(WorkflowRunStateError::DuplicateCommand) => {
+            workflow_run_command_conflict("command_id already names a different run command")
         }
+        WorkflowRunServiceError::State(error) => {
+            ApplicationProblem::invalid_request("workflow.run.state_refused", error.to_string())
+        }
+        WorkflowRunServiceError::Storage(error) => workflow_run_storage_problem(error),
     }
 }
 
 pub(super) fn workflow_coordination_problem(
     error: WorkflowCoordinationError,
-) -> DaemonInvocationProblem {
+) -> ApplicationProblem {
+    let invalid = |code: &str, message: String| ApplicationProblem::invalid_request(code, message);
     match error {
-        tracedecay_contracts::WorkflowCoordinationError::AuthorityUnavailable(_) => {
-            DaemonInvocationProblem::Unavailable
-        }
         // A catalog that could not be composed is an unavailable authority,
         // not a caller mistake; only a definition the live catalog actually
         // refused is an invalid request.
-        tracedecay_contracts::WorkflowCoordinationError::CatalogAdmissionDenied(
-            tracedecay_contracts::WorkflowCatalogAdmissionError::CatalogUnavailable(_),
-        ) => DaemonInvocationProblem::Unavailable,
-        tracedecay_contracts::WorkflowCoordinationError::DefinitionNotFound
-        | tracedecay_contracts::WorkflowCoordinationError::ScopeMismatch => {
-            DaemonInvocationProblem::NotFoundOrNotAuthorized
+        WorkflowCoordinationError::AuthorityUnavailable(_)
+        | WorkflowCoordinationError::CatalogAdmissionDenied(
+            WorkflowCatalogAdmissionError::CatalogUnavailable(_),
+        ) => workflow_runtime_unavailable(),
+        WorkflowCoordinationError::DefinitionNotFound | WorkflowCoordinationError::ScopeMismatch => {
+            workflow_not_found()
         }
-        tracedecay_contracts::WorkflowCoordinationError::InvalidDefinition
-        | tracedecay_contracts::WorkflowCoordinationError::CatalogAdmissionDenied(_)
-        | tracedecay_contracts::WorkflowCoordinationError::ImmutableDefinitionConflict
-        | tracedecay_contracts::WorkflowCoordinationError::IllegalLifecycleTransition
-        | tracedecay_contracts::WorkflowCoordinationError::LifecycleRevisionConflict => {
-            DaemonInvocationProblem::InvalidRequest
+        WorkflowCoordinationError::InvalidDefinition => invalid(
+            "workflow.definition.invalid",
+            "definition content, definition_version, or expected_revision failed validation; versions and revisions start at 1".to_owned(),
+        ),
+        WorkflowCoordinationError::CatalogAdmissionDenied(
+            WorkflowCatalogAdmissionError::CatalogPinMismatch { pinned, current },
+        ) => invalid(
+            "workflow.catalog.pin_mismatch",
+            format!(
+                "pinned_catalog_digest expected {current}, observed {pinned}; register a new immutable definition version with the live Work executable catalog digest"
+            ),
+        ),
+        WorkflowCoordinationError::CatalogAdmissionDenied(
+            WorkflowCatalogAdmissionError::UnknownOperation { step_id, operation },
+        ) => invalid(
+            "workflow.catalog.operation_unknown",
+            format!(
+                "steps[{step_id}].operation observed {operation}; expected an operation in the live Work executable catalog"
+            ),
+        ),
+        WorkflowCoordinationError::CatalogAdmissionDenied(
+            WorkflowCatalogAdmissionError::OperationUnavailable { step_id, operation },
+        ) => invalid(
+            "workflow.catalog.operation_unavailable",
+            format!(
+                "steps[{step_id}].operation observed {operation}; expected a live executable binding"
+            ),
+        ),
+        WorkflowCoordinationError::ImmutableDefinitionConflict => workflow_final_conflict(
+            "workflow.definition.immutable_conflict",
+            "definition_id and definition_version already identify different immutable content; register a new definition_version",
+            LegalAction::CorrectRequest,
+        ),
+        WorkflowCoordinationError::IllegalLifecycleTransition => ApplicationProblem::conflict(
+            "workflow.lifecycle.illegal_transition",
+            "lifecycle operation is not legal from the observed definition state",
+        ),
+        WorkflowCoordinationError::LifecycleRevisionConflict => {
+            ApplicationProblem::stale(SafeDiagnostic {
+                code: "workflow.lifecycle.revision_conflict".to_owned(),
+                message:
+                    "expected_revision does not match the observed definition disposition revision"
+                        .to_owned(),
+            })
         }
     }
 }
@@ -391,112 +550,45 @@ pub(super) fn admit_workflow_environment_pins(
     Ok(())
 }
 
-pub(super) fn workflow_coordination_application_problem(
-    error: &WorkflowCoordinationError,
-) -> Option<ApplicationProblem> {
-    let diagnostic = match error {
-        WorkflowCoordinationError::InvalidDefinition => SafeDiagnostic {
-            code: "workflow.definition.invalid".to_owned(),
-            message: "definition failed structural validation".to_owned(),
-        },
-        WorkflowCoordinationError::CatalogAdmissionDenied(
-            WorkflowCatalogAdmissionError::CatalogPinMismatch { pinned, current },
-        ) => SafeDiagnostic {
-            code: "workflow.catalog.pin_mismatch".to_owned(),
-            message: format!(
-                "pinned_catalog_digest expected {current}, observed {pinned}; register a new immutable definition version with the live Work executable catalog digest"
-            ),
-        },
-        WorkflowCoordinationError::CatalogAdmissionDenied(
-            WorkflowCatalogAdmissionError::UnknownOperation { step_id, operation },
-        ) => SafeDiagnostic {
-            code: "workflow.catalog.operation_unknown".to_owned(),
-            message: format!(
-                "steps[{step_id}].operation observed {operation}; expected an operation in the live Work executable catalog"
-            ),
-        },
-        WorkflowCoordinationError::CatalogAdmissionDenied(
-            WorkflowCatalogAdmissionError::OperationUnavailable { step_id, operation },
-        ) => SafeDiagnostic {
-            code: "workflow.catalog.operation_unavailable".to_owned(),
-            message: format!(
-                "steps[{step_id}].operation observed {operation}; expected a live executable binding"
-            ),
-        },
-        WorkflowCoordinationError::ImmutableDefinitionConflict => SafeDiagnostic {
-            code: "workflow.definition.immutable_conflict".to_owned(),
-            message:
-                "definition_id and definition_version already identify different immutable content"
-                    .to_owned(),
-        },
-        WorkflowCoordinationError::IllegalLifecycleTransition => SafeDiagnostic {
-            code: "workflow.lifecycle.illegal_transition".to_owned(),
-            message: "lifecycle operation is not legal from the observed definition state"
-                .to_owned(),
-        },
-        WorkflowCoordinationError::LifecycleRevisionConflict => SafeDiagnostic {
-            code: "workflow.lifecycle.revision_conflict".to_owned(),
-            message:
-                "expected_revision does not match the observed definition disposition revision"
-                    .to_owned(),
-        },
-        WorkflowCoordinationError::CatalogAdmissionDenied(
-            WorkflowCatalogAdmissionError::CatalogUnavailable(_),
-        )
-        | WorkflowCoordinationError::ScopeMismatch
-        | WorkflowCoordinationError::DefinitionNotFound
-        | WorkflowCoordinationError::AuthorityUnavailable(_) => return None,
-    };
-    Some(ApplicationProblem::invalid_request(
-        diagnostic.code,
-        diagnostic.message,
-    ))
-}
-
-pub(super) fn workflow_run_storage_problem(
-    error: tracedecay_contracts::WorkflowRunStorageError,
-) -> DaemonInvocationProblem {
+pub(super) fn workflow_run_storage_problem(error: WorkflowRunStorageError) -> ApplicationProblem {
     match error {
-        tracedecay_contracts::WorkflowRunStorageError::NotFound => {
-            DaemonInvocationProblem::NotFoundOrNotAuthorized
+        WorkflowRunStorageError::NotFound => workflow_not_found(),
+        WorkflowRunStorageError::VersionConflict => ApplicationProblem::stale(SafeDiagnostic {
+            code: "workflow.run.sequence_conflict".to_owned(),
+            message: "expected_sequence does not match the run's current sequence".to_owned(),
+        }),
+        WorkflowRunStorageError::IdempotencyConflict => {
+            workflow_run_command_conflict("command_id already names a different run command")
         }
-        tracedecay_contracts::WorkflowRunStorageError::VersionConflict
-        | tracedecay_contracts::WorkflowRunStorageError::IdempotencyConflict => {
-            DaemonInvocationProblem::InvalidRequest
-        }
-        tracedecay_contracts::WorkflowRunStorageError::InvalidHistory => {
-            DaemonInvocationProblem::ResetRequired
-        }
-        tracedecay_contracts::WorkflowRunStorageError::Unavailable => {
-            DaemonInvocationProblem::Unavailable
-        }
+        WorkflowRunStorageError::InvalidHistory => workflow_reset_required(),
+        WorkflowRunStorageError::Unavailable => workflow_runtime_unavailable(),
     }
 }
 
 fn workflow_placement_problem(
     error: tracedecay_contracts::WorkflowProviderPlacementError,
-) -> DaemonInvocationProblem {
+) -> ApplicationProblem {
     match error {
         tracedecay_contracts::WorkflowProviderPlacementError::InvalidRegistry
         | tracedecay_contracts::WorkflowProviderPlacementError::ConfigurationDigestMismatch
         | tracedecay_contracts::WorkflowProviderPlacementError::TopologyDigestMismatch
         | tracedecay_contracts::WorkflowProviderPlacementError::InvalidTopology => {
-            DaemonInvocationProblem::InvalidRequest
+            workflow_invalid_request()
         }
         tracedecay_contracts::WorkflowProviderPlacementError::Unavailable => {
-            DaemonInvocationProblem::Unavailable
+            workflow_runtime_unavailable()
         }
     }
 }
 
-fn workflow_topology_problem(error: WorkflowTopologyError) -> DaemonInvocationProblem {
+fn workflow_topology_problem(error: WorkflowTopologyError) -> ApplicationProblem {
     match error {
-        WorkflowTopologyError::Contract(_) => DaemonInvocationProblem::InvalidRequest,
+        WorkflowTopologyError::Contract(_) => workflow_invalid_request(),
         WorkflowTopologyError::GenerationMismatch | WorkflowTopologyError::Corrupt(_) => {
-            DaemonInvocationProblem::ResetRequired
+            workflow_reset_required()
         }
         WorkflowTopologyError::Cancelled
         | WorkflowTopologyError::BudgetExhausted
-        | WorkflowTopologyError::Unavailable(_) => DaemonInvocationProblem::Unavailable,
+        | WorkflowTopologyError::Unavailable(_) => workflow_runtime_unavailable(),
     }
 }
