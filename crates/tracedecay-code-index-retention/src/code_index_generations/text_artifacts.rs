@@ -525,7 +525,9 @@ pub(super) fn staging_text_artifact_source_digest(file_name: &str) -> Option<&st
 /// compacted rewrite before it replaces the staging file
 /// (`.staging-compacting`), and the rollback journal SQLite keeps beside that
 /// rewrite while `VACUUM INTO` writes it (`.staging-compacting-journal`, which
-/// a kill mid-rewrite leaves behind). They carry the same source-generation
+/// a kill mid-rewrite leaves behind), and a parent-artifact carry still being
+/// copied before its rename onto the staging name (`.staging-carrying` and
+/// its `.staging-carrying-journal`). They carry the same source-generation
 /// digest as their staging file and share its liveness.
 pub(super) fn staging_sidecar_text_artifact_source_digest(file_name: &str) -> Option<&str> {
     let value = file_name.strip_prefix(".text-artifact-")?;
@@ -534,7 +536,9 @@ pub(super) fn staging_sidecar_text_artifact_source_digest(file_name: &str) -> Op
         .or_else(|| value.strip_suffix(".staging-wal"))
         .or_else(|| value.strip_suffix(".staging-shm"))
         .or_else(|| value.strip_suffix(".staging-compacting"))
-        .or_else(|| value.strip_suffix(".staging-compacting-journal"))?;
+        .or_else(|| value.strip_suffix(".staging-compacting-journal"))
+        .or_else(|| value.strip_suffix(".staging-carrying"))
+        .or_else(|| value.strip_suffix(".staging-carrying-journal"))?;
     is_lowercase_hex(digest, 64).then_some(digest)
 }
 

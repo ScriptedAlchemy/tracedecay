@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { z, type ZodTypeAny } from "zod";
 import ts from "typescript";
 import { generateContracts, type JsonSchema, OUTPUT_FILES } from "../src/generate.ts";
@@ -14,6 +14,20 @@ function loadBundles(): JsonSchema[] {
     .filter((f) => f.endsWith(".schema.json"))
     .sort()
     .map((f) => JSON.parse(readFileSync(join(SCHEMA_DIR, f), "utf8")) as JsonSchema);
+}
+
+function contractText(files: Record<string, string>): string {
+  return [
+    files[OUTPUT_FILES.TYPES_FILE],
+    files[OUTPUT_FILES.DECODERS_FILE],
+    files[OUTPUT_FILES.GENERATED_FILE],
+  ].join("\n");
+}
+
+function diagnosticText(diagnostics: readonly ts.Diagnostic[]): string[] {
+  return diagnostics.map((diagnostic) =>
+    ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
+  );
 }
 
 function emittedPropertyDecoder(generated: string, property: string): ZodTypeAny {
@@ -36,7 +50,7 @@ describe("contracts generator", () => {
 
   it("emits no timestamps or host/env state (reviewable diffs)", () => {
     const { files } = generateContracts(bundles);
-    const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(files);
     // No ISO timestamps, epoch millis, or absolute machine paths.
     expect(generated).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
     expect(generated).not.toMatch(/\/fast\/|\/home\/|\/Users\//);
@@ -45,14 +59,30 @@ describe("contracts generator", () => {
 
   it("sorts named defs alphabetically (stable ordering)", () => {
     const { files } = generateContracts(bundles);
-    const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
-    const order = [
+    const types = files[OUTPUT_FILES.TYPES_FILE]!;
+    const decoders = files[OUTPUT_FILES.DECODERS_FILE]!;
+    const typeOrder = [
+      "export type ActorId ",
+      "export type AnalyticsAgentsPayloadV1 ",
+      "export type DashboardAuthorizationV1 ",
+      "export type DashboardCoverageV1 ",
+      "export type DashboardDomainStateV1 ",
+      "export interface DashboardEnvelopeV1<",
+      "export type DashboardFreshnessV1 ",
+      "export type DashboardLegalActionKindV1 ",
+      "export type DashboardLegalActionRefV1 ",
+      "export type DashboardScopeV1 ",
+      "export type DashboardTimeV1 ",
+      "export type DashboardVersionV1 ",
+      "export type DashboardWatermarkV1 ",
+      "export type DeliveryCiTimelineV1 ",
+    ].map((needle) => types.indexOf(needle));
+    const decoderOrder = [
       "const ActorIdSchema",
       "const AnalyticsAgentsPayloadV1Schema",
       "const DashboardAuthorizationV1Schema",
       "const DashboardCoverageV1Schema",
       "const DashboardDomainStateV1Schema",
-      "interface DashboardEnvelopeV1",
       "const DashboardFreshnessV1Schema",
       "const DashboardLegalActionKindV1Schema",
       "const DashboardLegalActionRefV1Schema",
@@ -61,22 +91,23 @@ describe("contracts generator", () => {
       "const DashboardVersionV1Schema",
       "const DashboardWatermarkV1Schema",
       "const DeliveryCiTimelineV1Schema",
-    ].map((needle) => generated.indexOf(needle));
-    expect(order.every((i) => i >= 0)).toBe(true);
-    const sorted = [...order].sort((a, b) => a - b);
-    expect(order).toEqual(sorted);
+    ].map((needle) => decoders.indexOf(needle));
+    for (const order of [typeOrder, decoderOrder]) {
+      expect(order.every((i) => i >= 0)).toBe(true);
+      expect(order).toEqual([...order].sort((a, b) => a - b));
+    }
   });
 
   it("emits an assertNever exhaustiveness helper", () => {
     const { files } = generateContracts(bundles);
-    expect(files[OUTPUT_FILES.GENERATED_FILE]!).toContain(
+    expect(contractText(files)).toContain(
       "export function assertNever(value: never): never",
     );
   });
 
   it("emits the closed 17-value domain-state string enum (read_model.rs parity)", () => {
     const { files } = generateContracts(bundles);
-    const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(files);
     // Flat string enum, not a `{ kind }` tagged union.
     expect(generated).toContain("export type DashboardDomainStateV1 =");
     expect(generated).toContain("export const DashboardDomainStateV1Schema");
@@ -96,7 +127,7 @@ describe("contracts generator", () => {
 
   it("emits a decoder factory for the generic DashboardEnvelope<T>", () => {
     const { files } = generateContracts(bundles);
-    const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(files);
     expect(generated).toContain("export interface DashboardEnvelopeV1<TPayload>");
     expect(generated).toContain("export function DashboardEnvelopeV1Schema<TPayload>(");
     expect(generated).toContain("payload: payloadSchema,");
@@ -112,7 +143,7 @@ describe("contracts generator", () => {
     defs.FeedbackEnvelopeInstantiation = defs.DashboardEnvelopeV12!;
     delete defs.DashboardEnvelopeV12;
 
-    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(generateContracts([bundle]).files);
     expect(generated).not.toContain("FeedbackEnvelopeInstantiationSchema");
   });
 
@@ -124,7 +155,7 @@ describe("contracts generator", () => {
       required: ["description"],
     };
 
-    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(generateContracts([bundle]).files);
     expect(generated).toContain("export const DashboardEnvelopeV1MetadataSchema");
   });
 
@@ -141,17 +172,12 @@ describe("contracts generator", () => {
 
   it("emits only Rust-owned contract names", () => {
     const { files } = generateContracts(bundles);
-    const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(files);
     expect(generated).not.toContain("export const DashboardEnvelopeV1Schema =");
     expect(generated).not.toContain("export type DashboardEnvelopeV1");
     expect(generated).not.toContain("export const AnalyticsOverviewPayloadSchema =");
     expect(generated).not.toContain("export type AnalyticsOverviewPayload =");
     expect(generated).not.toContain("export const DoctorEffectReceiptSchema =");
-  });
-
-  it("emits the live index that re-exports the generated contract", () => {
-    const { files } = generateContracts(bundles);
-    expect(files[OUTPUT_FILES.INDEX_FILE]!).toContain('export * from "./generated";');
   });
 
   it("maps a synthetic tagged union without inventing variants", () => {
@@ -175,42 +201,13 @@ describe("contracts generator", () => {
       },
     };
     const { files } = generateContracts([bundle]);
-    const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(files);
     expect(generated).toContain('z.discriminatedUnion("kind"');
     expect(generated).not.toContain('kind: "unsupported_schema";');
     expect(generated).toContain('WIRE_SCHEMA_REVISION = "test.1"');
   });
 
-  it("preserves closed-object admission while leaving open objects extensible", () => {
-    const bundle: JsonSchema = {
-      schemaRevision: "test.1",
-      $defs: {
-        ClosedReading: {
-          type: "object",
-          properties: { status: { type: "string" } },
-          required: ["status"],
-          additionalProperties: false,
-        },
-        OpenReading: {
-          type: "object",
-          properties: { status: { type: "string" } },
-          required: ["status"],
-        },
-      },
-    };
-
-    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
-    expect(generated).toContain(
-      "export const ClosedReadingSchema: z.ZodObject<{\n  status: z.ZodType<string, z.ZodTypeDef, unknown>;\n}, \"strict\"> = z.object({\n  status: z.string(),\n}).strict();",
-    );
-    expect(generated).toContain("export type ClosedReading = {\n  status: string;\n};");
-    expect(generated).toContain(
-      "export const OpenReadingSchema: z.ZodObject<{\n  status: z.ZodType<string, z.ZodTypeDef, unknown>;\n}> = z.object({\n  status: z.string(),\n});",
-    );
-    expect(generated).toContain("export type OpenReading = {\n  status: string;\n};");
-  });
-
-  it("type-checks structural aliases against decoder expressions and consumers", () => {
+  it("typechecks consumer code and accepts only decoder-valid fixtures", async () => {
     const bundle: JsonSchema = {
       schemaRevision: "test.1",
       $defs: {
@@ -225,22 +222,69 @@ describe("contracts generator", () => {
           },
           required: ["id", "label", "metadata"],
         },
+        ClosedReading: {
+          type: "object",
+          additionalProperties: false,
+          properties: { status: { type: "string" } },
+          required: ["status"],
+        },
+        OpenReading: {
+          type: "object",
+          properties: { status: { type: "string" } },
+          required: ["status"],
+        },
         DashboardDomainStateV1: { enum: ["ready", "unsupported_schema"] },
         Status: { enum: ["ready", "pending"] },
         Choice: { oneOf: [{ const: "yes" }, { const: "no" }] },
         Result: {
           oneOf: [
-            { type: "object", properties: { kind: { const: "ok" }, node: { $ref: "#/$defs/Node" } }, required: ["kind", "node"] },
-            { type: "object", properties: { kind: { const: "missing" } }, required: ["kind"] },
+            {
+              type: "object",
+              properties: { kind: { const: "ok" }, node: { $ref: "#/$defs/Node" } },
+              required: ["kind", "node"],
+            },
+            {
+              type: "object",
+              properties: { kind: { const: "missing" } },
+              required: ["kind"],
+            },
           ],
         },
       },
     };
-    // Check the initializer-to-annotation boundary too: the production file
-    // skips this expensive work, but fixture decoders must agree with aliases.
-    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!
-      .replace("// @ts-nocheck", "");
-    const source = generated + `
+    const files = generateContracts([bundle]).files;
+    const directory = mkdtempSync(join(HERE, ".contract-fixture-"));
+    const typesPath = join(directory, "types.ts");
+    const decodersPath = join(directory, "decoders.ts");
+    const consumerPath = join(directory, "consumer.ts");
+    try {
+      writeFileSync(typesPath, files[OUTPUT_FILES.TYPES_FILE]!);
+      writeFileSync(join(directory, "generated.ts"), files[OUTPUT_FILES.GENERATED_FILE]!);
+      // Production dashboard checks skip decoder expressions. This fixture
+      // removes that skip so an annotation/initializer mismatch fails here.
+      writeFileSync(
+        decodersPath,
+        files[OUTPUT_FILES.DECODERS_FILE]!.replace("// @ts-nocheck\n", ""),
+      );
+      writeFileSync(consumerPath, `
+import { z } from "zod";
+import {
+  assertNever,
+  ChoiceSchema,
+  ClosedReadingSchema,
+  DashboardDomainStateV1Schema,
+  NodeSchema,
+  OpenReadingSchema,
+  ResultSchema,
+  StatusSchema,
+  type Choice,
+  type ClosedReading,
+  type Node,
+  type OpenReading,
+  type Result,
+  type Status,
+} from "./generated.ts";
+
 const catchInput: z.input<typeof DashboardDomainStateV1Schema> = 42;
 const valid: Node = { id: "root", label: null, child: { id: "leaf", label: "ok" } };
 const decoded: Node = NodeSchema.parse(valid);
@@ -251,6 +295,10 @@ const missing: Node = { id: "root" };
 const invalidChild: Node = { id: "root", label: null, child: { id: 42 } };
 // @ts-expect-error the decoder output retains the literal enum
 const invalidStatus: z.infer<typeof StatusSchema> = "other";
+// @ts-expect-error a closed reading still requires its declared field
+const closedMissing: ClosedReading = {};
+const closed: ClosedReading = { status: "ok" };
+const open: OpenReading = { status: "ok" };
 const extended: Node & { extra: number } = NodeSchema.extend({ extra: z.number() }).parse({});
 const field: string = NodeSchema.shape.id.parse("id");
 const status: Status = StatusSchema.options[0];
@@ -262,20 +310,52 @@ function unwrap(result: Result): Node | undefined {
     default: return assertNever(result);
   }
 }
-`;
-    const filename = resolve(HERE, "structural-contract-fixture.ts");
-    const options: ts.CompilerOptions = {
-      strict: true, noEmit: true, skipLibCheck: true,
-      target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
-      moduleResolution: ts.ModuleResolutionKind.Bundler,
-      exactOptionalPropertyTypes: true,
-    };
-    const host = ts.createCompilerHost(options);
-    const readFile = host.readFile;
-    host.readFile = (path) => path === filename ? source : readFile(path);
-    const program = ts.createProgram([filename], options, host);
-    const diagnostics = ts.getPreEmitDiagnostics(program);
-    expect(diagnostics.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([]);
+export { catchInput, decoded, inferred, missing, invalidChild, invalidStatus, closedMissing, closed, open, extended, field, status, choice, unwrap };
+`);
+      const options: ts.CompilerOptions = {
+        strict: true, noEmit: true, skipLibCheck: true,
+        target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler,
+        allowImportingTsExtensions: true,
+        exactOptionalPropertyTypes: true,
+      };
+      const program = ts.createProgram([decodersPath, consumerPath], options);
+      expect(diagnosticText(ts.getPreEmitDiagnostics(program))).toEqual([]);
+
+      const javascript = ts.transpileModule(files[OUTPUT_FILES.DECODERS_FILE]!, {
+        compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+      }).outputText;
+      const runtimePath = join(directory, "runtime.js");
+      writeFileSync(runtimePath, javascript);
+      const runtime = await import(pathToFileURL(runtimePath).href) as Record<string, ZodTypeAny>;
+      const node = {
+        id: "root",
+        label: null,
+        metadata: { any: true },
+        child: { id: "leaf", label: "ok", metadata: 1 },
+      };
+      expect(runtime.NodeSchema!.parse(node)).toEqual(node);
+      expect(runtime.NodeSchema!.safeParse({ id: "root", metadata: 1 }).success).toBe(false);
+      expect(runtime.NodeSchema!.safeParse({ ...node, extra: true }).success).toBe(false);
+      expect(runtime.NodeSchema!.safeParse({
+        ...node,
+        child: { id: 42, label: "ok", metadata: 1 },
+      }).success).toBe(false);
+      expect(runtime.ClosedReadingSchema!.parse({ status: "ok" })).toEqual({ status: "ok" });
+      expect(runtime.ClosedReadingSchema!.safeParse({ status: "ok", extra: 1 }).success).toBe(false);
+      expect(runtime.OpenReadingSchema!.parse({ status: "ok", extra: 1 })).toEqual({ status: "ok" });
+      expect(runtime.OpenReadingSchema!.safeParse({}).success).toBe(false);
+      expect(runtime.StatusSchema!.parse("ready")).toBe("ready");
+      expect(runtime.StatusSchema!.safeParse("other").success).toBe(false);
+      expect(runtime.ChoiceSchema!.parse("yes")).toBe("yes");
+      expect(runtime.ChoiceSchema!.safeParse("maybe").success).toBe(false);
+      expect(runtime.ResultSchema!.parse({ kind: "missing" })).toEqual({ kind: "missing" });
+      expect(runtime.ResultSchema!.safeParse({ kind: "other" }).success).toBe(false);
+      expect(runtime.DashboardDomainStateV1Schema!.parse("ready")).toBe("ready");
+      expect(runtime.DashboardDomainStateV1Schema!.parse(42)).toBe("unsupported_schema");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("emits declared integer bounds without constraining unbounded integers", () => {
@@ -295,7 +375,7 @@ function unwrap(result: Result): Node | undefined {
       },
     } as JsonSchema;
 
-    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(generateContracts([bundle]).files);
     expect(generated).toContain("bounded: z.number().int().min(0).max(10),");
     expect(generated).toContain("lower_only: z.number().int().min(1),");
     expect(generated).toContain("unbounded: z.number().int(),");
@@ -317,7 +397,7 @@ function unwrap(result: Result): Node | undefined {
       },
     } as JsonSchema;
 
-    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(generateContracts([bundle]).files);
     const integer = emittedPropertyDecoder(generated, "integer");
     const number = emittedPropertyDecoder(generated, "number");
 
@@ -351,7 +431,7 @@ function unwrap(result: Result): Node | undefined {
       },
     } as JsonSchema;
 
-    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    const generated = contractText(generateContracts([bundle]).files);
     const nullableOptional = emittedPropertyDecoder(generated, "nullable_optional");
     const plain = emittedPropertyDecoder(generated, "plain");
     const platform = emittedPropertyDecoder(generated, "platform");

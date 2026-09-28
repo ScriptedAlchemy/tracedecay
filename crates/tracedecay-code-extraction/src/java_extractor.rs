@@ -6,6 +6,9 @@ use std::time::Instant;
 use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::local_node_id;
+use crate::extraction_artifact::{
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportBindingV1, ImportNamespaceV1,
+};
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
     Visibility, generate_node_id,
@@ -123,9 +126,10 @@ impl JavaExtractor {
         source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        let mut imports = Vec::new();
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -159,15 +163,67 @@ impl JavaExtractor {
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit_node(&mut state, child);
+            if child.kind() == "import_declaration" {
+                Self::import_evidence(&mut state, &mut imports, child);
+            }
         });
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            ExtractionArtifactV1::with_imports(Self::build_result(state, start), imports),
             scope,
             metrics,
         )
+    }
+
+    /// `import a.b.C;` binds type `C` from package `a.b`; `import static
+    /// a.b.C.m;` binds member `m` of class `a.b.C`; `.*` imports are globs.
+    fn import_evidence(
+        state: &mut ExtractionState,
+        imports: &mut Vec<ExtractedImportEvidenceV1>,
+        node: TsNode<'_>,
+    ) {
+        let mut cursor = node.walk();
+        let children = node.children(&mut cursor).collect::<Vec<_>>();
+        let Some(name) = children
+            .iter()
+            .find(|child| matches!(child.kind(), "scoped_identifier" | "identifier"))
+        else {
+            return;
+        };
+        let path = state.node_text(*name);
+        let is_static = children.iter().any(|child| child.kind() == "static");
+        let namespace = if is_static {
+            ImportNamespaceV1::Value
+        } else {
+            ImportNamespaceV1::Type
+        };
+        let (module, binding) = if children.iter().any(|child| child.kind() == "asterisk") {
+            (path, ImportBindingV1::Glob)
+        } else {
+            let Some((module, imported)) = path.rsplit_once('.') else {
+                return;
+            };
+            (
+                module,
+                ImportBindingV1::Named {
+                    imported,
+                    local: imported,
+                },
+            )
+        };
+        match ExtractedImportEvidenceV1::private_binding(
+            &state.file_path,
+            "java",
+            module,
+            binding,
+            namespace,
+            node,
+        ) {
+            Ok(row) => imports.push(row),
+            Err(error) => state.errors.push(error),
+        }
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -1462,8 +1518,6 @@ impl crate::LanguageExtractor for JavaExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(
-            JavaExtractor::extract_tree(file_path, source, tree, scope),
-        )
+        JavaExtractor::extract_tree(file_path, source, tree, scope)
     }
 }

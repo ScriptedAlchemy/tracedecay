@@ -1,5 +1,5 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import type { WorkflowDefinition } from '../../contracts/index.ts';
+import type { WorkflowDefinition } from '../../contracts/generated.ts';
 import { cn } from '../../ui/cn.ts';
 import { Absence, GradeTag } from '../../ui/EvidenceGrade.tsx';
 import { formatMicrosUtcClock } from '../../ui/format.ts';

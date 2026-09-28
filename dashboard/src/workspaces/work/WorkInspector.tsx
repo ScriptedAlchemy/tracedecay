@@ -3,7 +3,7 @@ import type {
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
   WorkGraphReadV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { EvidenceGrade, type EvidenceGradeKind } from '../../ui/EvidenceGrade.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';

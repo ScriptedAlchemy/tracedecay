@@ -1,4 +1,4 @@
-import type { WorkDagEdgeV1 } from '../../contracts/index.ts';
+import type { WorkDagEdgeV1 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import {
   attemptPageOf,

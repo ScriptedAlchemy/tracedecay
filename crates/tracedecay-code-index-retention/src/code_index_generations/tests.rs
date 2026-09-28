@@ -2984,6 +2984,14 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     ));
     std::fs::write(&orphan_compacting, b"abandoned compacted rewrite")
         .expect("write orphan compacting sidecar");
+    let active_carrying =
+        artifacts_root.join(format!(".text-artifact-{active_digest}.staging-carrying"));
+    std::fs::write(&active_carrying, b"active parent carry").expect("write active carry");
+    let orphan_carrying = artifacts_root.join(format!(
+        ".text-artifact-{}.staging-carrying-journal",
+        "c".repeat(64)
+    ));
+    std::fs::write(&orphan_carrying, b"abandoned carry journal").expect("write orphan carry");
 
     let report = run_code_generation_retention(
         store.path(),
@@ -2994,14 +3002,18 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     )
     .expect("apply sidecar-aware retention");
 
-    assert_eq!(report.deleted_text_artifacts.len(), 3);
+    assert_eq!(report.deleted_text_artifacts.len(), 4);
     assert!(
-        active_staging.is_file() && active_sidecar.is_file() && active_compacting.is_file(),
+        active_staging.is_file()
+            && active_sidecar.is_file()
+            && active_compacting.is_file()
+            && active_carrying.is_file(),
         "the active build's staging file and its sidecars must survive"
     );
     assert!(!orphan_staging.exists());
     assert!(!orphan_sidecar.exists());
     assert!(!orphan_compacting.exists());
+    assert!(!orphan_carrying.exists());
 }
 
 /// A daemon killed while `VACUUM INTO` writes the compacted rewrite leaves

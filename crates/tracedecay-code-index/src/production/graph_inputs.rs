@@ -19,7 +19,7 @@ use crate::graph_projection::{
 };
 use crate::lineage::LineageSymbolRecordV1;
 
-use super::helpers::{resolve_cross_file_references, unresolved_typescript_import_calls};
+use super::helpers::{resolve_cross_file_references, unresolved_import_calls};
 use super::partitioned_codec::{SealedGenerationFileWindowsV1, SealedGenerationSegmentReaderV1};
 use super::sealed_codec::PersistedFileGenerationArtifactsV1;
 use super::{CodeIndexProductionErrorV1, FileGenerationArtifactsV1};
@@ -97,7 +97,7 @@ impl SealedGenerationFileWindowsV1 {
         check()?;
         let cross_file_edges = resolve_cross_file_references(&files)?;
         check()?;
-        let typescript_unresolved = unresolved_typescript_import_calls(&files);
+        let import_unresolved = unresolved_import_calls(&files);
         let references = files
             .iter()
             .flat_map(|file| {
@@ -113,7 +113,7 @@ impl SealedGenerationFileWindowsV1 {
                 .iter()
                 .flat_map(|file| file.artifacts.edges.iter())
                 .chain(&cross_file_edges),
-            typescript_unresolved,
+            import_unresolved,
             check,
         )?;
         drop(references);

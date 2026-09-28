@@ -14,8 +14,8 @@ use tracedecay_domain::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry,
-    load_json_file, mcp_servers_registration_state, uninstall_mcp_server_entry,
+    McpDoctorLabels, doctor_check_mcp_registration, install_mcp_server_entry, load_json_file,
+    mcp_servers_registration_state, uninstall_mcp_server_entry,
 };
 
 pub struct RooCodeIntegration;
@@ -108,7 +108,6 @@ impl AgentIntegration for RooCodeIntegration {
                 &roo_settings_path(&ctx.home),
                 "mcpServers",
                 JsonConfigDialect::Json,
-                McpUninstallPolicy::default(),
             )?;
         }
         Ok(())

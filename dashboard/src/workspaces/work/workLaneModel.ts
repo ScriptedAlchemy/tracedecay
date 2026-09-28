@@ -1,4 +1,4 @@
-import type { WorkTimelineLaneV1 } from '../../contracts/index.ts';
+import type { WorkTimelineLaneV1 } from '../../contracts/generated.ts';
 import type { WorkTaskLane } from './workProductView.ts';
 
 /**

@@ -226,6 +226,22 @@ impl HostBundleWriterV1 {
                 .iter()
                 .flat_map(|receipt| receipt.created_directories.iter().cloned()),
         );
+        if previous_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.created_config.is_none())
+        {
+            recorded.extend(tracedecay_namespace_directories(
+                manifest
+                    .artifacts
+                    .iter()
+                    .map(|artifact| artifact.relative_path.as_str())
+                    .chain(
+                        plan.mutations
+                            .iter()
+                            .map(|mutation| mutation.relative_path.as_str()),
+                    ),
+            ));
+        }
         let created_directories = match self.prune_created_directories(&recorded) {
             Ok(kept) => kept.into_iter().collect(),
             Err(error) => return Err(self.undo_after_failure(error, &undo, &missing_before)),
@@ -252,6 +268,12 @@ impl HostBundleWriterV1 {
                     .collect()
             },
             created_directories,
+            // This path runs no host registration: the set transaction's
+            // facts carry forward until an uninstall consumes them.
+            created_config: Some(match (request.lifecycle.operation, &previous_receipt) {
+                (HostBundleLifecycleOpV1::Uninstall, _) | (_, None) => Vec::new(),
+                (_, Some(previous)) => previous.created_config.clone().unwrap_or_default(),
+            }),
         };
         if let Err(error) = self.write_receipt(&receipt) {
             return Err(self.undo_after_failure(error, &undo, &missing_before));
@@ -587,15 +609,7 @@ impl HostBundleWriterV1 {
     /// Install-root-relative form of an absolute host path, when it lies
     /// below this writer's root and is a valid install path.
     pub(super) fn root_relative(&self, path: &Path) -> Option<String> {
-        let relative = path.strip_prefix(&self.root_path).ok()?;
-        let components = relative
-            .components()
-            .map(|component| match component {
-                Component::Normal(name) => name.to_str(),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let relative = components.join("/");
+        let relative = crate::agents::root_relative_path(&self.root_path, path)?;
         validate_relative_install_path(Path::new(&relative))
             .is_ok()
             .then_some(relative)
@@ -762,6 +776,25 @@ pub(super) fn ancestor_directories<'a>(
         }
     }
     directories
+}
+
+/// Ancestors of `paths` at or below a directory named in TraceDecay's own
+/// namespace (`tracedecay`, `tracedecay.*`, `tracedecay-*`): TraceDecay's to
+/// remove once empty even when no receipt recorded creating them, which is
+/// how releases that predate `created_directories` left them.
+pub(super) fn tracedecay_namespace_directories<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<String> {
+    ancestor_directories(paths)
+        .into_iter()
+        .filter(|directory| {
+            directory.split('/').any(|name| {
+                name == "tracedecay"
+                    || name.starts_with("tracedecay.")
+                    || name.starts_with("tracedecay-")
+            })
+        })
+        .collect()
 }
 
 fn validate_artifact_contents(

@@ -1013,18 +1013,10 @@ fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
     );
 }
 
-#[test]
-fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
-
-    let socket_path = common::daemon_socket_path(&home_path);
-    common::stop_managed_daemon(&home_path);
-    let mut daemon = spawn_tracedecay_daemon(&home_path);
-
+/// Connects an authenticated project client and completes `initialize`,
+/// which starts the project open in the background.
+fn connect_initialized_project_client(home_path: &Path, project_path: &Path) -> UnixStream {
+    let socket_path = common::daemon_socket_path(home_path);
     let mut client = UnixStream::connect(&socket_path).expect("client should connect to daemon");
     let mut reader = BufReader::new(client.try_clone().expect("clone daemon client stream"));
     let authority: Value = serde_json::from_slice(
@@ -1074,13 +1066,31 @@ fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
         response.contains("\"id\":1"),
         "daemon should answer initialize before SIGTERM, got: {response}"
     );
+    client
+}
 
+fn send_sigterm(daemon: &common::DaemonProcess) {
     let pid = daemon.id().to_string();
     let status = std::process::Command::new("kill")
         .args(["-TERM", pid.as_str()])
         .status()
         .expect("send SIGTERM to daemon");
     assert!(status.success(), "kill -TERM should succeed");
+}
+
+#[test]
+fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    common::stop_managed_daemon(&home_path);
+    let mut daemon = spawn_tracedecay_daemon(&home_path);
+    let _client = connect_initialized_project_client(&home_path, &project_path);
+
+    send_sigterm(&daemon);
 
     assert!(
         daemon
@@ -1088,6 +1098,69 @@ fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
             .expect("daemon status should be readable")
             .is_some(),
         "daemon should exit on SIGTERM even with a connected project client"
+    );
+}
+
+/// A draining daemon waits only for the store mount an in-flight open is
+/// inside. Once that mount returns, the open stops before opening the
+/// project graph instead of running on to its next composition phase.
+#[test]
+fn daemon_sigterm_stops_an_in_flight_open_at_the_next_store_boundary() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    common::stop_managed_daemon(&home_path);
+    let hold = home_path.join("hold-after-project-sessions");
+    std::fs::write(&hold, b"hold").unwrap();
+    let entered = PathBuf::from(format!("{}.entered", hold.display()));
+    let log = home_path.join("daemon.log");
+    let mut daemon = common::spawn_tracedecay_daemon_logged(&home_path, &log, {
+        let hold = hold.clone();
+        move |command| {
+            command.env("TRACEDECAY_TEST_HOLD_AFTER_PROJECT_SESSIONS", &hold);
+        }
+    });
+    let _client = connect_initialized_project_client(&home_path, &project_path);
+    common::poll_until(
+        Instant::now() + Duration::from_secs(30),
+        Duration::from_millis(20),
+        || entered.is_file().then_some(()),
+        || "the project open never mounted its session database".to_owned(),
+    );
+
+    send_sigterm(&daemon);
+    // Shutdown cancels every admitted open before it starts draining clients.
+    common::poll_until(
+        Instant::now() + Duration::from_secs(10),
+        Duration::from_millis(20),
+        || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("outcome=client_drain_start")
+                .then_some(())
+        },
+        || "the daemon never started draining".to_owned(),
+    );
+    std::fs::remove_file(&hold).unwrap();
+
+    assert!(
+        daemon
+            .wait_for_exit(Duration::from_secs(3))
+            .expect("daemon status should be readable")
+            .is_some(),
+        "daemon should exit once the held store mount returns"
+    );
+    let log = std::fs::read_to_string(&log).expect("read daemon log");
+    assert!(
+        log.contains("event=project_server_warmup outcome=cancelled"),
+        "the open must end cancelled: {log}"
+    );
+    assert!(
+        !log.contains("phase=graph_admitted"),
+        "a cancelled open must not go on to open the project graph: {log}"
     );
 }
 

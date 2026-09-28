@@ -243,15 +243,17 @@ impl StaticLanguageRegistry {
             // comments and `///` lost its stray `/`; QBasic dialects moved when
             // CONST names stopped losing their text before an underscore.
             // Ruby v6 names a receiver call `recv.m`, so `x.clamp` inside
-            // `clamp` is no longer bound as recursion.
+            // `clamp` is no longer bound as recursion. Python v6, Go v7, Java
+            // v6, and Ruby v7 record parser-backed import evidence (Go also
+            // indexes `go.mod` module paths), so their cross-file calls bind
+            // at sealing and unbound qualified calls stay disclosed gaps.
             let extractor_revision = match language.as_str() {
                 "rust" => 16,
-                "ruby" => 6,
+                "ruby" | "go" => 7,
                 "typescript" => 9,
                 "protobuf" => 7,
-                "sql" => 6,
-                "c" | "cpp" | "metal" | "objc" | "go" | "glsl" | "pascal" | "qbasic"
-                | "quickbasic" => 6,
+                "sql" | "python" | "java" => 6,
+                "c" | "cpp" | "metal" | "objc" | "glsl" | "pascal" | "qbasic" | "quickbasic" => 6,
                 _ => 5,
             };
             let descriptor = LanguageDescriptorV1 {

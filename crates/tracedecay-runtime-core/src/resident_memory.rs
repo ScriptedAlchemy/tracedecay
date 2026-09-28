@@ -297,11 +297,30 @@ pub fn resident_memory_watermark_bytes_v1(limit_bytes: NonZeroU64, permille: u64
 pub struct ProcessResidentSampleV1 {
     /// Every resident page (`VmRSS`), clean file-backed mappings included.
     pub resident_bytes: u64,
-    /// Anonymous and shared-memory pages (`RssAnon + RssShmem`). Clean mapped
-    /// file pages (the sealed container, graph stores) are dropped by the
-    /// kernel on demand before the cgroup kill line, so admission counts only
-    /// these.
+    /// Anonymous and shared-memory pages (`RssAnon + RssShmem`).
     pub unreclaimable_bytes: u64,
+    /// Bytes the kernel charges toward a finite `memory.max`: `memory.current`
+    /// minus `inactive_file`, on the cgroup with the tightest finite ceiling.
+    ///
+    /// `None` when no cgroup has a finite `memory.max`. An unlimited cgroup's
+    /// file cache is not a kill line, and inactive file pages are what the
+    /// kernel reclaims before it kills. Active file pages of a mapped store
+    /// stay in this figure because they are not dropped before the kill.
+    pub cgroup_committed_bytes: Option<u64>,
+}
+
+impl ProcessResidentSampleV1 {
+    /// Bytes admission compares with the watermark.
+    ///
+    /// Unreclaimable pages are the floor. A finite cgroup ceiling also counts
+    /// its committed working set, so a build cannot be admitted while
+    /// `memory.current` is already at the kill line and only the anonymous
+    /// subset sits under the watermark.
+    #[must_use]
+    pub fn admission_bytes(self) -> u64 {
+        self.unreclaimable_bytes
+            .max(self.cgroup_committed_bytes.unwrap_or(0))
+    }
 }
 
 fn status_kib_field_bytes(status: &str, field: &str) -> Option<u64> {
@@ -321,7 +340,56 @@ fn process_resident_sample_from_status_v1(status: &str) -> Option<ProcessResiden
     Some(ProcessResidentSampleV1 {
         resident_bytes: status_kib_field_bytes(status, "VmRSS")?,
         unreclaimable_bytes: anon.checked_add(shmem)?,
+        cgroup_committed_bytes: None,
     })
+}
+
+fn memory_stat_field_bytes(stat: &str, field: &str) -> Option<u64> {
+    stat.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        if parts.next()? != field {
+            return None;
+        }
+        parts.next()?.parse::<u64>().ok()
+    })
+}
+
+/// Working set a finite `memory.max` will kill for: `memory.current` minus
+/// `inactive_file` on the cgroup directory with the tightest finite ceiling.
+///
+/// `None` when every `memory.max` is absent or `max`. Counting `memory.current`
+/// on an unlimited cgroup treats the machine's page cache as a kill line and
+/// refuses work the kernel can reclaim.
+fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Option<u64> {
+    let mut directory = cgroup_v2_process_directory_v1(proc_self_cgroup, cgroup_root)?;
+    let mut chosen: Option<(std::path::PathBuf, u64)> = None;
+    loop {
+        if let Some(limit) = finite_cgroup_memory_value_v1(&directory.join("memory.max")) {
+            let tighter = chosen.as_ref().is_none_or(|(_, current)| limit < *current);
+            if tighter {
+                chosen = Some((directory.clone(), limit));
+            }
+        }
+        if directory == cgroup_root {
+            break;
+        }
+        let parent = directory.parent()?;
+        if !parent.starts_with(cgroup_root) {
+            return None;
+        }
+        directory = parent.to_path_buf();
+    }
+    let (directory, _) = chosen?;
+    let current = std::fs::read_to_string(directory.join("memory.current"))
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let inactive_file = std::fs::read_to_string(directory.join("memory.stat"))
+        .ok()
+        .and_then(|stat| memory_stat_field_bytes(&stat, "inactive_file"))
+        .unwrap_or(0);
+    Some(current.saturating_sub(inactive_file))
 }
 
 /// Sample this process's resident set directly from the kernel.
@@ -335,7 +403,12 @@ fn process_resident_sample_from_status_v1(status: &str) -> Option<ProcessResiden
 pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
     #[cfg(target_os = "linux")]
     {
-        process_resident_sample_from_status_v1(&std::fs::read_to_string("/proc/self/status").ok()?)
+        let mut sample = process_resident_sample_from_status_v1(
+            &std::fs::read_to_string("/proc/self/status").ok()?,
+        )?;
+        sample.cgroup_committed_bytes =
+            cgroup_committed_bytes_v1(Path::new(PROC_SELF_CGROUP_V1), Path::new(CGROUP_V2_ROOT_V1));
+        Some(sample)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -343,7 +416,8 @@ pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
     }
 }
 
-/// The bytes admission trusts: [`ProcessResidentSampleV1::unreclaimable_bytes`].
+/// Unreclaimable bytes, for growth measurement. Admission publishes
+/// [`ProcessResidentSampleV1::admission_bytes`] instead.
 #[must_use]
 pub fn sampled_process_resident_bytes_v1() -> Option<u64> {
     sampled_process_resident_v1().map(|sample| sample.unreclaimable_bytes)
@@ -545,24 +619,39 @@ impl ResidentMemoryPressureV1 {
         }
     }
 
-    /// Read the process and publish its unreclaimable bytes as the admission
-    /// observation. `None` when the process cannot be read, which leaves the
-    /// last observation standing.
+    /// Read the process and publish its admission bytes. `None` when the
+    /// process cannot be read, which leaves the last observation standing.
     pub fn sample_and_publish(
         &self,
     ) -> Option<(ProcessResidentSampleV1, ResidentMemoryPressureStateV1)> {
         let sample = (self.sampler)()?;
         Some((
             sample,
-            self.publish_observed_resident_bytes(sample.unreclaimable_bytes),
+            self.publish_observed_resident_bytes(sample.admission_bytes()),
         ))
+    }
+
+    /// Publish a fresh admission sample without running pressure reclaimers.
+    ///
+    /// Capture and graph checkpoints run on the indexing pool. A reclaimer
+    /// sheds retained owners and trims the allocator; doing that on a pool
+    /// thread once RSS crosses the watermark overflows that thread's stack.
+    /// The latch is what stops the allocating pass. [`Self::sample_and_publish`]
+    /// remains the path that reclaims, from admission and the maintenance sampler.
+    pub fn sample_for_checkpoint(&self) -> Option<ResidentMemoryPressureStateV1> {
+        let sample = (self.sampler)()?;
+        self.publish_observation(sample.admission_bytes());
+        self.publish_over_budget_gauge();
+        Some(self.state())
     }
 
     /// [`Self::sample_and_publish`] reduced to the admission bytes: the
     /// post-reclaim observation, or zero when the process cannot be read.
     pub fn measure_admission_bytes(&self) -> u64 {
         self.sample_and_publish().map_or(0, |(sample, state)| {
-            state.observed_bytes().unwrap_or(sample.unreclaimable_bytes)
+            state
+                .observed_bytes()
+                .unwrap_or_else(|| sample.admission_bytes())
         })
     }
 
@@ -786,8 +875,8 @@ impl ProcessAllocatorTrimV1 {
     }
 }
 
-/// The process allocator's release call, installed once by the composition
-/// root that chose the allocator. Without one, a glibc build trims its arenas.
+/// The Rust global allocator's release call, installed once by the composition
+/// root that chose the allocator. glibc's arenas are trimmed either way.
 static PROCESS_ALLOCATOR_RELEASE_V1: OnceLock<fn()> = OnceLock::new();
 
 /// Install `release` as the call that returns the process allocator's freed
@@ -807,15 +896,35 @@ pub fn install_process_allocator_release_v1(release: fn()) -> Result<(), String>
 /// mimalloc in pages it purges only after a delay or on collection. Measured
 /// RSS is what admission trusts, so those pages refuse real work until the
 /// allocator is asked for them.
+///
+/// A mimalloc global allocator serves only Rust allocations. `SQLite`,
+/// tree-sitter, and libgit2 call `malloc` directly, so glibc's arenas are
+/// trimmed after the installed release as well.
 #[must_use]
 pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
+    measured_trim(|| {
+        let released = PROCESS_ALLOCATOR_RELEASE_V1
+            .get()
+            .map(|release| release())
+            .is_some();
+        glibc_trim() || released
+    })
+}
+
+/// Return freed glibc arena pages to the kernel without the installed release.
+///
+/// C-library churn (`SQLite` statements and caches on the store writers,
+/// tree-sitter parses on the index workers) accumulates between the events
+/// that run the full release, so the daemon runs this on its resident-memory
+/// sampling cadence. It never waits on a busy worker pool.
+#[must_use]
+pub fn release_c_library_heap_v1() -> ProcessAllocatorTrimV1 {
+    measured_trim(glibc_trim)
+}
+
+fn measured_trim(trim: impl FnOnce() -> bool) -> ProcessAllocatorTrimV1 {
     let before_bytes = sampled_process_resident_bytes_v1();
-    let trimmed = if let Some(release) = PROCESS_ALLOCATOR_RELEASE_V1.get() {
-        release();
-        true
-    } else {
-        glibc_trim()
-    };
+    let trimmed = trim();
     let after_bytes = sampled_process_resident_bytes_v1();
     let trim = ProcessAllocatorTrimV1 {
         trimmed,

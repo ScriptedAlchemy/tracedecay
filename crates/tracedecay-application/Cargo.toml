@@ -78,6 +78,8 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
 static_assertions = "1.1.0"
+# test-util pauses the Tokio clock the observability producer's deadlines read.
+tokio = { version = "1", features = ["full", "test-util"] }
 # Test-only helper surfaces reached across crate boundaries by this crate's
 # test targets. Feature unification supplies them to the test build only.
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }

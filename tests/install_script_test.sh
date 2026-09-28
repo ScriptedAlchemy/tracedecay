@@ -145,8 +145,49 @@ esac
 SH
 chmod +x "$tmpdir/bin/uname" "$tmpdir/bin/curl"
 
+# The installer runs on a PATH of these tools and the stubs alone, so a gh on
+# the host PATH can neither verify nor refuse the fixture archives.
+mkdir -p "$tmpdir/tools" "$tmpdir/gh-bin" "$tmpdir/no-gh"
+for tool in bash env cat cp install tar gzip grep cut mktemp rm awk tr sha256sum shasum mkdir mv od sed head; do
+  if tool_path=$(command -v "$tool"); then
+    ln -s "$tool_path" "$tmpdir/tools/$tool"
+  fi
+done
+
+# Stands in for `gh attestation verify`: records each invocation and accepts
+# only a certificate identity listed in GH_ACCEPTED_IDENTITIES.
+cat >"$tmpdir/gh-bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${GH_LOG:?}"
+identity=
+while (($#)); do
+  case "$1" in
+    --cert-identity)
+      identity=$2
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+while IFS= read -r accepted; do
+  [[ -n $accepted && $identity == "$accepted" ]] && exit 0
+done <<<"${GH_ACCEPTED_IDENTITIES:-}"
+printf 'Error: verifying with issuer "sigstore.dev"\n' >&2
+exit 1
+SH
+chmod +x "$tmpdir/gh-bin/gh"
+gh_log=$tmpdir/gh.log
+BETA_SIGNER=https://github.com/ScriptedAlchemy/tracedecay/.github/workflows/release-beta.yml
+STABLE_SIGNER=https://github.com/ScriptedAlchemy/tracedecay/.github/workflows/release.yml
+
 run_installer() {
-  PATH="$tmpdir/bin:$PATH" \
+  PATH="$tmpdir/bin:${INSTALLER_GH_DIR:-$tmpdir/gh-bin}:$tmpdir/tools" \
+  GH_LOG="$gh_log" \
+  GH_ACCEPTED_IDENTITIES="${INSTALLER_ACCEPTED_IDENTITIES-${BETA_SIGNER}@refs/heads/master
+${STABLE_SIGNER}@refs/tags/${STABLE_TAG}}" \
   TRACEDECAY_INSTALL_DIR="$tmpdir/install" \
   TEST_RELEASES_JSON="${INSTALLER_RELEASES_JSON:-$tmpdir/releases.json}" \
   TEST_ARCHIVE="$tmpdir/${BETA_ASSET}" \
@@ -156,16 +197,62 @@ run_installer() {
     "$@"
 }
 
-rm -rf "$tmpdir/install"
-mkdir -p "$tmpdir/install"
-run_installer "$INSTALLER"
-[[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7-beta.1" ]]
-[[ "$(ls -A "$tmpdir/install")" == "tracedecay" ]]
+verify_args() {
+  local signer=$1
+  printf -- '--repo ScriptedAlchemy/tracedecay --cert-identity %s --cert-oidc-issuer https://token.actions.githubusercontent.com' \
+    "$signer"
+}
 
 rm -rf "$tmpdir/install"
 mkdir -p "$tmpdir/install"
-run_installer env TRACEDECAY_VERSION=stable "$INSTALLER"
+: >"$gh_log"
+run_installer "$INSTALLER" >"$tmpdir/beta-install.log"
+[[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7-beta.1" ]]
+[[ "$(ls -A "$tmpdir/install")" == "tracedecay" ]]
+[[ $(wc -l <"$gh_log") -eq 1 ]]
+[[ $(cat "$gh_log") == "attestation verify "*"/${BETA_ASSET} $(verify_args "${BETA_SIGNER}@refs/heads/master")" ]]
+grep -Fqx "Verified build provenance: ${BETA_SIGNER}@refs/heads/master" \
+  "$tmpdir/beta-install.log"
+
+# A stable release run on its tag is accepted after the master identity.
+rm -rf "$tmpdir/install"
+mkdir -p "$tmpdir/install"
+: >"$gh_log"
+run_installer env TRACEDECAY_VERSION=stable "$INSTALLER" >"$tmpdir/stable-install.log"
 [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7" ]]
+[[ $(sed -n 1p "$gh_log") == "attestation verify "*"/${STABLE_ASSET} $(verify_args "${STABLE_SIGNER}@refs/heads/master")" ]]
+[[ $(sed -n 2p "$gh_log") == "attestation verify "*"/${STABLE_ASSET} $(verify_args "${STABLE_SIGNER}@refs/tags/${STABLE_TAG}")" ]]
+grep -Fqx "Verified build provenance: ${STABLE_SIGNER}@refs/tags/${STABLE_TAG}" \
+  "$tmpdir/stable-install.log"
+
+# An archive whose attestation names no accepted release identity (another
+# workflow or repository, or none at all) is refused with nothing installed,
+# even though SHA256SUMS matches it.
+rm -rf "$tmpdir/install"
+mkdir -p "$tmpdir/install"
+if INSTALLER_ACCEPTED_IDENTITIES="" run_installer "$INSTALLER" >"$tmpdir/unattested.log" 2>&1; then
+  echo "installer accepted an archive without a release-workflow attestation" >&2
+  exit 1
+fi
+grep -Fq "tracedecay installer: the build-provenance attestation of ${BETA_ASSET} did not verify as ${BETA_SIGNER}:" \
+  "$tmpdir/unattested.log"
+grep -Fq 'Error: verifying with issuer "sigstore.dev"' "$tmpdir/unattested.log"
+[[ -z "$(ls -A "$tmpdir/install")" ]]
+
+# Without gh the installer refuses unless the operator explicitly accepts a
+# checksum-only install, and then it says so.
+if INSTALLER_GH_DIR="$tmpdir/no-gh" run_installer "$INSTALLER" >"$tmpdir/no-gh.log" 2>&1; then
+  echo "installer installed without verifying build provenance" >&2
+  exit 1
+fi
+grep -Fq "tracedecay installer: gh (GitHub CLI) is required to verify the build-provenance attestation of ${BETA_ASSET}." \
+  "$tmpdir/no-gh.log"
+[[ -z "$(ls -A "$tmpdir/install")" ]]
+INSTALLER_GH_DIR="$tmpdir/no-gh" run_installer env TRACEDECAY_INSTALL_UNATTESTED=1 "$INSTALLER" \
+  >/dev/null 2>"$tmpdir/unattested-optin.log"
+[[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7-beta.1" ]]
+grep -Fq "tracedecay installer: WARNING: gh is not installed, so the build-provenance attestation of ${BETA_ASSET} was NOT verified" \
+  "$tmpdir/unattested-optin.log"
 
 # The live releases payload is hundreds of KB of pretty-printed lines. With the
 # asset URLs near the front and many lines after them, an early-exiting matcher

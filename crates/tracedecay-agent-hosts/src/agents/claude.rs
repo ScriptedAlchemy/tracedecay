@@ -105,12 +105,15 @@ impl AgentIntegration for ClaudeIntegration {
         ensure_claude_plugin_permission(&ctx.home)
     }
 
+    /// Undoes activation in reverse order, so Claude's own removal sees
+    /// `settings.json` exactly as its install left it.
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        remove_claude_plugin_permission(&ctx.home)?;
         if claude_plugin_registration_is_active(&ctx.home)? {
             let claude = require_claude_cli()?;
             claude_plugin_deactivate_with(&claude, &ctx.home)?;
         }
-        remove_claude_plugin_permission(&ctx.home)
+        Ok(())
     }
 
     fn require_lifecycle_host_cli(&self) -> Result<()> {
@@ -868,8 +871,8 @@ fn ensure_claude_plugin_permission(home: &Path) -> Result<()> {
 }
 
 /// Inverse of [`ensure_claude_plugin_permission`]: drop the plugin wildcard
-/// rule, and the `allow` / `permissions` containers once nothing else is in
-/// them, leaving every other Claude setting untouched.
+/// rule, leaving every other Claude setting untouched. The `allow` and
+/// `permissions` containers go too exactly when install created them.
 fn remove_claude_plugin_permission(home: &Path) -> Result<()> {
     let settings_path = home.join(".claude/settings.json");
     if !settings_path.exists() {
@@ -896,14 +899,6 @@ fn remove_claude_plugin_permission(home: &Path) -> Result<()> {
             allow.retain(|entry| entry.as_str() != Some(wildcard.as_str()));
             if allow.len() == before {
                 return Ok((false, JsonConfigMutation::Unchanged));
-            }
-            if allow.is_empty() {
-                permissions.remove("allow");
-            }
-            if permissions.is_empty()
-                && let Some(object) = settings.as_object_mut()
-            {
-                object.remove("permissions");
             }
             Ok((true, JsonConfigMutation::Write(settings)))
         },

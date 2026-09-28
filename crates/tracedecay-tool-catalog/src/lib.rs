@@ -29,7 +29,6 @@ pub use executable::{
     ExecutableCodecV1, ExecutableSchemaAuthority, ExecutableUnavailableDispositionV1,
     ExecutionOwnerV1, RouteExposureV1, SchemaBodyAuthorityV1, SdkExecutableBindingAvailabilityV1,
     SdkExecutableBindingRegistryV1, SdkExecutableBindingV1, SdkTransportBindingV1,
-    executable_schema_body_generations,
 };
 pub use id::{
     BindingId, CapabilityId, CatalogDigest, CatalogDigestError, CodecBindingKey, ContributionId,
