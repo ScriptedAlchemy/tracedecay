@@ -350,7 +350,6 @@ pub(crate) async fn capture_opencode_observations(
                 byte_offset: 0,
                 mtime: stored_frontier.mtime,
                 file_id: database.source_file_identity,
-                coverage_reason: None,
             }
         };
         let mut cursor = OpenCodePageCursor {
@@ -400,7 +399,6 @@ pub(crate) async fn capture_opencode_observations(
                     byte_offset: u64::try_from(cursor.after_rowid).map_err(|_| invalid_frame())?,
                     mtime: durable_frontier.mtime.saturating_add(1),
                     file_id: database.source_file_identity,
-                    coverage_reason: None,
                 };
                 facade
                     .advance_parse_offset(&scope, scan_kind.frontier_key(), durable_frontier)
@@ -440,13 +438,11 @@ pub(crate) async fn capture_opencode_observations(
                         byte_offset: current_generation,
                         mtime: revision,
                         file_id: database.source_file_identity,
-                        coverage_reason: None,
                     };
                     rewrite_frontier = ParseOffset {
                         byte_offset: 0,
                         mtime: revision,
                         file_id: database.source_file_identity,
-                        coverage_reason: None,
                     };
                     write_frontier(
                         facade,

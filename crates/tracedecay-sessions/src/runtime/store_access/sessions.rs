@@ -15,7 +15,6 @@ use tracedecay_lcm::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
 
-use super::super::host_coverage::HostCoverageReason;
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
 use super::super::shared::{durable_project_path_key, path_identity_key};
 use super::super::source::HostProviderCoverage;
@@ -176,7 +175,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         health.observed_providers = observed_providers.into_iter().collect();
         let mut coverage_rows = reader
             .query(
-                "SELECT file_path, byte_offset, file_id, coverage_reason
+                "SELECT file_path, byte_offset, file_id
                  FROM parse_offsets
                  WHERE file_path LIKE 'host-coverage://%/v1'
                  ORDER BY file_path",
@@ -213,22 +212,13 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             let Ok(file_id) = u64::try_from(file_id) else {
                 continue;
             };
-            let state = match HostProviderCoverage::from_file_id(file_id) {
-                Some(HostProviderCoverage::Complete) => SessionProviderCoverageState::Complete,
-                Some(HostProviderCoverage::Partial) => SessionProviderCoverageState::Partial,
-                Some(HostProviderCoverage::Unavailable) => {
-                    SessionProviderCoverageState::Unavailable
-                }
-                None => continue,
+            let Some((coverage, reason)) = HostProviderCoverage::from_file_id(file_id) else {
+                continue;
             };
-            let reason_code = row.get::<Option<i64>>(3).map_err(|error| {
-                format!("failed to decode host ingest coverage reason: {error}")
-            })?;
-            let reason = match (&state, reason_code) {
-                (SessionProviderCoverageState::Unavailable, Some(code)) => u64::try_from(code)
-                    .ok()
-                    .and_then(HostCoverageReason::from_code),
-                _ => None,
+            let state = match coverage {
+                HostProviderCoverage::Complete => SessionProviderCoverageState::Complete,
+                HostProviderCoverage::Partial => SessionProviderCoverageState::Partial,
+                HostProviderCoverage::Unavailable => SessionProviderCoverageState::Unavailable,
             };
             health.provider_coverage.push(SessionProviderCoverage {
                 provider: provider_name.to_owned(),

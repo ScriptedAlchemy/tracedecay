@@ -336,16 +336,10 @@ pub(crate) async fn ensure_parse_offset_columns(
     ensure_table_columns(
         conn,
         "parse_offsets",
-        &[
-            (
-                "file_id",
-                "ALTER TABLE parse_offsets ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "coverage_reason",
-                "ALTER TABLE parse_offsets ADD COLUMN coverage_reason INTEGER",
-            ),
-        ],
+        &[(
+            "file_id",
+            "ALTER TABLE parse_offsets ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
+        )],
     )
     .await
 }

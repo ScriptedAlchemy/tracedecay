@@ -161,7 +161,6 @@ pub(super) async fn write_ingest_frontier<S: TranscriptIngestStore>(
                 byte_offset: previous.saturating_add(processed),
                 mtime: 0,
                 file_id: 1,
-                coverage_reason: None,
             },
         )
         .await

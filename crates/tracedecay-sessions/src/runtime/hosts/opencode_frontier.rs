@@ -22,13 +22,11 @@ pub(super) async fn prepare_generation_rewrite(
             byte_offset: current_generation,
             mtime: revision,
             file_id: source_file_identity,
-            coverage_reason: None,
         };
         rewrite = ParseOffset {
             byte_offset: u64::MAX,
             mtime: revision,
             file_id: source_file_identity,
-            coverage_reason: None,
         };
         write(admission, scope, GENERATION_KEY, generation).await?;
         write(admission, scope, REWRITE_KEY, rewrite).await?;
@@ -41,13 +39,11 @@ pub(super) async fn prepare_generation_rewrite(
             byte_offset: current_generation,
             mtime: revision,
             file_id: source_file_identity,
-            coverage_reason: None,
         };
         rewrite = ParseOffset {
             byte_offset: 0,
             mtime: revision,
             file_id: source_file_identity,
-            coverage_reason: None,
         };
         write(admission, scope, GENERATION_KEY, generation).await?;
         write(admission, scope, REWRITE_KEY, rewrite).await?;

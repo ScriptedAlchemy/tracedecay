@@ -277,7 +277,6 @@ mod tests {
                     byte_offset: 4,
                     mtime: 100,
                     file_id: 0,
-                    coverage_reason: None,
                 },
             )
             .await
@@ -289,7 +288,6 @@ mod tests {
                     byte_offset: 20,
                     mtime: 200,
                     file_id: 0,
-                    coverage_reason: None,
                 },
             )
             .await
@@ -305,22 +303,14 @@ mod tests {
                         byte_offset: 1,
                         mtime: 0,
                         file_id: 1,
-                        coverage_reason: None,
                     },
                 )
                 .await
                 .unwrap();
         }
-        for (provider, state, deferred_units, reason) in [
-            ("kimi", 1, 0, None),
-            ("opencode", 2, 3, None),
-            (
-                "claude",
-                3,
-                1,
-                Some(crate::HostCoverageReason::DatabaseMissing as u64),
-            ),
-        ] {
+        for (provider, state, deferred_units) in
+            [("kimi", 1, 0), ("opencode", 2, 3), ("claude", 3, 1)]
+        {
             database
                 .set_parse_offset(
                     &format!("host-coverage://{provider}/v1"),
@@ -328,7 +318,6 @@ mod tests {
                         byte_offset: deferred_units,
                         mtime: 1,
                         file_id: state,
-                        coverage_reason: reason,
                     },
                 )
                 .await
@@ -360,7 +349,7 @@ mod tests {
                     provider: "claude".into(),
                     state: SessionProviderCoverageState::Unavailable,
                     deferred_units: 1,
-                    reason: Some(crate::HostCoverageReason::DatabaseMissing),
+                    reason: None,
                 },
                 SessionProviderCoverage {
                     provider: "kimi".into(),
@@ -375,6 +364,69 @@ mod tests {
                     reason: None,
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn coverage_status_names_refusals_and_skips_packed_reason_codes() {
+        let profile = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .unwrap();
+        // 259 is the unreleased packed shape: state 3 with reason 1 in bits 8+.
+        for (provider, file_id) in [("claude", 3), ("kimi", 7), ("opencode", 259), ("pi", 4)] {
+            database
+                .set_parse_offset(
+                    &format!("host-coverage://{provider}/v1"),
+                    ParseOffset {
+                        byte_offset: 1,
+                        mtime: 1,
+                        file_id,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let health = database
+            .session_ingest_health_for_provider(None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            health.provider_coverage,
+            [
+                SessionProviderCoverage {
+                    provider: "claude".into(),
+                    state: SessionProviderCoverageState::Unavailable,
+                    deferred_units: 1,
+                    reason: None,
+                },
+                SessionProviderCoverage {
+                    provider: "kimi".into(),
+                    state: SessionProviderCoverageState::Unavailable,
+                    deferred_units: 1,
+                    reason: Some(crate::HostCoverageReason::SourceIdentityUnavailable),
+                },
+                SessionProviderCoverage {
+                    provider: "pi".into(),
+                    state: SessionProviderCoverageState::Unavailable,
+                    deferred_units: 1,
+                    reason: Some(crate::HostCoverageReason::DatabaseMissing),
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&health.provider_coverage[2]).unwrap(),
+            serde_json::json!({
+                "provider": "pi",
+                "state": "unavailable",
+                "deferred_units": 1,
+                "reason": "database_missing",
+            })
         );
     }
 

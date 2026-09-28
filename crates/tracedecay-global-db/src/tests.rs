@@ -341,7 +341,6 @@ async fn registered_mount_publishes_complete_migrated_schema() {
         ("code_projects", "primary_root_bytes"),
         ("code_projects", "primary_root_last_seen_at"),
         ("parse_offsets", "file_id"),
-        ("parse_offsets", "coverage_reason"),
         ("sessions", "parent_session_id"),
         ("sessions", "is_subagent"),
         ("sessions", "agent_id"),
@@ -880,7 +879,6 @@ async fn analytics_import_cursor_failure_rolls_back_events() {
                 byte_offset: 42,
                 mtime: 7,
                 file_id: 0,
-                coverage_reason: None,
             },
         )
         .await
@@ -898,7 +896,6 @@ async fn analytics_import_cursor_conflict_rolls_back_events() {
         byte_offset: 42,
         mtime: 7,
         file_id: 0,
-        coverage_reason: None,
     };
     db.set_parse_offset("hook_analytics:fixture", claimed)
         .await
@@ -928,7 +925,6 @@ async fn analytics_import_cursor_conflict_rolls_back_events() {
                 byte_offset: 84,
                 mtime: 8,
                 file_id: 0,
-                coverage_reason: None,
             },
         )
         .await
@@ -950,13 +946,11 @@ async fn parse_offset_pair_conflict_rolls_back_both_authorities() {
         byte_offset: 1,
         mtime: 2,
         file_id: 3,
-        coverage_reason: None,
     };
     let second = ParseOffset {
         byte_offset: 4,
         mtime: 5,
         file_id: 6,
-        coverage_reason: None,
     };
     db.set_parse_offset("pair:first", first).await.unwrap();
     db.set_parse_offset("pair:second", second).await.unwrap();
@@ -970,7 +964,6 @@ async fn parse_offset_pair_conflict_rolls_back_both_authorities() {
                     byte_offset: 7,
                     mtime: 8,
                     file_id: 9,
-                    coverage_reason: None,
                 },
             ),
             (
@@ -980,7 +973,6 @@ async fn parse_offset_pair_conflict_rolls_back_both_authorities() {
                     byte_offset: 10,
                     mtime: 11,
                     file_id: 12,
-                    coverage_reason: None,
                 },
             ),
         )

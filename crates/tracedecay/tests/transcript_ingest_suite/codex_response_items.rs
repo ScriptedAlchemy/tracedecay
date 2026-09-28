@@ -427,7 +427,6 @@ async fn codex_custom_tool_call_exec_is_joined_into_searchable_tool_call() {
                 byte_offset: 0,
                 mtime: 1,
                 file_id: 1,
-                coverage_reason: None,
             },
         )
         .await
@@ -795,7 +794,6 @@ Budget:
         byte_offset: std::fs::metadata(&path).unwrap().len(),
         mtime: 1,
         file_id: 1,
-        coverage_reason: None,
     };
     db.runtime()
         .set_project_parse_offset_for_test(path.to_string_lossy().as_ref(), legacy_cursor)

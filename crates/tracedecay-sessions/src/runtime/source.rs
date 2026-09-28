@@ -70,17 +70,46 @@ static TRANSCRIPT_PARSE_POOL: OnceLock<Result<rayon::ThreadPool, String>> = Once
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HostProviderCoverage {
-    Complete = 1,
-    Partial = 2,
-    Unavailable = 3,
+    Complete,
+    Partial,
+    Unavailable,
 }
 
+/// Closed `host-coverage://` `file_id` code table. Codes 1-3 are the
+/// reason-free states released before refusal reasons were recorded; each
+/// unavailable refusal owns one further code. A code outside this table
+/// decodes to no coverage, so the next sweep rewrites it.
 impl HostProviderCoverage {
-    pub(super) const fn from_file_id(file_id: u64) -> Option<Self> {
+    pub(super) const fn file_id(self, reason: Option<HostCoverageReason>) -> u64 {
+        match (self, reason) {
+            (Self::Complete, _) => 1,
+            (Self::Partial, _) => 2,
+            (Self::Unavailable, None) => 3,
+            (Self::Unavailable, Some(HostCoverageReason::DatabaseMissing)) => 4,
+            (Self::Unavailable, Some(HostCoverageReason::DatabaseNotAFile)) => 5,
+            (Self::Unavailable, Some(HostCoverageReason::DatabaseUnreadable)) => 6,
+            (Self::Unavailable, Some(HostCoverageReason::SourceIdentityUnavailable)) => 7,
+        }
+    }
+
+    pub(super) const fn from_file_id(file_id: u64) -> Option<(Self, Option<HostCoverageReason>)> {
         match file_id {
-            1 => Some(Self::Complete),
-            2 => Some(Self::Partial),
-            3 => Some(Self::Unavailable),
+            1 => Some((Self::Complete, None)),
+            2 => Some((Self::Partial, None)),
+            3 => Some((Self::Unavailable, None)),
+            4 => Some((Self::Unavailable, Some(HostCoverageReason::DatabaseMissing))),
+            5 => Some((
+                Self::Unavailable,
+                Some(HostCoverageReason::DatabaseNotAFile),
+            )),
+            6 => Some((
+                Self::Unavailable,
+                Some(HostCoverageReason::DatabaseUnreadable),
+            )),
+            7 => Some((
+                Self::Unavailable,
+                Some(HostCoverageReason::SourceIdentityUnavailable),
+            )),
             _ => None,
         }
     }
@@ -102,7 +131,9 @@ pub(super) async fn read_host_provider_coverage(
         .map_err(|outcome| {
             crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
         })?;
-    Ok(offset.and_then(|stored| HostProviderCoverage::from_file_id(stored.file_id)))
+    Ok(offset
+        .and_then(|stored| HostProviderCoverage::from_file_id(stored.file_id))
+        .map(|(coverage, _)| coverage))
 }
 
 pub(super) async fn read_codex_history_frontier(
@@ -176,8 +207,7 @@ pub(super) async fn persist_host_provider_coverage(
             ParseOffset {
                 byte_offset: deferred_units,
                 mtime: current.mtime.saturating_add(1).max(1),
-                file_id: coverage as u64,
-                coverage_reason: reason.map(|reason| reason as u64),
+                file_id: coverage.file_id(reason),
             },
         )
         .await
@@ -697,7 +727,6 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
             byte_offset: parsed.new_cursor.position,
             mtime: parsed.new_cursor.mtime,
             file_id: parsed.new_cursor.file_id,
-            coverage_reason: None,
         }
     };
     if parsed.messages.is_empty() {

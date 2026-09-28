@@ -98,8 +98,7 @@ pub async fn get_parse_offset(
     let path = path.as_str();
     match conn
         .query(
-            "SELECT byte_offset, mtime, file_id, coverage_reason
-             FROM parse_offsets WHERE file_path = ?1",
+            "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
             params![path],
         )
         .await
@@ -115,15 +114,7 @@ pub async fn get_parse_offset(
                 byte_offset: decode_u64_bits(&row, 0, "decode transcript byte offset")?,
                 mtime: decode_u64_bits(&row, 1, "decode transcript mtime")?,
                 file_id: decode_u64_bits(&row, 2, "decode transcript file id")?,
-                coverage_reason: decode_optional_u64_bits(
-                    &row,
-                    3,
-                    "decode transcript coverage reason",
-                )?,
             }))
-        }
-        Err(error) if sqlite_missing_column(&error, "coverage_reason") => {
-            read_parse_offset_without_coverage_reason(conn, path).await
         }
         Err(error) if sqlite_missing_column(&error, "file_id") => {
             let mut legacy_rows = conn
@@ -145,7 +136,6 @@ pub async fn get_parse_offset(
                 byte_offset: decode_u64_bits(&row, 0, "decode transcript byte offset")?,
                 mtime: decode_u64_bits(&row, 1, "decode transcript mtime")?,
                 file_id: 0,
-                coverage_reason: None,
             }))
         }
         Err(error) => Err(TranscriptPersistenceError::storage(
@@ -191,44 +181,6 @@ fn decode_u64_bits_value(value: i64) -> u64 {
     u64::from_le_bytes(value.to_le_bytes())
 }
 
-fn decode_optional_u64_bits(
-    row: &Row,
-    index: i32,
-    operation: &'static str,
-) -> Result<Option<u64>, TranscriptPersistenceError> {
-    let value = row
-        .get::<Option<i64>>(index)
-        .map_err(|error| TranscriptPersistenceError::storage(operation, error))?;
-    Ok(value.map(decode_u64_bits_value))
-}
-
-async fn read_parse_offset_without_coverage_reason(
-    conn: &impl QueryExecutor,
-    path: &str,
-) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
-    let mut rows = conn
-        .query(
-            "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
-            params![path],
-        )
-        .await
-        .map_err(|error| {
-            TranscriptPersistenceError::storage("read transcript parse offset", error)
-        })?;
-    let Some(row) = rows.next().await.map_err(|error| {
-        TranscriptPersistenceError::storage("read transcript parse offset", error)
-    })?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(ParseOffset {
-        byte_offset: decode_u64_bits(&row, 0, "decode transcript byte offset")?,
-        mtime: decode_u64_bits(&row, 1, "decode transcript mtime")?,
-        file_id: decode_u64_bits(&row, 2, "decode transcript file id")?,
-        coverage_reason: None,
-    }))
-}
-
 pub async fn require_expected_offset(
     conn: &impl QueryExecutor,
     path: &str,
@@ -253,19 +205,17 @@ pub async fn set_parse_offset(
 ) -> Result<(), TranscriptPersistenceError> {
     let path = path_identity_key(path);
     conn.execute(
-        "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id, coverage_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(file_path) DO UPDATE SET
             byte_offset = excluded.byte_offset,
             mtime = excluded.mtime,
-            file_id = excluded.file_id,
-            coverage_reason = excluded.coverage_reason",
+            file_id = excluded.file_id",
         params![
             path,
             encode_u64_bits(offset.byte_offset),
             encode_u64_bits(offset.mtime),
-            encode_u64_bits(offset.file_id),
-            offset.coverage_reason.map(encode_u64_bits)
+            encode_u64_bits(offset.file_id)
         ],
     )
     .await
@@ -758,13 +708,12 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     ) -> Result<(), String> {
         let path = path_identity_key(path);
         conn.execute(
-            "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id, coverage_reason)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
+                 VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(file_path) DO UPDATE SET
                     byte_offset = excluded.byte_offset,
                     mtime = excluded.mtime,
-                    file_id = excluded.file_id,
-                    coverage_reason = excluded.coverage_reason
+                    file_id = excluded.file_id
                  WHERE excluded.file_id != parse_offsets.file_id
                     OR excluded.mtime > parse_offsets.mtime
                     OR (excluded.mtime = parse_offsets.mtime
@@ -773,8 +722,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 path,
                 encode_u64_bits(offset.byte_offset),
                 encode_u64_bits(offset.mtime),
-                encode_u64_bits(offset.file_id),
-                offset.coverage_reason.map(encode_u64_bits)
+                encode_u64_bits(offset.file_id)
             ],
         )
         .await

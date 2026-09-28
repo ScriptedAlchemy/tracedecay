@@ -652,10 +652,7 @@ async fn complete_claude_pass_persists_host_provider_coverage() {
         .await
         .unwrap()
         .expect("Claude coverage watermark");
-    assert_eq!(
-        coverage.file_id,
-        crate::runtime::source::HostProviderCoverage::Complete as u64
-    );
+    assert_eq!(coverage.file_id, 1);
 }
 
 #[tokio::test]

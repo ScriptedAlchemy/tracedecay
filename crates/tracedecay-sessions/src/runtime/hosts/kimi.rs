@@ -675,7 +675,6 @@ pub async fn capture_kimi_observations(
                             byte_offset: sequence,
                             mtime: queue_frontier.mtime.saturating_add(1),
                             file_id: KIMI_FRONTIER_VERSION,
-                            coverage_reason: None,
                         },
                     )
                     .await
@@ -694,14 +693,12 @@ pub async fn capture_kimi_observations(
                         byte_offset: 0,
                         mtime: discovery_frontier.mtime.saturating_add(1),
                         file_id: 0,
-                        coverage_reason: None,
                     })
                 } else {
                     last_discovered_entry.map(|entry| ParseOffset {
                         byte_offset: entry.sequence,
                         mtime: discovery_frontier.mtime.saturating_add(1),
                         file_id: entry.sequence,
-                        coverage_reason: None,
                     })
                 };
                 if let Some(next_frontier) = next_frontier
@@ -839,7 +836,7 @@ mod tests {
     use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
     use crate::observation::ObservationCancellation;
     use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
-    use crate::runtime::source::{HostProviderCoverage, TranscriptDiscoveryBounds};
+    use crate::runtime::source::TranscriptDiscoveryBounds;
 
     use super::{KimiSource, capture_kimi_observations};
 
@@ -958,7 +955,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(coverage.file_id, HostProviderCoverage::Complete as u64);
+        assert_eq!(coverage.file_id, 1);
     }
 
     #[tokio::test]

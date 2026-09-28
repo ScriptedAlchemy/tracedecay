@@ -137,8 +137,7 @@ const TRANSCRIPT_SCHEMA: &str = "
         file_path TEXT PRIMARY KEY,
         byte_offset INTEGER NOT NULL,
         mtime INTEGER NOT NULL,
-        file_id INTEGER NOT NULL DEFAULT 0,
-        coverage_reason INTEGER
+        file_id INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS savings_ledger (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
