@@ -1308,6 +1308,18 @@ pub fn poll_until<T>(
     }
 }
 
+/// The API base for a dashboard launch URL (`http://ADDR/?token=T`): its
+/// userinfo carries the token, so ureq sends it as the Basic password.
+pub fn dashboard_api_base_url(launch_url: &str) -> String {
+    let (origin, token) = launch_url
+        .split_once("/?token=")
+        .unwrap_or_else(|| panic!("dashboard launch URL carries no token: {launch_url}"));
+    let authority = origin
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("dashboard launch URL is not loopback HTTP: {launch_url}"));
+    format!("http://tracedecay:{token}@{authority}")
+}
+
 pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
     let probe = format!("{base_url}/api/capabilities");
     // Poll until the server both accepts the connection AND returns a real

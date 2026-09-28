@@ -188,7 +188,7 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
                             line.clear();
                         }
                     });
-                    return url.trim_end_matches('/').to_owned();
+                    return common::dashboard_api_base_url(url);
                 }
             }
             Err(error) => panic!("dashboard stdout failed: {error}; seen:\n{seen}"),

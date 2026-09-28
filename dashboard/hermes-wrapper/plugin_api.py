@@ -25,7 +25,8 @@ only listens on loopback.
 
 Configuration (environment always wins, then deploy-time defaults below):
 
-- ``TRACEDECAY_DASHBOARD_URL``      use an existing server instead of spawning
+- ``TRACEDECAY_DASHBOARD_URL``      launch URL (with its ``token``) of an
+  existing server to use instead of spawning
 - ``TRACEDECAY_BIN``                path to the tracedecay binary
 - ``TRACEDECAY_DASHBOARD_PROJECT``  project root/store to serve. When unset,
   the wrapper uses the Hermes process cwd. Hermes homes and profiles never
@@ -37,6 +38,7 @@ Use ``TRACEDECAY_*`` environment variables for runtime configuration.
 from __future__ import annotations
 
 import atexit
+import base64
 import concurrent.futures
 import ctypes
 import json
@@ -63,6 +65,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 try:
     from embed_proxy import (
         DASHBOARD_EMBED_PATH,
+        dashboard_upstream,
         embed_upstream_path,
         is_event_stream,
         is_html_content_type,
@@ -75,6 +78,15 @@ except ImportError:  # pragma: no cover - Hermes deploys this file alone
         r"""(?P<attr>\b(?:src|href))=(?P<quote>['"])/(?P<path>(?!/))""",
         re.IGNORECASE,
     )
+
+    def dashboard_upstream(launch_url: str) -> tuple[str, dict[str, str]]:
+        parts = urllib.parse.urlsplit(launch_url)
+        base = f"{parts.scheme}://{parts.netloc}"
+        tokens = urllib.parse.parse_qs(parts.query).get("token")
+        if not tokens:
+            return base, {}
+        credential = base64.b64encode(f"tracedecay:{tokens[0]}".encode()).decode()
+        return base, {"Authorization": f"Basic {credential}"}
 
     def embed_upstream_path(subpath: str) -> str:
         tail = subpath.strip("/")
@@ -181,7 +193,7 @@ _STDERR_TAIL_LINES = 20
 
 _lock = threading.Lock()
 _process: subprocess.Popen | None = None
-_base_url: str | None = None
+_upstream_origin: tuple[str, dict[str, str]] | None = None
 # (monotonic timestamp, detail) of the last failed spawn, for fast-fail.
 _last_spawn_failure: tuple[float, str] | None = None
 
@@ -210,7 +222,7 @@ def _child_preexec() -> None:
     """Runs in the forked child: deliver SIGTERM when the parent dies.
 
     Best-effort, Linux-only (PR_SET_PDEATHSIG). Other platforms rely on
-    atexit plus the dead-instance reap in ``_upstream_base``.
+    atexit plus the dead-instance reap in ``_upstream``.
     """
     if _libc is not None:
         try:
@@ -263,7 +275,7 @@ def _dashboard_env() -> dict[str, str]:
     return os.environ.copy()
 
 
-def _spawn_dashboard() -> str:
+def _spawn_dashboard() -> tuple[str, dict[str, str]]:
     """Starts ``tracedecay dashboard`` and returns its base URL."""
     binary = _find_tracedecay_bin()
     if not binary:
@@ -341,12 +353,13 @@ def _spawn_dashboard() -> str:
             headers={"Retry-After": "5"},
         )
 
-    _wait_until_ready(process, url, project, stderr_tail)
+    base, headers = dashboard_upstream(url)
+    _wait_until_ready(process, base, headers, project, stderr_tail)
 
     global _process
     _process = process
-    logger.info("tracedecay dashboard started at %s (project %s)", url, project)
-    return url
+    logger.info("tracedecay dashboard started at %s (project %s)", base, project)
+    return base, headers
 
 
 def _terminate_process(process: subprocess.Popen) -> None:
@@ -367,7 +380,11 @@ def _terminate_process(process: subprocess.Popen) -> None:
 
 
 def _wait_until_ready(
-    process: subprocess.Popen, url: str, project: str, stderr_tail: deque
+    process: subprocess.Popen,
+    base: str,
+    headers: dict[str, str],
+    project: str,
+    stderr_tail: deque,
 ) -> None:
     """Blocks until the spawned engine answers /api/capabilities.
 
@@ -389,7 +406,9 @@ def _wait_until_ready(
                 headers={"Retry-After": "5"},
             )
         try:
-            request = urllib.request.Request(f"{url}/api/capabilities", method="GET")
+            request = urllib.request.Request(
+                f"{base}/api/capabilities", method="GET", headers=headers
+            )
             with urllib.request.urlopen(request, timeout=2.0) as response:
                 if response.status < 500:
                     return
@@ -426,9 +445,10 @@ def _shutdown() -> None:
 atexit.register(_shutdown)
 
 
-def _upstream_base() -> str:
-    """Returns the base URL of the tracedecay dashboard server, starting it
-    on first use unless an external URL is configured.
+def _upstream() -> tuple[str, dict[str, str]]:
+    """Returns the tracedecay dashboard origin and the credential headers its
+    launch token grants, starting the server on first use unless an external
+    launch URL is configured.
 
     Spawn failures are cached for ``_SPAWN_RETRY_BACKOFF_SECONDS`` so a
     persistently failing spawn (e.g. project root not tracedecay-initialized)
@@ -437,11 +457,11 @@ def _upstream_base() -> str:
     """
     configured = _env("DASHBOARD_URL")
     if configured:
-        return configured.rstrip("/")
-    global _base_url, _last_spawn_failure
+        return dashboard_upstream(configured)
+    global _upstream_origin, _last_spawn_failure
     with _lock:
-        if _base_url is not None and _process is not None and _process.poll() is None:
-            return _base_url
+        if _upstream_origin is not None and _process is not None and _process.poll() is None:
+            return _upstream_origin
         if _last_spawn_failure is not None:
             failed_at, detail = _last_spawn_failure
             remaining = _SPAWN_RETRY_BACKOFF_SECONDS - (time.monotonic() - failed_at)
@@ -458,33 +478,36 @@ def _upstream_base() -> str:
         # spawning a replacement.
         _shutdown()
         try:
-            _base_url = _spawn_dashboard()
+            _upstream_origin = _spawn_dashboard()
         except HTTPException as exc:
             _last_spawn_failure = (time.monotonic(), str(exc.detail))
             raise
-        return _base_url
+        return _upstream_origin
 
 
 def _proxy(method: str, upstream_path: str, request: Request, body: bytes | None) -> JSONResponse:
     # Connection-level failures (reset/refused) on GETs are retried once
-    # after re-resolving the upstream: _upstream_base reaps a dead child and
+    # after re-resolving the upstream: _upstream reaps a dead child and
     # respawns it (then waits for readiness), so a mid-flight engine death
     # heals transparently instead of surfacing a one-off 502. POSTs are never
     # retried. Curation applies must not run twice.
     attempts = 2 if method == "GET" else 1
     last_exc: Exception | None = None
     for attempt in range(attempts):
-        base = _upstream_base()
+        base, credential = _upstream()
         query = request.url.query
         url = f"{base}{upstream_path}" + (f"?{query}" if query else "")
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in ("http", "https"):
             raise HTTPException(status_code=502, detail="invalid upstream URL scheme")
+        headers = dict(credential)
+        if body:
+            headers["Content-Type"] = "application/json"
         req = urllib.request.Request(
             url,
             data=body if method == "POST" else None,
             method=method,
-            headers={"Content-Type": "application/json"} if body else {},
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT_SECONDS) as resp:  # noqa: S310, loopback/configured upstream only
@@ -524,7 +547,7 @@ def get_dashboard_url() -> JSONResponse:
     503 rather than a later iframe 502. The URL itself is always the Hermes
     proxy path, never ``http://127.0.0.1``.
     """
-    _upstream_base()
+    _upstream()
     return JSONResponse({"url": DASHBOARD_EMBED_PATH})
 
 
@@ -581,13 +604,13 @@ def _embed_once(
     accept: str,
     timeout: float | None,
 ) -> Response:
-    base = _upstream_base()
+    base, credential = _upstream()
     query = request.url.query
     url = f"{base}{upstream_path}" + (f"?{query}" if query else "")
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise HTTPException(status_code=502, detail="invalid upstream URL scheme")
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = dict(credential)
     content_type = request.headers.get("content-type")
     if content_type:
         headers["Content-Type"] = content_type

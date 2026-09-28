@@ -113,11 +113,36 @@ impl Drop for DashboardServer {
     }
 }
 
+/// The access token a fixture dashboard on `port` admits, and the base URL
+/// whose userinfo carries it to every request built from it.
+pub(crate) fn dashboard_access_for(
+    port: u16,
+) -> (tracedecay_dashboard_api::DashboardAccessToken, String) {
+    let access = tracedecay_dashboard_api::DashboardAccessToken::mint()
+        .unwrap_or_else(|error| panic!("mint dashboard access token: {error}"));
+    let base_url = crate::common::dashboard_api_base_url(
+        &access.launch_url(std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+    );
+    (access, base_url)
+}
+
+fn fixture_endpoint(
+    port: u16,
+    access: tracedecay_dashboard_api::DashboardAccessToken,
+) -> tracedecay_dashboard_api::DashboardTestEndpointV1<'static> {
+    tracedecay_dashboard_api::DashboardTestEndpointV1 {
+        host: "127.0.0.1",
+        port,
+        access,
+    }
+}
+
 pub(crate) fn spawn_dashboard_server_with_host_runtime(
     cg: TraceDecay,
     host_runtime: Arc<DashboardTestRuntimeV1>,
     project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
     port: u16,
+    access: tracedecay_dashboard_api::DashboardAccessToken,
 ) -> DashboardServer {
     spawn_dashboard_server_with_runner(
         cg,
@@ -126,7 +151,7 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
         None,
         None,
         None,
-        port,
+        fixture_endpoint(port, access),
     )
 }
 
@@ -135,6 +160,7 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
     host_runtime: Arc<DashboardTestRuntimeV1>,
     project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
     port: u16,
+    access: tracedecay_dashboard_api::DashboardAccessToken,
 ) -> DashboardServer {
     spawn_dashboard_server_with_runner(
         cg,
@@ -143,7 +169,7 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
         None,
         None,
         None,
-        port,
+        fixture_endpoint(port, access),
     )
 }
 
@@ -169,7 +195,7 @@ fn spawn_dashboard_server_with_runner(
         Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
     >,
     project_open: Option<Arc<AtomicBool>>,
-    port: u16,
+    endpoint: tracedecay_dashboard_api::DashboardTestEndpointV1<'static>,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let thread = thread::spawn(move || {
@@ -229,10 +255,7 @@ fn spawn_dashboard_server_with_runner(
                 host_runtime.profile(),
                 authority,
                 project_graphs,
-                tracedecay_dashboard_api::DashboardTestEndpointV1 {
-                    host: "127.0.0.1",
-                    port,
-                },
+                endpoint,
                 tracedecay_project::product_runtime::register_fixture_product_runtime()
                     .build_version(),
                 tracedecay_api::static_dashboard_router(std::sync::Arc::new(
@@ -1068,7 +1091,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         seed_lcm_fixture(&host_runtime, &project_root).await;
     }
     let port = pick_free_port();
-    let base_url = format!("http://127.0.0.1:{port}");
+    let (access, base_url) = dashboard_access_for(port);
     let server = spawn_dashboard_server_with_runner(
         cg,
         Some((Arc::clone(&host_runtime), project_graphs.clone())),
@@ -1076,7 +1099,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         delivery_authority,
         git_correlation_authority,
         project_open,
-        port,
+        fixture_endpoint(port, access),
     );
 
     let agent = http_agent();

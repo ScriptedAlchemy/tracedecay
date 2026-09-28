@@ -215,12 +215,13 @@ fn managed_skills_are_dashboard_controllable_with_direct_activation() {
         let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -375,12 +376,13 @@ fn managed_skill_dashboard_api_applies_updates_immediately() {
         let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
