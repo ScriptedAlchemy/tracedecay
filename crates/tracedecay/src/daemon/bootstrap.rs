@@ -990,7 +990,12 @@ mod tests {
         std::fs::set_permissions(&socket_parent, std::fs::Permissions::from_mode(0o755))
             .expect("public socket parent");
         let socket = socket_parent.join("daemon.sock");
-        drop(std::os::unix::net::UnixListener::bind(&socket).expect("stale socket"));
+        // Bound but never listening: a dropped listener stays connectable while
+        // a sibling test's forked child still holds the inherited descriptor.
+        socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+            .expect("stale socket")
+            .bind(&socket2::SockAddr::unix(&socket).expect("stale socket address"))
+            .expect("bind stale socket");
 
         let endpoint = DaemonEndpoint::Unix(socket.clone());
         let authority = authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
