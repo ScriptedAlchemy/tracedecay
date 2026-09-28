@@ -1066,6 +1066,15 @@ async fn restart_after_sigterm_rebuilds_only_changed_files() {
         !replayed_retained_corpus,
         "restart bulk-committed the retained corpus instead of the changed file: {last}"
     );
+    let restarted_progress = &last["code_index_freshness"]["worktree"]["progress"];
+    assert_eq!(
+        (
+            restarted_progress["total_files"].as_u64(),
+            restarted_progress["completed_files"].as_u64(),
+        ),
+        (Some(1), Some(1)),
+        "the restarted text build must name only the edited file: {last}"
+    );
 
     let changed = search(&socket, &handshake, "restart_resume_probe").await;
     assert_eq!(
