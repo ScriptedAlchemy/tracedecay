@@ -311,3 +311,93 @@ fn remote_replay_parses_request_file_and_optional_trust_root() {
     assert_eq!(authority.request_file, std::path::Path::new("-"));
     assert!(authority.json);
 }
+
+#[test]
+fn every_help_example_is_accepted_by_the_parser() {
+    fn examples(
+        command: &clap::Command,
+        path: &mut Vec<String>,
+        found: &mut Vec<(String, String)>,
+    ) {
+        path.push(command.get_name().to_owned());
+        for help in [command.get_after_help(), command.get_after_long_help()]
+            .into_iter()
+            .flatten()
+        {
+            let text = help.to_string();
+            let mut lines: Vec<String> = Vec::new();
+            let mut continues = false;
+            for line in text.lines() {
+                let (body, next_continues) = match line.trim_end().strip_suffix('\\') {
+                    Some(body) => (body.trim_end(), true),
+                    None => (line, false),
+                };
+                match lines.last_mut() {
+                    Some(last) if continues => {
+                        last.push(' ');
+                        last.push_str(body.trim_start());
+                    }
+                    _ => lines.push(body.to_owned()),
+                }
+                continues = next_continues;
+            }
+            let mut in_examples = false;
+            for line in &lines {
+                if line.trim_end().ends_with("Examples:") {
+                    in_examples = true;
+                    continue;
+                }
+                if in_examples && !line.starts_with("  ") {
+                    in_examples = false;
+                }
+                let Some(example) = line.trim_start().strip_prefix("tracedecay ") else {
+                    continue;
+                };
+                if in_examples {
+                    let invocation = example.split("  ").next().unwrap_or_default();
+                    found.push((path.join(" "), format!("tracedecay {invocation}")));
+                }
+            }
+        }
+        for subcommand in command.get_subcommands() {
+            examples(subcommand, path, found);
+        }
+        path.pop();
+    }
+
+    let mut found = Vec::new();
+    examples(
+        &<Cli as clap::CommandFactory>::command(),
+        &mut Vec::new(),
+        &mut found,
+    );
+    assert!(
+        found
+            .iter()
+            .any(|(owner, example)| owner == "tracedecay work"
+                && example == "tracedecay work create --request-file create.json --json"),
+        "{found:#?}"
+    );
+
+    let rejected: Vec<String> = found
+        .iter()
+        .filter_map(|(owner, example)| {
+            let argv = shell_words::split(example).expect("example is shell-quoted");
+            match Cli::try_parse_from(&argv) {
+                Ok(_) => None,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::DisplayHelp
+                            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                            | ErrorKind::DisplayVersion
+                    ) =>
+                {
+                    None
+                }
+                Err(error) => Some(format!("{owner}: `{example}`: {}", error.kind())),
+            }
+        })
+        .collect();
+    assert_eq!(rejected, Vec::<String>::new());
+}
