@@ -9,11 +9,12 @@
 use std::collections::BTreeSet;
 
 use crate::handlers::BoundApplicationHandler;
+use crate::schema_bodies::SchemaBodyMaterialization;
 use crate::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
     APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID, ApplicationContractError,
-    ApplicationHandlerDescriptors, application_catalog_contributions,
-    application_handler_descriptors,
+    ApplicationHandlerDescriptors, application_binding_contributions,
+    application_catalog_contributions, application_handler_descriptors,
 };
 use thiserror::Error;
 use tracedecay_tool_catalog::{
@@ -96,18 +97,35 @@ pub fn compose_application_catalog_with<Dispatcher>(
 /// Build the immutable catalog snapshot used by transport binding resolution.
 /// Callers that execute operations must use [`compose_application_catalog`].
 pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
-    assemble_application_catalog().map(|(snapshot, _handlers)| snapshot)
+    assemble_application_catalog_with(SchemaBodyMaterialization::Materialize)
+        .map(|(snapshot, _handlers)| snapshot)
+}
+
+/// Binding snapshot for dispatch. Schema references stay; JSON Schema bodies do not.
+///
+/// A CLI process resolves one operation from this snapshot. Generating every
+/// executable schema body is discovery and SDK work, not a dispatch prerequisite.
+pub fn build_application_binding_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
+    assemble_application_catalog_with(SchemaBodyMaterialization::Omit)
+        .map(|(snapshot, _handlers)| snapshot)
 }
 
 #[hotpath::measure(label = "catalog_composition.assemble")]
 fn assemble_application_catalog()
 -> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
+    assemble_application_catalog_with(SchemaBodyMaterialization::Materialize)
+}
+
+fn assemble_application_catalog_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
     let (mut contributions, handlers) =
         hotpath::measure_block!("catalog_composition.contributions", {
-            (
-                application_catalog_contributions()?,
-                application_handler_descriptors()?,
-            )
+            let contributions = match materialize {
+                SchemaBodyMaterialization::Materialize => application_catalog_contributions()?,
+                SchemaBodyMaterialization::Omit => application_binding_contributions()?,
+            };
+            (contributions, application_handler_descriptors()?)
         });
     contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
     hotpath::measure_block!(

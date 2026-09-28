@@ -58,6 +58,7 @@ pub mod result;
 pub mod retained_receipts;
 pub mod retained_surfaces;
 pub mod retrieval;
+mod schema_bodies;
 pub mod sdk_catalog;
 pub mod session_sync;
 mod session_temporal_refresh;
@@ -368,7 +369,8 @@ pub use retained_surfaces::{
 pub use retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
     APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID,
-    application_catalog_contributions, application_operation_default_page_size,
+    application_binding_contributions, application_catalog_contributions,
+    application_operation_default_page_size,
 };
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AnchorExpandRequest, AnchorExpandResult,
