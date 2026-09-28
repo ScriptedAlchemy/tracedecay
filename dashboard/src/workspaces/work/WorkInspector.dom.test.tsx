@@ -2,9 +2,9 @@
  * The Work inspector over one selected task.
  *
  * The inspector separates definition, admission, relations, placement, and
- * evidence so no status stands in for another, and it prints the fields the
- * concept plate pictures but no Work authority publishes, priority, an owner
- * field, as the typed absences they are. Every row carries a grade.
+ * evidence so no status stands in for another, and it prints the owner field
+ * the concept plate pictures but no Work authority publishes as the typed
+ * absence it is. Every row carries a grade.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -162,16 +162,18 @@ describe('the Work inspector', () => {
     expect(row(admission, 'admitted').textContent).toMatch(/\d{4}-\d{2}-\d{2}T/);
   });
 
-  /** The assertion this file exists for: concept fields with no authority
-   * are printed as absences, graded UNAVAILABLE, never filled from a neighbour. */
-  it('states priority and owners as typed absences when no authority declares them', async () => {
+  /** The assertion this file exists for: the task's estimate is the effort
+   * the graph declares, the Work model owns no priority so none is drawn, and
+   * an owner with no authority is printed as an absence, graded UNAVAILABLE,
+   * never filled from a neighbour. */
+  it('prints declared effort as the estimate, omits priority, and states owners as an absence', async () => {
     const aside = await inspector('/work?view=dag&task=leaf');
     const definition = aside.querySelector<HTMLElement>('[data-work-inspector-definition]');
     if (definition === null) throw new Error('no definition');
 
-    const priority = row(definition, 'priority');
-    expect(priority.textContent).toContain('declares no priority field');
-    expect(priority.querySelector('[data-evidence-grade="unavailable"]')).not.toBeNull();
+    expect(row(definition, 'effort').textContent).toContain('5 declared effort');
+    expect(within(definition).queryByText('priority', { selector: 'dt' })).toBeNull();
+    expect(definition.textContent).not.toContain('priority');
 
     const owners = row(definition, 'owners');
     expect(owners.textContent).toContain('no owner field');

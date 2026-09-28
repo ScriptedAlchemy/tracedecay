@@ -284,25 +284,60 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
   const gaps: JourneyGap[] = [];
   const spawnEvents: JourneyEvent[] = [];
 
-  // Tool calls the selected transcript page carries, by the host's own
-  // tool-use id. A fork or an edit binds to one only through that identity
-  // (or, for an edit, its recorded second); the first recorded call wins.
+  // Tool calls and pull requests the temporal read served for every lane, at
+  // the time the host recorded them. They share the transcript's message
+  // identity, so the selected transcript never draws the same record twice.
+  const streamEvents: JourneyEvent[] = [];
+  const streamed = new Set<string>();
+  // Tool calls by the host's own tool-use id. A fork or an edit binds to one
+  // only through that identity (or, for an edit, its recorded second); the
+  // first recorded call wins.
   const toolCalls = new Map<string, ToolCallAnchor>();
   const toolCallsBySecond = new Map<string, ToolCallAnchor[]>();
+  const anchorToolCall = (laneId: string, anchor: ToolCallAnchor): void => {
+    const key = JSON.stringify([laneId, anchor.toolUseId]);
+    if (toolCalls.has(key)) return;
+    toolCalls.set(key, anchor);
+    if (anchor.time === null) return;
+    const secondKey = JSON.stringify([laneId, Math.floor(anchor.time)]);
+    const bucket = toolCallsBySecond.get(secondKey);
+    if (bucket) bucket.push(anchor);
+    else toolCallsBySecond.set(secondKey, [anchor]);
+  };
+  for (const event of temporal.events) {
+    const laneId = keyOf(event.provider, event.session_id);
+    if (!drafts.has(laneId)) continue;
+    const id = `msg:${laneId}:${event.message_id}`;
+    if (streamed.has(id)) continue;
+    streamed.add(id);
+    const toolUseId = event.tool_use_id?.trim() || null;
+    const pullRequest = event.kind === 'pull_request';
+    const label = event.label ?? (pullRequest ? 'reference unrecorded' : 'tool unrecorded');
+    streamEvents.push({
+      id,
+      laneId,
+      kind: pullRequest ? 'pull_request' : 'tool_call',
+      time: event.recorded_at,
+      sequence: 0,
+      grade: 'exact',
+      source: 'recorded_event',
+      label,
+      detail: pullRequest ? label : toolUseId === null ? null : `tool use ${toolUseId}`,
+      ref: event.message_id,
+    });
+    if (!pullRequest && toolUseId !== null) {
+      anchorToolCall(laneId, { eventId: id, toolUseId, label, time: event.recorded_at });
+    }
+  }
+  // A call the host recorded without a time is not served; the selected
+  // transcript can still bind a fork to it by identity.
   if (selected && drafts.has(selected.laneId)) {
     for (const message of orderMessages(selected.messages)) {
       const toolUseId = message.tool_use_id?.trim();
-      if (!toolUseId || transcriptKind(message) !== 'tool_call') continue;
-      const key = JSON.stringify([selected.laneId, toolUseId]);
-      if (toolCalls.has(key)) continue;
+      const id = `msg:${selected.laneId}:${message.message_id}`;
+      if (!toolUseId || streamed.has(id) || transcriptKind(message) !== 'tool_call') continue;
       const time = isFinitePositive(message.timestamp) ? message.timestamp : null;
-      const anchor = { eventId: `msg:${selected.laneId}:${message.message_id}`, toolUseId, label: transcriptLabel(message), time };
-      toolCalls.set(key, anchor);
-      if (time === null) continue;
-      const secondKey = JSON.stringify([selected.laneId, time]);
-      const bucket = toolCallsBySecond.get(secondKey);
-      if (bucket) bucket.push(anchor);
-      else toolCallsBySecond.set(secondKey, [anchor]);
+      anchorToolCall(selected.laneId, { eventId: id, toolUseId, label: transcriptLabel(message), time });
     }
   }
 
@@ -401,18 +436,16 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
       if (child.parentId === null) child.parentId = parent.id;
       const precedes = child.start < parent.start;
       const agreed = both !== null && !parentsDiffer;
-      // The fork sits on the parent's tool call only when a loaded parent
-      // message carries the recorded tool-use id; otherwise at the child's
-      // start, saying why.
+      // The fork sits on the parent's tool call only when a recorded parent
+      // call carries the child's tool-use id; otherwise at the child's start,
+      // saying why.
       const anchor =
         claim.toolUseId === null ? undefined : toolCalls.get(JSON.stringify([parent.id, claim.toolUseId]));
       const placement = anchor
         ? `fork placed on the spawning tool call ${anchor.label}`
         : claim.toolUseId === null
           ? 'fork placed at the child start: no parent tool-use id recorded'
-          : selected?.laneId !== parent.id
-            ? 'fork placed at the child start: the parent transcript is not loaded'
-            : `fork placed at the child start: no loaded parent tool call carries ${claim.toolUseId}`;
+          : `fork placed at the child start: no recorded parent tool call in this read carries ${claim.toolUseId}`;
       const grade: EvidenceGrade =
         parentsDiffer || toolsDiffer || precedes ? 'ambiguous' : anchor ? 'exact' : 'inferred';
       const basis = [
@@ -629,23 +662,29 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     });
   }
   for (const event of spawnEvents) pushRecorded(event);
+  for (const event of streamEvents) pushRecorded(event);
 
   const transcriptByLane = new Map<string, JourneyEvent[]>();
   if (selected && laneIndex.has(selected.laneId)) {
     const laneId = selected.laneId;
-    const orderedMessages = orderMessages(selected.messages);
-    const events: JourneyEvent[] = orderedMessages.map((message, sequence) => ({
-      id: `msg:${laneId}:${message.message_id}`,
-      laneId,
-      kind: transcriptKind(message),
-      time: isFinitePositive(message.timestamp) ? message.timestamp : null,
-      sequence,
-      grade: 'exact',
-      source: 'transcript',
-      label: transcriptLabel(message),
-      detail: oneLine(message.snippet) ?? oneLine(message.content),
-      ref: message.message_id,
-    }));
+    // A turn keeps its position in the loaded transcript, the index the
+    // playback cursor walks, even when the recorded stream already drew it.
+    const events: JourneyEvent[] = orderMessages(selected.messages).flatMap((message, sequence) => {
+      const id = `msg:${laneId}:${message.message_id}`;
+      if (streamed.has(id)) return [];
+      return [{
+        id,
+        laneId,
+        kind: transcriptKind(message),
+        time: isFinitePositive(message.timestamp) ? message.timestamp : null,
+        sequence,
+        grade: 'exact' as const,
+        source: 'transcript' as const,
+        label: transcriptLabel(message),
+        detail: oneLine(message.snippet) ?? oneLine(message.content),
+        ref: message.message_id,
+      }];
+    });
     transcriptByLane.set(laneId, events);
     const undatedTurns = events.filter((event) => event.time === null).length;
     if (undatedTurns > 0) {
