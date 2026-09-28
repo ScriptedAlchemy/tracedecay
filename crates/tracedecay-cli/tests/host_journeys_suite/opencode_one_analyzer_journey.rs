@@ -303,8 +303,19 @@ fn opencode_keeps_exactly_one_analyzer_through_install_repair_rollback_uninstall
         HostAnalyzerOwnership::from_opencode_config(&repaired),
     );
 
-    // INTERRUPTION: a mutation killed mid-write leaves what it wrote; the next
-    // reinstall converges, and the result must still hold single ownership.
+    // INTERRUPTION: a repair of a damaged registration killed right after its
+    // write leaves what it wrote; the next reinstall converges, and the result
+    // must still hold single ownership.
+    let mut damaged = cli.host_config();
+    damaged["lsp"]
+        .as_object_mut()
+        .expect("installed lsp registrations")
+        .remove("tracedecay");
+    fs::write(
+        cli.host_config_path(),
+        serde_json::to_vec_pretty(&damaged).unwrap(),
+    )
+    .unwrap();
     let killed = cli.run_with_env(
         &["reinstall"],
         "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",

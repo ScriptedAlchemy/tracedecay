@@ -246,11 +246,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert_eq!(detailed["branch_diagnostics"]["warnings"], json!([]));
     assert_eq!(
         detailed["git_staleness"],
-        json!({
-            "status": "unavailable",
-            "reason": "sealed_generation_git_watermark_not_published",
-            "message": "the verified code generation does not publish a Git commit watermark",
-        })
+        json!({ "status": "current", "watermark": project.head })
     );
     assert_eq!(detailed["session_ingest"], empty_cursor_session_ingest());
     assert_eq!(

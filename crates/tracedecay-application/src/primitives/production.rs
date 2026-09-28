@@ -5,7 +5,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use tracedecay_contracts::retrieval::grep_analysis::PrimitiveCoverageV1;
 use tracedecay_contracts::retrieval::{
-    RetrievalPortOutcome, TemporalRetrievalPort, TestPrimitivePortContext, TestPrimitivePortOutcome,
+    PrimitiveFailure, PrimitiveFailureKind, RetrievalPortOutcome, TemporalRetrievalPort,
+    TestPrimitivePortContext, TestPrimitivePortOutcome,
 };
 use tracedecay_contracts::{
     ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceCoverage,
@@ -41,6 +42,7 @@ use tracedecay_graph_query::SourceReadContext;
 use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
+    code_graph_read_error_from_runtime,
 };
 use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
 use tracedecay_temporal_query::cursor::SessionCursorAuthenticator;
@@ -284,7 +286,90 @@ fn graph_read_outcome<T>(
     match error {
         CodeGraphReadError::Cancelled => RetrievalPortOutcome::Cancelled(evidence),
         CodeGraphReadError::TimedOut => RetrievalPortOutcome::TimedOut(evidence),
-        _ => RetrievalPortOutcome::Unavailable(evidence),
+        _ => RetrievalPortOutcome::Refused(
+            evidence,
+            Box::new(code_graph_read_failure(error).into_problem()),
+        ),
+    }
+}
+
+/// The outcome of a graph query that failed after its projection opened: the
+/// same typed state an open failure reports when the query surfaced a
+/// code-graph read error, and a failed read otherwise.
+fn graph_query_outcome<T>(
+    error: &tracedecay_domain::errors::TraceDecayError,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    match code_graph_read_error_from_runtime(error) {
+        Some(read_error) => graph_read_outcome(&read_error, domain, finished_at),
+        None => failed(domain, finished_at),
+    }
+}
+
+/// The typed refusal for a code-graph read the projection could not serve.
+///
+/// Every graph read reports one state per cause, so a graph that is still
+/// building answers `application.code-graph.unavailable` from every tool
+/// instead of an empty answer that reads as "nothing depends on this".
+pub(super) fn code_graph_read_failure(error: &CodeGraphReadError) -> PrimitiveFailure {
+    let (kind, code, message) = match error {
+        CodeGraphReadError::MissingRegistry => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.registry-missing",
+            "The code index has not registered this project's code graph yet.",
+        ),
+        CodeGraphReadError::Unavailable { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.unavailable",
+            "The project's verified code graph is not serving yet; retry after the code index \
+             seals a generation.",
+        ),
+        CodeGraphReadError::ResetRequired { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.reset-required",
+            "The project's code graph requires a reset before it can serve.",
+        ),
+        CodeGraphReadError::Stale { .. } => (
+            PrimitiveFailureKind::Stale,
+            "application.code-graph.stale",
+            "The code-graph generation this read was admitted against has been superseded.",
+        ),
+        CodeGraphReadError::Cancelled => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.cancelled",
+            "The code-graph read was cancelled.",
+        ),
+        CodeGraphReadError::TimedOut => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.timed-out",
+            "The code-graph read timed out.",
+        ),
+        CodeGraphReadError::BudgetExhausted { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.budget-exhausted",
+            "The code-graph read exceeded its budget.",
+        ),
+        CodeGraphReadError::Denied => (
+            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+            "application.code-graph.denied",
+            "The code-graph read is not authorized.",
+        ),
+        CodeGraphReadError::InvalidRequest { .. } => (
+            PrimitiveFailureKind::InvalidRequest,
+            "application.code-graph.invalid-request",
+            "The code-graph read request is invalid.",
+        ),
+        CodeGraphReadError::Corrupt { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.corrupt",
+            "The project's verified code-graph projection is corrupt.",
+        ),
+    };
+    PrimitiveFailure {
+        kind,
+        code: code.to_owned(),
+        message: message.to_owned(),
     }
 }
 
@@ -492,14 +577,12 @@ async fn open_code_graph(
 fn all_code_graph_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
-) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
+) -> tracedecay_domain::errors::Result<Vec<CodeGraphSymbolSummaryV1>> {
     const PAGE_SIZE: usize = 4_096;
-    GraphQueryManager::new(graph, cancellation)
-        .page_all_symbols(
-            PAGE_SIZE,
-            "verified symbol census exceeded its analytical budget",
-        )
-        .map_err(|_| ())
+    GraphQueryManager::new(graph, cancellation).page_all_symbols(
+        PAGE_SIZE,
+        "verified symbol census exceeded its analytical budget",
+    )
 }
 
 fn logical_file_symbols(
@@ -557,7 +640,7 @@ fn test_annotation_evidence(
     {
         return Ok(cached.clone());
     }
-    let symbols = all_code_graph_symbols(graph, Arc::clone(&cancellation))?;
+    let symbols = all_code_graph_symbols(graph, Arc::clone(&cancellation)).map_err(|_| ())?;
     let occurrences = symbols
         .iter()
         .map(|symbol| symbol.occurrence.clone())

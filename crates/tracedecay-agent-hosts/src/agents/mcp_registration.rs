@@ -41,7 +41,7 @@ pub fn install_mcp_server_entry(
         })?;
     }
 
-    update_json_config_transactionally(config_path, dialect, |mut settings| {
+    let outcome = update_json_config_transactionally(config_path, dialect, |mut settings| {
         if !settings.is_object() {
             return Err(TraceDecayError::Config {
                 message: format!("{} must contain a JSON object", config_path.display()),
@@ -55,14 +55,49 @@ pub fn install_mcp_server_entry(
                 message: format!("{}.{root_key} must be a JSON object", config_path.display()),
             });
         }
+        let outcome = McpRegistrationOutcome::between(
+            settings
+                .get(root_key)
+                .and_then(|servers| servers.get("tracedecay")),
+            &entry,
+        );
+        if outcome == McpRegistrationOutcome::Unchanged {
+            return Ok((outcome, JsonConfigMutation::Unchanged));
+        }
         settings[root_key]["tracedecay"] = entry;
-        Ok(((), JsonConfigMutation::Write(settings)))
+        Ok((outcome, JsonConfigMutation::Write(settings)))
     })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        config_path.display()
-    );
+    outcome.report(config_path);
     Ok(())
+}
+
+/// What registering tracedecay did to a host config, reported as it happened
+/// so a refresh that finds its entry in place never claims to have added it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum McpRegistrationOutcome {
+    Added,
+    Updated,
+    Unchanged,
+}
+
+impl McpRegistrationOutcome {
+    /// The outcome of replacing the registration `previous` with `next`.
+    pub(crate) fn between(previous: Option<&serde_json::Value>, next: &serde_json::Value) -> Self {
+        match previous {
+            None => Self::Added,
+            Some(previous) if previous == next => Self::Unchanged,
+            Some(_) => Self::Updated,
+        }
+    }
+
+    pub(crate) fn report(self, config_path: &Path) {
+        let path = config_path.display();
+        match self {
+            Self::Added => eprintln!("\x1b[32m✔\x1b[0m Added tracedecay MCP server to {path}"),
+            Self::Updated => eprintln!("\x1b[32m✔\x1b[0m Updated tracedecay MCP server in {path}"),
+            Self::Unchanged => eprintln!("  tracedecay MCP server unchanged in {path}"),
+        }
+    }
 }
 
 /// How far an uninstall prunes a config once the tracedecay entry is gone.

@@ -4,6 +4,7 @@ mod callers_coverage;
 mod relation_page_cost;
 mod typed_evidence_trailers;
 mod typescript_module_resolution;
+mod unsealed_graph;
 
 use crate::support::*;
 use serde_json::{Value, json};

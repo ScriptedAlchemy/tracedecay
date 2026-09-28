@@ -253,12 +253,30 @@ pub struct StatusBranchMismatchV1 {
     pub serving_branch: Option<String>,
 }
 
+/// The sealed generation's Git watermark, the commit its source snapshot was
+/// captured from, against the worktree's checked-out commit.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct StatusGitStalenessV1 {
-    pub status: String,
-    pub reason: String,
-    pub message: String,
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StatusGitStalenessV1 {
+    /// HEAD is the commit the sealed generation was built from.
+    Current { watermark: String },
+    /// HEAD has moved off the commit the sealed generation was built from.
+    Stale { watermark: String, head: String },
+    /// No watermark or no HEAD to compare it with.
+    Unavailable {
+        reason: StatusGitStalenessUnavailableV1,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusGitStalenessUnavailableV1 {
+    /// No complete generation has sealed for the worktree yet.
+    NoSealedGeneration,
+    /// The sealed generation captured no commit, as in an unborn repository.
+    SealedGenerationHasNoCommit,
+    /// The worktree's checked-out commit could not be read.
+    GitHeadUnreadable,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

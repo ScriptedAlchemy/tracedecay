@@ -31,6 +31,7 @@ use self::ignored_dependency::{
 };
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use crate::primitives::concrete::SymbolGraphCursorSnapshot;
+use crate::primitives::production::code_graph_read_failure;
 
 const MAX_COMPATIBILITY_RESULTS: usize = 500;
 const MAX_IMPLEMENTATION_RESULTS: usize = 200;
@@ -145,8 +146,9 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let Ok(graph) = open_graph(&self.code_graph, context).await else {
-                    return failed(context, "canonical symbol search failed");
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
                 if let Err(failure) = validate_claim_generation(&claim, &graph.reader) {
                     return failed_with(context, failure);
@@ -217,8 +219,9 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let Ok(graph) = open_graph(&self.code_graph, context).await else {
-                    return failed(context, "exact symbol lookup failed");
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
                 if let Err(failure) = validate_claim_generation(&claim, &graph.reader) {
                     return failed_with(context, failure);
@@ -288,8 +291,9 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let Ok(graph) = open_graph(&self.code_graph, context).await else {
-                    return failed(context, "signature symbol lookup failed");
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
                 let Ok(nodes) = graph.reader.find_symbols(
                     &|_, binding, metadata| {
@@ -355,8 +359,9 @@ where
                     Ok(claim) => claim,
                     Err(failure) => return failed_with(context, failure),
                 };
-                let Ok(graph) = open_graph(&self.code_graph, context).await else {
-                    return failed(context, "implementation lookup failed");
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
                 let records = match &request.selector {
                     ImplementationSelector::Trait { name } => {
@@ -441,8 +446,9 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let Ok(graph) = open_graph(&self.code_graph, context).await else {
-                    return failed(context, "type hierarchy graph admission failed");
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
                 let Ok(root_id) = SymbolOccurrenceId::new(request.node_id.clone()) else {
                     return failed(context, "type hierarchy node identity was invalid");
@@ -559,8 +565,9 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let Ok(graph) = open_graph(&self.code_graph, context).await else {
-                    return failed(context, "caller traversal failed");
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
                 let (records, unresolved) = match relation_traversal(
                     &graph.reader,
@@ -634,8 +641,9 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let Ok(graph) = open_graph(&self.code_graph, context).await else {
-                    return failed(context, "callee traversal failed");
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
                 let (mut records, _) = match relation_traversal(
                     &graph.reader,
@@ -732,8 +740,9 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let Ok(graph) = open_graph(&self.code_graph, context).await else {
-                    return failed(context, "impact traversal failed");
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
                 let Ok(seed) = SymbolOccurrenceId::new(request.node_id.clone()) else {
                     return failed(context, "impact seed identity was invalid");
@@ -790,7 +799,7 @@ struct OpenSymbolGraph {
 async fn open_graph(
     port: &Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     context: SymbolGraphPortContext<'_>,
-) -> Result<OpenSymbolGraph, ()> {
+) -> Result<OpenSymbolGraph, tracedecay_graph_query::CodeGraphReadError> {
     let cancellation = tracedecay_graph_query::request_graph_cancellation(context.request);
     let verified = port
         .open(tracedecay_graph_query::CodeGraphReadRequest::new(
@@ -798,8 +807,7 @@ async fn open_graph(
             context.observed_at,
             Arc::clone(&cancellation),
         ))
-        .await
-        .map_err(|_| ())?;
+        .await?;
     let freshness = verified.freshness();
     let cost = CodeGraphReadCostMeter::start();
     let reader = verified
@@ -807,8 +815,7 @@ async fn open_graph(
             context.request,
             context.observed_at,
             Arc::clone(&cancellation),
-        )
-        .map_err(|_| ())?
+        )?
         .metered(&cost);
     Ok(OpenSymbolGraph {
         reader,

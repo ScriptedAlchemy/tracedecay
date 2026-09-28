@@ -317,3 +317,29 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
         },
     }
 }
+
+/// The graph read error a query surfaced through
+/// [`map_code_graph_read_runtime_error`], or `None` when `error` did not come
+/// from a code-graph read. A project-route refusal without a code-graph reason
+/// is an unavailable graph read.
+pub fn code_graph_read_error_from_runtime(error: &TraceDecayError) -> Option<CodeGraphReadError> {
+    if let Some((_authority, reason)) = error.reset_required_context() {
+        return Some(CodeGraphReadError::ResetRequired {
+            detail: reason.to_owned(),
+        });
+    }
+    let (reason_code, _retryable, detail) = error.project_route_context()?;
+    let detail = detail.to_owned();
+    Some(match reason_code {
+        "code-graph-registry-missing" => CodeGraphReadError::MissingRegistry,
+        "code-graph-stale" => CodeGraphReadError::Stale { detail },
+        "code-graph-cancelled" => CodeGraphReadError::Cancelled,
+        "code-graph-timed-out" => CodeGraphReadError::TimedOut,
+        "code-graph-budget-exhausted" => CodeGraphReadError::BudgetExhausted { detail },
+        "code-graph-denied" => CodeGraphReadError::Denied,
+        "code-graph-invalid-request" => CodeGraphReadError::InvalidRequest { detail },
+        "code-graph-corrupt" => CodeGraphReadError::Corrupt { detail },
+        "code-graph-reset-required" => CodeGraphReadError::ResetRequired { detail },
+        _ => CodeGraphReadError::Unavailable { detail },
+    })
+}

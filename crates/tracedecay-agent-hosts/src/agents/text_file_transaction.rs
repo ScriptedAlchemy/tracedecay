@@ -528,6 +528,13 @@ fn apply_file_mutation(
 ) -> Result<()> {
     match mutation {
         TextFileMutation::Unchanged => Ok(()),
+        // Republishing identical bytes still replaces the file, churning its
+        // inode and mtime under the host that owns it.
+        TextFileMutation::Write(replacement)
+            if snapshot.contents() == Some(replacement.as_bytes()) =>
+        {
+            Ok(())
+        }
         TextFileMutation::Write(replacement) => {
             safe_write_bytes_file_from_snapshot(path, replacement.as_bytes(), None, snapshot)
         }

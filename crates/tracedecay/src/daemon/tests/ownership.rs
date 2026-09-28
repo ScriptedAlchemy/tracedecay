@@ -216,10 +216,10 @@ async fn cold_project_shutdown_joins_every_production_graph_holder() {
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "cold-production-owner-shutdown");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    let (cold_commit_entered, release_cold_commit) = engine
-        .invocation
-        .code_index_schedulers
-        .pause_next_cold_mount_before_final_commit(canonical_project)
+    let (cold_commit_entered, release_cold_commit) =
+        tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1::pause_next_cold_mount_before_final_commit(
+            canonical_project,
+        )
         .await;
     let lifecycle = engine.lifecycle.clone();
     let server = engine

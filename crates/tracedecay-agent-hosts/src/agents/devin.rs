@@ -15,6 +15,7 @@ use serde_json::json;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::host_bundle::HostBundleRegistrationStateV1;
+use super::mcp_registration::McpRegistrationOutcome;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, TextFileMutation, load_json_file, report_mcp_registration,
@@ -259,7 +260,7 @@ fn install_mcp_if_selected(
                 ),
             })?;
         }
-        update_text_file_transactionally(config_path, |existing| {
+        let outcome = update_text_file_transactionally(config_path, |existing| {
             let mut settings = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
             if !settings.is_object() {
                 return Err(TraceDecayError::Config {
@@ -274,14 +275,20 @@ fn install_mcp_if_selected(
                     message: format!("{}.mcpServers must be a JSON object", config_path.display()),
                 });
             }
-            settings["mcpServers"]["tracedecay"] = json!({
+            let entry = json!({
                 "command": ctx.tracedecay_bin.clone(),
                 "args": ["serve"],
                 "env": {},
                 "transport": "stdio",
             });
+            let outcome =
+                McpRegistrationOutcome::between(settings.pointer("/mcpServers/tracedecay"), &entry);
+            if outcome == McpRegistrationOutcome::Unchanged {
+                return Ok((outcome, TextFileMutation::Unchanged));
+            }
+            settings["mcpServers"]["tracedecay"] = entry;
             Ok((
-                (),
+                outcome,
                 TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
                     config_path,
                     existing,
@@ -289,10 +296,7 @@ fn install_mcp_if_selected(
                 )?),
             ))
         })?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-            config_path.display()
-        );
+        outcome.report(config_path);
     }
     Ok(())
 }

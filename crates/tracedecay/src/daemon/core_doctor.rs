@@ -562,7 +562,7 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     if request.doctor_report_requested() && value.get("doctor_report").is_none() {
         value["doctor_report"] = json!({
             "kind": "unknown",
-            "reason": "doctor_report_owner_warming",
+            "reason": super::DOCTOR_REPORT_OWNER_WARMING_REASON,
             "table_growth_evidence": [],
         });
     }

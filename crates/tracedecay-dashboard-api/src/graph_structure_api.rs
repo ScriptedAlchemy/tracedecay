@@ -1188,39 +1188,7 @@ fn graph_runtime_error_response<T: Serialize>(
     state: &DashboardState,
     error: tracedecay_domain::errors::TraceDecayError,
 ) -> Response {
-    if let Some((_authority, reason)) = error.reset_required_context() {
-        return graph_error_response::<T>(
-            state,
-            crate::graph::CodeGraphReadError::ResetRequired {
-                detail: reason.to_owned(),
-            },
-        );
-    }
-    if let Some((reason_code, _retryable, detail)) = error.project_route_context() {
-        let graph_error = match reason_code {
-            "code-graph-registry-missing" => crate::graph::CodeGraphReadError::MissingRegistry,
-            "code-graph-stale" => crate::graph::CodeGraphReadError::Stale {
-                detail: detail.to_owned(),
-            },
-            "code-graph-cancelled" => crate::graph::CodeGraphReadError::Cancelled,
-            "code-graph-timed-out" => crate::graph::CodeGraphReadError::TimedOut,
-            "code-graph-budget-exhausted" => crate::graph::CodeGraphReadError::BudgetExhausted {
-                detail: detail.to_owned(),
-            },
-            "code-graph-denied" => crate::graph::CodeGraphReadError::Denied,
-            "code-graph-invalid-request" => crate::graph::CodeGraphReadError::InvalidRequest {
-                detail: detail.to_owned(),
-            },
-            "code-graph-corrupt" => crate::graph::CodeGraphReadError::Corrupt {
-                detail: detail.to_owned(),
-            },
-            "code-graph-reset-required" => crate::graph::CodeGraphReadError::ResetRequired {
-                detail: detail.to_owned(),
-            },
-            _ => crate::graph::CodeGraphReadError::Unavailable {
-                detail: detail.to_owned(),
-            },
-        };
+    if let Some(graph_error) = crate::graph::code_graph_read_error_from_runtime(&error) {
         return graph_error_response::<T>(state, graph_error);
     }
     failed_response::<T>(state, "strata_read_failed", error.to_string(), false)

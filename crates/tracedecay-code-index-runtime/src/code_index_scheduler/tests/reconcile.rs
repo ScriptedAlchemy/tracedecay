@@ -2034,9 +2034,8 @@ async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(2);
     let root = canonical_existing_identity(fixture.path()).expect("canonical root");
-    let (cold_commit_entered, release_cold_commit) = registry
-        .pause_next_cold_mount_before_final_commit(root.clone())
-        .await;
+    let (cold_commit_entered, release_cold_commit) =
+        CodeIndexSchedulerRegistryV1::pause_next_cold_mount_before_final_commit(root.clone()).await;
     let cold_registry = registry.clone();
     let cold_root = fixture.path().to_path_buf();
     let cold_store = store.path().to_path_buf();

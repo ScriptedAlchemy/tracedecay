@@ -28,8 +28,8 @@ pub use projection::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFreshnessV1,
     CodeGraphReadFuture, CodeGraphReadRequest, VerifiedCodeGraphRead,
-    application_graph_cancellation, map_code_graph_read_runtime_error, map_projection_error,
-    request_graph_cancellation,
+    application_graph_cancellation, code_graph_read_error_from_runtime,
+    map_code_graph_read_runtime_error, map_projection_error, request_graph_cancellation,
 };
 pub use queries::{FileDependentsV1, GraphQueryManager, VerifiedHealthFileAggregateV1};
 pub use verified_query::{

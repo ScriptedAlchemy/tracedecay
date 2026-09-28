@@ -11,7 +11,9 @@ use tracedecay_contracts::project_open::{
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
-use tracedecay_contracts::{ApplicationOutcome, ResolvedSetting};
+use tracedecay_contracts::{
+    ApplicationOutcome, ApplicationProblemRecord, RUNTIME_MOUNTING_REASON_CODE, ResolvedSetting,
+};
 use tracedecay_domain::configuration::{
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
 };
@@ -148,12 +150,18 @@ pub async fn run_doctor(
             render_project_open_status(&mut dc, status)?;
             render_schema_convergences(&mut dc, status)?;
             match canonical_daemon_doctor_report(status)? {
-                Some(report) => {
+                CanonicalDoctorReport::Observed(report) => {
                     let storage_health = database_health_from_canonical_report(&report);
                     render_canonical_doctor_report(&mut dc, &report);
                     storage_health
                 }
-                None => {
+                CanonicalDoctorReport::Mounting => {
+                    dc.warn(&format!(
+                        "Canonical Doctor report is pending: {PROJECT_RUNTIME_MOUNTING}"
+                    ));
+                    DatabaseHealth::unknown(crate::daemon::DOCTOR_REPORT_OWNER_WARMING_REASON)
+                }
+                CanonicalDoctorReport::Unavailable => {
                     dc.warn("Canonical Doctor report is unavailable; health remains unknown");
                     DatabaseHealth::unknown("canonical_doctor_report_unavailable")
                 }
@@ -365,18 +373,40 @@ fn render_doctor_finding(
     }
 }
 
+/// The wait remedy for a check whose answer is owned by a project runtime that
+/// has not finished mounting since the daemon started.
+const PROJECT_RUNTIME_MOUNTING: &str = "the project runtime is still mounting \
+     (application.runtime.mounting); wait for it to finish, then re-run `tracedecay doctor`";
+
+/// The daemon's canonical Doctor report for the current project.
+#[derive(Debug, PartialEq)]
+enum CanonicalDoctorReport {
+    Observed(Box<tracedecay_contracts::doctor::DoctorReportV1>),
+    /// The project runtime that owns the report is still mounting.
+    Mounting,
+    Unavailable,
+}
+
 fn canonical_daemon_doctor_report(
     status: &serde_json::Value,
-) -> tracedecay_domain::errors::Result<Option<tracedecay_contracts::doctor::DoctorReportV1>> {
+) -> tracedecay_domain::errors::Result<CanonicalDoctorReport> {
     let Some(doctor_report) = status.get("doctor_report") else {
-        return Ok(None);
+        return Ok(CanonicalDoctorReport::Unavailable);
     };
     match doctor_report
         .get("kind")
         .and_then(serde_json::Value::as_str)
     {
         Some("observed") => {}
-        Some("unknown" | "unsupported") => return Ok(None),
+        Some("unknown")
+            if doctor_report
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                == Some(crate::daemon::DOCTOR_REPORT_OWNER_WARMING_REASON) =>
+        {
+            return Ok(CanonicalDoctorReport::Mounting);
+        }
+        Some("unknown" | "unsupported") => return Ok(CanonicalDoctorReport::Unavailable),
         Some(kind) => {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("daemon canonical Doctor report has unknown typed state: {kind}"),
@@ -393,11 +423,11 @@ fn canonical_daemon_doctor_report(
             message: "observed daemon Doctor response omitted its report".to_string(),
         }
     })?;
-    serde_json::from_value(report).map(Some).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
+    serde_json::from_value(report)
+        .map(|report| CanonicalDoctorReport::Observed(Box::new(report)))
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("daemon canonical Doctor report violated its wire contract: {error}"),
-        }
-    })
+        })
 }
 
 /// Derive the exit-gating storage verdict from the canonical kernel findings.
@@ -1023,7 +1053,7 @@ fn check_automation_effect_resets(
 async fn configured_upload_enabled(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: &Path,
-) -> tracedecay_domain::errors::Result<bool> {
+) -> tracedecay_domain::errors::Result<UploadSetting> {
     let operation = ApplicationSurfaceOperation::ConfigurationGet;
     let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -1061,12 +1091,10 @@ async fn configured_upload_enabled(
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: error.to_string(),
         })?;
-    let envelope =
-        result.result.map_err(
-            |problem| tracedecay_domain::errors::TraceDecayError::Config {
-                message: problem.problem.summary(),
-            },
-        )?;
+    let envelope = match result.result {
+        Ok(envelope) => envelope,
+        Err(problem) => return upload_setting_refusal(&problem.problem),
+    };
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "configuration get returned a non-evidence outcome".to_owned(),
@@ -1086,23 +1114,50 @@ async fn configured_upload_enabled(
         });
     }
     match setting.effective_value {
-        ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
+        ConfigurationValueV1::Boolean(enabled) => Ok(UploadSetting::Resolved(enabled)),
         _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "worldwide counter upload setting is not boolean".to_owned(),
         }),
     }
 }
 
+/// A configuration refusal is the mounting state when the project runtime
+/// serving it has not finished mounting, and a failure otherwise.
+fn upload_setting_refusal(
+    problem: &ApplicationProblemRecord,
+) -> tracedecay_domain::errors::Result<UploadSetting> {
+    if problem.code == RUNTIME_MOUNTING_REASON_CODE {
+        return Ok(UploadSetting::Mounting);
+    }
+    Err(tracedecay_domain::errors::TraceDecayError::Config {
+        message: problem.summary(),
+    })
+}
+
+/// The worldwide-counter upload setting as the canonical configuration owner
+/// answered it.
+#[derive(Debug, PartialEq, Eq)]
+enum UploadSetting {
+    Resolved(bool),
+    /// The project runtime that serves canonical configuration is mounting.
+    Mounting,
+}
+
 /// Check canonical user configuration and pending upload state.
 fn check_user_config(
     dc: &mut DoctorCounters,
     profile_root: &Path,
-    upload_enabled: Result<&bool, &tracedecay_domain::errors::TraceDecayError>,
+    upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
 ) {
     eprintln!("\n\x1b[1mUser config\x1b[0m");
     match upload_enabled {
-        Ok(true) => dc.pass("Worldwide counter upload enabled"),
-        Ok(false) => dc.info("Worldwide counter upload disabled (default)"),
+        Ok(UploadSetting::Resolved(true)) => dc.pass("Worldwide counter upload enabled"),
+        Ok(UploadSetting::Resolved(false)) => {
+            dc.info("Worldwide counter upload disabled (default)");
+        }
+        Ok(UploadSetting::Mounting) => dc.warn(&format!(
+            "Worldwide counter upload setting is pending: {PROJECT_RUNTIME_MOUNTING}"
+        )),
         Err(error) => dc.warn(&format!(
             "Worldwide counter upload setting unavailable from canonical configuration: {error}"
         )),
@@ -1193,12 +1248,12 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
 #[hotpath::measure(label = "doctor.check.network")]
 fn check_network(
     dc: &mut DoctorCounters,
-    upload_enabled: Result<&bool, &tracedecay_domain::errors::TraceDecayError>,
+    upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
     network: AdmittedDoctorNetworkProbes,
 ) {
     eprintln!("\n\x1b[1mNetwork\x1b[0m");
     match upload_enabled {
-        Ok(true) => {
+        Ok(UploadSetting::Resolved(true)) => {
             if let Some(total) = (network.fetch_worldwide_total)() {
                 dc.pass(&format!(
                     "Worldwide counter reachable (total: {})",
@@ -1208,7 +1263,12 @@ fn check_network(
                 dc.warn("Worldwide counter unreachable (offline or timeout)");
             }
         }
-        Ok(false) => dc.info("Worldwide counter skipped (upload disabled)"),
+        Ok(UploadSetting::Resolved(false)) => {
+            dc.info("Worldwide counter skipped (upload disabled)");
+        }
+        Ok(UploadSetting::Mounting) => dc.warn(&format!(
+            "Worldwide counter check is pending: {PROJECT_RUNTIME_MOUNTING}"
+        )),
         Err(error) => dc.warn(&format!(
             "Worldwide counter check skipped because canonical configuration is unavailable: {error}"
         )),

@@ -8,7 +8,10 @@ use tracedecay_domain::{EphemeralSanitizedQueryViewV1, UtcMicros};
 use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
-use crate::result::{OmissionReason, OpaqueCursor, OperationBudgetUsage};
+use crate::result::{
+    ApplicationProblem, OmissionReason, OpaqueCursor, OperationBudgetUsage, RetryDirective,
+    SafeDiagnostic,
+};
 
 use super::{CodeQueryRow, RetrievalRequestMeta};
 
@@ -154,6 +157,27 @@ impl PrimitiveFailure {
             code,
             message,
         })
+    }
+
+    /// The application problem a caller receives for this failure.
+    pub fn into_problem(self) -> ApplicationProblem {
+        let diagnostic = SafeDiagnostic {
+            code: self.code,
+            message: self.message,
+        };
+        match self.kind {
+            PrimitiveFailureKind::InvalidRequest => {
+                ApplicationProblem::invalid_request_without_action(
+                    diagnostic.code,
+                    diagnostic.message,
+                )
+            }
+            PrimitiveFailureKind::NotFoundOrNotAuthorized => {
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+            }
+            PrimitiveFailureKind::Stale => ApplicationProblem::stale(diagnostic),
+            PrimitiveFailureKind::Unavailable => ApplicationProblem::unavailable(diagnostic),
+        }
     }
 }
 
