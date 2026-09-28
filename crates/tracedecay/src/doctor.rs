@@ -505,12 +505,12 @@ fn render_doctor_finding(
     match finding.state() {
         State::HealthyCompleteCoverage => dc.pass(&message),
         State::Degraded => dc.fail(&message),
-        State::Unsupported
-        | State::Absent
-        | State::Stale
-        | State::Partial
-        | State::Unknown
-        | State::Denied => dc.warn(&message),
+        // Nothing there to grade (an optional capability, host, or analyzer
+        // that is not installed or configured): reported, counted nowhere.
+        State::Absent => dc.info(&message),
+        State::Unsupported | State::Stale | State::Partial | State::Unknown | State::Denied => {
+            dc.warn(&message)
+        }
     }
 }
 
