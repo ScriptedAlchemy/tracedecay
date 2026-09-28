@@ -2428,9 +2428,7 @@ pub(crate) fn typescript_member_call_path(reference_name: &str) -> Option<(&str,
 /// Whether a path is a TypeScript-family source the TypeScript extractor
 /// produced import bindings for.
 pub(crate) fn typescript_family_path(path: &str) -> bool {
-    path.rsplit('.').next().is_some_and(|extension| {
-        matches!(extension, "ts" | "tsx" | "js" | "jsx" | "astro" | "svelte")
-    })
+    path_has_extension(path, &["ts", "tsx", "js", "jsx", "astro", "svelte"])
 }
 
 /// The structural compatibility matrix between a reference's edge kind and a
@@ -2453,9 +2451,13 @@ fn reference_target_kind_is_compatible(reference_kind: EdgeKind, target_kind: &s
 /// Whether a path is a Python, Go, Java, or Ruby source, whose calls bind
 /// through its imports, package, or loaded files at sealing.
 pub(crate) fn module_import_language_path(path: &str) -> bool {
+    path_has_extension(path, &["py", "go", "java", "rb"])
+}
+
+fn path_has_extension(path: &str, extensions: &[&str]) -> bool {
     path.rsplit('.')
         .next()
-        .is_some_and(|extension| matches!(extension, "py" | "go" | "java" | "rb"))
+        .is_some_and(|extension| extensions.contains(&extension))
 }
 
 /// Languages whose files import through TypeScript/JavaScript module syntax.

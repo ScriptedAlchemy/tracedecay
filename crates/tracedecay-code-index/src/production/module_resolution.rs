@@ -44,6 +44,9 @@ pub(super) fn is_module_import_language(language: &str) -> bool {
 
 type SymbolRef<'a> = (usize, &'a LineageSymbolRecordV1);
 
+/// A module path under a source root to its `(root, target)` candidates.
+type PythonModulesV1 = HashMap<String, Vec<(String, PythonModuleV1)>>;
+
 /// What one step of module resolution reached.
 #[derive(Clone, Debug)]
 enum TargetV1<'a> {
@@ -71,8 +74,7 @@ pub(super) struct ModuleImportIndexV1<'a> {
     by_qualified: HashMap<&'a str, Vec<SymbolRef<'a>>>,
     /// Directories holding an `__init__.py`: regular Python packages.
     python_packages: HashSet<&'a str>,
-    /// A module path relative to a source root to its candidate targets.
-    python_modules: HashMap<String, Vec<(String, PythonModuleV1)>>,
+    python_modules: PythonModulesV1,
     /// Directories of Python sources that are not regular packages.
     python_namespace_dirs: HashSet<String>,
     /// `go.mod` module path and root directory, longest path first.
@@ -123,90 +125,8 @@ impl<'a> ModuleImportIndexV1<'a> {
         };
         for (file_index, file) in files.iter().enumerate() {
             let file = file.as_ref();
-            let language = file.extraction.language.as_str();
-            if !is_module_import_language(language) {
-                continue;
-            }
-            let path = file.authority.logical_path.as_str();
-            let (dir, name) = split_parent(path);
-            if language == "go" && name == "go.mod" {
-                if let Some(module) = file
-                    .artifacts
-                    .symbols
-                    .iter()
-                    .find(|symbol| symbol.kind == NodeKind::Module.as_str())
-                {
-                    index.go_modules.push((module.simple_name.as_str(), dir));
-                }
-                continue;
-            }
-            index.sources.insert(path, file_index);
-            index
-                .dirs
-                .entry((language, dir))
-                .or_default()
-                .push(file_index);
-            for symbol in &file.artifacts.symbols {
-                index
-                    .by_qualified
-                    .entry(symbol.qualified_name.as_str())
-                    .or_default()
-                    .push((file_index, symbol));
-                match language {
-                    "go" if symbol.kind == NodeKind::GoPackage.as_str() => {
-                        index
-                            .go_packages
-                            .insert(file_index, symbol.simple_name.as_str());
-                    }
-                    "java" if symbol.kind == NodeKind::Package.as_str() => {
-                        index
-                            .java_packages
-                            .entry(symbol.simple_name.as_str())
-                            .or_default()
-                            .push(file_index);
-                        index
-                            .java_file_packages
-                            .insert(file_index, symbol.simple_name.as_str());
-                    }
-                    "ruby"
-                        if symbol.kind == NodeKind::Module.as_str()
-                            || symbol.kind == NodeKind::Class.as_str() =>
-                    {
-                        index.ruby_constants.insert(symbol.simple_name.as_str());
-                    }
-                    _ => {}
-                }
-            }
-            match language {
-                "python" if name == "__init__.py" => {
-                    index.python_packages.insert(dir);
-                }
-                "go" => {
-                    let mut suffix = dir;
-                    loop {
-                        index.go_dir_suffixes.insert(suffix);
-                        match suffix.split_once('/') {
-                            Some((_, rest)) => suffix = rest,
-                            None => break,
-                        }
-                    }
-                }
-                "ruby" => {
-                    let under_lib = path
-                        .strip_prefix("lib/")
-                        .or_else(|| path.rfind("/lib/").map(|at| &path[at + "/lib/".len()..]));
-                    if let Some(under_lib) = under_lib {
-                        index
-                            .ruby_load_path
-                            .entry(under_lib)
-                            .or_default()
-                            .push(file_index);
-                    }
-                }
-                "java" if !index.java_file_packages.contains_key(&file_index) => {
-                    index.java_packages.entry("").or_default().push(file_index);
-                }
-                _ => {}
+            if is_module_import_language(file.extraction.language.as_str()) {
+                index.register(file_index, file);
             }
         }
         index
@@ -216,18 +136,99 @@ impl<'a> ModuleImportIndexV1<'a> {
         index
     }
 
+    /// Index one Python, Go, Java, or Ruby file: its path, directory, and
+    /// symbols, and the package, module, and load-path facts its language
+    /// resolves through.
+    fn register(&mut self, file_index: usize, file: &'a FileGenerationArtifactsV1) {
+        let language = file.extraction.language.as_str();
+        let path = file.authority.logical_path.as_str();
+        let (dir, name) = split_parent(path);
+        if language == "go" && name == "go.mod" {
+            if let Some(module) = file
+                .artifacts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.kind == NodeKind::Module.as_str())
+            {
+                self.go_modules.push((module.simple_name.as_str(), dir));
+            }
+            return;
+        }
+        self.sources.insert(path, file_index);
+        self.dirs
+            .entry((language, dir))
+            .or_default()
+            .push(file_index);
+        for symbol in &file.artifacts.symbols {
+            self.by_qualified
+                .entry(symbol.qualified_name.as_str())
+                .or_default()
+                .push((file_index, symbol));
+            self.register_declaration(language, file_index, symbol);
+        }
+        match language {
+            "python" if name == "__init__.py" => {
+                self.python_packages.insert(dir);
+            }
+            "go" => {
+                let mut suffix = dir;
+                self.go_dir_suffixes.insert(suffix);
+                while let Some((_, rest)) = suffix.split_once('/') {
+                    suffix = rest;
+                    self.go_dir_suffixes.insert(suffix);
+                }
+            }
+            "ruby" => {
+                let under_lib = path
+                    .strip_prefix("lib/")
+                    .or_else(|| path.rfind("/lib/").map(|at| &path[at + "/lib/".len()..]));
+                if let Some(under_lib) = under_lib {
+                    self.ruby_load_path
+                        .entry(under_lib)
+                        .or_default()
+                        .push(file_index);
+                }
+            }
+            "java" if !self.java_file_packages.contains_key(&file_index) => {
+                self.java_packages.entry("").or_default().push(file_index);
+            }
+            _ => {}
+        }
+    }
+
+    /// Record a Go package clause, a Java package, or a Ruby constant.
+    fn register_declaration(
+        &mut self,
+        language: &str,
+        file_index: usize,
+        symbol: &'a LineageSymbolRecordV1,
+    ) {
+        let name = symbol.simple_name.as_str();
+        match language {
+            "go" if symbol.kind == NodeKind::GoPackage.as_str() => {
+                self.go_packages.insert(file_index, name);
+            }
+            "java" if symbol.kind == NodeKind::Package.as_str() => {
+                self.java_packages.entry(name).or_default().push(file_index);
+                self.java_file_packages.insert(file_index, name);
+            }
+            "ruby"
+                if symbol.kind == NodeKind::Module.as_str()
+                    || symbol.kind == NodeKind::Class.as_str() =>
+            {
+                self.ruby_constants.insert(name);
+            }
+            _ => {}
+        }
+    }
+
     /// Every module path under a source root a Python source can be
     /// imported as, with its root: `a/b.py` and `a/b/__init__.py` as `a/b`,
     /// and each directory of sources that is not a regular package as a
     /// namespace package. A root is any ancestor that is not itself a
     /// regular package.
-    fn python_module_candidates(
-        &self,
-    ) -> (
-        HashMap<String, Vec<(String, PythonModuleV1)>>,
-        HashSet<String>,
-    ) {
-        let mut modules: HashMap<String, Vec<(String, PythonModuleV1)>> = HashMap::new();
+    fn python_module_candidates(&self) -> (PythonModulesV1, HashSet<String>) {
+        let mut modules = PythonModulesV1::new();
         let mut namespace_dirs = HashSet::new();
         for (path, file_index) in &self.sources {
             let Some(stem) = path.strip_suffix(".py") else {
@@ -291,16 +292,28 @@ impl<'a> ModuleImportIndexV1<'a> {
         })
     }
 
+    /// Every retained Python, Go, Java, and Ruby call that is a caller gap.
+    pub(super) fn call_gaps(&self) -> Vec<CodeIndexUnresolvedReferenceV1> {
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| is_module_import_language(file.extraction.language.as_str()))
+            .flat_map(|(index, file)| {
+                file.artifacts
+                    .unresolved_references
+                    .iter()
+                    .filter(move |reference| self.is_call_gap(index, reference))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Whether the retained call `reference` in file `index` is a caller gap:
     /// it names project code the seal could not bind, or it is a qualified
     /// call on a runtime value (dynamic dispatch). A bare call no import
     /// names is a builtin or a local in Python and Go, and a call on `self`
     /// that may be inherited in Java and Ruby.
-    pub(super) fn is_call_gap(
-        &self,
-        index: usize,
-        reference: &CodeIndexUnresolvedReferenceV1,
-    ) -> bool {
+    fn is_call_gap(&self, index: usize, reference: &CodeIndexUnresolvedReferenceV1) -> bool {
         if reference.kind != RelationEdgeKindV1::Calls {
             return false;
         }
@@ -731,7 +744,11 @@ impl<'a> ModuleImportIndexV1<'a> {
             return Some(format!("{}.{simple}", row.module_specifier));
         }
         let package = self.java_file_packages.get(&index).copied().unwrap_or("");
-        let own = java_qualified(package, simple);
+        let own = if package.is_empty() {
+            simple.to_owned()
+        } else {
+            format!("{package}.{simple}")
+        };
         if self.java_class(&own).is_some() {
             return Some(own);
         }
@@ -863,7 +880,7 @@ impl<'a> ModuleImportIndexV1<'a> {
 /// Insert `module` (a `/`-separated project path) under every root it can
 /// be imported from: each ancestor directory that is not a regular package.
 fn insert_python_roots(
-    modules: &mut HashMap<String, Vec<(String, PythonModuleV1)>>,
+    modules: &mut PythonModulesV1,
     packages: &HashSet<&str>,
     module: &str,
     target: impl Fn() -> PythonModuleV1,
@@ -915,12 +932,4 @@ fn identifier_path<'n>(name: &'n str, separators: &[&str]) -> Option<Vec<&'n str
                 && body.chars().all(|c| c.is_alphanumeric() || c == '_')
         })
         .then_some(segments)
-}
-
-fn java_qualified(package: &str, simple: &str) -> String {
-    if package.is_empty() {
-        simple.to_owned()
-    } else {
-        format!("{package}.{simple}")
-    }
 }

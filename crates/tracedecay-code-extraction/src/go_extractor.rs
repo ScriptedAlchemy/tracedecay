@@ -62,13 +62,8 @@ impl GoExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // ponytail: `.mod` dispatches by extension, so a non-Go `.mod` file
-        // indexes here as a bare Go file; a file-name keyed dispatch would
-        // route only `go.mod`.
         let metrics = if file_path.ends_with(".mod") {
-            if file_path.rsplit('/').next() == Some("go.mod") {
-                Self::visit_module_manifest(&mut state, source);
-            }
+            Self::visit_module_manifest(&mut state, source);
             crate::parsed_extraction::ParsedTraversalMetrics::default()
         } else {
             crate::parsed_extraction::visit_root_children(tree, scope, |child| {
@@ -82,12 +77,7 @@ impl GoExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
-            ExtractionArtifactV1 {
-                result: Self::build_result(state, start),
-                imports,
-                clone_bodies: Vec::new(),
-                schema_evidence: None,
-            },
+            ExtractionArtifactV1::with_imports(Self::build_result(state, start), imports),
             scope,
             metrics,
         )
@@ -97,6 +87,12 @@ impl GoExtractor {
     /// named by the module path, the prefix every import of the module's
     /// packages starts with.
     fn visit_module_manifest(state: &mut ExtractionState, source: &str) {
+        // ponytail: `.mod` dispatches by extension, so a non-Go `.mod` file
+        // indexes here as a bare Go file; a file-name keyed dispatch would
+        // route only `go.mod`.
+        if state.file_path.rsplit('/').next() != Some("go.mod") {
+            return;
+        }
         let Some((line, text, path)) = source.lines().enumerate().find_map(|(line, text)| {
             let directive = text.split("//").next().unwrap_or(text).trim();
             let path = directive.strip_prefix("module")?;

@@ -315,6 +315,17 @@ impl ExtractionArtifactV1 {
         }
     }
 
+    /// A graph extraction with the import rows the same traversal attested.
+    pub(crate) fn with_imports(
+        result: ExtractionResult,
+        imports: Vec<ExtractedImportEvidenceV1>,
+    ) -> Self {
+        Self {
+            imports,
+            ..Self::from_result(result)
+        }
+    }
+
     pub(crate) fn canonicalize_order(&mut self) {
         self.result.canonicalize_order();
         self.imports.sort();

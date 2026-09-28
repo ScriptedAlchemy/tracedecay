@@ -472,28 +472,14 @@ where
 /// workspace-package specifier that reaches no indexed file, or a module that
 /// does not define the imported name (a default import, an `export { x }` of
 /// a name the module neither declares nor imports from project code).
-/// Python, Go, Java, and Ruby: see [`ModuleImportIndexV1::is_call_gap`].
+/// Python, Go, Java, and Ruby: see [`ModuleImportIndexV1::call_gaps`].
 /// These are the sites `callers` and `file_dependents` must disclose as gaps;
 /// an import of an external dependency is not one of them.
 pub(crate) fn unresolved_import_calls<T>(files: &[T]) -> Vec<CodeIndexUnresolvedReferenceV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
-    let modules = ModuleImportIndexV1::new(files);
-    let mut unresolved = Vec::new();
-    for (index, file) in files.iter().enumerate() {
-        let file = file.as_ref();
-        if !is_module_import_language(file.extraction.language.as_str()) {
-            continue;
-        }
-        unresolved.extend(
-            file.artifacts
-                .unresolved_references
-                .iter()
-                .filter(|reference| modules.is_call_gap(index, reference))
-                .cloned(),
-        );
-    }
+    let mut unresolved = ModuleImportIndexV1::new(files).call_gaps();
     let typescript_modules = TypeScriptModuleIndexV1::new(files);
     if !typescript_modules.has_sources() {
         return unresolved;

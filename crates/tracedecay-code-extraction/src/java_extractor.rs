@@ -171,12 +171,7 @@ impl JavaExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
-            ExtractionArtifactV1 {
-                result: Self::build_result(state, start),
-                imports,
-                clone_bodies: Vec::new(),
-                schema_evidence: None,
-            },
+            ExtractionArtifactV1::with_imports(Self::build_result(state, start), imports),
             scope,
             metrics,
         )
