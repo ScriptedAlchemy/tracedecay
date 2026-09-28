@@ -53,6 +53,13 @@ pub(super) fn stale_cursor_problem() -> ApplicationProblem {
     })
 }
 
+pub(super) fn cursor_binding_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "application.work-attempt.cursor-binding-unavailable".to_owned(),
+        message: "The Work attempt list cursor could not be bound to its request.".to_owned(),
+    })
+}
+
 pub(super) fn list_page_contract_problem() -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "application.work-attempt.list-page-inconsistent".to_owned(),

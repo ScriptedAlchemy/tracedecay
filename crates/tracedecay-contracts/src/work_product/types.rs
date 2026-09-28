@@ -2,8 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ActorId, BrainId, ManifestDigest, UserProfileId, UtcMicros, WorkGraphVersionV1,
-    WorkProductEventSequenceV1, WorkProductSourceWatermarkV1,
+    ActorId, BrainId, CursorBindingMismatchV1, ManifestDigest, UserProfileId, UtcMicros,
+    WorkGraphVersionV1, WorkProductEventSequenceV1, WorkProductSourceWatermarkV1,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -55,6 +55,9 @@ pub enum WorkProductApplicationErrorV1 {
     EvidenceContinuationStale,
     #[error("Work proposal authority is unavailable")]
     ProposalAuthorityUnavailable,
+    /// A continuation minted for another operation or another request.
+    #[error("Work continuation was refused: {0}")]
+    CursorRefused(CursorBindingMismatchV1),
 }
 
 pub use tracedecay_domain::WorkProductAuthorizedRelationScopeV1;

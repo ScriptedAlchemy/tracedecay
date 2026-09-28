@@ -50,12 +50,11 @@
 //! atomic writer, so it is reported unavailable rather than absent.
 
 use tracedecay_contracts::{
-    MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, OpaqueCursor, VerifiedWorkEvidenceRootV1,
-    VerifiedWorkGraphVersionV1, WorkAttemptReceiptReadErrorV1, WorkAttemptReceiptReadPortV1,
-    WorkAttemptReceiptV1, WorkAttemptStoragePort, WorkEvidenceRootReadErrorV1,
-    WorkEvidenceRootReadPortV1, WorkGraphReadModeV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1,
-    WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphTimelineV1, WorkGraphVersionEntryV1,
-    WorkProductPortContextV1,
+    VerifiedWorkEvidenceRootV1, VerifiedWorkGraphVersionV1, WorkAttemptReceiptReadErrorV1,
+    WorkAttemptReceiptReadPortV1, WorkAttemptReceiptV1, WorkAttemptStoragePort,
+    WorkEvidenceRootReadErrorV1, WorkEvidenceRootReadPortV1, WorkGraphReadModeV1,
+    WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkProductPortContextV1,
 };
 use tracedecay_domain::{
     ProjectionGenerationId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAuthority,
@@ -197,7 +196,7 @@ fn read_graph(
             Ok(WorkGraphReadV1::Evolution {
                 authorized_scope: scope.clone(),
                 selection_coverage,
-                timeline: page(selected, request.continuation.as_ref())?,
+                timeline: WorkGraphTimelineV1::page(request, selected)?,
             })
         }
         WorkGraphReadModeV1::Forensic {
@@ -214,7 +213,7 @@ fn read_graph(
             Ok(WorkGraphReadV1::Forensic {
                 authorized_scope: scope.clone(),
                 selection_coverage,
-                timeline: page(selected, request.continuation.as_ref())?,
+                timeline: WorkGraphTimelineV1::page(request, selected)?,
             })
         }
     }
@@ -329,43 +328,3 @@ fn runtime_projection(
     )
     .map_err(|_| PortError::Unavailable)
 }
-
-/// Bound one timeline page, resuming from a continuation the previous page
-/// issued.
-///
-/// The cursor names the graph version the previous page ended on, so resuming
-/// is exact rather than offset-based: a version published between two pages
-/// cannot shift a caller past an entry it never saw.
-fn page(
-    entries: Vec<WorkGraphVersionEntryV1>,
-    continuation: Option<&OpaqueCursor>,
-) -> Result<WorkGraphTimelineV1, PortError> {
-    let remaining = match continuation {
-        None => entries,
-        Some(cursor) => {
-            let after = cursor
-                .as_str()
-                .strip_prefix(TIMELINE_CURSOR_PREFIX)
-                .and_then(|value| value.parse::<u64>().ok())
-                .ok_or(PortError::NotFoundOrNotAuthorized)?;
-            entries
-                .into_iter()
-                .filter(|entry| entry.verified_version().graph_version().get() > after)
-                .collect()
-        }
-    };
-    if remaining.len() <= MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1 {
-        return WorkGraphTimelineV1::complete(remaining).map_err(|_| PortError::Unavailable);
-    }
-    let mut page = remaining;
-    page.truncate(MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1);
-    let last = page
-        .last()
-        .map(|entry| entry.verified_version().graph_version().get())
-        .ok_or(PortError::Unavailable)?;
-    let cursor = OpaqueCursor::new(format!("{TIMELINE_CURSOR_PREFIX}{last}"))
-        .map_err(|_| PortError::Unavailable)?;
-    WorkGraphTimelineV1::partial(page, cursor).map_err(|_| PortError::Unavailable)
-}
-
-const TIMELINE_CURSOR_PREFIX: &str = "work-product-graph-version:";

@@ -8,12 +8,13 @@ use tracedecay_application::work::work_evidence_retrieval::tests::{
     verified_version,
 };
 use tracedecay_contracts::{
-    WorkEvidenceHydrationErrorV1, WorkProductSelectionScopeV1, WorkTaskSessionPortV1,
-    WorkTaskSessionRequestV1,
+    OpaqueCursor, WorkEvidenceHydrationErrorV1, WorkProductSelectionScopeV1,
+    WorkTaskSessionContinuationV1, WorkTaskSessionPortV1, WorkTaskSessionRequestV1,
 };
 use tracedecay_domain::{
-    AttemptId, ObservationSourceIdentityV1, PrivacyDomainId, ProjectId, ProviderId, RepositoryId,
-    RunId, SessionId, TaskId, TemporalModeV1, UtcMicros, WorkAttemptIdentityV1, WorktreeId,
+    AttemptId, CursorBindingMismatchV1, ObservationSourceIdentityV1, PrivacyDomainId, ProjectId,
+    ProviderId, RepositoryId, RunId, SessionId, TaskId, TemporalModeV1, UtcMicros,
+    WorkAttemptIdentityV1, WorktreeId,
 };
 use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
 
@@ -149,8 +150,45 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
             .retrieve_task_session(&request_context, stale_request, &reauthorization)
             .await
             .expect_err("foreign continuation identity must fail closed"),
-        WorkEvidenceHydrationErrorV1::Stale,
+        WorkEvidenceHydrationErrorV1::CursorRefused(CursorBindingMismatchV1::Foreign),
     );
+
+    let mut resized_request = request.clone();
+    resized_request.page_size = 2;
+    resized_request.continuation = Some(continuation.clone());
+    assert_eq!(
+        adapter
+            .retrieve_task_session(&request_context, resized_request, &reauthorization)
+            .await
+            .expect_err("a continuation replayed with another page size must be refused"),
+        WorkEvidenceHydrationErrorV1::CursorRefused(CursorBindingMismatchV1::ParameterChanged {
+            parameter: "page_size"
+        }),
+    );
+
+    for tamper in [
+        |continuation: &mut WorkTaskSessionContinuationV1| {
+            continuation.temporal_cursor = Some(OpaqueCursor::new("cursor.tampered").unwrap());
+        },
+        |continuation: &mut WorkTaskSessionContinuationV1| {
+            continuation.ranking_cursor = Some(OpaqueCursor::new("cursor.tampered").unwrap());
+        },
+        |continuation: &mut WorkTaskSessionContinuationV1| {
+            continuation.binding = OpaqueCursor::new("bc1.7b7d").unwrap();
+        },
+    ] {
+        let mut tampered = continuation.clone();
+        tamper(&mut tampered);
+        let mut tampered_request = request.clone();
+        tampered_request.continuation = Some(tampered);
+        assert_eq!(
+            adapter
+                .retrieve_task_session(&request_context, tampered_request, &reauthorization)
+                .await
+                .expect_err("a continuation Work never minted must be refused"),
+            WorkEvidenceHydrationErrorV1::CursorRefused(CursorBindingMismatchV1::Foreign),
+        );
+    }
 
     request.continuation = Some(continuation);
 
