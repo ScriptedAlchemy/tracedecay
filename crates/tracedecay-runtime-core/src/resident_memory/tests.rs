@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
-    CgroupMemoryCeilingV1, ProcessResidentMemoryV1, ProcessResidentPeakV1,
+    CgroupMemoryCeilingV1, ProcessResidentMemoryV1,
     RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
     ResidentMemoryPressureV1, cgroup_service_ceiling_bytes, cgroup_v2_memory_ceiling_v1,
@@ -1120,7 +1120,8 @@ fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
 #[test]
 fn a_resident_peak_reports_growth_a_pass_touched_and_released() {
     const TOUCHED_BYTES: usize = 128 * 1024 * 1024;
-    let peak = ProcessResidentPeakV1::start()
+    let peak = ResidentMemoryPressureV1::new(NonZeroU64::MAX)
+        .start_peak()
         .expect("sampler starts")
         .expect("linux reports a resident set");
     let touched = vec![1_u8; TOUCHED_BYTES];

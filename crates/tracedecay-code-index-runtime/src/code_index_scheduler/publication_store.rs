@@ -32,9 +32,9 @@ use tracedecay_domain::{
 };
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, DurableFileBatch};
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
-    ResidentMemoryReservationV1, ResidentOwnersV1, log_resident_owner_release_v1,
-    release_process_allocator_memory_v1,
+    ProcessResidentMemoryV1, ProcessResidentPeakV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryKeyV1, ResidentMemoryReservationV1, ResidentOwnersV1,
+    log_resident_owner_release_v1, release_process_allocator_memory_v1,
 };
 
 use crate::code_index::{
@@ -2539,6 +2539,22 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .active_decode_charge
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(charges);
+    }
+
+    /// Measure a sealed graph build's resident growth through the pressure
+    /// cell its admission reads. `None` without an admission to charge.
+    pub(super) fn start_sealed_graph_build_peak(
+        &self,
+    ) -> std::io::Result<Option<ProcessResidentPeakV1>> {
+        let Some(admission) = self
+            .decode_admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return Ok(None);
+        };
+        admission.resident_memory.pressure().start_peak()
     }
 
     /// Records what building `generation_id`'s code graph grew the resident

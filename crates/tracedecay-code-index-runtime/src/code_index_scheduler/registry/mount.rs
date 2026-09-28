@@ -1845,17 +1845,30 @@ impl CodeIndexSchedulerRegistryV1 {
                                      the graph after the serving decode"
                                 ),
                                 Ok(Ok((replay_binding, Ok(reservation), decoder))) => {
-                                    let resident_peak = ProcessResidentPeakV1::start()
-                                        .inspect_err(|error| {
-                                            tracing::warn!(
-                                                event = "code_index_graph_build_peak_unsampled",
-                                                error = %error,
-                                                "sealed graph build resident peak sampler did \
-                                                 not start"
-                                            );
-                                        })
-                                        .ok()
-                                        .flatten();
+                                    // A text projection of this pass runs until
+                                    // the seat joins it, under its own
+                                    // reservation. Process growth measured
+                                    // beside it is not this build's to carry
+                                    // into the next build's charge.
+                                    let text_projection_overlaps = text_projection_running
+                                        || retained_text_projection.is_some();
+                                    let resident_peak = decoder
+                                        .as_ref()
+                                        .filter(|_| !text_projection_overlaps)
+                                        .and_then(|decoder| {
+                                            decoder
+                                                .start_sealed_graph_build_peak()
+                                                .inspect_err(|error| {
+                                                    tracing::warn!(
+                                                        event = "code_index_graph_build_peak_unsampled",
+                                                        error = %error,
+                                                        "sealed graph build resident peak \
+                                                         sampler did not start"
+                                                    );
+                                                })
+                                                .ok()
+                                                .flatten()
+                                        });
                                     let published = worker_graph_activation
                                         .publish_sealed_graph(
                                             &worker_project_id,

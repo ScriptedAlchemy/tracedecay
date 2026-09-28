@@ -457,6 +457,10 @@ mod code_index_runtime_generation_census_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
+mod code_index_graph_build_charge_tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
 mod code_index_runtime_graph_activation_tests;
 
 #[cfg(test)]

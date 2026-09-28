@@ -39,14 +39,14 @@ use tracedecay_code_index_runtime::project_reads::{
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-const ALPHA_LIB_V1: &[(&str, &str)] = &[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")];
+pub(super) const ALPHA_LIB_V1: &[(&str, &str)] = &[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")];
 
-struct GitFixture {
+pub(super) struct GitFixture {
     root: TempDir,
 }
 
 impl GitFixture {
-    fn new(files: &[(&str, &str)]) -> Self {
+    pub(super) fn new(files: &[(&str, &str)]) -> Self {
         let root = TempDir::new().expect("fixture root");
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.name", "TraceDecay Test"]);
@@ -65,7 +65,7 @@ impl GitFixture {
         Self { root }
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         self.root.path()
     }
 
@@ -74,7 +74,7 @@ impl GitFixture {
     }
 }
 
-fn git(root: &Path, args: &[&str]) {
+pub(super) fn git(root: &Path, args: &[&str]) {
     let status = Command::new(
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
@@ -86,7 +86,7 @@ fn git(root: &Path, args: &[&str]) {
     assert!(status.success(), "git fixture command failed: {args:?}");
 }
 
-fn test_project_id() -> ProjectId {
+pub(super) fn test_project_id() -> ProjectId {
     ProjectId::new("project.code-index-tests").expect("valid test project identity")
 }
 

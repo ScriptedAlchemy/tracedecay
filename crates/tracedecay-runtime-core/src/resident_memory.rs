@@ -352,29 +352,32 @@ pub fn sampled_process_resident_bytes_v1() -> Option<u64> {
 /// How often [`ProcessResidentPeakV1`] samples while its pass runs.
 const PROCESS_RESIDENT_PEAK_INTERVAL_V1: std::time::Duration = std::time::Duration::from_millis(20);
 
-/// The highest [`sampled_process_resident_bytes_v1`] a background thread
-/// observes while one pass runs, above the reading when the pass started.
+/// The highest unreclaimable reading a background thread observes while one
+/// pass runs, above the reading when the pass started. It reads through the
+/// sampler of the pressure cell that started it, the one admission trusts.
 pub struct ProcessResidentPeakV1 {
     start_bytes: u64,
     stop: Arc<AtomicBool>,
-    sampler: std::thread::JoinHandle<u64>,
+    sampler: Arc<ProcessResidentSamplerV1>,
+    peak: std::thread::JoinHandle<u64>,
 }
 
 impl ProcessResidentPeakV1 {
-    /// Starts sampling. `None` where the kernel reports no resident set.
-    pub fn start() -> std::io::Result<Option<Self>> {
-        let Some(start_bytes) = sampled_process_resident_bytes_v1() else {
+    fn start(sampler: Arc<ProcessResidentSamplerV1>) -> std::io::Result<Option<Self>> {
+        let Some(start) = sampler() else {
             return Ok(None);
         };
+        let start_bytes = start.unreclaimable_bytes;
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
-        let sampler = std::thread::Builder::new()
+        let thread_sampler = Arc::clone(&sampler);
+        let peak = std::thread::Builder::new()
             .name("resident-peak".to_owned())
             .spawn(move || {
                 let mut peak = start_bytes;
                 while !stopped.load(Ordering::Acquire) {
-                    if let Some(bytes) = sampled_process_resident_bytes_v1() {
-                        peak = peak.max(bytes);
+                    if let Some(sample) = thread_sampler() {
+                        peak = peak.max(sample.unreclaimable_bytes);
                     }
                     std::thread::park_timeout(PROCESS_RESIDENT_PEAK_INTERVAL_V1);
                 }
@@ -384,6 +387,7 @@ impl ProcessResidentPeakV1 {
             start_bytes,
             stop,
             sampler,
+            peak,
         }))
     }
 
@@ -391,9 +395,9 @@ impl ProcessResidentPeakV1 {
     /// starting reading; `None` if the sampler thread panicked.
     pub fn finish(self) -> Option<u64> {
         self.stop.store(true, Ordering::Release);
-        self.sampler.thread().unpark();
-        let peak = self.sampler.join().ok()?;
-        let last = sampled_process_resident_bytes_v1().unwrap_or(peak);
+        self.peak.thread().unpark();
+        let peak = self.peak.join().ok()?;
+        let last = (self.sampler)().map_or(peak, |sample| sample.unreclaimable_bytes);
         Some(peak.max(last).saturating_sub(self.start_bytes))
     }
 }
@@ -605,6 +609,12 @@ impl ResidentMemoryPressureV1 {
             sample,
             self.publish_observed_resident_bytes(sample.unreclaimable_bytes),
         ))
+    }
+
+    /// Start measuring one pass's resident growth through this cell's
+    /// sampler. `None` where the process cannot be read.
+    pub fn start_peak(&self) -> std::io::Result<Option<ProcessResidentPeakV1>> {
+        ProcessResidentPeakV1::start(Arc::clone(&self.sampler))
     }
 
     /// [`Self::sample_and_publish`] reduced to the admission bytes: the
