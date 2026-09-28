@@ -2197,6 +2197,7 @@ fn concurrent_artifact_reads_are_bounded_and_keep_the_verified_file() {
             Some(ProcessResidentSampleV1 {
                 resident_bytes: bytes,
                 unreclaimable_bytes: bytes,
+                cgroup_committed_bytes: None,
             })
         }),
     );

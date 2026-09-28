@@ -128,19 +128,13 @@ pub(crate) fn application_profile_ids(
 /// [`crate::application_handler_descriptors`].
 pub fn application_catalog_contributions()
 -> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
-    application_catalog_contributions_materialized(SchemaBodyMaterialization::Materialize)
+    application_catalog_contributions_with(SchemaBodyMaterialization::Materialize)
 }
 
-/// Capability, binding, and schema-reference metadata with no JSON Schema bodies.
-///
-/// CLI and HTTP dispatch resolve from this projection. The bodies stay on
-/// [`application_catalog_contributions`] for SDK generation and MCP discovery.
-pub fn application_binding_contributions()
--> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
-    application_catalog_contributions_materialized(SchemaBodyMaterialization::Omit)
-}
-
-fn application_catalog_contributions_materialized(
+/// [`application_catalog_contributions`], optionally without JSON Schema
+/// bodies. Dispatch resolves from the body-free projection; SDK generation and
+/// MCP discovery need the bodies.
+pub(crate) fn application_catalog_contributions_with(
     materialize: SchemaBodyMaterialization,
 ) -> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
     Ok(vec![
