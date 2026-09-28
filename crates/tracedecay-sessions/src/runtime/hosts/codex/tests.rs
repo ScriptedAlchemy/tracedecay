@@ -2609,6 +2609,7 @@ mod recent_first_discovery_tests {
                 "codex",
                 coverage,
                 u64::from(pass.report.is_truncated()),
+                None,
             )
             .await
             .unwrap();

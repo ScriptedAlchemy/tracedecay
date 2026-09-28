@@ -3,95 +3,55 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::ObservationSourceGenerationV1;
-use tracedecay_runtime_core::sqlite_read_snapshot::SnapshotDatabase;
 
 use super::opencode::scan_error;
 use crate::runtime::host_scan::HostScanBudget;
-use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
+use crate::runtime::source::{HostCoverageReason, TranscriptIngestError, TranscriptIngestResult};
 
 const PROVIDER: &str = "opencode";
-const MAX_SNAPSHOT_DATABASE_BYTES: u64 = 512 * 1024 * 1024;
-pub(super) const MAX_SNAPSHOT_DATABASE_IO_BYTES: u64 = MAX_SNAPSHOT_DATABASE_BYTES * 2;
+const SQLITE_HEADER_BYTES: usize = 100;
+const WAL_HEADER_BYTES: usize = 32;
+const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+/// Bytes actually read while identifying a live database: the SQLite header
+/// and, when present, the WAL header. The database body is never charged.
+pub(super) const SOURCE_OPEN_READ_BUDGET: u64 =
+    (SQLITE_HEADER_BYTES + WAL_HEADER_BYTES) as u64 + 64;
 
-pub(super) struct OpenCodeDatabaseSnapshot {
-    _snapshot: SnapshotDatabase,
+/// A live OpenCode database opened in place.
+///
+/// Observation identity uses a bounded header fingerprint, not a digest of the
+/// database body. Rowid paging still follows `source_file_identity`, so an
+/// ordinary append does not rewind the scan frontier.
+pub(super) struct OpenCodeDatabase {
     pub(super) path: PathBuf,
     pub(super) generation: ObservationSourceGenerationV1,
-    /// The persisted scan-frontier incarnation. Observation identity uses the
-    /// exact content generation above; rowid paging separately follows the
-    /// physical source incarnation so ordinary WAL appends do not reset it.
     pub(super) source_file_identity: u64,
 }
 
-pub(super) async fn snapshot_database(
-    database_path: PathBuf,
-    scratch_root: PathBuf,
-    budget: HostScanBudget,
-) -> TranscriptIngestResult<(Option<OpenCodeDatabaseSnapshot>, HostScanBudget)> {
-    let measured_path = database_path.clone();
-    let measured =
-        tokio::task::spawn_blocking(move || measure_database_family(&measured_path, budget))
-            .await
-            .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
-    let (source_identity, mut budget) = measured;
-    let Some(source_identity) = source_identity else {
-        return Ok((None, budget));
-    };
-
-    let snapshot_control = tracedecay_runtime_core::sqlite_read_snapshot::SnapshotReadControl::new(
-        budget.deadline(),
-        {
-            let cancellation = budget.cancellation();
-            move || cancellation.is_cancelled()
-        },
-    );
-    let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_foreign_in(
-        &database_path,
-        &scratch_root,
-        snapshot_control,
-    )
-    .await
-    .map_err(|error| scan_error("freeze OpenCode database snapshot", &database_path, error))?;
-    if !budget.checkpoint() {
-        return Ok((None, budget));
-    }
-    let snapshot_path = snapshot
-        .attach_token()
-        .and_then(|token| token.verified_identity_path().map(Path::to_path_buf))
-        .map_err(|error| scan_error("verify OpenCode database snapshot", &database_path, error))?;
-    let generation_path = snapshot_path.clone();
-    let error_path = database_path.clone();
-    let generated = tokio::task::spawn_blocking(move || {
-        database_generation(&generation_path, &error_path, budget)
-    })
-    .await
-    .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
-    let (generation, returned_budget) = generated;
-    budget = returned_budget;
-    let Some(generation) = generation else {
-        return Ok((None, budget));
-    };
-    snapshot
-        .validate_source()
-        .map_err(|_| TranscriptIngestError::ScanGenerationChanged {
-            path: database_path,
-        })?;
-    Ok((
-        Some(OpenCodeDatabaseSnapshot {
-            _snapshot: snapshot,
-            path: snapshot_path,
-            generation,
-            source_file_identity: source_identity,
-        }),
-        budget,
-    ))
+pub(super) enum OpenedOpenCodeDatabase {
+    Ready(OpenCodeDatabase),
+    Refused(HostCoverageReason),
+    /// The open budget ended before a source decision (cancellation or deadline).
+    Stopped,
 }
 
-fn measure_database_family(
+pub(super) async fn open_database(
+    database_path: PathBuf,
+    budget: HostScanBudget,
+) -> TranscriptIngestResult<(OpenedOpenCodeDatabase, HostScanBudget)> {
+    let inspected = tokio::task::spawn_blocking(move || inspect_database(&database_path, budget))
+        .await
+        .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
+    Ok(inspected)
+}
+
+fn inspect_database(
     path: &Path,
     mut budget: HostScanBudget,
-) -> TranscriptIngestResult<(Option<u64>, HostScanBudget)> {
-    let mut family_bytes = 0_u64;
+) -> TranscriptIngestResult<(OpenedOpenCodeDatabase, HostScanBudget)> {
+    let mut wal_length = 0_u64;
+    let mut wal_header = [0_u8; WAL_HEADER_BYTES];
+    let mut wal_header_len = 0_usize;
     for (index, member) in [
         path.to_path_buf(),
         sqlite_sidecar(path, "-wal"),
@@ -101,7 +61,7 @@ fn measure_database_family(
     .enumerate()
     {
         if !budget.try_charge_unit() {
-            return Ok((None, budget));
+            return Ok((OpenedOpenCodeDatabase::Stopped, budget));
         }
         match std::fs::symlink_metadata(&member) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -113,78 +73,119 @@ fn measure_database_family(
                     ),
                 ));
             }
-            Ok(metadata) if metadata.is_file() => {
-                family_bytes = family_bytes.saturating_add(metadata.len());
+            Ok(metadata) if metadata.is_file() && index == 1 => {
+                wal_length = metadata.len();
             }
+            Ok(metadata) if metadata.is_file() => {}
             Ok(_) if index == 0 => {
-                budget.mark_unavailable();
-                return Ok((None, budget));
+                return Ok((
+                    OpenedOpenCodeDatabase::Refused(HostCoverageReason::DatabaseNotAFile),
+                    budget,
+                ));
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && index == 0 => {
-                return Ok((None, budget));
+                return Ok((
+                    OpenedOpenCodeDatabase::Refused(HostCoverageReason::DatabaseMissing),
+                    budget,
+                ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(scan_error("stat OpenCode database", path, error)),
         }
     }
-    if family_bytes > MAX_SNAPSHOT_DATABASE_BYTES || !budget.try_charge_input(family_bytes) {
-        return Ok((None, budget));
+
+    if !budget.checkpoint() {
+        return Ok((OpenedOpenCodeDatabase::Stopped, budget));
     }
-    let identity = tracedecay_runtime_core::db::sqlite_generation_identity(path).map_err(|_| {
-        scan_error(
-            "identify OpenCode database",
-            path,
-            std::io::Error::other("OpenCode database identity is unavailable"),
-        )
-    })?;
-    Ok((Some(identity), budget))
+    let mut header = [0_u8; SQLITE_HEADER_BYTES];
+    let header_read = match read_prefix(path, &mut header) {
+        Ok(read) => read,
+        Err(error) => return Err(scan_error("read OpenCode database header", path, error)),
+    };
+    if !budget.try_charge_input(read_len(header_read)?) {
+        return Ok((OpenedOpenCodeDatabase::Stopped, budget));
+    }
+    if header_read != SQLITE_HEADER_BYTES || header[..SQLITE_MAGIC.len()] != *SQLITE_MAGIC {
+        return Ok((
+            OpenedOpenCodeDatabase::Refused(HostCoverageReason::DatabaseUnreadable),
+            budget,
+        ));
+    }
+
+    if wal_length > 0 {
+        let wal_path = sqlite_sidecar(path, "-wal");
+        if !budget.checkpoint() {
+            return Ok((OpenedOpenCodeDatabase::Stopped, budget));
+        }
+        match read_prefix(&wal_path, &mut wal_header) {
+            Ok(read) => {
+                wal_header_len = read;
+                if !budget.try_charge_input(read_len(read)?) {
+                    return Ok((OpenedOpenCodeDatabase::Stopped, budget));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(scan_error("read OpenCode WAL header", path, error));
+            }
+        }
+    }
+
+    let identity = match tracedecay_runtime_core::db::sqlite_generation_identity(path) {
+        Ok(identity) => identity,
+        Err(_) => {
+            return Ok((
+                OpenedOpenCodeDatabase::Refused(HostCoverageReason::SourceIdentityUnavailable),
+                budget,
+            ));
+        }
+    };
+    let generation = header_generation(&header, wal_length, &wal_header[..wal_header_len])?;
+    Ok((
+        OpenedOpenCodeDatabase::Ready(OpenCodeDatabase {
+            path: path.to_path_buf(),
+            generation,
+            source_file_identity: identity,
+        }),
+        budget,
+    ))
 }
 
-fn database_generation(
-    path: &Path,
-    error_path: &Path,
-    mut budget: HostScanBudget,
-) -> TranscriptIngestResult<(Option<ObservationSourceGenerationV1>, HostScanBudget)> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|error| scan_error("stat OpenCode snapshot generation", error_path, error))?;
-    if metadata.len() > MAX_SNAPSHOT_DATABASE_BYTES || !budget.try_charge_input(metadata.len()) {
-        return Ok((None, budget));
-    }
-    let mut file = std::fs::File::open(path)
-        .map_err(|error| scan_error("open OpenCode snapshot generation", error_path, error))?;
+/// Fingerprint the SQLite header and WAL header only.
+///
+/// The change counter and WAL length move when a commit lands, so observation
+/// identity still changes when rows change. Hashing the body would read every
+/// page of a multi-gigabyte host database before any message could be admitted.
+fn header_generation(
+    header: &[u8],
+    wal_length: u64,
+    wal_header: &[u8],
+) -> TranscriptIngestResult<ObservationSourceGenerationV1> {
     let mut digest = Sha256::new();
-    digest.update(b"tracedecay.opencode.snapshot-generation.v1");
-    digest.update(metadata.len().to_be_bytes());
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        if !budget.checkpoint() {
-            return Ok((None, budget));
-        }
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| scan_error("hash OpenCode snapshot generation", error_path, error))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
+    digest.update(b"tracedecay.opencode.source-generation.v2");
+    digest.update(header);
+    digest.update(wal_length.to_be_bytes());
+    digest.update(wal_header);
     let digest = digest.finalize();
     let bytes: [u8; 8] = digest[..8]
         .try_into()
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
-    let generation = ObservationSourceGenerationV1::new(u64::from_be_bytes(bytes).max(1))
-        .map_err(TranscriptIngestError::from)?;
-    Ok((Some(generation), budget))
+    ObservationSourceGenerationV1::new(u64::from_be_bytes(bytes).max(1))
+        .map_err(TranscriptIngestError::from)
+}
+
+fn read_len(read: usize) -> TranscriptIngestResult<u64> {
+    u64::try_from(read).map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })
+}
+
+fn read_prefix(path: &Path, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut file = std::fs::File::open(path)?;
+    file.read(buffer)
 }
 
 fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
-}
-
-pub(super) fn snapshot_scratch_root() -> Option<PathBuf> {
-    crate::runtime::transcript_source_profile()
-        .map(|profile| profile.data_dir().join("scratch/sqlite-read/opencode"))
 }

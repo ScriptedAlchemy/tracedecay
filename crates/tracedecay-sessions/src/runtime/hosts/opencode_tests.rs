@@ -771,3 +771,116 @@ async fn durable_sql_frontier_reaches_rows_beyond_a_poisoned_pass_after_restart(
             .contains("fair-restart")
     }));
 }
+
+#[tokio::test]
+async fn oversized_opencode_database_admits_its_project_session() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project.clone());
+    let admission = MemoryHostAdmission::default();
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    let writer = Connection::open(&database).unwrap();
+    writer
+        .execute(
+            "INSERT INTO session(id, directory) VALUES ('ses_large', ?1)",
+            [project.to_string_lossy()],
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO message(id, session_id, time_created, data)
+             VALUES ('msg_large', 'ses_large', 4, ?1)",
+            [json!({"role": "user", "time": {"created": 4}}).to_string()],
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO part(id, message_id, session_id, data)
+             VALUES ('part_large', 'msg_large', 'ses_large', ?1)",
+            [json!({"type": "text", "text": "oversized-db-visible"}).to_string()],
+        )
+        .unwrap();
+    drop(writer);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&database)
+        .unwrap();
+    file.set_len(560 * 1024 * 1024).unwrap();
+    drop(file);
+    assert!(std::fs::metadata(&database).unwrap().len() > 512 * 1024 * 1024);
+
+    let outcome = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let coverage = admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://opencode/v1")
+        .await
+        .unwrap()
+        .unwrap();
+    let admitted = admission.observations().iter().any(|stored| {
+        stored.observation().source().session_id().as_str() == "ses_large"
+            && stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("oversized-db-visible")
+    });
+    assert!(
+        admitted,
+        "oversized OpenCode database must admit ses_large; admitted={admitted} coverage_file_id={} deferred_units={} messages_upserted={}",
+        coverage.file_id, coverage.byte_offset, outcome.stats.messages_upserted
+    );
+    assert_eq!(
+        crate::runtime::source::HostProviderCoverage::from_file_id(coverage.file_id),
+        Some(crate::runtime::source::HostProviderCoverage::Complete)
+    );
+    assert_eq!(coverage.byte_offset, 0);
+}
+
+#[tokio::test]
+async fn missing_opencode_database_names_its_coverage_reason() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = OpenCodeSource::with_database_for_project(
+        temp.path().join("missing-opencode.db"),
+        temp.path().join("project"),
+    );
+    let admission = MemoryHostAdmission::default();
+
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    let coverage = admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://opencode/v1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        crate::runtime::source::HostProviderCoverage::from_file_id(coverage.file_id),
+        Some(crate::runtime::source::HostProviderCoverage::Unavailable)
+    );
+    assert_eq!(
+        crate::runtime::source::HostProviderCoverage::coverage_reason_name(coverage.file_id),
+        Some("database_missing")
+    );
+}

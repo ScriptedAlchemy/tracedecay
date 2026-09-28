@@ -507,7 +507,7 @@ fn empty_host_session_history() -> Value {
             { "provider": "codex", "state": "complete", "deferred_units": 0 },
             { "provider": "cursor", "state": "complete", "deferred_units": 0 },
             { "provider": "kimi", "state": "complete", "deferred_units": 0 },
-            { "provider": "opencode", "state": "unavailable", "deferred_units": 1 },
+            { "provider": "opencode", "state": "unavailable", "deferred_units": 1, "reason": "database_missing" },
             { "provider": "pi", "state": "complete", "deferred_units": 0 },
         ],
         "unobserved_providers": ["claude", "codex", "cursor", "opencode"],

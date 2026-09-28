@@ -570,6 +570,16 @@ fn finish_open(
     })
 }
 
+/// Opens a foreign database read-only, including committed WAL frames.
+///
+/// `immutable=1` ignores `-wal` sidecars. A live host database therefore uses
+/// ordinary read-only locking, with the same query-only reader policy as
+/// [`open_immutable_reader`]: no checkpoint on close, no writes, and a zero
+/// busy timeout.
+pub fn open_query_only_reader(path: &Path) -> Result<Connection, ConnectionPolicyError> {
+    open(path, ConnectionMode::Reader)
+}
+
 /// Opens an immutable, query-only connection for a foreign or health database.
 ///
 /// Uses `file:…?immutable=1&mode=ro` so diagnosis never creates WAL/SHM

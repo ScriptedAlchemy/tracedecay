@@ -831,6 +831,7 @@ async fn persist_coverage(
         outcome
             .discovery_failures
             .saturating_add(u64::from(outcome.deferred)),
+        None,
     )
     .await
 }

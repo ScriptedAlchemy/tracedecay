@@ -21,7 +21,6 @@ use crate::runtime::hosts::opencode_frontier::{
     REWRITE_KEY as OPENCODE_REWRITE_FRONTIER_KEY, prepare_generation_rewrite,
     read as read_frontier, write as write_frontier,
 };
-use crate::runtime::hosts::opencode_snapshot::MAX_SNAPSHOT_DATABASE_IO_BYTES;
 use crate::runtime::shared::TranscriptScopeMatcher;
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_CAPTURE_UNIT_BYTES, SnapshotAdmissionBatch, SnapshotAdmissionRecord,
@@ -45,7 +44,6 @@ pub(super) const OPENCODE_PART_FRONTIER_KEY: &str = "host-frontier://opencode/pa
 #[derive(Clone)]
 pub struct OpenCodeSource {
     database_path: PathBuf,
-    snapshot_scratch_root: PathBuf,
     scope: OpenCodeSourceScope,
 }
 
@@ -202,73 +200,37 @@ impl SnapshotAdmissionRecord for OpenCodeRecord {
 impl OpenCodeSource {
     pub fn new_for_project(project_root: &Path) -> Option<Self> {
         let home = crate::runtime::home_dir()?;
-        let snapshot_scratch_root =
-            crate::runtime::hosts::opencode_snapshot::snapshot_scratch_root()?;
-        Some(Self::with_database_for_project_and_scratch(
+        Some(Self::with_scope(
             opencode_data_dir(&home).join("opencode.db"),
-            snapshot_scratch_root,
-            project_root.to_path_buf(),
+            OpenCodeSourceScope::Project(project_root.to_path_buf()),
         ))
     }
 
     pub fn new_for_user(roots: Vec<PathBuf>) -> Option<Self> {
         let home = crate::runtime::home_dir()?;
-        let snapshot_scratch_root =
-            crate::runtime::hosts::opencode_snapshot::snapshot_scratch_root()?;
-        Some(Self::with_database_for_user_and_scratch(
+        Some(Self::with_scope(
             opencode_data_dir(&home).join("opencode.db"),
-            snapshot_scratch_root,
-            roots,
+            OpenCodeSourceScope::Profile(roots),
         ))
     }
 
     #[cfg(test)]
     pub fn with_database_for_project(database_path: PathBuf, project_root: PathBuf) -> Self {
-        let snapshot_scratch_root = database_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("opencode-snapshot-scratch");
-        Self::with_database_for_project_and_scratch(
-            database_path,
-            snapshot_scratch_root,
-            project_root,
-        )
-    }
-
-    fn with_database_for_project_and_scratch(
-        database_path: PathBuf,
-        snapshot_scratch_root: PathBuf,
-        project_root: PathBuf,
-    ) -> Self {
-        Self {
-            database_path,
-            snapshot_scratch_root,
-            scope: OpenCodeSourceScope::Project(project_root),
-        }
+        Self::with_scope(database_path, OpenCodeSourceScope::Project(project_root))
     }
 
     #[cfg(test)]
     pub fn with_database_for_user(database_path: PathBuf, registered_roots: Vec<PathBuf>) -> Self {
-        let snapshot_scratch_root = database_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("opencode-snapshot-scratch");
-        Self::with_database_for_user_and_scratch(
+        Self::with_scope(
             database_path,
-            snapshot_scratch_root,
-            registered_roots,
+            OpenCodeSourceScope::Profile(registered_roots),
         )
     }
 
-    fn with_database_for_user_and_scratch(
-        database_path: PathBuf,
-        snapshot_scratch_root: PathBuf,
-        registered_roots: Vec<PathBuf>,
-    ) -> Self {
+    fn with_scope(database_path: PathBuf, scope: OpenCodeSourceScope) -> Self {
         Self {
             database_path,
-            snapshot_scratch_root,
-            scope: OpenCodeSourceScope::Profile(registered_roots),
+            scope,
         }
     }
 }
@@ -289,33 +251,50 @@ pub(crate) async fn capture_opencode_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<OpenCodeCaptureOutcome> {
-    let snapshot_budget = HostScanBudget::new(
-        MAX_SNAPSHOT_DATABASE_IO_BYTES,
-        usize::MAX,
+    let open_budget = HostScanBudget::new(
+        crate::runtime::hosts::opencode_snapshot::SOURCE_OPEN_READ_BUDGET,
+        8,
         Instant::now() + HOST_SCAN_WINDOW,
         cancellation.clone(),
     );
-    let snapshot_attempt = crate::runtime::hosts::opencode_snapshot::snapshot_database(
+    let (opened, open_budget) = crate::runtime::hosts::opencode_snapshot::open_database(
         source.database_path.clone(),
-        source.snapshot_scratch_root.clone(),
-        snapshot_budget,
+        open_budget,
     )
     .await?;
-    let (snapshot, snapshot_budget) = snapshot_attempt;
-    let Some(snapshot) = snapshot else {
-        let outcome = outcome_for_scan_evidence(snapshot_budget.evidence());
-        persist_host_provider_coverage(
-            facade,
-            &scope,
-            PROVIDER,
-            HostProviderCoverage::Unavailable,
-            1,
-        )
-        .await?;
-        return Ok(outcome);
+    let database = match opened {
+        crate::runtime::hosts::opencode_snapshot::OpenedOpenCodeDatabase::Ready(database) => {
+            database
+        }
+        crate::runtime::hosts::opencode_snapshot::OpenedOpenCodeDatabase::Refused(reason) => {
+            let outcome = outcome_for_scan_evidence(open_budget.evidence());
+            persist_host_provider_coverage(
+                facade,
+                &scope,
+                PROVIDER,
+                HostProviderCoverage::Unavailable,
+                1,
+                Some(reason),
+            )
+            .await?;
+            return Ok(outcome);
+        }
+        crate::runtime::hosts::opencode_snapshot::OpenedOpenCodeDatabase::Stopped => {
+            let outcome = outcome_for_scan_evidence(open_budget.evidence());
+            persist_host_provider_coverage(
+                facade,
+                &scope,
+                PROVIDER,
+                HostProviderCoverage::Unavailable,
+                1,
+                None,
+            )
+            .await?;
+            return Ok(outcome);
+        }
     };
     let scan_source = OpenCodeScanSource {
-        database_path: snapshot.path.clone(),
+        database_path: database.path.clone(),
         source_path: source.database_path.clone(),
         scope: source.scope.clone(),
     };
@@ -329,12 +308,12 @@ pub(crate) async fn capture_opencode_observations(
         cancellation.clone(),
     );
     let mut runner = SnapshotAdmissionRunner::new(PROVIDER, max_new_bytes);
-    let current_generation = snapshot.generation.generation_id();
+    let current_generation = database.generation.generation_id();
     let (mut generation_frontier, mut rewrite_frontier) = prepare_generation_rewrite(
         facade,
         &scope,
         current_generation,
-        snapshot.source_file_identity,
+        database.source_file_identity,
     )
     .await?;
     for scan_kind in [
@@ -356,14 +335,14 @@ pub(crate) async fn capture_opencode_observations(
             read_frontier(facade, &scope, scan_kind.frontier_key()).await?
         };
         let initialize_part_frontier = matches!(scan_kind, OpenCodeScanKind::Parts)
-            && stored_frontier.file_id != snapshot.source_file_identity;
-        let mut durable_frontier = if stored_frontier.file_id == snapshot.source_file_identity {
+            && stored_frontier.file_id != database.source_file_identity;
+        let mut durable_frontier = if stored_frontier.file_id == database.source_file_identity {
             stored_frontier
         } else {
             ParseOffset {
                 byte_offset: 0,
                 mtime: stored_frontier.mtime,
-                file_id: snapshot.source_file_identity,
+                file_id: database.source_file_identity,
             }
         };
         let mut cursor = OpenCodePageCursor {
@@ -404,7 +383,7 @@ pub(crate) async fn capture_opencode_observations(
                         cancellation,
                         || {
                             Ok(Some(vec![SnapshotAdmissionBatch::new(
-                                snapshot.generation,
+                                database.generation,
                                 materialized.records,
                             )]))
                         },
@@ -415,7 +394,7 @@ pub(crate) async fn capture_opencode_observations(
                 durable_frontier = ParseOffset {
                     byte_offset: u64::try_from(cursor.after_rowid).map_err(|_| invalid_frame())?,
                     mtime: durable_frontier.mtime.saturating_add(1),
-                    file_id: snapshot.source_file_identity,
+                    file_id: database.source_file_identity,
                 };
                 facade
                     .advance_parse_offset(&scope, scan_kind.frontier_key(), durable_frontier)
@@ -454,12 +433,12 @@ pub(crate) async fn capture_opencode_observations(
                     generation_frontier = ParseOffset {
                         byte_offset: current_generation,
                         mtime: revision,
-                        file_id: snapshot.source_file_identity,
+                        file_id: database.source_file_identity,
                     };
                     rewrite_frontier = ParseOffset {
                         byte_offset: 0,
                         mtime: revision,
-                        file_id: snapshot.source_file_identity,
+                        file_id: database.source_file_identity,
                     };
                     write_frontier(
                         facade,
@@ -501,15 +480,15 @@ pub(crate) async fn capture_opencode_observations(
         stats,
         bytes_consumed,
         deferred_by_byte_cap,
-        scan_cancelled: evidence.cancelled || snapshot_budget.evidence().cancelled,
+        scan_cancelled: evidence.cancelled || open_budget.evidence().cancelled,
         scan_input_bound_reached: evidence.input_bound_reached
-            || snapshot_budget.evidence().input_bound_reached,
+            || open_budget.evidence().input_bound_reached,
         scan_non_durable_units: evidence
             .non_durable_units
-            .saturating_add(snapshot_budget.evidence().non_durable_units),
+            .saturating_add(open_budget.evidence().non_durable_units),
         scan_unavailable_units: evidence
             .unavailable_units
-            .saturating_add(snapshot_budget.evidence().unavailable_units),
+            .saturating_add(open_budget.evidence().unavailable_units),
     };
     let deferred_units = outcome
         .scan_non_durable_units
@@ -530,6 +509,7 @@ pub(crate) async fn capture_opencode_observations(
                 HostProviderCoverage::Complete
             },
             deferred_units,
+            None,
         )
         .await?;
     }
@@ -904,9 +884,11 @@ pub(super) fn open_scan_connection(
     if !budget.checkpoint() {
         return Ok(None);
     }
-    tracedecay_rusqlite_runtime::open_immutable_reader(&source.database_path)
+    // `immutable=1` skips WAL frames, so a live OpenCode database is read with
+    // ordinary query-only locking and paged by rowid instead of copied.
+    tracedecay_rusqlite_runtime::open_query_only_reader(&source.database_path)
         .map(Some)
-        .map_err(|error| scan_error("open immutable database", &source.source_path, error))
+        .map_err(|error| scan_error("open query-only database", &source.source_path, error))
 }
 
 pub(super) fn install_progress_handler(
