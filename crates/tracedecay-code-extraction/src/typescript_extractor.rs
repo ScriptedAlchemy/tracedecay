@@ -165,10 +165,13 @@ impl TypeScriptExtractor {
         };
         let file_node_id = file_node.id.clone();
         state.nodes.push(file_node);
-        state.node_stack.push((file_path.to_string(), file_node_id));
+        state
+            .node_stack
+            .push((file_path.to_string(), file_node_id.clone()));
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit_node(&mut state, child);
+            Self::visit_module_scope_calls(&mut state, &file_node_id, child);
         });
 
         state.node_stack.pop();
@@ -230,9 +233,13 @@ impl TypeScriptExtractor {
     fn visit_node(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         match node.kind() {
             "export_statement" => Self::visit_export_statement(state, node),
-            "function_declaration" => Self::visit_function(state, node),
-            "lexical_declaration" => Self::visit_lexical_declaration(state, node),
-            "class_declaration" => Self::visit_class(state, node),
+            "function_declaration" | "generator_function_declaration" => {
+                Self::visit_function(state, node);
+            }
+            "lexical_declaration" | "variable_declaration" => {
+                Self::visit_lexical_declaration(state, node, None);
+            }
+            "class_declaration" | "abstract_class_declaration" => Self::visit_class(state, node),
             "interface_declaration" => Self::visit_interface(state, node),
             "enum_declaration" => Self::visit_enum(state, node),
             "type_alias_declaration" => Self::visit_type_alias(state, node),
@@ -257,6 +264,48 @@ impl TypeScriptExtractor {
         }
     }
 
+    /// Whether no symbol visit owns a module- or namespace-scope statement's
+    /// calls: `createRoot(el).render(<App />)`,
+    /// `export default defineConfig({ plugins: [react()] })`. Declarations own
+    /// their calls, and namespaces and test-framework calls are visited as
+    /// their own symbols.
+    fn has_unowned_calls(state: &ExtractionState<'_>, statement: TsNode<'_>) -> bool {
+        match statement.kind() {
+            "expression_statement" => {
+                find_direct_child_by_kind(statement, "internal_module").is_none()
+                    && !find_direct_child_by_kind(statement, "call_expression")
+                        .is_some_and(|call| test_calls::is_test_framework_call(state, call))
+            }
+            "export_statement" => statement.child_by_field_name("declaration").is_none(),
+            "import_statement" | "comment" => false,
+            kind => !kind.ends_with("declaration"),
+        }
+    }
+
+    /// Give a module-scope statement's unowned calls a `<module>` owner.
+    fn visit_module_scope_calls(
+        state: &mut ExtractionState<'_>,
+        file_node_id: &str,
+        statement: TsNode<'_>,
+    ) {
+        if !Self::has_unowned_calls(state, statement) {
+            return;
+        }
+        let (owner, contains) = crate::common::module_scope_init_block(
+            &state.file_path,
+            state.source,
+            file_node_id,
+            statement,
+            state.timestamp,
+        );
+        let before = state.unresolved_refs.len();
+        Self::extract_owned_call_sites(state, statement, &owner.id);
+        if state.unresolved_refs.len() > before {
+            state.nodes.push(owner);
+            state.edges.push(contains);
+        }
+    }
+
     /// Visit an `export_statement`. Sets `in_export` flag and recurses into the
     /// inner declaration.
     fn visit_export_statement(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
@@ -272,12 +321,18 @@ impl TypeScriptExtractor {
             loop {
                 let child = cursor.node();
                 match child.kind() {
-                    "function_declaration" => Self::visit_function(state, child),
-                    "class_declaration" => Self::visit_class(state, child),
+                    "function_declaration" | "generator_function_declaration" => {
+                        Self::visit_function(state, child);
+                    }
+                    "class_declaration" | "abstract_class_declaration" => {
+                        Self::visit_class(state, child);
+                    }
                     "interface_declaration" => Self::visit_interface(state, child),
                     "enum_declaration" => Self::visit_enum(state, child),
                     "type_alias_declaration" => Self::visit_type_alias(state, child),
-                    "lexical_declaration" => Self::visit_lexical_declaration(state, child),
+                    "lexical_declaration" | "variable_declaration" => {
+                        Self::visit_lexical_declaration(state, child, None);
+                    }
                     // Re-export or bare export like `export { foo }`
                     "export_clause" => {
                         let text = state.node_text(node);
@@ -401,42 +456,39 @@ impl TypeScriptExtractor {
 
         Self::extract_type_refs(state, node, &id);
 
-        // Extract call sites from the function body. Function declarations
-        // always carry a `statement_block`, but fall back to scanning the node
-        // itself for robustness against unusual grammars.
-        if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
-            Self::extract_call_sites(state, body, &id);
-        } else {
-            Self::extract_call_sites(state, node, &id);
-        }
-        Self::suppress_shadowed_calls(state, node, &id);
+        // The body and default parameter values (`x = defaults()`) run on
+        // each call.
+        Self::extract_owned_call_sites(state, node, &id);
     }
 
-    /// Extract a lexical declaration (const/let) looking for arrow functions
-    /// and variable declarations.
-    fn visit_lexical_declaration(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
+    /// Extract a `const`/`let`/`var` declaration, looking for arrow functions
+    /// and variable declarations. An arrow binding owns its body's calls;
+    /// other initializer calls belong to `initializer_owner` when given (a
+    /// test callback that maps its setup to sources), else to the binding.
+    fn visit_lexical_declaration(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        initializer_owner: Option<&str>,
+    ) {
         let variable_kind = if Self::has_child_kind(node, "const") {
-            Some(NodeKind::Const)
-        } else if Self::has_child_kind(node, "let") {
-            Some(NodeKind::VarField)
+            NodeKind::Const
         } else {
-            None
+            NodeKind::VarField
         };
 
         let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "variable_declarator" {
-                    if let Some(arrow) = find_direct_child_by_kind(child, "arrow_function") {
-                        Self::visit_arrow_function(state, child, arrow);
-                    } else if let Some(kind) = variable_kind.clone() {
-                        Self::visit_variable(state, child, kind);
-                    }
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
+        for declarator in node
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "variable_declarator")
+        {
+            if let Some(arrow) = find_direct_child_by_kind(declarator, "arrow_function") {
+                Self::visit_arrow_function(state, declarator, arrow);
+                continue;
+            }
+            let binding = Self::visit_variable(state, declarator, variable_kind.clone());
+            match initializer_owner {
+                Some(owner) => Self::extract_call_sites(state, declarator, owner),
+                None => Self::extract_owned_call_sites(state, declarator, &binding),
             }
         }
     }
@@ -529,7 +581,11 @@ impl TypeScriptExtractor {
     }
 
     /// Extract a typed or untyped variable declaration (not an arrow function).
-    fn visit_variable(state: &mut ExtractionState<'_>, declarator: TsNode<'_>, kind: NodeKind) {
+    fn visit_variable(
+        state: &mut ExtractionState<'_>,
+        declarator: TsNode<'_>,
+        kind: NodeKind,
+    ) -> String {
         let name = Self::child_name(state, find_direct_child_by_kind(declarator, "identifier"));
         let visibility = if state.in_export {
             Visibility::Pub
@@ -584,6 +640,7 @@ impl TypeScriptExtractor {
         if let Some(annotation) = find_direct_child_by_kind(declarator, "type_annotation") {
             Self::collect_type_identifiers(state, annotation, &id, EdgeKind::TypeOf);
         }
+        id
     }
 
     /// Extract a class declaration node.
@@ -670,7 +727,16 @@ impl TypeScriptExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "method_definition" => Self::visit_method(state, child),
-                    "public_field_definition" => Self::visit_field(state, child),
+                    "public_field_definition" | "field_definition" => {
+                        Self::visit_field(state, child);
+                    }
+                    // `static { … }` and member decorators (`@memo()`) run
+                    // when the class is defined.
+                    "class_static_block" | "decorator" => {
+                        if let Some(class_id) = state.parent_node_id().map(str::to_owned) {
+                            Self::extract_owned_call_sites(state, child, &class_id);
+                        }
+                    }
                     _ => {}
                 }
                 if !cursor.goto_next_sibling() {
@@ -744,10 +810,8 @@ impl TypeScriptExtractor {
 
         Self::extract_type_refs(state, node, &id);
 
-        if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
-            Self::extract_call_sites(state, body, &id);
-        }
-        Self::suppress_shadowed_calls(state, node, &id);
+        // Default parameter values and the body run on each call.
+        Self::extract_owned_call_sites(state, node, &id);
     }
 
     /// Extract a field from a class body (`public_field_definition`).
@@ -802,11 +866,15 @@ impl TypeScriptExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
-                target: id,
+                target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
             });
         }
+
+        // A field initializer (`onClick = () => this.save()`) runs as part of
+        // construction; the field is the named symbol that owns its calls.
+        Self::extract_owned_call_sites(state, node, &id);
     }
 
     /// Extract an interface declaration node.
@@ -1041,8 +1109,15 @@ impl TypeScriptExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "property_identifier" {
-                    Self::visit_enum_member(state, child);
+                match child.kind() {
+                    "property_identifier" => Self::visit_enum_member(state, child),
+                    // `A = compute()` runs when the enum is defined.
+                    "enum_assignment" => {
+                        if let Some(enum_id) = state.parent_node_id().map(str::to_owned) {
+                            Self::extract_call_sites(state, child, &enum_id);
+                        }
+                    }
+                    _ => {}
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1227,9 +1302,16 @@ impl TypeScriptExtractor {
         }
 
         if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
-            state.node_stack.push((name, id));
+            state.node_stack.push((name, id.clone()));
             Self::visit_children(state, body);
             state.node_stack.pop();
+            // The namespace owns the calls its body runs when it is entered.
+            let mut cursor = body.walk();
+            for statement in body.named_children(&mut cursor) {
+                if Self::has_unowned_calls(state, statement) {
+                    Self::extract_owned_call_sites(state, statement, &id);
+                }
+            }
         }
     }
 
@@ -1298,6 +1380,8 @@ impl TypeScriptExtractor {
                         kind: EdgeKind::Annotates,
                         line: Some(start_line),
                     });
+                    // `@Component({ … })` is called to wrap the declaration.
+                    Self::extract_call_sites(state, child, parent_id);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1375,41 +1459,65 @@ impl TypeScriptExtractor {
         }
     }
 
-    /// Recursively find `call_expression` nodes inside a node and create
-    /// unresolved Calls references.
+    /// Recursively find call sites inside a node and create unresolved Calls
+    /// references. Nested arrow functions, function expressions, and local
+    /// function declarations are not graph symbols, so the calls in their
+    /// bodies (`.map((row) => format(row))`, JSX event handlers) belong to the
+    /// enclosing symbol. A JSX element naming a component (`<Card />`,
+    /// `<Layout.Header>`) renders, and so calls, that component.
     fn extract_call_sites(state: &mut ExtractionState<'_>, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                match child.kind() {
-                    "call_expression" => {
-                        let callee = child.named_child(0);
-                        if let Some(callee) = callee {
-                            let callee_name = state.node_text(callee).to_string();
-                            state.unresolved_refs.push(UnresolvedRef {
-                                from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
-                                reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
-                                file_path: state.file_path.clone(),
-                                unmodeled_import: None,
-                            });
-                        }
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
-                    // Skip nested arrow functions to avoid polluting call sites.
-                    "arrow_function" | "function" | "function_declaration" => {}
-                    _ => {
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
+                let callee = match child.kind() {
+                    "call_expression" => child.named_child(0).map(|callee| (callee, child)),
+                    "jsx_opening_element" | "jsx_self_closing_element" => child
+                        .child_by_field_name("name")
+                        .filter(|name| Self::is_jsx_component_name(state, *name))
+                        .map(|name| (name, name)),
+                    _ => None,
+                };
+                if let Some((callee, site)) = callee {
+                    state.unresolved_refs.push(UnresolvedRef {
+                        from_node_id: fn_node_id.to_string(),
+                        reference_name: state.node_text(callee).to_string(),
+                        reference_kind: EdgeKind::Calls,
+                        line: site.start_position().row as u32,
+                        column: site.start_position().column as u32,
+                        file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                    });
                 }
+                Self::extract_call_sites(state, child, fn_node_id);
                 if !cursor.goto_next_sibling() {
                     break;
                 }
             }
         }
+    }
+
+    /// Lower-case JSX names (`<div>`) and namespaced names (`<svg:rect>`) are
+    /// intrinsic elements, not components.
+    fn is_jsx_component_name(state: &ExtractionState<'_>, name: TsNode<'_>) -> bool {
+        match name.kind() {
+            "member_expression" => true,
+            "identifier" => state
+                .node_text(name)
+                .starts_with(|first: char| first.is_ascii_uppercase()),
+            _ => false,
+        }
+    }
+
+    /// Call sites owned by the symbol `owner_id`, less calls to names a
+    /// binding inside `scope` shadows.
+    fn extract_owned_call_sites(
+        state: &mut ExtractionState<'_>,
+        scope: TsNode<'_>,
+        owner_id: &str,
+    ) {
+        Self::extract_call_sites(state, scope, owner_id);
+        Self::suppress_shadowed_calls(state, scope, owner_id);
     }
 
     /// Import rows are file-scoped, so a local binding makes the same bare
@@ -1435,32 +1543,11 @@ impl TypeScriptExtractor {
         function: TsNode<'_>,
         shadows: &mut ShadowedCallNames,
     ) {
-        if matches!(
-            node.kind(),
-            "required_parameter" | "optional_parameter" | "rest_parameter"
-        ) && let Some(pattern) = node.child_by_field_name("pattern")
-        {
-            Self::record_binding_pattern(state, pattern, shadows);
-        }
-        if node.kind() == "variable_declarator"
-            && let Some(name) = node.child_by_field_name("name")
-        {
-            Self::record_binding_pattern(state, name, shadows);
-        }
-        if matches!(node.kind(), "catch_clause" | "for_in_statement")
-            && let Some(binding) = node
-                .child_by_field_name("parameter")
-                .or_else(|| node.child_by_field_name("left"))
-        {
+        if let Some(binding) = Self::declared_binding(node, function) {
             Self::record_binding_pattern(state, binding, shadows);
         }
-        if node.kind() == "arrow_function"
-            && let Some(parameter) = node.child_by_field_name("parameter")
-        {
-            Self::record_binding_pattern(state, parameter, shadows);
-        }
-        if node != function && matches!(node.kind(), "function_declaration" | "method_definition") {
-            return;
+        if node.kind() == "formal_parameters" {
+            Self::record_bare_parameters(state, node, shadows);
         }
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -1470,6 +1557,47 @@ impl TypeScriptExtractor {
                     break;
                 }
             }
+        }
+    }
+
+    /// JavaScript parameters are bare patterns, not `required_parameter`.
+    fn record_bare_parameters(
+        state: &ExtractionState<'_>,
+        parameters: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            let binding = match parameter.kind() {
+                "identifier" | "object_pattern" | "array_pattern" | "rest_pattern" => {
+                    Some(parameter)
+                }
+                "assignment_pattern" => parameter.child_by_field_name("left"),
+                _ => None,
+            };
+            if let Some(binding) = binding {
+                Self::record_binding_pattern(state, binding, shadows);
+            }
+        }
+    }
+
+    /// The binding pattern `node` declares in `function`'s scope. A nested
+    /// function declaration is a local binding too: its body's calls are
+    /// attributed to `function`, so its name shadows there.
+    fn declared_binding<'t>(node: TsNode<'t>, function: TsNode<'t>) -> Option<TsNode<'t>> {
+        match node.kind() {
+            "required_parameter" | "optional_parameter" | "rest_parameter" => {
+                node.child_by_field_name("pattern")
+            }
+            "variable_declarator" => node.child_by_field_name("name"),
+            "catch_clause" | "for_in_statement" => node
+                .child_by_field_name("parameter")
+                .or_else(|| node.child_by_field_name("left")),
+            "arrow_function" => node.child_by_field_name("parameter"),
+            "function_declaration" | "generator_function_declaration" if node != function => {
+                node.child_by_field_name("name")
+            }
+            _ => None,
         }
     }
 
