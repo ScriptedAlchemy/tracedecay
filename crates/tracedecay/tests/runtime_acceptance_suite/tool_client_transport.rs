@@ -21,7 +21,7 @@ use tracedecay_daemon_protocol::{
     DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationRequest,
     DaemonInvocationResponse,
 };
-use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+use tracedecay_domain::ProjectId;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -124,14 +124,11 @@ fn files_result(paths: impl IntoIterator<Item = String>) -> FilesResultV1 {
     }
 }
 
-fn files_response(request: &DaemonInvocationRequest, result: FilesResultV1) -> Vec<u8> {
-    let scope = ResolvedScope::new(
-        ProjectId::new("project.transport").expect("project id"),
-        RepositoryId::new("repository.transport").expect("repository id"),
-        WorktreeId::new("worktree.transport").expect("worktree id"),
-        None,
-    )
-    .expect("transport scope");
+fn files_response(
+    request: &DaemonInvocationRequest,
+    scope: ResolvedScope,
+    result: FilesResultV1,
+) -> Vec<u8> {
     let response = DaemonInvocationResponse {
         protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
         revision: DAEMON_INVOCATION_REVISION,
@@ -152,8 +149,8 @@ fn files_response(request: &DaemonInvocationRequest, result: FilesResultV1) -> V
     bytes
 }
 
-fn response_bytes(request: &DaemonInvocationRequest, text: &str) -> Vec<u8> {
-    files_response(request, files_result([text.to_owned()]))
+fn response_bytes(request: &DaemonInvocationRequest, scope: ResolvedScope, text: &str) -> Vec<u8> {
+    files_response(request, scope, files_result([text.to_owned()]))
 }
 
 fn output_payload(result: &ChildResult) -> Value {
@@ -178,12 +175,29 @@ fn assert_problem(result: &ChildResult, kind: &str) {
 
 fn spawn_scripted_daemon<F>(
     socket: PathBuf,
+    home: &Path,
+    project: &Path,
     connections: usize,
     script: F,
 ) -> (mpsc::Receiver<()>, JoinHandle<()>)
 where
-    F: Fn(UnixStream, DaemonInvocationRequest) + Send + Sync + 'static,
+    F: Fn(UnixStream, DaemonInvocationRequest, ResolvedScope) + Send + Sync + 'static,
 {
+    let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(
+        project,
+        &home.join(".tracedecay"),
+    )
+    .expect("resolve enrolled project")
+    .expect("project is enrolled");
+    let project_id = ProjectId::new(layout.identity.project_id.expect("enrolled project id"))
+        .expect("valid enrolled project id");
+    let scope =
+        tracedecay_code_index_runtime::code_index_scheduler::identity::resolved_scope_for_project(
+            project,
+            &project_id,
+        )
+        .expect("production project scope");
+    let expected_project = canonical_existing_path(project);
     let (ready_tx, ready_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
     let script = Arc::new(script);
@@ -227,8 +241,16 @@ where
                     );
                     let mut handshake = String::new();
                     reader.read_line(&mut handshake).expect("read handshake");
-                    serde_json::from_str::<DaemonHandshake>(handshake.trim())
-                        .expect("decode handshake");
+                    let handshake: DaemonHandshake =
+                        serde_json::from_str(handshake.trim()).expect("decode handshake");
+                    assert_eq!(
+                        handshake
+                            .project_path
+                            .as_deref()
+                            .map(canonical_existing_path),
+                        Some(expected_project.clone()),
+                        "CLI must request the enrolled project"
+                    );
                     let mut request = String::new();
                     reader.read_line(&mut request).expect("read request");
                     let request: DaemonInvocationRequest =
@@ -244,7 +266,8 @@ where
                     ));
                     request_tx.send(()).expect("publish request receipt");
                     let script = Arc::clone(&script);
-                    workers.push(std::thread::spawn(move || script(stream, request)));
+                    let scope = scope.clone();
+                    workers.push(std::thread::spawn(move || script(stream, request, scope)));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     assert!(
@@ -284,13 +307,19 @@ fn fixture() -> (TempDir, TempDir, TempDir, PathBuf, PathBuf, PathBuf) {
 #[test]
 fn generic_tool_accepts_slow_byte_stream() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
-        for byte in response_bytes(&request, "slow-ok") {
-            stream.write_all(&[byte]).expect("write slow byte");
-            stream.flush().expect("flush slow byte");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    });
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        |mut stream, request, scope| {
+            for byte in response_bytes(&request, scope, "slow-ok") {
+                stream.write_all(&[byte]).expect("write slow byte");
+                stream.flush().expect("flush slow byte");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        },
+    );
     let result = run_command_with_timeout(
         tool_command(&home, &project, &socket, "slow"),
         CHILD_TIMEOUT,
@@ -304,12 +333,18 @@ fn generic_tool_accepts_slow_byte_stream() {
 #[test]
 fn generic_tool_rejects_truncated_frame_as_typed_failure() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
-        let bytes = response_bytes(&request, "partial-must-not-escape");
-        stream
-            .write_all(&bytes[..bytes.len() / 2])
-            .expect("write truncated response");
-    });
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        |mut stream, request, scope| {
+            let bytes = response_bytes(&request, scope, "partial-must-not-escape");
+            stream
+                .write_all(&bytes[..bytes.len() / 2])
+                .expect("write truncated response");
+        },
+    );
     let result = run_command_with_timeout(
         tool_command(&home, &project, &socket, "truncated"),
         CHILD_TIMEOUT,
@@ -347,11 +382,17 @@ fn generic_tool_reports_unavailable_truncation_storage() {
     }
     std::fs::write(&layout.response_handle_root, b"cache path is a file")
         .expect("block handle cache storage");
-    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
-        stream
-            .write_all(&files_response(&request, oversized_files()))
-            .expect("write oversized result");
-    });
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        |mut stream, request, scope| {
+            stream
+                .write_all(&files_response(&request, scope, oversized_files()))
+                .expect("write oversized result");
+        },
+    );
     let result = run_command_with_timeout(
         tool_command(&home, &project, &socket, "large"),
         CHILD_TIMEOUT,
@@ -389,11 +430,17 @@ fn generic_tool_reports_unavailable_truncation_storage() {
 fn generic_tool_retrieves_oversized_typed_result() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
     let expected = serde_json::to_value(oversized_files()).expect("expected file listing");
-    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
-        stream
-            .write_all(&files_response(&request, oversized_files()))
-            .expect("write oversized result");
-    });
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        |mut stream, request, scope| {
+            stream
+                .write_all(&files_response(&request, scope, oversized_files()))
+                .expect("write oversized result");
+        },
+    );
     let result = run_command_with_timeout(
         tool_command(&home, &project, &socket, "large"),
         CHILD_TIMEOUT,
@@ -466,10 +513,16 @@ fn generic_tool_retrieves_oversized_typed_result() {
 #[test]
 fn generic_read_only_tool_times_out_without_late_success() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
-        std::thread::sleep(Duration::from_secs(1));
-        let _ = stream.write_all(&response_bytes(&request, "too-late"));
-    });
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        |mut stream, request, scope| {
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = stream.write_all(&response_bytes(&request, scope, "too-late"));
+        },
+    );
     let mut command = tool_command(&home, &project, &socket, "never");
     command.env("TRACEDECAY_TOOL_DEADLINE_MS", "200");
     let result = run_command_with_timeout(command, CHILD_TIMEOUT);
@@ -504,17 +557,22 @@ fn generic_tool_handles_concurrent_requests_without_crosstalk() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
     let barrier = Arc::new(Barrier::new(2));
     let server_barrier = Arc::clone(&barrier);
-    let (_requests, server) =
-        spawn_scripted_daemon(socket.clone(), 2, move |mut stream, request| {
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        2,
+        move |mut stream, request, scope| {
             server_barrier.wait();
             let DaemonInvocationPayload::GraphTool { arguments, .. } = &request.payload else {
                 panic!("expected graph tool request");
             };
             let query = arguments["pattern"].as_str().expect("pattern argument");
             stream
-                .write_all(&response_bytes(&request, query))
+                .write_all(&response_bytes(&request, scope, query))
                 .expect("write concurrent response");
-        });
+        },
+    );
     let first = tool_command(&home, &project, &socket, "first");
     let second = tool_command(&home, &project, &socket, "second");
     let first = std::thread::spawn(move || run_command_with_timeout(first, CHILD_TIMEOUT));
@@ -532,13 +590,18 @@ fn generic_tool_handles_concurrent_requests_without_crosstalk() {
 fn cancelling_generic_tool_reaps_child_and_closes_request() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
     let (write_result_tx, write_result_rx) = mpsc::channel();
-    let (requests, server) =
-        spawn_scripted_daemon(socket.clone(), 1, move |mut stream, request| {
+    let (requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        move |mut stream, request, scope| {
             std::thread::sleep(Duration::from_millis(200));
             write_result_tx
-                .send(stream.write_all(&response_bytes(&request, "after-cancel")))
+                .send(stream.write_all(&response_bytes(&request, scope, "after-cancel")))
                 .expect("publish post-cancel write");
-        });
+        },
+    );
     let mut command = tool_command(&home, &project, &socket, "cancel");
     command
         .env("TRACEDECAY_TOOL_DEADLINE_MS", "30000")
