@@ -1,55 +1,28 @@
 #!/usr/bin/env python3
-"""Resolve the Linux test partitions and prove they cover every test target.
-
-`.github/linux-test-partitions.json` names the partitions the Linux test lane
-compiles and runs as parallel jobs. Each partition is a cargo selection
-(`-p <package>` plus target flags such as `--lib` or `--test <name>`), so the
-job builds only the test targets it runs and the lane's wall time is the
-slowest partition rather than the whole workspace. That is also the failure
-mode this script exists for: a target that no partition selects is a target
-CI never runs. `check` therefore resolves every partition against `cargo
-metadata` with cargo's own selection rules and fails unless every test target
-in the workspace is selected by exactly one partition, or is listed under
-`not_run` with a reason.
-
-Windows runs the same partitions as parallel jobs too, one hosted 4-vCPU
-`windows-latest` job each, under the partition's `windows_timeout_minutes`:
-the MSVC toolchain compiles the same selection about 2.5x slower than the Arm
-Linux runner, so the two budgets are measured separately.
-
-macOS runs the same partitions grouped: every partition names one of the
-`macos_groups` under `macos_group`, and each group is one hosted 3-vCPU job
-that runs its partitions' selections in turn against one target directory.
-`check` also proves that every partition names a listed group and every group
-runs at least one partition, and that the manifest stays within the
-MACOS_GROUP_CAP concurrent macOS jobs a run may take. A group's
-`budget_basis` is documentation: the measurement its `timeout_minutes` rests
-on.
+"""Resolve Cargo test selections and prove complete, disjoint coverage.
 
     linux-test-partitions.py [--metadata FILE] check
     linux-test-partitions.py [--metadata FILE] cargo-args <partition>
     linux-test-partitions.py [--metadata FILE] build-args <partition>
-    linux-test-partitions.py matrix
+    linux-test-partitions.py linux-matrix
     linux-test-partitions.py windows-matrix
     linux-test-partitions.py macos-matrix
+    linux-test-partitions.py [--metadata FILE] run-linux-group <group>
 
-`cargo-args` prints the selection for one partition as a shell-quoted
-argument list. `build-args` prints that selection plus the partition's
-`executables`, the binaries and examples its tests spawn rather than link,
-which a test build does not produce on its own, for a `cargo build` that
-shares the test build's resolution; it prints nothing for a partition with no
-executables. `matrix`, `windows-matrix` and `macos-matrix` print the
-`strategy.matrix` documents the Linux, Windows and macOS jobs feed through
-`fromJSON`.
+`cargo-args` and `build-args` emit shell-quoted selections. The Linux runner
+passes those same argument arrays through Hauler, preserves every partition's
+JUnit report, and writes build/test durations and exit codes to timings.json.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -154,8 +127,8 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
     if not isinstance(partitions, list) or not partitions:
         raise PartitionError(f"{path} has no partitions")
     names = [partition.get("name") for partition in partitions]
-    if any(not isinstance(name, str) or not name for name in names):
-        raise PartitionError(f"{path}: every partition needs a name")
+    if any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in names):
+        raise PartitionError(f"{path}: every partition needs a name using letters, digits, underscores or hyphens")
     if len(set(names)) != len(names):
         raise PartitionError(f"{path}: partition names repeat")
     for partition in partitions:
@@ -179,49 +152,45 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
         not isinstance(reason, str) or not reason for reason in not_run.values()
     ):
         raise PartitionError(f"{path}: not_run must map `package::target` to a reason")
-    macos_groups(document)
+    groups(document, "macos")
+    groups(document, "linux")
     return document
 
 
-def macos_groups(document: dict[str, Any]) -> dict[str, list[str]]:
-    """The macOS groups and the partitions each runs, in manifest order.
-
-    Every partition names exactly one listed group and every group runs at
-    least one partition, so a partition cannot fall out of the macOS lane and
-    a group job cannot run nothing; the group count is bounded by the macOS
-    concurrency one run may take.
-    """
-    groups = document.get("macos_groups")
-    if not isinstance(groups, list) or not groups:
-        raise PartitionError("manifest has no macos_groups")
+def groups(document: dict[str, Any], platform: str) -> dict[str, list[str]]:
+    label = {"linux": "Linux", "macos": "macOS"}[platform]
+    declarations = document.get(f"{platform}_groups")
+    if not isinstance(declarations, list) or not declarations:
+        raise PartitionError(f"manifest has no {platform}_groups")
     members: dict[str, list[str]] = {}
-    for group in groups:
+    for group in declarations:
         name = group.get("name") if isinstance(group, dict) else None
-        if not isinstance(name, str) or not name:
-            raise PartitionError("every macOS group needs a name")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise PartitionError(f"every {label} group needs a name using letters, digits, underscores or hyphens")
         if name in members:
-            raise PartitionError(f"macOS group names repeat: {name!r}")
+            raise PartitionError(f"{label} group names repeat: {name!r}")
         timeout = group.get("timeout_minutes")
-        if not isinstance(timeout, int) or timeout <= 0:
-            raise PartitionError(f"macOS group {name!r} needs a positive timeout")
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            raise PartitionError(f"{label} group {name!r} needs a positive timeout")
         members[name] = []
-    if len(members) > MACOS_GROUP_CAP:
+    if platform == "macos" and len(members) > MACOS_GROUP_CAP:
         raise PartitionError(
             f"{len(members)} macOS groups exceed the {MACOS_GROUP_CAP} concurrent macOS jobs a run may take"
         )
     for partition in document["partitions"]:
-        if "macos_group" not in partition:
-            raise PartitionError(f"partition {partition['name']!r} has no 'macos_group'")
-        group = partition["macos_group"]
-        if group not in members:
+        key = f"{platform}_group"
+        if key not in partition:
+            raise PartitionError(f"partition {partition['name']!r} has no {key!r}")
+        group = partition[key]
+        if not isinstance(group, str) or group not in members:
             raise PartitionError(
-                f"partition {partition['name']!r} names macOS group {group!r}, "
-                f"which is not listed under macos_groups"
+                f"partition {partition['name']!r} names {label} group {group!r}, "
+                f"which is not listed under {platform}_groups"
             )
         members[group].append(partition["name"])
     for name, partitions in members.items():
         if not partitions:
-            raise PartitionError(f"macOS group {name!r} runs no partition")
+            raise PartitionError(f"{label} group {name!r} runs no partition")
     return members
 
 
@@ -361,12 +330,13 @@ def check(document: dict[str, Any], metadata: dict[str, Any]) -> list[str]:
         f"{len(universe)} test targets: {sum(1 for names in owners.values() if names)} in exactly "
         f"one partition, {len(not_run)} listed under not_run"
     )
-    groups = macos_groups(document)
-    for group, partitions in groups.items():
-        lines.append(f"macOS {group}: {', '.join(partitions)}")
-    lines.append(
-        f"{len(document['partitions'])} partitions: each in exactly one of {len(groups)} macOS groups"
-    )
+    for platform, label in (("macos", "macOS"), ("linux", "Linux")):
+        members = groups(document, platform)
+        for group, partitions in members.items():
+            lines.append(f"{label} {group}: {', '.join(partitions)}")
+        lines.append(
+            f"{len(document['partitions'])} partitions: each in exactly one of {len(members)} {label} groups"
+        )
     return lines
 
 
@@ -410,7 +380,7 @@ def build_args(document: dict[str, Any], metadata: dict[str, Any], name: str) ->
     raise PartitionError(f"no partition named {name!r}")
 
 
-def matrix(document: dict[str, Any], timeout_key: str = "timeout_minutes") -> dict[str, Any]:
+def matrix(document: dict[str, Any], timeout_key: str) -> dict[str, Any]:
     """One matrix entry per partition; `timeout_key` selects the host's budget."""
     return {
         "include": [
@@ -420,9 +390,8 @@ def matrix(document: dict[str, Any], timeout_key: str = "timeout_minutes") -> di
     }
 
 
-def macos_matrix(document: dict[str, Any]) -> dict[str, Any]:
-    """One matrix entry per macOS group; `partitions` is the space-separated run order."""
-    members = macos_groups(document)
+def group_matrix(document: dict[str, Any], platform: str) -> dict[str, Any]:
+    members = groups(document, platform)
     return {
         "include": [
             {
@@ -430,9 +399,57 @@ def macos_matrix(document: dict[str, Any]) -> dict[str, Any]:
                 "timeout": group["timeout_minutes"],
                 "partitions": " ".join(members[group["name"]]),
             }
-            for group in document["macos_groups"]
+            for group in document[f"{platform}_groups"]
         ]
     }
+
+
+def run_linux_group(document: dict[str, Any], metadata: dict[str, Any], name: str) -> int:
+    members = groups(document, "linux")
+    if name not in members:
+        raise PartitionError(f"no Linux group named {name!r}")
+    check(document, metadata)
+    output = ROOT / "target/nextest/linux"
+    output.mkdir(parents=True, exist_ok=True)
+    source = ROOT / "target/nextest/ci/junit.xml"
+    results: dict[str, Any] = {"group": name, "partitions": []}
+    failed = False
+    for partition in members[name]:
+        result: dict[str, Any] = {"partition": partition, "build": None, "test": None, "report": None, "error": None}
+        print(f"::group::Test partition {partition}", flush=True)
+        try:
+            source.unlink(missing_ok=True)
+            destination = output / f"{partition}.xml"
+            destination.unlink(missing_ok=True)
+            build = build_args(document, metadata, partition)
+            commands = []
+            if build:
+                commands.append(("build", ["build", "--locked", "--profile", "perf", *build]))
+            commands.append(("test", [
+                "nextest", "run", "--profile", "ci", "--cargo-profile", "perf", "--locked",
+                *cargo_args(document, metadata, partition), "--no-tests=fail",
+            ]))
+            for stage, args in commands:
+                started = time.monotonic()
+                completed = subprocess.run(["hauler", "exec", "--", "cargo", *args], cwd=ROOT)
+                result[stage] = {"seconds": round(time.monotonic() - started, 3), "exit_code": completed.returncode}
+                if completed.returncode:
+                    failed = True
+                    break
+            if source.exists():
+                source.replace(destination)
+                result["report"] = destination.relative_to(ROOT).as_posix()
+            elif result["test"] is not None and result["test"]["exit_code"] == 0:
+                raise PartitionError(f"{partition}: nextest succeeded without its JUnit report")
+        except (OSError, PartitionError) as error:
+            result["error"] = str(error)
+            failed = True
+            print(f"::error::{error}", flush=True)
+        results["partitions"].append(result)
+        (output / "timings.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(result), flush=True)
+        print("::endgroup::", flush=True)
+    return int(failed)
 
 
 def main() -> None:
@@ -443,23 +460,23 @@ def main() -> None:
     commands.add_parser("check")
     for command in ("cargo-args", "build-args"):
         commands.add_parser(command).add_argument("partition")
-    commands.add_parser("matrix")
+    commands.add_parser("linux-matrix")
+    commands.add_parser("run-linux-group").add_argument("group")
     commands.add_parser("windows-matrix")
     commands.add_parser("macos-matrix")
     args = parser.parse_args()
 
     try:
         document = load_manifest(args.manifest)
-        if args.command == "matrix":
-            print(json.dumps(matrix(document)))
-            return
         if args.command == "windows-matrix":
             print(json.dumps(matrix(document, "windows_timeout_minutes")))
             return
-        if args.command == "macos-matrix":
-            print(json.dumps(macos_matrix(document)))
+        if args.command in ("linux-matrix", "macos-matrix"):
+            print(json.dumps(group_matrix(document, args.command.removesuffix("-matrix"))))
             return
         metadata = load_metadata(args.metadata)
+        if args.command == "run-linux-group":
+            raise SystemExit(run_linux_group(document, metadata, args.group))
         if args.command == "check":
             print("\n".join(check(document, metadata)))
         elif args.command == "cargo-args":

@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [master, feature/holographic-memory]
   workflow_dispatch:
@@ -25,17 +27,11 @@ on:
 permissions:
   contents: read
 
-# One run per ref, and a newer push cancels the run in flight, master
-# included. The newest master commit contains every merge before it, so its
-# run is the verdict on what ships; a superseded run proves nothing the newer
-# one does not. One master push spends 16 of the account's 20 hosted jobs, and
-# keeping superseded master runs (keyed per SHA) serialized a merge burst at
-# ~27 min per merge and left release-please waiting 80-93 min for a runner.
-# To attribute a break inside a burst, bisect or dispatch this workflow on a
-# branch at the suspect commit.
+# PR updates supersede their own run. Master finishes its current snapshot
+# and retains only the newest pending run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,13 +41,8 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Manual dispatch is the only PR-head entry point. GitHub queues a
-  # pull_request workflow before evaluating job conditions, and automation
-  # applied every opt-in label to 173 PRs; only removing the trigger prevents
-  # that volume from occupying the account FIFO. A dispatch runs the Linux
-  # lane and may add OS, host, perf, or full-workspace work through explicit
-  # inputs. A master push runs the Linux lane only so release jobs retain
-  # runner slots.
+  # Draft PRs run cheap gates. Ready PRs and pushes run the ordinary Linux
+  # lane; dispatch can additionally request OS, host and profiling work.
   scope-gate:
     name: Scope gate
     runs-on: ubuntu-latest
@@ -61,7 +52,7 @@ jobs:
       run-os: ${{ steps.decide.outputs.run-os }}
       run-hosts: ${{ steps.decide.outputs.run-hosts }}
       run-perf: ${{ steps.decide.outputs.run-perf }}
-      linux-partitions: ${{ steps.linux-partitions.outputs.matrix }}
+      linux-groups: ${{ steps.linux-groups.outputs.matrix }}
       windows-partitions: ${{ steps.windows-partitions.outputs.matrix }}
       macos-groups: ${{ steps.macos-groups.outputs.matrix }}
     steps:
@@ -69,11 +60,15 @@ jobs:
         id: decide
         env:
           EVENT: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft || false }}
           RUN_OS: ${{ inputs.run_os || false }}
           RUN_HOSTS: ${{ inputs.run_hosts || false }}
           RUN_PERF: ${{ inputs.run_perf || false }}
         run: |
           heavy=true
+          if [[ $EVENT == pull_request && $DRAFT == true ]]; then
+            heavy=false
+          fi
           os=false
           hosts=false
           perf=false
@@ -101,8 +96,8 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Derive the Linux test matrix
-        id: linux-partitions
-        run: echo "matrix=$(python3 scripts/linux-test-partitions.py matrix)" >> "$GITHUB_OUTPUT"
+        id: linux-groups
+        run: echo "matrix=$(python3 scripts/linux-test-partitions.py linux-matrix)" >> "$GITHUB_OUTPUT"
 
       - name: Derive the Windows test matrix
         id: windows-partitions
@@ -222,11 +217,9 @@ jobs:
           bash scripts/test-check-distribution-reuse.sh
           bash tests/macos_stable_codesign_test.sh
 
-      # Release guards: drift, safety, installer, PR integrity, bundle check.
-      # Pull requests only; the release PR itself is exempt because it is
-      # the one change allowed to move the version authorities.
+      # Exercise the release guard scripts when admitting proposed changes.
       - name: Check the release guards
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
         run: |
           bash tests/release_drift_check_test.sh
           bash tests/release_safety_test.sh
@@ -250,15 +243,14 @@ jobs:
           python3 scripts/test-check-dev-skill-mirrors.py
           python3 scripts/check-dev-skill-mirrors.py check
 
-      # Dispatch admits an integration branch. Judge the commits a merge onto
-      # the default branch would introduce, with the same linter a push uses.
-      # A push still uses the before SHA, so published history is not rejudged.
+      # Lint proposed commits without rejudging already-published history.
       - name: Validate commit messages
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         env:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: scripts/lint-ci-commits.sh
 
@@ -444,59 +436,19 @@ jobs:
           fi
           echo "All macOS groups passed."
 
-  # Linux compiles and runs the suite as parallel partitions of the test
-  # targets (.github/linux-test-partitions.json), one hosted 4-vCPU job each,
-  # so the lane's wall time is the slowest partition instead of the whole
-  # workspace. The single job that preceded it (run 34278967966, warm
-  # dependency cache, four compile slots) spent 55.5 min compiling: 32 min of
-  # workspace libraries beneath the root crate, then the root library
-  # (~8 min) and its library test target (~15.5 min), a serial chain that no
-  # job count shortens; the other 300-odd test units fit in the slots beside
-  # it. Tests then took 22.5 min, the dashboard's `test-transport` rebuild
-  # and run 11 min, and the hotpath parity rebuild ~16 min. Partitioned, the
-  # root chain is one job (`root-lib`: 19.7 min compile + 5.2 min tests, 25.9
-  # min in run 34296614024, the first partitioned run) while every other
-  # partition finishes in 17–27 min, so the lane's critical path drops from
-  # ~105 min to the slowest partition; the parity rebuild runs beside the
-  # partitions as `hotpath-parity` rather than after the root chain. Building
-  # the graph once and sharding only the test execution (the Windows lane's
-  # shape) keeps the whole 55 min compile plus an archive round trip on the
-  # path and then the dashboard rebuild and parity on the same job: ~88 min,
-  # or ~70 with both moved elsewhere. The partitions pay for the shorter path
-  # with duplicated compile. Each root partition rebuilds the library chain
-  # beneath the root crate, about 200 core-minutes per run across the seven
-  # jobs, which is free on hosted runners where only wall time and the
-  # 20-job concurrency cap count. A cold dependency cache adds ~6 min to every
-  # job alike (the dependencies compile at opt-level 0 in ~17 core-minutes).
-  # The floor no partitioning reaches is the root chain itself: library
-  # chain + root lib + root lib-test + its tests, the ~26 min above.
-  #
-  # The partitions are cargo selections, not nextest filters: `-p` plus
-  # `--lib` / `--test <name>` / `--bins` decide what compiles, and a filterset
-  # would compile everything and skip at run time. The three root partitions
-  # share one package selection (`tracedecay`, `tracedecay-cli`,
-  # `tracedecay-search-eval`) with the root fixture feature. Journeys also
-  # enable `tracedecay/search-eval`, the only link from the root crate to the
-  # evaluator library. It stays off every other partition: an unconditional
-  # dependency links the evaluator into every test target of the package.
-  # Every cargo invocation inside a job (the test build,
-  # the executables the suites spawn) is a cache hit against that job's
-  # resolution. `scripts/linux-test-partitions.py check` proves, from `cargo
-  # metadata`, that every test target in the workspace is selected by exactly
-  # one partition or listed under `not_run` with a reason, so a new crate or
-  # suite cannot fall out of the lane silently; `scope-gate` derives the
-  # matrix from the same manifest.
   linux-test-partition:
-    name: Test Linux ${{ matrix.partition }}
-    needs: scope-gate
+    name: Test Linux ${{ matrix.group }}
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    concurrency:
+      group: ci-linux-${{ matrix.group }}
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04-arm
-    # Each partition's budget is its measured wall time plus headroom, set in
-    # the manifest beside the selection it covers.
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.scope-gate.outputs.linux-partitions) }}
+      matrix: ${{ fromJSON(needs.scope-gate.outputs.linux-groups) }}
     steps:
       # Full history: the search-quality workload fixture pins a
       # `source_repository_commit`, and `validate_source_bindings` resolves that
@@ -539,31 +491,19 @@ jobs:
         with:
           version: ${{ env.AST_GREP_VERSION }}
 
+      - name: Install Cargo Hauler
+        run: |
+          echo "CARGO_HAULER_STATE_DIR=$RUNNER_TEMP/hauler" >> "$GITHUB_ENV"
+          npm install --global cargo-hauler@0.9.14
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      # One dependency cache for the lane, as before the split. rust-cache
-      # stores the dependency graph only, keyed by toolchain and lockfile; the
-      # workspace crates compile fresh every run. A single writer keeps the
-      # lane at one entry in the repository's 10 GB cache: `root-journeys`
-      # resolves the widest graph (the root crate with its dev-dependencies,
-      # the CLI and the evaluator), so its save covers the other root
-      # partitions exactly (`root-dashboard-api` selects the CLI package for
-      # that reason: alone, `-p tracedecay` resolves `mio` without the
-      # features the CLI's clap graph adds, so tokio and every workspace
-      # crate above it hash differently). The three lower partitions unify
-      # dependency features differently and each recompile ~150 dependency
-      # units (syn, serde_json, tokio, gix-*, grafeo-*, ...) against it every
-      # run, measured in run 36051245663: 4-6 min beside chains that end
-      # 4-12 min before `root-transport` does, cheaper than three more cache
-      # entries in the 10 GB budget (macOS, where the same recompile is 2.5x
-      # longer and on the lane's critical path, carries one). Crate sources
-      # come from the pnpm store that setup-pnpm restores, not from this cache.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-test-full-Linux-${{ runner.arch }}
-          save-if: ${{ matrix.partition == 'root-journeys' }}
+          save-if: ${{ matrix.group == 'root-journeys' }}
           cache-on-failure: true
 
       # Every partition job re-proves the cover before it compiles anything:
@@ -574,45 +514,22 @@ jobs:
           python3 scripts/test-linux-test-partitions.py
           python3 scripts/linux-test-partitions.py check
 
-      - name: Resolve this partition's cargo selection
-        id: selection
-        run: |
-          {
-            echo "test=$(python3 scripts/linux-test-partitions.py cargo-args '${{ matrix.partition }}')"
-            echo "build=$(python3 scripts/linux-test-partitions.py build-args '${{ matrix.partition }}')"
-          } >> "$GITHUB_OUTPUT"
+      - name: Run the group's partitions through Hauler
+        env:
+          GROUP: ${{ matrix.group }}
+        run: python3 scripts/linux-test-partitions.py run-linux-group "$GROUP"
 
-      # Suites that spawn the CLI (`tests/common::tracedecay_bin`) or the
-      # search-eval evaluators (`search_eval_bin`) resolve them out of the
-      # profile directory, and cargo links a package's bins for a test build
-      # only when that package's own integration tests are selected. This
-      # builds the partition's selection plus those executables in one
-      # resolution: the test targets keep dev-dependencies in the graph, so
-      # the nextest build below is a cache hit, and the selection includes
-      # `tracedecay-search-eval` so the evaluator resolves
-      # `tracedecay-code-index` with its language tiers (a lone
-      # `-p tracedecay-search-eval` build yields one that cannot parse Rust).
-      # The `tracedecay-host-cli-fixture` example is the host fixture the CLI
-      # suites drive. Partitions whose tests spawn nothing skip this.
-      - name: Build the executables the suites spawn
-        if: ${{ steps.selection.outputs.build != '' }}
-        run: cargo build --locked --profile perf ${{ steps.selection.outputs.build }}
-
-      # nextest `ci` policy (.config/nextest.toml: fail-fast off, one retry
-      # that still fails flaky results, 8 threads, slow-timeout termination)
-      # and the perf cargo profile, as `cargo test-ci`; the selection replaces
-      # the alias's `--workspace`. `--no-tests=fail` so a selection that
-      # resolves to nothing cannot report green.
-      - name: Run tests
-        run: cargo nextest run --profile ci --cargo-profile perf --locked ${{ steps.selection.outputs.test }} --no-tests=fail
+      - name: Stop the worker's Hauler daemon
+        if: always()
+        run: hauler daemon stop
 
       # `linux-test` folds the partition reports back into one report.
-      - name: Upload Linux partition nextest report
+      - name: Upload Linux partition reports and timings
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nextest-junit-Linux-${{ matrix.partition }}
-          path: target/nextest/ci/junit.xml
+          name: nextest-junit-Linux-${{ matrix.group }}
+          path: target/nextest/linux/
           if-no-files-found: ignore
           retention-days: 1
 
@@ -1021,12 +938,16 @@ jobs:
 
   clippy:
     name: Clippy
-    needs: scope-gate
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     # The free 4-vCPU Arm runner (Cobalt 100), as a measured comparison
     # against the x64 `ubuntu-latest` this lane took 19 minutes on: same
     # workload, same cache shape, different core. Public repositories get it
     # at no cost; the result decides whether the partitioned test jobs move.
+    concurrency:
+      group: ci-clippy
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -1090,8 +1011,12 @@ jobs:
   # already evicted from.
   feature-gates:
     name: Feature gates
-    needs: scope-gate
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    concurrency:
+      group: ci-feature-gates
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -1136,8 +1061,12 @@ jobs:
   # of it, and that workflow keeps its own cache lineage.
   shipped-cli:
     name: Shipped CLI build (x86_64-linux)
-    needs: scope-gate
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    concurrency:
+      group: ci-shipped-cli
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -1210,8 +1139,12 @@ jobs:
 
   dashboard:
     name: Dashboard
-    needs: scope-gate
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    concurrency:
+      group: ci-dashboard
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

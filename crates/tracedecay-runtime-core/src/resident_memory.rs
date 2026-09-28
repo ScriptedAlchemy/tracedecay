@@ -1644,6 +1644,16 @@ impl ResidentMemoryReservationV1 {
         self.reserved_bytes
     }
 
+    /// Charge overlapping work to this reservation's exact owner. The new
+    /// guard releases only its additional bytes, leaving this charge intact.
+    pub fn reserve_additional(
+        &self,
+        requested_bytes: NonZeroU64,
+    ) -> Result<Self, ResidentMemoryAdmissionFailureV1> {
+        self.authority.pressure().measure_admission_bytes();
+        self.authority.reserve(self.key.clone(), requested_bytes)
+    }
+
     pub fn shrink_to(
         &mut self,
         measured_bytes: u64,

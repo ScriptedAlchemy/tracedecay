@@ -224,6 +224,7 @@ mod tests {
     use tracedecay_global_db::configuration::resolver::{
         ConfigurationLayerV1, resolve_configuration,
     };
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     use super::{
         PinnedWorkExecutableBindingResolver, WorkExecutableBindingError,
@@ -241,15 +242,7 @@ mod tests {
     fn executable_digest_remains_raw_sha256() {
         let directory = TempDir::new().unwrap();
         let executable_path = directory.path().join("fixture");
-        std::fs::write(&executable_path, b"#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(&executable_path).unwrap().permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(&executable_path, permissions).unwrap();
-        }
+        write_executable_script(&executable_path, b"#!/bin/sh\nexit 0\n").unwrap();
 
         let (digest, byte_length) = digest_file(&executable_path).unwrap();
         assert_eq!(
@@ -295,15 +288,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let executable_path = directory.path().join("codex");
         let original = b"#!/bin/sh\nexit 0\n";
-        std::fs::write(&executable_path, original).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(&executable_path).unwrap().permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(&executable_path, permissions).unwrap();
-        }
+        write_executable_script(&executable_path, original).unwrap();
         let executable_path = executable_path.canonicalize().unwrap();
         let reference =
             WorkExecutableReference::new("codex.pinned".to_owned(), digest(original)).unwrap();

@@ -8,8 +8,8 @@ use tracedecay_code_index::production::{CodeIndexExecutionControlV1, VerifiedSea
 use tracedecay_domain::{ExactFieldV1, ManifestDigest, NodeKind};
 
 use super::super::{
-    CodeLexicalProjectionMetadataV1, ProjectedChunkV1, canonical_projected_exact_term,
-    exact_field_for_kind, normalized_search_text,
+    CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1,
+    canonical_projected_exact_term, exact_field_for_kind, normalized_search_text,
 };
 use super::clone_codec::{encode_clone_eligibility, encode_clone_payload};
 use super::format::{
@@ -294,6 +294,8 @@ pub(super) fn prepare_page(
                 parent_chunk_id: text.parent_chunk_id.as_deref(),
                 row: &document.row,
                 text: &text.text,
+                field_lengths: &text.field_lengths,
+                trimmed_normalized_len: text.trimmed_normalized_len,
             })
             .collect::<Vec<_>>(),
     )?;
@@ -466,6 +468,8 @@ fn prepare_base_sections_receipt(
 struct PreparedTextV1 {
     text: String,
     parent_chunk_id: Option<String>,
+    field_lengths: BTreeMap<LexicalFieldV1, usize>,
+    trimmed_normalized_len: usize,
 }
 
 /// One prepared document, its `(kind, n-gram)` keys, and its text.
@@ -559,6 +563,8 @@ fn prepare_document(
             .parent_chunk_id
             .as_ref()
             .map(|parent| parent.as_str().to_owned()),
+        trimmed_normalized_len: artifact_row.normalized_text.trim().len(),
+        field_lengths: artifact_row.field_lengths.clone(),
         text: artifact_row.sanitized_text.as_str().to_owned(),
     };
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();

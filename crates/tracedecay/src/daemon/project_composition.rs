@@ -5,6 +5,8 @@
 //! Unix broker, the portable broker, and the in-process test harness.
 
 use super::*;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::test_support::hold_after_core_publish_for_test;
 use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
 use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
 use tracedecay_code_index_runtime::code_index_scheduler;
@@ -1115,6 +1117,14 @@ impl ProjectOpenInputs<'_> {
             }
         }
         self.log_phase("core_published", None, self.started);
+        // The core is reachable from here. The hold lives in `test_support`,
+        // which a default or `production` build does not compile, so this
+        // open does not read `TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH`.
+        // Boxed so the hold's wait state stays out of this phase.
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            Box::pin(hold_after_core_publish_for_test()).await?;
+        }
         Ok(CoreRouteActivation {
             publication_attempt,
             core_source_edit_mutation,

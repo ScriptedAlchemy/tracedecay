@@ -4,8 +4,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::common::{
-    MessageRecordBuilder, canonical_existing_path as canonical_temp_path, create_runtime,
-    global_session,
+    MessageRecordBuilder, apply_isolated_profile_env,
+    canonical_existing_path as canonical_temp_path, create_runtime, global_session, hermetic_path,
 };
 use crate::provision_host_cli_fixture;
 #[cfg(unix)]
@@ -23,6 +23,7 @@ use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
     default_profile_project_id, profile_sharded_data_root, write_repository_identity_marker,
 };
+use tracedecay_runtime_core::test_executable::link_or_copy_executable;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 /// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
@@ -88,15 +89,10 @@ pub(crate) fn remove_repo_local_marker_dir_if_present(project: &Path) {
 
 fn tracedecay_command_without_daemon(home: &std::path::Path, project: &std::path::Path) -> Command {
     let home = canonical_temp_path(home);
-    let profile_root = profile_root(&home);
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    apply_isolated_profile_env(&mut command, &home, &profile_root(&home));
     command
         .current_dir(project)
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("TRACEDECAY_DATA_DIR", &profile_root)
-        .env("TRACEDECAY_GLOBAL_DB", profile_root.join("global.db"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -120,19 +116,8 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
     } else {
         "tracedecay"
     });
-    if std::fs::hard_link(env!("CARGO_BIN_EXE_tracedecay"), &shim).is_err() {
-        std::fs::copy(env!("CARGO_BIN_EXE_tracedecay"), &shim).unwrap();
-    }
-    #[cfg(unix)]
-    {
-        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim, permissions).unwrap();
-    }
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let joined =
-        std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(&path))).unwrap();
-    command.env("PATH", joined);
+    link_or_copy_executable(Path::new(env!("CARGO_BIN_EXE_tracedecay")), &shim).unwrap();
+    command.env("PATH", hermetic_path(&[bin_dir]));
     shim
 }
 
@@ -143,14 +128,7 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
 fn add_codex_plugin_cli_shim(command: &mut Command, home: &Path) {
     let bin_dir = home.join("bin");
     provision_host_cli_fixture::install_compiled_host_cli_fixture(&bin_dir, "codex");
-    let path = command
-        .get_envs()
-        .find(|(key, _)| *key == "PATH")
-        .and_then(|(_, value)| value.map(|value| value.to_os_string()))
-        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-    let joined =
-        std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(&path))).unwrap();
-    command.env("PATH", joined);
+    command.env("PATH", hermetic_path(&[bin_dir]));
 }
 
 fn arm_implicit_cursor_reinstall(home: &Path) {
@@ -400,9 +378,73 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     }
 }
 
-/// A git sync sent to a freshly started daemon reaches the project while its
-/// session authorities are still mounting; it must wait for that mount and
-/// complete, never report the session sync authority as unavailable.
+fn poll_git_sync(
+    child: &mut std::process::Child,
+    stdout: &mut Option<JoinHandle<Vec<u8>>>,
+    stderr: &mut Option<JoinHandle<Vec<u8>>>,
+) -> Option<Output> {
+    child
+        .try_wait()
+        .expect("git-sync status should be readable")
+        .map(|status| child_output(status, stdout.take(), stderr.take()))
+}
+
+fn git_sync_failure(message: &str, output: &Output) -> String {
+    format!(
+        "{message}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn assert_mounted_git_sync(output: &Output, dry_run: bool) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "sessions git-sync should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.starts_with("session git sync completed (session-sync."),
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .any(|line| line == "git-sync (dry-run): no rows were written"),
+        dry_run,
+        "{stdout}"
+    );
+}
+
+fn wait_for_git_sync(
+    child: &mut std::process::Child,
+    stdout: &mut Option<JoinHandle<Vec<u8>>>,
+    stderr: &mut Option<JoinHandle<Vec<u8>>>,
+) -> Output {
+    let finished = Instant::now() + cli_timeout();
+    loop {
+        if let Some(output) = poll_git_sync(child, stdout, stderr) {
+            return output;
+        }
+        if Instant::now() >= finished {
+            let _ = child.kill();
+            let status = child.wait().expect("git-sync should exit after kill");
+            panic!(
+                "{}",
+                git_sync_failure(
+                    "sessions git-sync did not finish after the full server mounted",
+                    &child_output(status, stdout.take(), stderr.take())
+                )
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A git sync that arrives while the core owner is published, and the full
+/// server has not mounted session sync, must keep running. Releasing the
+/// hold lets the full server answer; a later sync then writes for real.
 #[test]
 fn sessions_git_sync_on_a_cold_daemon_waits_for_the_project_mount() {
     let home = TempDir::new().unwrap();
@@ -410,33 +452,67 @@ fn sessions_git_sync_on_a_cold_daemon_waits_for_the_project_mount() {
     let project_root = canonical_temp_path(project.path());
     write_git_fixture(&project_root);
     init_project_fixture(home.path(), &project_root);
-    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
 
-    for (args, previews) in [
-        (&["sessions", "git-sync", "--dry-run"][..], true),
-        (&["sessions", "git-sync"][..], false),
-    ] {
-        let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
-        command.args(args);
-        let output = run_with_timeout(command, cli_timeout());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let hold = canonical_temp_path(home.path()).join("hold-after-core-publish");
+    std::fs::write(&hold, b"hold").unwrap();
+    let entered = PathBuf::from(format!("{}.entered", hold.display()));
+    let _daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), {
+        let hold = hold.clone();
+        move |command| {
+            command.env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold);
+        }
+    });
+
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+    command.args(["sessions", "git-sync", "--dry-run"]);
+    let mut child = command
+        .spawn()
+        .expect("tracedecay sessions git-sync should spawn");
+    let mut stdout = child.stdout.take().map(drain_pipe);
+    let mut stderr = child.stderr.take().map(drain_pipe);
+
+    let core_visible = Instant::now() + Duration::from_secs(30);
+    while !entered.is_file() {
+        if let Some(output) = poll_git_sync(&mut child, &mut stdout, &mut stderr) {
+            panic!(
+                "{}",
+                git_sync_failure(
+                    "sessions git-sync finished before the core owner was held",
+                    &output
+                )
+            );
+        }
         assert!(
-            output.status.success(),
-            "{args:?} should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            Instant::now() < core_visible,
+            "core publication was not held"
         );
-        assert!(
-            stdout.starts_with("session git sync completed (session-sync."),
-            "{args:?}\nstdout:\n{stdout}"
-        );
-        assert_eq!(
-            stdout
-                .lines()
-                .any(|line| line == "git-sync (dry-run): no rows were written"),
-            previews,
-            "{args:?}\nstdout:\n{stdout}"
-        );
+        std::thread::sleep(Duration::from_millis(20));
     }
+    // A terminal unavailable answer returns immediately. Waiting for the
+    // mount keeps the command running for this whole interval.
+    let still_mounting = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < still_mounting {
+        if let Some(output) = poll_git_sync(&mut child, &mut stdout, &mut stderr) {
+            panic!(
+                "{}",
+                git_sync_failure(
+                    "sessions git-sync stopped while the project was still mounting",
+                    &output
+                )
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    std::fs::remove_file(&hold).unwrap();
+    assert_mounted_git_sync(
+        &wait_for_git_sync(&mut child, &mut stdout, &mut stderr),
+        true,
+    );
+
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+    command.args(["sessions", "git-sync"]);
+    assert_mounted_git_sync(&run_with_timeout(command, cli_timeout()), false);
 }
 
 fn refresh_json(output: &Output, step: &str) -> serde_json::Value {

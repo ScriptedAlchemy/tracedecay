@@ -1,8 +1,8 @@
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use tempfile::TempDir;
 
@@ -17,12 +17,7 @@ struct RunnerInvocation {
 }
 
 fn write_executable(path: &Path, body: &str) {
-    fs::write(path, body).expect("write fake executable");
-    let mut permissions = fs::metadata(path)
-        .expect("inspect fake executable")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("make fake executable runnable");
+    write_executable_script(path, body).expect("write fake executable");
 }
 
 fn invoke_runner(uname: &str, mode: &str) -> RunnerInvocation {

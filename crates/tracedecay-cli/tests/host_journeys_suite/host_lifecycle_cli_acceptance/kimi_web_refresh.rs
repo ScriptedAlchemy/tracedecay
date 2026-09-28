@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 
 use super::IsolatedCli;
 use super::sweep_outcomes::complete_kimi_plugins_install;
+use crate::isolated_profile::hermetic_path;
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 const PENDING_OPERATOR_ACTION_EXIT: i32 = 75;
 const TOKEN: &str = "fake-kimi-server-token";
@@ -116,15 +118,12 @@ impl FakeKimi {
     /// Put the fake `kimi` first on the isolated `PATH`, with its interpreter
     /// named absolutely so the fake needs nothing else from `PATH`.
     fn install(cli: &IsolatedCli) -> Self {
-        use std::os::unix::fs::PermissionsExt;
-
-        let python = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        let python = std::env::split_paths(&hermetic_path::<&Path>(&[]))
             .map(|dir| dir.join("python3"))
             .find(|candidate| candidate.is_file())
-            .expect("python3 on PATH for the fake Kimi Code server");
+            .expect("python3 in a system dir for the fake Kimi Code server");
         let kimi = cli.bin_dir.join("kimi");
-        fs::write(&kimi, format!("#!{}\n{FAKE_KIMI}", python.display())).unwrap();
-        fs::set_permissions(&kimi, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&kimi, format!("#!{}\n{FAKE_KIMI}", python.display())).unwrap();
         let code_home = cli.home.path().join(".kimi-code");
         fs::create_dir_all(code_home.join("fake-kimi")).unwrap();
         fs::write(code_home.join("server.token"), format!("{TOKEN}\n")).unwrap();
@@ -224,7 +223,7 @@ fn update_plugin_refreshes_the_installed_kimi_plugin_through_kimi_web() {
     let cli = IsolatedCli::new();
     let kimi = FakeKimi::install(&cli);
 
-    let install = cli.run_without_host_clis(&["install", "--agent", "kimi"]);
+    let install = cli.run(&["install", "--agent", "kimi"]);
     let install_stderr = stderr(&install);
     assert_eq!(
         install.status.code(),
@@ -242,7 +241,7 @@ fn update_plugin_refreshes_the_installed_kimi_plugin_through_kimi_web() {
     );
 
     kimi.install_previous_release(&cli);
-    let update = cli.run_without_host_clis(&["update-plugin"]);
+    let update = cli.run(&["update-plugin"]);
     let update_stderr = stderr(&update);
 
     assert_eq!(update.status.code(), Some(0), "{update_stderr}");
@@ -280,7 +279,7 @@ fn update_plugin_refreshes_the_installed_kimi_plugin_through_kimi_web() {
             .unwrap();
     assert_eq!(child_env, json!({"KIMI_CODE_NO_AUTO_UPDATE": "1"}));
 
-    let doctor = stderr(&cli.run_without_host_clis(&["doctor"]));
+    let doctor = stderr(&cli.run(&["doctor"]));
     assert!(
         doctor.contains("Kimi Code CLI managed plugin matches its staged source"),
         "{doctor}"
@@ -292,14 +291,14 @@ fn update_plugin_refreshes_the_installed_kimi_plugin_through_kimi_web() {
 fn kimi_web_refresh_never_installs_a_plugin_kimi_lists_from_another_source() {
     let cli = IsolatedCli::new();
     let kimi = FakeKimi::install(&cli);
-    let _ = cli.run_without_host_clis(&["install", "--agent", "kimi"]);
+    let _ = cli.run(&["install", "--agent", "kimi"]);
     kimi.install_previous_release(&cli);
     kimi.set(
         "listed-source",
         &cli.home.path().join("foreign-plugin").display().to_string(),
     );
 
-    let update = cli.run_without_host_clis(&["update-plugin"]);
+    let update = cli.run(&["update-plugin"]);
     let update_stderr = stderr(&update);
 
     assert_eq!(
@@ -327,11 +326,11 @@ fn kimi_web_refresh_never_installs_a_plugin_kimi_lists_from_another_source() {
 fn kimi_web_refresh_falls_back_to_the_operator_step_when_kimi_refuses_the_token() {
     let cli = IsolatedCli::new();
     let kimi = FakeKimi::install(&cli);
-    let _ = cli.run_without_host_clis(&["install", "--agent", "kimi"]);
+    let _ = cli.run(&["install", "--agent", "kimi"]);
     kimi.install_previous_release(&cli);
     kimi.set("mode", "unauthorized");
 
-    let update = cli.run_without_host_clis(&["update-plugin"]);
+    let update = cli.run(&["update-plugin"]);
     let update_stderr = stderr(&update);
 
     assert_eq!(
@@ -365,11 +364,11 @@ fn kimi_web_refresh_falls_back_to_the_operator_step_when_kimi_refuses_the_token(
 fn kimi_web_refresh_falls_back_to_the_operator_step_when_kimi_never_serves() {
     let cli = IsolatedCli::new();
     let kimi = FakeKimi::install(&cli);
-    let _ = cli.run_without_host_clis(&["install", "--agent", "kimi"]);
+    let _ = cli.run(&["install", "--agent", "kimi"]);
     kimi.install_previous_release(&cli);
     kimi.set("mode", "hang");
 
-    let update = cli.run_without_host_clis(&["update-plugin"]);
+    let update = cli.run(&["update-plugin"]);
     let update_stderr = stderr(&update);
 
     assert_eq!(
@@ -397,11 +396,11 @@ fn kimi_web_refresh_falls_back_to_the_operator_step_when_kimi_never_serves() {
 fn kimi_web_refresh_falls_back_to_the_operator_step_without_a_kimi_cli() {
     let cli = IsolatedCli::new();
     let kimi = FakeKimi::install(&cli);
-    let _ = cli.run_without_host_clis(&["install", "--agent", "kimi"]);
+    let _ = cli.run(&["install", "--agent", "kimi"]);
     kimi.install_previous_release(&cli);
     fs::remove_file(cli.bin_dir.join("kimi")).unwrap();
 
-    let update = cli.run_without_host_clis(&["update-plugin"]);
+    let update = cli.run(&["update-plugin"]);
     let update_stderr = stderr(&update);
 
     assert_eq!(

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
@@ -12,6 +12,9 @@ use tracedecay_agent_hosts::agents::host_bundle::{
 };
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
 use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
+use tracedecay_runtime_core::test_executable::link_or_copy_executable;
+
+use crate::isolated_profile::{apply_isolated_profile_env, hermetic_path};
 
 #[cfg(unix)]
 #[path = "host_lifecycle_cli_acceptance/kimi_web_refresh.rs"]
@@ -228,17 +231,7 @@ impl IsolatedCli {
         } else {
             "tracedecay"
         });
-        if fs::hard_link(env!("CARGO_BIN_EXE_tracedecay"), &shim).is_err() {
-            fs::copy(env!("CARGO_BIN_EXE_tracedecay"), &shim).unwrap();
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = fs::metadata(&shim).unwrap().permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&shim, permissions).unwrap();
-        }
+        link_or_copy_executable(Path::new(env!("CARGO_BIN_EXE_tracedecay")), &shim).unwrap();
         Self {
             home,
             project,
@@ -254,25 +247,15 @@ impl IsolatedCli {
         tracedecay_domain::forward_slash_text(self.shim.to_str().expect("UTF-8 test path"))
     }
 
+    /// The only host CLIs the child can resolve are the fakes a test put in
+    /// `bin_dir`.
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-        let path = std::env::join_paths(
-            std::iter::once(self.bin_dir.clone()).chain(std::env::split_paths(&inherited_path)),
-        )
-        .unwrap();
+        apply_isolated_profile_env(&mut command, self.home.path(), &self.profile);
         command
             .args(args)
             .current_dir(self.project.path())
-            .env("HOME", self.home.path())
-            .env("USERPROFILE", self.home.path())
-            .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
-            .env("TRACEDECAY_DATA_DIR", &self.profile)
-            .env("TRACEDECAY_GLOBAL_DB", self.profile.join("global.db"))
-            // `HOME` is the sandbox here, so an inherited Pi relocation would
-            // otherwise be honored and point outside it.
-            .env_remove("PI_CODING_AGENT_DIR")
-            .env("PATH", path)
+            .env("PATH", hermetic_path(&[&self.bin_dir]))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -281,14 +264,6 @@ impl IsolatedCli {
 
     fn run(&self, args: &[&str]) -> Output {
         self.command(args).output().unwrap()
-    }
-
-    /// Runs with only the isolated bin dir on `PATH`, so no host CLI the
-    /// machine happens to carry can resolve.
-    fn run_without_host_clis(&self, args: &[&str]) -> Output {
-        let mut command = self.command(args);
-        command.env("PATH", &self.bin_dir);
-        command.output().unwrap()
     }
 
     fn run_with_env(&self, args: &[&str], key: &str, value: &str) -> Output {
@@ -1166,7 +1141,7 @@ fn codex_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
     let originals = seed_host(case, &cli);
     let home = cli.home.path();
 
-    let refused = cli.run_without_host_clis(&["install", "--agent", case.id]);
+    let refused = cli.run(&["install", "--agent", case.id]);
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
@@ -1405,7 +1380,7 @@ fn claude_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
     let source_manifest =
         home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/plugin.json");
 
-    let refused = cli.run_without_host_clis(&["install", "--agent", case.id]);
+    let refused = cli.run(&["install", "--agent", case.id]);
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(

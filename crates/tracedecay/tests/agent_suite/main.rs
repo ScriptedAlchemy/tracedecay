@@ -14,6 +14,8 @@ mod agent_registry_test;
 mod agent_targets_test;
 mod claude_plugin_bundle_test;
 mod claude_plugin_schema_test;
+#[cfg(unix)]
+mod host_cli_lookup_test;
 mod host_io_bundle_test;
 mod managed_skill_archive_test;
 mod managed_skills_test;
@@ -26,4 +28,3 @@ mod skill_lint_cursor_test;
 mod skill_materialization_test;
 mod skill_targets_test;
 mod skill_usage_test;
-mod tool_skill_coverage_test;

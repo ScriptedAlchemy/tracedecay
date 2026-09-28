@@ -215,6 +215,8 @@ pub fn parse_tsc_line(line: &str) -> Option<Diagnostic> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     #[test]
     fn parse_basic_error_line() {
@@ -274,13 +276,13 @@ src/b.ts(2,2): warning TS6133: Second.
             let tsconfig = project.path().join("packages/app/tsconfig.json");
             let compiler = project.path().join("tsc");
             // Reports only when pointed at exactly the requested tsconfig.
-            write_script(
+            write_executable_script(
                 &compiler,
-                &format!(
+                format!(
                     "#!/bin/sh\n[ \"$1 $2 $3\" = \"-p {} --noEmit\" ] || exit 9\necho \"packages/app/src/index.ts(3,14): error TS4023: Exported variable 'value' cannot be named.\"\nexit {exit}\n",
                     tsconfig.display()
                 ),
-            );
+            ).unwrap();
 
             let diagnostics = run_compiler(&compiler, project.path(), &tsconfig, None)
                 .await
@@ -296,10 +298,11 @@ src/b.ts(2,2): warning TS6133: Second.
     async fn run_compiler_refuses_a_check_that_named_no_inputs() {
         let project = tempfile::tempdir().unwrap();
         let compiler = project.path().join("tsc");
-        write_script(
+        write_executable_script(
             &compiler,
             "#!/bin/sh\necho \"error TS18003: No inputs were found in config file.\"\nexit 3\n",
-        );
+        )
+        .unwrap();
 
         let error = run_compiler(
             &compiler,
@@ -313,28 +316,5 @@ src/b.ts(2,2): warning TS6133: Second.
             error.to_string().contains("TS18003"),
             "the refusal names the compiler's own error: {error}"
         );
-    }
-
-    /// Writes an executable script from a child shell so this process never
-    /// holds a writable descriptor to it: a sibling test forking while one is
-    /// open makes executing the script fail with `ETXTBSY`.
-    #[cfg(unix)]
-    fn write_script(path: &Path, body: &str) {
-        use std::io::Write;
-
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("cat > \"$0\" && chmod 755 \"$0\"")
-            .arg(path)
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(body.as_bytes())
-            .unwrap();
-        assert!(child.wait().unwrap().success());
     }
 }

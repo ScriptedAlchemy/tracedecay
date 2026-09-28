@@ -7,9 +7,11 @@ use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 
-/// Revision 29 is the only layout this build serves: interned exact terms,
+/// Revision 30 is the only layout this build serves: interned exact terms,
 /// integer field codes, rows stored as deflated blocks of consecutive
-/// documents (per-file and per-symbol strings interned once as
+/// documents with an uncompressed scoring preface (chunk id, field lengths,
+/// and trimmed normalized-text length) ahead of the deflated payload
+/// (per-file and per-symbol strings interned once as
 /// `row_dictionary` entries, a signature chunk's text stored as the prefix
 /// it shares with its body chunk), one `term_postings` row per term text
 /// carrying every field's delta-varint list, one `exact_postings` list per
@@ -32,9 +34,9 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// seal, so identical trees in different worktrees seal byte-identical
 /// files. Every other revision is refused as incompatible and rebuilt from
 /// the sealed generation.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 29;
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 30;
 
-const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v29\0";
+const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v30\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;
@@ -299,7 +301,7 @@ mod tests {
     fn superseded_revisions_are_rejected() {
         require_served_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1)
             .expect("the served revision opens");
-        for revision in [16, 20, 22, 25, 26, 27, 28, 30] {
+        for revision in [16, 20, 22, 25, 26, 27, 28, 29] {
             assert!(matches!(
                 require_served_revision(revision),
                 Err(CodeLexicalArtifactErrorV1::Incompatible(message))

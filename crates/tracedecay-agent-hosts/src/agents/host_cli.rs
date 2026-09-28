@@ -24,6 +24,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::config::host_program_search_path;
 
 pub(crate) use tracedecay_automation_runtime::automation::executable_lookup::resolve_on_path;
 
@@ -103,7 +104,7 @@ impl HostCliOutcomeV1 {
 /// plugin lifecycle"), so the operator learns both what is missing and what it
 /// was needed for.
 pub(crate) fn require_host_cli(program: &str, lifecycle: &str) -> Result<PathBuf> {
-    let path_var = tracedecay_runtime_core::config::host_program_search_path();
+    let path_var = host_program_search_path();
     require_host_cli_from(program, lifecycle, path_var.as_deref())
 }
 
@@ -573,7 +574,7 @@ fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
         if interpreter.starts_with('-') || interpreter.contains('=') {
             return Ok((program.to_path_buf(), Vec::new()));
         }
-        let search_path = tracedecay_runtime_core::config::host_program_search_path();
+        let search_path = host_program_search_path();
         let interpreter_path = resolve_on_path(interpreter, search_path.as_deref())?.ok_or_else(
             || TraceDecayError::Config {
                 message: format!(
@@ -636,16 +637,14 @@ fn admit_windows_profile_environment(command: &mut Command, home: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     /// Write an executable shell script usable as a fake host CLI, mirroring
     /// the `install_fake_codex_launcher` pattern used by the root test suite.
     #[cfg(unix)]
     pub(super) fn write_fake_cli(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write fake host cli");
-        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("chmod fake host cli");
+        write_executable_script(path, format!("#!/bin/sh\n{body}\n")).expect("write fake host cli");
     }
 
     #[test]
@@ -817,13 +816,11 @@ printf '%s' "$HOME" > "$HOME/home"
     #[cfg(unix)]
     #[test]
     fn env_shebang_interpreter_is_resolved_before_ambient_path_is_cleared() {
-        use std::os::unix::fs::PermissionsExt;
-
         let home = tempfile::tempdir().unwrap();
         let node_dir = tempfile::tempdir().unwrap();
         let attacker_dir = tempfile::tempdir().unwrap();
         let node = node_dir.path().join("node");
-        std::fs::write(
+        write_executable_script(
             &node,
             r#"#!/bin/sh
 printf '%s' "$*" > "$HOME/node-args"
@@ -832,25 +829,16 @@ exit 0
 "#,
         )
         .unwrap();
-        let mut node_permissions = std::fs::metadata(&node).unwrap().permissions();
-        node_permissions.set_mode(0o755);
-        std::fs::set_permissions(&node, node_permissions).unwrap();
 
         let attacker = attacker_dir.path().join("attacker");
-        std::fs::write(
+        write_executable_script(
             &attacker,
             "#!/bin/sh\nprintf '%s' invoked > \"$HOME/attacker-ran\"\n",
         )
         .unwrap();
-        let mut attacker_permissions = std::fs::metadata(&attacker).unwrap().permissions();
-        attacker_permissions.set_mode(0o755);
-        std::fs::set_permissions(&attacker, attacker_permissions).unwrap();
 
         let launcher = home.path().join("kiro-cli");
-        std::fs::write(&launcher, "#!/usr/bin/env node\n").unwrap();
-        let mut launcher_permissions = std::fs::metadata(&launcher).unwrap().permissions();
-        launcher_permissions.set_mode(0o755);
-        std::fs::set_permissions(&launcher, launcher_permissions).unwrap();
+        write_executable_script(&launcher, "#!/usr/bin/env node\n").unwrap();
 
         let path = std::env::join_paths([node_dir.path(), attacker_dir.path()]).unwrap();
         let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&path);
@@ -888,12 +876,12 @@ exit 0
     #[cfg(unix)]
     #[test]
     fn env_shebang_interpreter_preserves_multicall_symlink_name() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::symlink;
 
         let home = tempfile::tempdir().unwrap();
         let bin_dir = tempfile::tempdir().unwrap();
         let shim = bin_dir.path().join("volta-shim");
-        std::fs::write(
+        write_executable_script(
             &shim,
             r#"#!/bin/sh
 if [ "$(basename "$0")" != node ]; then
@@ -904,16 +892,10 @@ printf '%s' "$*" > "$HOME/node-args"
 "#,
         )
         .unwrap();
-        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim, permissions).unwrap();
         symlink(&shim, bin_dir.path().join("node")).unwrap();
 
         let launcher = home.path().join("codex");
-        std::fs::write(&launcher, "#!/usr/bin/env node\n").unwrap();
-        let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&launcher, permissions).unwrap();
+        write_executable_script(&launcher, "#!/usr/bin/env node\n").unwrap();
 
         let path = std::env::join_paths([bin_dir.path()]).unwrap();
         let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&path);

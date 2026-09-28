@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::io::Read;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -40,7 +40,7 @@ use tracedecay_domain::{
     RetrieverBatch, RetrieverCoverage, RetrieverOutcome, SanitizationReceiptId,
     SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId,
     SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1, SourceFreshness,
-    SourceInstanceKey, SourceNamespace, TemporalModeV1, UtcMicros, VectorWatermark,
+    SourceInstanceKey, SourceNamespace, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -63,6 +63,11 @@ use tracedecay_query::retrieval::ports::{
     ExactTermPostingReadPort, LexicalPostingReadPort, RetrievalExecutionControl, RetrievalPortError,
 };
 use tracedecay_query::retrieval::{QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1};
+
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ProcessResidentSampleV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryKeyV1, ResidentMemoryPressureV1,
+};
 
 /// The request authority every uncancelled fixture request runs under.
 pub(crate) struct FixtureRetrievalExecutionControl;
@@ -2149,6 +2154,281 @@ fn hot_only_fingerprints_are_partial_while_exact_digest_reads_still_work() {
     );
 }
 
+/// Concurrent reads share a fixed reservation and stay bound to the verified
+/// file even after its published name is removed. No query opens another file.
+#[test]
+fn concurrent_artifact_reads_are_bounded_and_keep_the_verified_file() {
+    struct PausedScan {
+        entered: std::sync::mpsc::Sender<()>,
+        resume: Mutex<std::sync::mpsc::Receiver<()>>,
+        paused: AtomicBool,
+    }
+    impl RetrievalExecutionControl for PausedScan {
+        fn is_cancelled(&self) -> bool {
+            if !self.paused.swap(true, Ordering::SeqCst) {
+                self.entered.send(()).expect("report scan checkpoint");
+                // A failing assertion drops the sender and releases the worker.
+                let _ = self
+                    .resume
+                    .lock()
+                    .expect("resume lock")
+                    .recv_timeout(std::time::Duration::from_secs(30));
+            }
+            false
+        }
+        fn elapsed_micros(&self) -> u64 {
+            0
+        }
+    }
+
+    let fixture = real_lexical_source_fixture_with_files(24);
+    let mut artifact = sealed_artifact(&fixture, fixture.metadata.clone());
+    let reader_bytes = CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 as u64;
+    let ceiling = NonZeroU64::new(
+        (CodeLexicalArtifactReaderV1::MAX_CONCURRENT_READS as u64 + 1) * reader_bytes,
+    )
+    .expect("memory ceiling");
+    let observed = Arc::new(AtomicU64::new(0));
+    let sampler_observed = Arc::clone(&observed);
+    let pressure = ResidentMemoryPressureV1::with_sampler(
+        ceiling,
+        Arc::new(move || {
+            let bytes = sampler_observed.load(Ordering::SeqCst);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: bytes,
+                unreclaimable_bytes: bytes,
+            })
+        }),
+    );
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        ceiling,
+        Arc::new(pressure),
+    ));
+    let reservation = memory
+        .reserve(
+            ResidentMemoryKeyV1 {
+                project_id: ProjectId::new("project.concurrent-reader").expect("project"),
+                worktree_id: WorktreeId::new("worktree.concurrent-reader").expect("worktree"),
+                generation_id: artifact.metadata.generation.clone(),
+                component: ResidentMemoryComponentIdV1::new("code-text-reader").expect("component"),
+            },
+            NonZeroU64::new(reader_bytes).expect("reader budget"),
+        )
+        .expect("reserve baseline");
+    artifact.reader = artifact
+        .reader
+        .with_resident_memory_reservation(reservation);
+    let request = artifact.request("widget", &["widget"], &[], &[], 0, 64);
+    let expected = artifact
+        .reader
+        .read_lexical_postings(&request)
+        .expect("baseline read");
+    assert!(!complete(expected.clone()).candidates.is_empty());
+    let reserved = artifact.reader.retained_owned_bytes();
+    assert!(reserved <= CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1);
+
+    std::thread::scope(|scope| {
+        let mut resumes = Vec::new();
+        let mut workers = Vec::new();
+        for _ in 0..CodeLexicalArtifactReaderV1::MAX_CONCURRENT_READS {
+            let (entered, reached) = std::sync::mpsc::channel();
+            let (resume, receiver) = std::sync::mpsc::channel();
+            resumes.push(resume);
+            let artifact = &artifact;
+            workers.push(scope.spawn(move || {
+                let control = PausedScan {
+                    entered,
+                    resume: Mutex::new(receiver),
+                    paused: AtomicBool::new(false),
+                };
+                let mut request = artifact.request("widget", &["widget"], &[], &[], 0, 64);
+                request.control = &control;
+                artifact.reader.read_lexical_postings(&request)
+            }));
+            reached
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("each admitted reader reaches its scan concurrently");
+        }
+        assert_eq!(
+            memory.snapshot().used_bytes,
+            CodeLexicalArtifactReaderV1::MAX_CONCURRENT_READS as u64 * reader_bytes,
+            "the overlapping scan has its own scratch reservation"
+        );
+        let (started, starting) = std::sync::mpsc::channel();
+        let (completed, completion) = std::sync::mpsc::channel();
+        let artifact = &artifact;
+        let queued = scope.spawn(move || {
+            started.send(()).expect("report queued reader");
+            let request = artifact.request("widget", &["widget"], &[], &[], 0, 64);
+            let result = artifact.reader.read_lexical_postings(&request);
+            completed.send(()).expect("report completion");
+            result
+        });
+        starting.recv().expect("queued read starts");
+        assert!(
+            matches!(
+                completion.recv_timeout(std::time::Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a burst must queue instead of allocating another reader"
+        );
+        struct WaitingCancellation {
+            cancelled: Arc<AtomicBool>,
+            waiting: std::sync::mpsc::Sender<()>,
+            reported: AtomicBool,
+        }
+        impl RetrievalExecutionControl for WaitingCancellation {
+            fn is_cancelled(&self) -> bool {
+                if !self.reported.swap(true, Ordering::SeqCst) {
+                    self.waiting.send(()).expect("report waiting checkpoint");
+                }
+                self.cancelled.load(Ordering::SeqCst)
+            }
+            fn elapsed_micros(&self) -> u64 {
+                0
+            }
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let (waiting, parked) = std::sync::mpsc::channel();
+        let (settled, settlement) = std::sync::mpsc::channel();
+        let abandoned = scope.spawn(move || {
+            let control = WaitingCancellation {
+                cancelled: worker_cancelled,
+                waiting,
+                reported: AtomicBool::new(false),
+            };
+            let mut request = artifact.request("widget", &["widget"], &[], &[], 0, 64);
+            request.control = &control;
+            let result = artifact.reader.read_lexical_postings(&request);
+            settled.send(()).expect("report cancelled waiter");
+            result
+        });
+        parked
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("cancelled reader is parked");
+        cancelled.store(true, Ordering::SeqCst);
+        settlement
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("cancellation settles before either active scan releases");
+        assert_eq!(
+            abandoned.join().expect("cancelled waiter joins"),
+            Err(RetrievalPortError::Cancelled)
+        );
+
+        resumes
+            .pop()
+            .expect("nonprimary reader resume")
+            .send(())
+            .expect("release nonprimary handle");
+        completion
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("queued reader uses a free nonprimary handle while the first is still held");
+        for resume in resumes {
+            resume.send(()).expect("release first scan");
+        }
+        for worker in workers {
+            assert_eq!(
+                worker.join().expect("scan joins").expect("scan completes"),
+                expected
+            );
+        }
+        assert_eq!(
+            queued
+                .join()
+                .expect("queued scan joins")
+                .expect("queued scan completes"),
+            expected
+        );
+    });
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        reader_bytes,
+        "completed scans release their extra reservation"
+    );
+    assert_eq!(artifact.reader.retained_owned_bytes(), reserved);
+    assert_eq!(
+        artifact
+            .reader
+            .read_lexical_postings(&request)
+            .expect("read after release"),
+        expected
+    );
+
+    // Unix permits unlinking an open SQLite file. The retained handles must
+    // continue reading the original bytes, never the newly named file.
+    #[cfg(unix)]
+    {
+        let path = artifact._directory.path().join("lexical.sqlite");
+        std::fs::remove_file(&path).expect("unlink the artifact pathname");
+        std::fs::write(&path, b"replacement is not the verified SQLite file")
+            .expect("replace pathname");
+        for over_budget in [false, true] {
+            observed.store(
+                if over_budget { ceiling.get() } else { 0 },
+                Ordering::SeqCst,
+            );
+            std::thread::scope(|scope| {
+                let (entered, reached) = std::sync::mpsc::channel();
+                let (resume, receiver) = std::sync::mpsc::channel();
+                let artifact = &artifact;
+                let worker = scope.spawn(move || {
+                    let control = PausedScan {
+                        entered,
+                        resume: Mutex::new(receiver),
+                        paused: AtomicBool::new(false),
+                    };
+                    let mut held = artifact.request("widget", &["widget"], &[], &[], 0, 64);
+                    held.control = &control;
+                    artifact.reader.read_lexical_postings(&held)
+                });
+                reached
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .expect("first handle held");
+                let (completed, completion) = std::sync::mpsc::channel();
+                let second = scope.spawn(move || {
+                    let request = artifact.request("widget", &["widget"], &[], &[], 0, 64);
+                    let result = artifact.reader.read_lexical_postings(&request);
+                    completed.send(()).expect("report second completion");
+                    result
+                });
+                if over_budget {
+                    assert!(
+                        matches!(
+                            completion.recv_timeout(std::time::Duration::from_millis(50)),
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        ),
+                        "refused extra scratch queues instead of refusing the existing read"
+                    );
+                    assert_eq!(memory.snapshot().used_bytes, reader_bytes);
+                } else {
+                    completion
+                        .recv_timeout(std::time::Duration::from_secs(30))
+                        .expect("second handle reads the original inode concurrently");
+                }
+                resume.send(()).expect("release first handle");
+                assert_eq!(
+                    second
+                        .join()
+                        .expect("second joins")
+                        .expect("second completes"),
+                    expected
+                );
+                assert_eq!(
+                    worker.join().expect("scan joins").expect("first completes"),
+                    expected
+                );
+            });
+        }
+    }
+    drop(artifact);
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        0,
+        "last reader releases its baseline"
+    );
+}
+
 /// The lexical row scan is cooperatively cancellable on both production
 /// row sources. Over a real multi-file corpus whose every chunk matches the
 /// query, a request cancelled after its `k`-th control consultation unwinds
@@ -2802,7 +3082,8 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     )
     .expect("the current revision must open");
 
-    for revision in [28i64, 30] {
+    let current = i64::from(verified.format_revision());
+    for revision in [current - 1, current + 1] {
         let connection =
             rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
@@ -3150,7 +3431,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
             |row| row.get(0),
         )
         .expect("read current format revision");
-    assert_eq!(format_revision, 29);
+    assert_eq!(format_revision, i64::from(verified.format_revision()));
     let (ngram_lists, ngram_postings, untagged_ngram_lists): (i64, i64, i64) = connection
         .query_row(
             "SELECT COUNT(*), SUM(document_frequency), SUM(substr(documents, 1, 1) NOT IN (x'00', x'01', x'02')) FROM ngram_postings",
@@ -3215,7 +3496,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
     let (blocks, documents, untagged_blocks): (i64, i64, i64) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM row_blocks), (SELECT COUNT(*) FROM row_chunks), \
-             (SELECT COUNT(*) FROM row_blocks WHERE substr(payload, 1, 1) != x'17')",
+             (SELECT COUNT(*) FROM row_blocks WHERE substr(payload, 1, 1) != x'18')",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -5971,6 +6252,99 @@ fn disk_artifact_ledger_charges_stay_page_local_across_corpus_scaling() {
     );
 }
 
+/// A named symbol must outrank hundreds of bulky body mentions of the same
+/// term, and the warm query must finish inside a budget the full-block
+/// candidate decode cannot meet.
+#[test]
+fn warm_lexical_search_finds_the_named_symbol_ahead_of_bulk_body_matches() {
+    const BULK_FILES: usize = 800;
+    const WARM_BUDGET: std::time::Duration = std::time::Duration::from_millis(80);
+    let mut sources = Vec::with_capacity(BULK_FILES + 1);
+    sources.push((
+        "file.cascade.marker".to_owned(),
+        "src/cascade_marker.ts".to_owned(),
+        b"export function cascadeMarker() { return 1; }\n".to_vec(),
+    ));
+    for ordinal in 0..BULK_FILES {
+        let mut source = format!("export function bulk{ordinal}() {{\n  const payload = \"");
+        let mut state = (ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        while source.len() < 60 * 1024 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let byte = b' ' + (state % 94) as u8;
+            source.push(if matches!(byte, b'"' | b'\\') {
+                'A'
+            } else {
+                byte as char
+            });
+        }
+        source.push_str("\";\n  return \"cascadeMarker\";\n}\n");
+        sources.push((
+            format!("file.bulk.{ordinal:04}"),
+            format!("src/bulk_{ordinal:04}.ts"),
+            source.into_bytes(),
+        ));
+    }
+    sources.sort_by(|left, right| left.1.cmp(&right.1));
+    let fixture = real_lexical_source_fixture_from_sources(sources);
+    let metadata = fixture.metadata.clone();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let path = directory.path().join("sparse-lexical.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&path, metadata.clone()).expect("create artifact");
+    let verified = builder
+        .rebuild_and_finalize(&mut fixture.open_source(64), &control)
+        .expect("build lexical artifact");
+    drop(builder);
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &path,
+        &verified,
+        &metadata,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen lexical artifact");
+    let mut request = lexical_request("cascadeMarker", &["cascadeMarker"], &[], &[], 0, 8);
+    request.generation = metadata.generation.clone();
+    reader
+        .read_lexical_postings(&request)
+        .expect("warmup lexical search");
+    let started = Instant::now();
+    let batch = complete(
+        reader
+            .read_lexical_postings(&request)
+            .expect("warm lexical search"),
+    );
+    let elapsed = started.elapsed();
+    let names = scored_fields(&reader, &batch);
+    let top = names
+        .first()
+        .map(|(name, _)| name.as_str())
+        .expect("lexical search returns the named symbol");
+    assert!(
+        top.contains("cascadeMarker"),
+        "the named symbol must outrank bulky body mentions, top was {top}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|(name, _)| !name.contains("cascadeMarker")),
+        "bulky body mentions must share the result page with the named symbol"
+    );
+    assert!(
+        batch.coverage.capped > 0,
+        "the page must stay capped while bulky body mentions remain eligible"
+    );
+    assert!(
+        elapsed < WARM_BUDGET,
+        "warm lexical search took {}ms, budget is {}ms",
+        elapsed.as_millis(),
+        WARM_BUDGET.as_millis()
+    );
+}
+
 #[test]
 fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage() {
     let fixture = real_lexical_source_fixture_with_files(9);
@@ -6383,6 +6757,83 @@ fn lexical_phrase_candidate_set_and_frequency_are_reused_without_drift() {
         assert_eq!(
             first.evidence_by_occurrence[&candidate.source_occurrence_id].matched_phrases,
             vec!["reserve stock".to_owned()]
+        );
+    }
+}
+
+#[test]
+fn lexical_streaming_top_k_preserves_echo_penalties() {
+    let source = "pub fn reserve() {}";
+    let artifact = rust_artifact(&[
+        source,
+        "pub fn reserve() { let inventory = 1; }",
+        "pub fn reserve() { let inventory = 2; }",
+    ]);
+    let lane = artifact.lane();
+    let full = complete(
+        lane.retrieve_lexical(&artifact.request(source, &["reserve"], &[], &[], 0, 32))
+            .expect("all lexical candidates"),
+    );
+    assert!(full.candidates.len() > 2);
+    assert!(
+        full.evidence_by_occurrence
+            .values()
+            .any(|evidence| evidence.echo_penalty_applied)
+    );
+    let capped = complete(
+        lane.retrieve_lexical(&artifact.request(source, &["reserve"], &[], &[], 0, 2))
+            .expect("bounded lexical candidates"),
+    );
+    assert_eq!(capped.candidates, full.candidates[..2]);
+    for (occurrence, evidence) in &capped.evidence_by_occurrence {
+        assert_eq!(evidence, &full.evidence_by_occurrence[occurrence]);
+    }
+}
+
+#[test]
+fn normalized_phrase_aliases_share_document_frequency() {
+    let artifact = rust_artifact(&[
+        "pub fn reserve() {\n    // reserve stock inventory ledger\n}\n",
+        "pub fn unrelated() {\n    // nothing relevant lives here\n}\n",
+    ]);
+    let lane = artifact.lane();
+    let single = complete(
+        lane.retrieve_lexical(&artifact.request(
+            "phrase lookup",
+            &[],
+            &[],
+            &["reserve stock"],
+            0,
+            8,
+        ))
+        .expect("single phrase"),
+    );
+    let aliases = complete(
+        lane.retrieve_lexical(&artifact.request(
+            "phrase lookup",
+            &[],
+            &[],
+            &["reserve stock", "RESERVE STOCK"],
+            0,
+            8,
+        ))
+        .expect("normalized phrase aliases"),
+    );
+    assert!(!single.candidates.is_empty());
+    assert_eq!(
+        candidate_files(&single.candidates),
+        candidate_files(&aliases.candidates)
+    );
+    for (occurrence, evidence) in &single.evidence_by_occurrence {
+        let aliased = &aliases.evidence_by_occurrence[occurrence];
+        let doubled = evidence
+            .field_scores_micros
+            .iter()
+            .map(|(field, score)| (*field, score * 2))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            aliased.field_scores_micros, doubled,
+            "two spellings contribute twice, but each matching document counts once in IDF"
         );
     }
 }
