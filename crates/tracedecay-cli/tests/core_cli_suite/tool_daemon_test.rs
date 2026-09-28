@@ -2115,7 +2115,7 @@ fn doctor_renders_the_daemon_canonical_findings_the_dashboard_serves() {
         .output()
         .expect("dashboard should start");
     let stdout = String::from_utf8_lossy(&dashboard.stdout);
-    let base_url = stdout
+    let launch_url = stdout
         .lines()
         .find_map(|line| line.strip_prefix("tracedecay dashboard listening on "))
         .unwrap_or_else(|| {
@@ -2123,10 +2123,17 @@ fn doctor_renders_the_daemon_canonical_findings_the_dashboard_serves() {
                 "dashboard announced no URL:\n{stdout}\n{}",
                 String::from_utf8_lossy(&dashboard.stderr)
             )
-        })
-        .trim_end_matches('/')
-        .to_owned();
-    let findings_url = format!("{base_url}/api/doctor/findings");
+        });
+    // The launch URL (`http://ADDR/?token=T`) carries the API token; as
+    // userinfo, ureq sends it as the Basic password.
+    let (origin, token) = launch_url
+        .trim()
+        .split_once("/?token=")
+        .unwrap_or_else(|| panic!("dashboard launch URL carries no token: {launch_url}"));
+    let authority = origin
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("dashboard launch URL is not loopback HTTP: {launch_url}"));
+    let findings_url = format!("http://tracedecay:{token}@{authority}/api/doctor/findings");
 
     // Live producers (table-growth sampling) may settle between reads, so the
     // comparison is taken once the route answers the same identity on both
