@@ -68,7 +68,8 @@ const GENERATED_HEADER = [
   "//",
   "// Decoder expressions are not checked. Inferring this zod graph dominated a",
   "// cold `tsc` of the dashboard. The annotations and type aliases are the",
-  "// checker contract; decoder behavior is owned by the codegen tests.",
+  "// checker contract. Generation/check validates decoder implementations with",
+  "// this directive removed; codegen tests verify runtime behavior.",
 ].join("\n");
 
 /** Return the `$defs`/`definitions` map from a bundle, sorted by key. */
@@ -174,7 +175,8 @@ interface Resolved {
 }
 
 function typeAnn(ts: string): string {
-  return `z.ZodType<${ts}>`;
+  // Wire decoders accept unknown input, including catch defaults and lazy refs.
+  return `z.ZodType<${ts}, z.ZodTypeDef, unknown>`;
 }
 
 function resolveType(schema: JsonSchema, ctx: ResolveCtx): Resolved {
@@ -398,9 +400,9 @@ function emitNamedDef(name: string, schema: JsonSchema): string {
       `${desc}export interface ${name}<${genericParam}> ${obj.ts}`,
       "",
       `export function ${name}Schema<${genericParam}>(`,
-      `  ${schemaVar}: z.ZodType<${genericParam}>,`,
-      `): z.ZodType<${name}<${genericParam}>> {`,
-      `  return ${obj.zod.replace(/\n/g, "\n  ")} as unknown as z.ZodType<${name}<${genericParam}>>;`,
+      `  ${schemaVar}: ${typeAnn(genericParam)},`,
+      `): ${typeAnn(`${name}<${genericParam}>`)} {`,
+      `  return ${obj.zod.replace(/\n/g, "\n  ")} as unknown as ${typeAnn(`${name}<${genericParam}>`)};`,
       "}",
     ].join("\n");
   }
@@ -410,14 +412,14 @@ function emitNamedDef(name: string, schema: JsonSchema): string {
   if (isTaggedUnion(schema)) {
     const union = resolveTaggedUnion(schema, ctx);
     const desc = schema.description ? `/** ${schema.description} */\n` : "";
-    return emitAlias(desc, name, `z.ZodType<${name}>`, union.zod, union.ts);
+    return emitAlias(desc, name, typeAnn(name), union.zod, union.ts);
   }
 
   const resolved = resolveType(schema, ctx);
   if (name === "DashboardDomainStateV1") {
     resolved.zod = `${resolved.zod}.catch("unsupported_schema")`;
     // `.catch` wraps the enum, so the value is no longer a `ZodEnum`.
-    resolved.ann = `z.ZodType<${name}>`;
+    resolved.ann = typeAnn(name);
   }
   const desc = schema.description ? `/** ${schema.description} */\n` : "";
   return emitAlias(desc, name, resolved.ann, resolved.zod, resolved.ts);

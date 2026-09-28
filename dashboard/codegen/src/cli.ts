@@ -16,7 +16,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { generateContracts, type JsonSchema } from "./generate.ts";
+import ts from "typescript";
+import { generateContracts, OUTPUT_FILES, type JsonSchema } from "./generate.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_ROOT = resolve(HERE, "..", "..");
@@ -80,10 +81,35 @@ function exportSdkSources(): Record<string, string> {
   }
 }
 
+/** Validate decoder implementations once at generation, outside dashboard checks. */
+function checkDecoderTypes(source: string): void {
+  const filename = join(DASHBOARD_ROOT, OUTPUT_FILES.GENERATED_FILE);
+  const options: ts.CompilerOptions = {
+    strict: true, noEmit: true, skipLibCheck: true,
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    exactOptionalPropertyTypes: true,
+  };
+  const host = ts.createCompilerHost(options);
+  const readFile = host.readFile;
+  host.readFile = (path) => path === filename
+    ? source.replace("// @ts-nocheck", "") : readFile(path);
+  const program = ts.createProgram([filename], options, host);
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  if (diagnostics.length > 0) {
+    throw new Error(ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+      getCurrentDirectory: () => REPOSITORY_ROOT,
+      getCanonicalFileName: (path) => path,
+      getNewLine: () => "\n",
+    }));
+  }
+}
+
 /** Every generated output, keyed by its repository-relative path. */
 function generatedOutputs(): Record<string, string> {
   const exported = exportRustBundle();
   const { files } = generateContracts([exported.bundle]);
+  checkDecoderTypes(files[OUTPUT_FILES.GENERATED_FILE]!);
   files[RUST_SCHEMA_FILE] = exported.source;
   const outputs: Record<string, string> = {};
   for (const [rel, content] of Object.entries(files)) outputs[`dashboard/${rel}`] = content;
