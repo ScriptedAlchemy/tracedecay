@@ -688,6 +688,58 @@ fn activation_adds_wildcard_permission_without_replacing_user_settings() {
 }
 
 #[test]
+fn deactivation_removes_the_wildcard_permission_activation_added() {
+    let home = tempfile::tempdir().unwrap();
+    let settings_path = home.path().join(".claude/settings.json");
+    let ctx = InstallContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
+        home: home.path().to_path_buf(),
+        tracedecay_bin: "/bin/tracedecay".to_string(),
+        project_root: None,
+        dashboard: true,
+    };
+
+    safe_write_json_file(
+        &settings_path,
+        &json!({
+            "env": { "FOREIGN_SETTING": "preserved" },
+            "permissions": {
+                "allow": ["Read", "mcp__plugin_tracedecay_graph__*"],
+                "deny": ["Bash(rm:*)"]
+            }
+        }),
+    )
+    .unwrap();
+    ClaudeIntegration
+        .deactivate_deployed_host_registration(&ctx)
+        .unwrap();
+    assert_eq!(
+        load_json_file_strict(&settings_path).unwrap(),
+        json!({
+            "env": { "FOREIGN_SETTING": "preserved" },
+            "permissions": { "allow": ["Read"], "deny": ["Bash(rm:*)"] }
+        })
+    );
+
+    safe_write_json_file(
+        &settings_path,
+        &json!({
+            "theme": "dark",
+            "permissions": { "allow": ["mcp__plugin_tracedecay_graph__*"] }
+        }),
+    )
+    .unwrap();
+    ClaudeIntegration
+        .deactivate_deployed_host_registration(&ctx)
+        .unwrap();
+    assert_eq!(
+        load_json_file_strict(&settings_path).unwrap(),
+        json!({ "theme": "dark" }),
+        "containers that held only the wildcard go with it"
+    );
+}
+
+#[test]
 fn detected_host_surface_reports_claude_home() {
     let home = tempfile::tempdir().unwrap();
     assert_eq!(

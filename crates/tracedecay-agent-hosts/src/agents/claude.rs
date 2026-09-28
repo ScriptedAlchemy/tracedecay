@@ -106,11 +106,11 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if !claude_plugin_registration_is_active(&ctx.home)? {
-            return Ok(());
+        if claude_plugin_registration_is_active(&ctx.home)? {
+            let claude = require_claude_cli()?;
+            claude_plugin_deactivate_with(&claude, &ctx.home)?;
         }
-        let claude = require_claude_cli()?;
-        claude_plugin_deactivate_with(&claude, &ctx.home)
+        remove_claude_plugin_permission(&ctx.home)
     }
 
     fn require_lifecycle_host_cli(&self) -> Result<()> {
@@ -861,6 +861,56 @@ fn ensure_claude_plugin_permission(home: &Path) -> Result<()> {
     if added {
         eprintln!(
             "\x1b[32m✔\x1b[0m Allowed tracedecay plugin tools in {}",
+            settings_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Inverse of [`ensure_claude_plugin_permission`]: drop the plugin wildcard
+/// rule, and the `allow` / `permissions` containers once nothing else is in
+/// them, leaving every other Claude setting untouched.
+fn remove_claude_plugin_permission(home: &Path) -> Result<()> {
+    let settings_path = home.join(".claude/settings.json");
+    if !settings_path.exists() {
+        return Ok(());
+    }
+    let removed = update_json_config_transactionally(
+        &settings_path,
+        JsonConfigDialect::Json,
+        |mut settings| {
+            let wildcard = plugin_wildcard_perm();
+            let Some(permissions) = settings
+                .get_mut("permissions")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            };
+            let Some(allow) = permissions
+                .get_mut("allow")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            };
+            let before = allow.len();
+            allow.retain(|entry| entry.as_str() != Some(wildcard.as_str()));
+            if allow.len() == before {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            }
+            if allow.is_empty() {
+                permissions.remove("allow");
+            }
+            if permissions.is_empty()
+                && let Some(object) = settings.as_object_mut()
+            {
+                object.remove("permissions");
+            }
+            Ok((true, JsonConfigMutation::Write(settings)))
+        },
+    )?;
+    if removed {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed the tracedecay plugin tool allow rule from {}",
             settings_path.display()
         );
     }
