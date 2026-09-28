@@ -41,7 +41,7 @@ use super::{
     settle_text_projection, settled_owner_with_idle_admission, test_project_id,
     wait_for_dashboard_ready, wait_for_event_to_ready, wait_for_generation_change,
     wait_for_initial_generation, wait_for_live_complete_generation,
-    wait_for_live_complete_generation_by_polling, wait_for_owner_pass,
+    wait_for_live_complete_generation_by_polling, wait_for_owner, wait_for_owner_pass,
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
     wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
     wait_for_worker_phase, wait_until_serving_seat, write,
@@ -3272,10 +3272,11 @@ async fn publication_decode_failure_parks_typed_instead_of_indexing() {
         .send(())
         .expect("release graph prepare");
 
-    let parked = wait_until_serving_seat(
+    let parked = wait_for_owner(
         &registry,
         fixture.path(),
         Duration::from_secs(10),
+        "a typed convergence park",
         || async {
             registry
                 .dashboard_freshness_read(fixture.path())
