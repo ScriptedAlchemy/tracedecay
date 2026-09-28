@@ -1646,6 +1646,7 @@ mod tests {
         GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexSigningPolicyV1, GitIndexTransactionId,
         GitIndexTransactionJournalV1, GitObjectFormatV1, GitOperationStateV1, RefId,
     };
+    use tracedecay_runtime_core::test_executable::write_executable_script;
     use tracedecay_store::GitIndexTransactionRecordV1;
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -2013,14 +2014,7 @@ mod tests {
         fs::remove_file(runner.index_lock_path()).expect("remove external lock");
 
         let hook = directory.path().join(".git/hooks/pre-commit");
-        fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write hook");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&hook, permissions).expect("executable hook");
-        }
+        write_executable_script(&hook, "#!/bin/sh\nexit 0\n").expect("write hook");
         assert!(matches!(
             assembler.materialize(&stale),
             Err(GitIndexTransactionPortError::StalePreview)

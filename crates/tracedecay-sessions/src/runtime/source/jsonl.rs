@@ -241,6 +241,30 @@ impl JsonlFileChangeToken {
     }
 }
 
+/// Whether `token` is old enough that a later write must move it.
+///
+/// Linux inode timestamps come from the coarse realtime clock. A token still
+/// inside that quantum can be shared with a same-length rewrite, so it is not
+/// proof the bytes are unchanged. Callers that would skip a content check
+/// must refuse the skip until the token falls behind the clock.
+#[cfg(unix)]
+pub(in crate::runtime) fn jsonl_change_token_settled(token: JsonlFileChangeToken) -> bool {
+    tracedecay_private_fs::change_time_settled(change_time_nanos(token))
+}
+
+#[cfg(unix)]
+fn change_time_nanos(token: JsonlFileChangeToken) -> i128 {
+    i128::from(token.ctime_seconds)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(i128::from(token.ctime_nanos))
+}
+
+#[cfg(not(unix))]
+pub(in crate::runtime) fn jsonl_change_token_settled(token: JsonlFileChangeToken) -> bool {
+    let _ = token;
+    true
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct CacheAdmission<N> {
     priority: u64,
@@ -398,6 +422,29 @@ impl HoldUnchangedGenerationCache {
     }
 }
 
+/// Block until `path`'s change time is strictly older than the kernel clock
+/// that stamps it. Tests that lock the settled zero-read path use this
+/// instead of sleeping for a fixed budget: the condition is the clock
+/// quantum itself.
+#[cfg(test)]
+pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) {
+    for _ in 0..10_000_000u32 {
+        let Ok(file) = std::fs::File::open(path) else {
+            std::thread::yield_now();
+            continue;
+        };
+        let Ok(metadata) = file.metadata() else {
+            std::thread::yield_now();
+            continue;
+        };
+        if jsonl_change_token_settled(jsonl_file_change_token(&metadata)) {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("filesystem change clock stayed inside one timestamp quantum");
+}
+
 #[cfg(test)]
 impl Drop for HoldUnchangedGenerationCache {
     fn drop(&mut self) {
@@ -418,6 +465,16 @@ fn remember_unchanged_generation(key: UnchangedGenerationCacheKey) {
         return;
     };
     cache.insert(key.native_identity, key);
+}
+
+fn remember_unchanged_generation_if_settled(key: UnchangedGenerationCacheKey) {
+    // A proof taken while the change time is still inside the coarse quantum
+    // can share that token with a later same-length rewrite. Remembering it
+    // would let the settled repoll skip the bytes. Record the cache only once
+    // the token can no longer be shared.
+    if jsonl_change_token_settled(key.change) {
+        remember_unchanged_generation(key);
+    }
 }
 
 fn unchanged_generation_cache_key(
@@ -1204,7 +1261,9 @@ impl<'a> PreparedJsonlScan<'a> {
             .and_then(|resume| {
                 unchanged_generation_cache_key(file.inner(), &metadata, previous, resume)
             })
-            .filter(|key| unchanged_generation_cache_hit(*key));
+            .filter(|key| {
+                unchanged_generation_cache_hit(*key) && jsonl_change_token_settled(key.change)
+            });
         let (file_identity, identity_window_bytes) = if let Some(key) = cached_unchanged {
             (key.stable_file_identity, 0)
         } else {
@@ -1294,23 +1353,25 @@ impl<'a> PreparedJsonlScan<'a> {
         } else {
             (0, file_identity)
         };
-        // No snapshot fingerprint is minted here for the common full-file scan.
-        //
-        // Detecting a rewrite that lands *during* a scan needs two independent
-        // full-extent hashes, one before the read and one in `revalidate`
-        // after it, because a single pass folded into the read would hash the
-        // rewritten bytes and match itself. On a cold catch-up every file is a
-        // full-file scan, so that pair ran over the whole corpus twice:
-        // ingesting 109 MB of transcript charged 43.5 GB of hashing.
-        //
-        // `revalidate` fails closed on every observable change without it.
-        // Identity (which covers the head window and the inode), size, and
-        // mtime still trip the check. What is given up is a rewrite that preserves all three: same
-        // inode, same length, same head window, landing inside the same mtime
-        // second as the scan. The pair is still spent on the one path that has
-        // real evidence of rewriting, where `rewritten_jsonl_generation` above
-        // mints a generation from the fingerprint and `revalidate` then
-        // re-checks it.
+        // A settled change token is proof a same-length rewrite would have
+        // moved ctime, so a cold catch-up of historical transcripts does not
+        // hash the whole extent. A token still inside the kernel's coarse
+        // timestamp quantum is not that proof: the rewrite can land before
+        // this scan reads and leave inode, length, and both timestamps alone.
+        // Seal the fingerprint before `after_generation_capture` so that
+        // rewrite cannot hash as its own witness.
+        if snapshot_fingerprint.is_none()
+            && file_size > 0
+            && !jsonl_change_token_settled(jsonl_file_change_token(&metadata))
+        {
+            memoized_jsonl_snapshot_fingerprint(
+                &mut snapshot_fingerprint,
+                &mut io.snapshot_hash_bytes,
+                &mut file,
+                file_size,
+            )
+            .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+        }
         after_generation_capture();
         // A generation that is not the file's own identity was minted for a
         // rewrite, so it stays flagged for every batch it covers. The rewind
@@ -1384,6 +1445,20 @@ impl<'a> PreparedJsonlScan<'a> {
                     path: path.to_path_buf(),
                 });
             }
+            if let Some(expected_snapshot) = self.generation.snapshot_fingerprint {
+                let (final_snapshot, snapshot_hashed) = bounded_jsonl_snapshot_fingerprint(
+                    &mut self.file,
+                    self.generation.file_size,
+                )
+                .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+                io.snapshot_hash_bytes = io.snapshot_hash_bytes.saturating_add(snapshot_hashed);
+                if final_snapshot != expected_snapshot {
+                    crate::runtime::pipeline_metrics::record_scan_generation_changed();
+                    return Err(TranscriptIngestError::ScanGenerationChanged {
+                        path: path.to_path_buf(),
+                    });
+                }
+            }
             if let Some((extent, digest)) = self.validated_prefix
                 && extent == self.generation.seek_to
                 && extent == metadata.len()
@@ -1401,7 +1476,7 @@ impl<'a> PreparedJsonlScan<'a> {
                 if let Some(key) =
                     unchanged_generation_cache_key(self.file.inner(), &metadata, cursor, resume)
                 {
-                    remember_unchanged_generation(key);
+                    remember_unchanged_generation_if_settled(key);
                 }
             }
         }
@@ -1829,7 +1904,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
             if let Some(key) =
                 unchanged_generation_cache_key(file.inner(), &final_metadata, cursor, resume)
             {
-                remember_unchanged_generation(key);
+                remember_unchanged_generation_if_settled(key);
             }
         }
         Ok(RawNewJsonl {
@@ -2050,6 +2125,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("appending.jsonl");
         std::fs::write(&path, b"{\"v\":0}\n").unwrap();
+        // The append must move the change token. A just-written file is still
+        // inside the coarse quantum, where an append can share that timestamp.
+        spin_until_jsonl_change_settled(&path);
         let handle = std::fs::File::open(&path).unwrap();
 
         let outcome = try_stream_new_jsonl_raw_from_file(
@@ -2173,6 +2251,44 @@ mod tests {
         assert_ne!(rescanned.new_cursor.file_id, checkpoint.generation);
     }
 
+    #[test]
+    fn same_quantum_rewrite_is_visible_after_the_change_time_settles() {
+        let _hold = HoldUnchangedGenerationCache::enter();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quantum.jsonl");
+        let original = b"{\"v\":0}\n";
+        let replacement = b"{\"v\":1}\n";
+        assert_eq!(original.len(), replacement.len());
+        std::fs::write(&path, original).unwrap();
+        let first = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            StoredCursor::default(),
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            None,
+        )
+        .unwrap();
+        let checkpoint = JsonlResumeState {
+            generation: first.new_cursor.file_id,
+            file_identity: first.file_identity,
+            fingerprint: first.frames.last().unwrap().resume_fingerprint,
+        };
+        std::fs::write(&path, replacement).unwrap();
+        spin_until_jsonl_change_settled(&path);
+
+        let rescanned = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            first.new_cursor,
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            Some(checkpoint),
+        )
+        .unwrap();
+        assert_eq!(rescanned.start_offset, 0);
+        assert_ne!(rescanned.new_cursor.file_id, checkpoint.generation);
+        assert_eq!(rescanned.frames.len(), 1);
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn cached_unchanged_generation_rejects_inode_replacement() {
@@ -2284,6 +2400,10 @@ mod tests {
             .unwrap()
             .write_all(appended)
             .unwrap();
+        // The settled re-poll is the path that must hash the prefix once and
+        // not the whole file. Inside the coarse quantum the change token is
+        // not that proof, so wait until it is before measuring the hash.
+        spin_until_jsonl_change_settled(&path);
         let second = try_stream_new_jsonl_raw_strict_with_resume(
             &path,
             first.new_cursor,

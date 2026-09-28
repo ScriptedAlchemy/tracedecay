@@ -54,6 +54,8 @@ use super::{
     DashboardProcess, ProductionDaemon, assert_canonical_envelope, post_dashboard_envelope,
     post_envelope,
 };
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 /// The task the parent journey already created through both mounts.
 const TASK_ID: &str = "task.work-surface-conformance";
@@ -1133,15 +1135,8 @@ fn write_provider_transcript(home: &Path, project: &Path) {
 
 #[cfg(unix)]
 fn pinned_executable(directory: &Path, name: &str, body: &str) -> (PathBuf, ManifestDigest) {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = directory.join(name);
-    std::fs::write(&path, body).expect("fixture executable");
-    let mut permissions = std::fs::metadata(&path)
-        .expect("executable metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&path, permissions).expect("executable mode");
+    write_executable_script(&path, body).expect("fixture executable");
     let digest = ManifestDigest::new(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(body.as_bytes()))

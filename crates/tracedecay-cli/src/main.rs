@@ -74,7 +74,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::retrieval::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use tracedecay_daemon_service::logging::StderrTracingDefault;
-use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::config::{ProfileRoot, admit_process_host_program_search_path};
 
 pub(crate) fn current_unix_timestamp() -> i64 {
     tracedecay_runtime_core::tracedecay::current_timestamp()
@@ -581,6 +581,7 @@ impl Drop for ProcessHotpathGuard {
 }
 
 fn main() -> ExitCode {
+    admit_process_host_program_search_path();
     let args = std::env::args_os().collect::<Vec<_>>();
     #[cfg(feature = "hotpath")]
     if let Err(message) = configure_hotpath_output(&args) {

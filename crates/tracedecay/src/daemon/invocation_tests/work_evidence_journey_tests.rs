@@ -27,6 +27,7 @@ use tracedecay_domain::{
     WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_lsp::LspSessionRegistry;
+use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -97,18 +98,7 @@ pub(super) fn configured_work_proposal_routing(
 
     let executable_bytes = b"#!/bin/sh\nexit 0\n";
     let executable_path = project.join("work-evidence-provider");
-    std::fs::write(&executable_path, executable_bytes).expect("write provider executable");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = std::fs::metadata(&executable_path)
-            .expect("provider executable metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&executable_path, permissions)
-            .expect("provider executable permissions");
-    }
+    write_executable_script(&executable_path, executable_bytes).expect("write provider executable");
     let executable_path = executable_path
         .canonicalize()
         .expect("canonical provider executable");
