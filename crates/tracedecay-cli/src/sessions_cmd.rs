@@ -60,6 +60,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
 pub(crate) async fn handle_sessions_action(
     profile: &ProfileRoot,
     action: SessionsAction,
+    dry_run: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     match action {
         SessionsAction::Import {
@@ -86,7 +87,6 @@ pub(crate) async fn handle_sessions_action(
             project_path,
             since,
             limit_sessions,
-            dry_run,
         } => {
             hotpath::future!(
                 run_git_sync(

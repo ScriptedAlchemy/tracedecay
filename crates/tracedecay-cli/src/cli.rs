@@ -127,9 +127,10 @@ pub struct Cli {
     /// the same receipt-backed lifecycle over the host's whole canonical component set
     #[arg(long, global = true, value_enum)]
     pub component: Option<HostBundleComponentArg>,
-    /// Verify and print the exact signed lifecycle plan without mutating.
-    /// Valid only alongside the agent-lifecycle commands; dispatch enforces
-    /// that scope so this global flag never leaks onto unrelated subcommands
+    /// Preview without mutating: the exact signed lifecycle plan for the
+    /// agent-lifecycle commands, the rows `projects forget` would remove, or
+    /// the counts `sessions git-sync` would write. Dispatch enforces that
+    /// scope so this global flag never leaks onto unrelated subcommands
     /// (e.g. `branch gc`, `storage report`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
@@ -1191,9 +1192,6 @@ pub enum SessionsAction {
         /// Maximum number of sessions to scan
         #[arg(long, default_value_t = 500)]
         limit_sessions: usize,
-        /// Derive and report counts without writing to the session store
-        #[arg(long)]
-        dry_run: bool,
     },
     /// List unfinished workflow/task evidence from ingested session messages
     Unfinished {

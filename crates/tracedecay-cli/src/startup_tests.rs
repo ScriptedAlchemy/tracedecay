@@ -155,6 +155,7 @@ fn destructive_non_lifecycle_commands_accept_only_their_own_confirmation_flags()
         &["wipe", "--yes"][..],
         &["projects", "forget", "proj_123", "--yes"][..],
         &["projects", "forget", "proj_123", "--dry-run"][..],
+        &["sessions", "git-sync", "--dry-run"][..],
         &[
             "storage",
             "reset-project-store",
@@ -172,6 +173,10 @@ fn destructive_non_lifecycle_commands_accept_only_their_own_confirmation_flags()
     }
     for (rejected, message) in [
         (&["wipe", "--dry-run"][..], "wipe accepts --yes to confirm"),
+        (
+            &["sessions", "git-sync", "--dry-run", "--component", "core"][..],
+            "sessions git-sync accepts --dry-run to preview",
+        ),
         (
             &[
                 "projects",

@@ -48,11 +48,15 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use serde_json::Value;
 use tokio::time::Instant;
 
+use tracedecay::mcp::tools::{registered_project_not_found, registered_project_selector_id};
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexReadinessWaitOutcomeV1,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
 use tracedecay_contracts::{CancellationSignal, Deadline, RetainedSurfaceOperation};
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
@@ -64,6 +68,7 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
 use tracedecay_mcp::tools::response_trailers::{
     CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, REQUEST_COST_TRAILER_PREFIX,
     TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
@@ -205,8 +210,8 @@ fn run_inner(
             }
             if operation.is_graph_tool() {
                 let project_path =
-                    DaemonToolDispatch::project_scoped(profile, explicit_project, tool_name)
-                        .project_path;
+                    graph_tool_project_path(profile, explicit_project, tool_name, &tool_args)
+                        .await?;
                 return dispatch_cli_graph_tool(
                     profile,
                     operation,
@@ -332,8 +337,7 @@ fn run_inner(
             && operation.is_graph_tool()
         {
             let project_path =
-                DaemonToolDispatch::project_scoped(profile, explicit_project, &def.name)
-                    .project_path;
+                graph_tool_project_path(profile, explicit_project, &def.name, &tool_args).await?;
             return dispatch_cli_graph_tool(
                 profile,
                 operation,
@@ -757,19 +761,6 @@ async fn dispatch_cli_graph_tool(
     deadline: Instant,
 ) -> Result<()> {
     let tool_name = operation.mcp_tool_name();
-    // The graph-tool owner answers for the handshake's project; a selector
-    // naming another registered project would otherwise be dropped with the
-    // transport keys and answered from the wrong project.
-    if tool_args
-        .get("project_selector")
-        .is_some_and(|selector| !selector.is_null())
-    {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "`tracedecay tool` answers {tool_name} for the project named by --project; pass --project <registered project path> instead of project_selector"
-            ),
-        });
-    }
     let handshake = tracedecay::daemon::handshake_for_current_client(
         profile,
         project.clone(),
@@ -791,6 +782,57 @@ async fn dispatch_cli_graph_tool(
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
     print_tool_output(&result.value, raw_json);
     tool_result_process_outcome(&result.value, tool_name)
+}
+
+/// The project a graph-tool read answers for. The graph-tool owner answers
+/// for the handshake's project, so a registered-project reader's
+/// `project_selector` is resolved here, through the daemon's registry, to that
+/// exact registered project's root; it never falls back to the cwd project.
+async fn graph_tool_project_path(
+    profile: &ProfileRoot,
+    explicit_project: Option<String>,
+    tool_name: &str,
+    tool_args: &Value,
+) -> Result<Option<PathBuf>> {
+    let invalid_selector = |detail: String| {
+        TraceDecayError::project_route("project_route_invalid_selector", false, detail)
+    };
+    if !tool_dispatches_registered_project_reader(tool_name) {
+        if tool_args.get("project_selector").is_some() {
+            return Err(invalid_selector(format!(
+                "{tool_name} answers only for the connected project and does not accept project_selector"
+            )));
+        }
+        return Ok(
+            DaemonToolDispatch::project_scoped(profile, explicit_project, tool_name).project_path,
+        );
+    }
+    let Some(project_id) = registered_project_selector_id(tool_args)? else {
+        return Ok(
+            DaemonToolDispatch::project_scoped(profile, explicit_project, tool_name).project_path,
+        );
+    };
+    if explicit_project.is_some() {
+        return Err(invalid_selector(
+            "--project and project_selector both name a project; pass only one".to_owned(),
+        ));
+    }
+    let request = AdminCliSurfaceRequestV1::RegistryContext {
+        project_arg: Some(PathBuf::from(project_id)),
+    };
+    // The registry also matches aliases and paths; only the exact project id
+    // is this selector's project.
+    match crate::commands::admin_cli_result(profile, None, request).await? {
+        AdminCliResultV1::RegistryContext(AdminCliRegistryContextV1::Ok { project, .. })
+            if project.project_id == project_id =>
+        {
+            Ok(Some(PathBuf::from(project.canonical_root)))
+        }
+        AdminCliResultV1::RegistryContext(_) => Err(registered_project_not_found(project_id)),
+        _ => Err(crate::commands::admin_cli_result_mismatch(
+            "registry_context",
+        )),
+    }
 }
 
 /// Run one graph-tool owner operation for `project` through the daemon and
