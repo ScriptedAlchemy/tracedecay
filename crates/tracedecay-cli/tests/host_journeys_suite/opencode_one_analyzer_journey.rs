@@ -26,6 +26,8 @@ use tracedecay_lsp::analyzer::adapters::{DiagnosticMode, LspAdapterDefinition};
 use tracedecay_lsp::analyzer::broker::{DiagnosticBroker, EngineState};
 use tracedecay_lsp::analyzer::host_ownership::HostAnalyzerOwnership;
 
+use crate::isolated_profile::{apply_isolated_profile_env, hermetic_path};
+
 const HOST_CONFIG_RELATIVE: &str = ".config/opencode/opencode.json";
 const PRE_EXISTING_ANALYZER: &str = "rust-analyzer";
 
@@ -69,20 +71,11 @@ impl IsolatedCli {
 
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-        let path = std::env::join_paths(
-            std::iter::once(self.bin_dir.clone()).chain(std::env::split_paths(&inherited_path)),
-        )
-        .unwrap();
+        apply_isolated_profile_env(&mut command, self.home.path(), &self.profile);
         command
             .args(args)
             .current_dir(self.project.path())
-            .env("HOME", self.home.path())
-            .env("USERPROFILE", self.home.path())
-            .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
-            .env("TRACEDECAY_DATA_DIR", &self.profile)
-            .env("TRACEDECAY_GLOBAL_DB", self.profile.join("global.db"))
-            .env("PATH", path)
+            .env("PATH", hermetic_path(&[&self.bin_dir]))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

@@ -10,7 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::ffi::{c_int, c_ulong};
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
@@ -94,19 +94,83 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// Points a child process at a throwaway home and profile.
+/// Variables that relocate a host's config root; inherited, any of them would
+/// point a sandboxed child at the operator's real host state.
+const HOST_RELOCATION_ENV: &[&str] = &[
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "KIMI_CODE_HOME",
+    "KIRO_HOME",
+    "PI_CODING_AGENT_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+
+/// System directories a hermetic child may search: they carry `sh`, `git`,
+/// and coreutils, and no agent-host CLI.
+fn system_path_dirs() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let mut dirs = vec![root.join("System32"), root];
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            dirs.push(PathBuf::from(program_files).join("Git").join("cmd"));
+        }
+        dirs
+    }
+    #[cfg(not(windows))]
+    {
+        vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
+    }
+}
+
+/// A child `PATH` of exactly `fake_bin_dirs`, then the system directories.
 ///
-/// This is the command-env subset shared by daemon journeys. It does not
-/// detach the process group or pin `XDG_RUNTIME_DIR`; callers that need the
-/// full hermetic daemon environment still use `apply_tracedecay_home_env`.
-/// Host CLIs launch only through the `lcm.summarizer_executables.v1` setting,
-/// which defaults to unconfigured, so no executable pin is needed here.
-pub fn apply_isolated_profile_env(command: &mut Command, home: &Path, profile: &Path) {
-    die_with_test_process(command);
+/// Never derived from the inherited `PATH`: that is where the operator's real
+/// host CLIs live (`~/.local/bin/kimi`, mise/asdf shims, Homebrew), and a
+/// test must not be one lookup away from launching them.
+pub fn hermetic_path<P: AsRef<Path>>(fake_bin_dirs: &[P]) -> OsString {
+    let dirs = fake_bin_dirs
+        .iter()
+        .map(|dir| dir.as_ref().to_path_buf())
+        .chain(system_path_dirs());
+    std::env::join_paths(dirs).expect("hermetic PATH entries must be joinable")
+}
+
+/// Sandboxes a child's host-facing environment under `home`: `HOME`, every
+/// XDG root, a [`hermetic_path`] with no fake hosts, and no host relocation.
+///
+/// Tests that provide fake host CLIs override `PATH` afterwards with
+/// `hermetic_path(&[fake_bin_dir])`.
+pub fn apply_hermetic_child_env(command: &mut Command, home: &Path) {
+    for key in HOST_RELOCATION_ENV {
+        command.env_remove(key);
+    }
     command
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        // A child resolves its installed unit file under `XDG_CONFIG_HOME` and
+        // reaches the user service manager through `XDG_RUNTIME_DIR`; both stay
+        // inside the isolated home so it can never stop the real
+        // `tracedecay.service`.
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("PATH", hermetic_path::<&Path>(&[]));
+}
+
+/// Points a child process at a throwaway home and profile.
+///
+/// This is the command-env subset shared by daemon journeys. It does not
+/// detach the process group; callers that need the full hermetic daemon
+/// environment still use `apply_tracedecay_home_env`.
+pub fn apply_isolated_profile_env(command: &mut Command, home: &Path, profile: &Path) {
+    die_with_test_process(command);
+    apply_hermetic_child_env(command, home);
+    command
         .env("TRACEDECAY_DATA_DIR", profile)
         .env("TRACEDECAY_GLOBAL_DB", profile.join("global.db"))
         .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");

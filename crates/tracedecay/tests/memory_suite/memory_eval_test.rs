@@ -108,20 +108,9 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(crate::common::tracedecay_bin());
+        let mut command = common::tracedecay_command_with_home(&self.home_path);
         command
             .current_dir(&self.project_path)
-            .env("HOME", &self.home_path)
-            .env("USERPROFILE", &self.home_path)
-            .env("XDG_CONFIG_HOME", self.home_path.join(".config"))
-            .env(
-                tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
-                self.home_path.join(".tracedecay"),
-            )
-            .env(
-                "TRACEDECAY_GLOBAL_DB",
-                self.home_path.join(".tracedecay/global.db"),
-            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

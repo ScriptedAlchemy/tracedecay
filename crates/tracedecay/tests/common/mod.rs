@@ -125,7 +125,8 @@ pub async fn open_test_database(
 mod isolated_profile;
 #[allow(unused_imports)] // each suite binary uses a subset
 pub use isolated_profile::{
-    EnvVarGuard, apply_isolated_profile_env, die_with_test_process, run_ok,
+    EnvVarGuard, apply_hermetic_child_env, apply_isolated_profile_env, die_with_test_process,
+    hermetic_path, run_ok,
 };
 
 /// Query lanes a terminal code-index answer must report as `"complete"`.
@@ -808,17 +809,9 @@ fn bind_to_test_process(command: &mut Command) {
 
 pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     let home = canonical_existing_path(home);
-    // A child resolves its installed unit file under `XDG_CONFIG_HOME` and
-    // reaches the user service manager through `XDG_RUNTIME_DIR`; both stay
-    // inside the isolated home so it can never stop the real
-    // `tracedecay.service`.
-    let runtime_dir = home.join("run");
-    let _ = fs::create_dir_all(&runtime_dir);
+    let _ = fs::create_dir_all(home.join("run"));
+    apply_hermetic_child_env(command, &home);
     command
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
         .env(GLOBAL_DB_PATH_ENV, home.join(".tracedecay/global.db"))
         // A child must never inherit a socket that reaches a daemon running
