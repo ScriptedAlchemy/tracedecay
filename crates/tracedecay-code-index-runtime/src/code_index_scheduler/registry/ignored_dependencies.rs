@@ -12,8 +12,7 @@ use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexPr
 use tracedecay_domain::canonical_sha256;
 
 use super::{
-    CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1, PendingWakeV1,
-    ServingGenerationSlot,
+    CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1, PendingWakeV1, ServingGenerationSlot,
 };
 use crate::code_index_scheduler::graph_activation::CodeGraphActivationAuthorityV1;
 use crate::code_index_scheduler::{
@@ -410,7 +409,6 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree_id,
             serving_generation,
             graph_activation_enabled,
-            shutting_down,
             flights,
             hints,
             wake,
@@ -434,7 +432,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.serving_generation),
                 worktree.graph_activation.policy().is_enabled(),
-                Arc::clone(&worktree.shutting_down),
                 Arc::clone(&worktree.ignored_dependency_admissions),
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
@@ -443,15 +440,8 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         if graph_activation_enabled {
-            self.await_decoded_seat(
-                &project_root,
-                &serving_generation,
-                control.as_ref(),
-                &shutting_down,
-                &pending_wake,
-                &wake,
-            )
-            .await?;
+            self.await_decoded_seat(&project_root, control.as_ref())
+                .await?;
         }
         let (flight, owns_flight) = {
             let mut active = flights
@@ -507,53 +497,70 @@ impl CodeIndexSchedulerRegistryV1 {
     /// first publication), or with no seat at all until one is demanded.
     /// Demand the seat and wait for it on the owner's signals, within the
     /// request's budget: an unexpired request never refuses for a seat that
-    /// is still being installed, and an expired one reports its deadline. A
-    /// worker that took its turn after this demand and parked again without
-    /// seating (a restored roster it refused, say) has no seat coming, so
-    /// validation reports that state instead.
+    /// is still being installed, and an expired one reports its deadline.
+    ///
+    /// A worker parked on a failure installs no seat, so the park is the
+    /// answer. A park the worker re-checks on every wake answers only once a
+    /// pass after this demand has observed it again (each observation
+    /// rewrites it); any other park answers once the worker is back at a
+    /// wait, since only changed input or an operator remedy lifts it.
     async fn await_decoded_seat(
         &self,
         project_root: &Path,
-        serving_generation: &ServingGenerationSlot,
         control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
-        shutting_down: &AtomicBool,
-        pending_wake: &PendingWakeV1,
-        wake: &tokio::sync::Notify,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
+        let Some(activity) = self.subscribe_owner_activity(project_root).await else {
+            return Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
+        };
+        let (serving_generation, convergence_park, shutting_down, pending_wake, wake) = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(project_root) else {
+                return Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
+            };
+            (
+                Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.convergence_park),
+                Arc::clone(&worktree.shutting_down),
+                Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.wake),
+            )
+        };
         let seated = || {
             serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_some()
         };
-        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
+        let park = || {
+            convergence_park
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
         if seated() {
             return Ok(());
         }
-        let Some(mut activity) = self.subscribe_owner_activity(project_root).await else {
-            return Ok(());
-        };
+        let park_at_demand = park();
         self.request_complete_generation(project_root).await;
-        // The demand flag is set once per mount, so this demand posts its own
-        // wake: a parked worker must take a turn before its park means "no
-        // seat is coming". Any phase change after this point is that turn.
+        // The demand flag flips once per mount, so this demand posts its own
+        // wake: a park the worker re-checks answers only after that re-check.
         Self::note_wake(
-            pending_wake,
-            wake,
+            &pending_wake,
+            &wake,
             CodeIndexCadenceTriggerV1::QueryAdmission,
         );
-        activity.worker_phase.borrow_and_update();
         loop {
             if seated() {
                 return Ok(());
             }
-            if activity.worker_phase.has_changed().unwrap_or(true)
-                && activity.worker_phase() == CodeIndexWorkerPhaseV1::Parked
-                && !activity.passes().running()
+            if let Some(parked) = park()
+                && activity.pass_finished()
+                && (!parked.retries_on_wake || park_at_demand.as_ref() != Some(&parked))
             {
-                return Ok(());
+                return Err(CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(parked).into());
             }
-            refuse_if_interrupted(control, shutting_down)?;
+            refuse_if_interrupted(control, &shutting_down)?;
             tokio::select! {
                 changed = signals.changed() => {
                     if changed.is_err() {

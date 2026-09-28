@@ -1,5 +1,25 @@
 use super::*;
 
+/// A production admission carries its request's budget, so a seat that never
+/// arrives ends in a typed deadline refusal instead of an unbounded wait.
+struct RequestBudget(std::time::Instant);
+
+impl RequestBudget {
+    fn within(budget: Duration) -> Arc<Self> {
+        Arc::new(Self(std::time::Instant::now() + budget))
+    }
+}
+
+impl CodeIndexExecutionControlV1 for RequestBudget {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        std::time::Instant::now() >= self.0
+    }
+}
+
 fn assert_reconcile_did_not_publish_invalid_roster(
     served: &LatestCompleteCodeIndexV1,
     incumbent: &CodeGenerationId,
@@ -90,6 +110,7 @@ async fn assert_restart_requires_readmission(
 ) {
     // A retained publication can still have an identity while its invalid
     // ignored-source roster prevents complete-generation admission.
+    let budget = RequestBudget::within(Duration::from_secs(10));
     let error = if let Some(restored) = registry.latest_complete_fresh(fixture.path()).await {
         assert!(
             restored.generation().ignored_source_admissions().is_empty(),
@@ -99,29 +120,32 @@ async fn assert_restart_requires_readmission(
             registry,
             fixture.path(),
             request_for(&restored, "pkg"),
-            StaticControl::active(),
+            budget,
         )
         .await
         .expect_err("the changed entrypoint requires typed re-admission")
     } else {
-        index_dependency(
-            registry,
-            fixture.path(),
-            prior_request,
-            StaticControl::active(),
-        )
-        .await
-        .expect_err("unverified restart requires typed re-admission")
+        index_dependency(registry, fixture.path(), prior_request, budget)
+            .await
+            .expect_err("unverified restart requires typed re-admission")
     };
+    // A restart whose worker refused the roster parks on that refusal and
+    // seats nothing, so admission answers with the park it left.
+    let parked_on_expected = CodeIndexSchedulerErrorV1::from(expected.clone()).to_string();
     assert!(
         matches!(
             &error,
             CodeIndexSchedulerErrorV1::IgnoredDependency(refusal)
                 if refusal == &expected
                     || refusal == &CodeIndexIgnoredDependencyRefusalV1::StaleGeneration
+                    || matches!(
+                        refusal,
+                        CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(parked)
+                            if parked.reason == parked_on_expected && !parked.retries_on_wake
+                    )
         ),
-        "restart must expose the exact validation refusal or a stale-generation re-admission \
-         fence, expected {expected:?}, observed {error:?}"
+        "restart must expose the exact validation refusal, a stale-generation re-admission \
+         fence, or the park that refusal left, expected {expected:?}, observed {error:?}"
     );
 }
 

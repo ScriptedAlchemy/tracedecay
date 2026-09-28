@@ -4,16 +4,17 @@ use tempfile::TempDir;
 use tracedecay_application::code_index::{
     CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionRequestV1,
 };
+use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_contracts::clock::now_micros;
 use tracedecay_contracts::{
     CallableCodeOperationKind, CancellationContext, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, RequestId, ResolvedScope, callable_code_operation,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
+use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, UtcMicros};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-use super::{GitFixture, test_project_id, write};
-use crate::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use super::{GitFixture, test_project_id, wait_for_live_complete_generation, write};
+use crate::code_index_scheduler::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
 use crate::project_reads::project_code_index_ignored_dependency_admission_port;
 
 fn request_context(scope: ResolvedScope, suffix: &str, budget: Duration) -> RequestContext {
@@ -44,12 +45,7 @@ fn request_context(scope: ResolvedScope, suffix: &str, budget: Duration) -> Requ
     .expect("request context")
 }
 
-/// A first publication serves from its text owner before the worker's graph
-/// tail seats the decoded generation. Admission in that window waits on the
-/// seat within its budget: an expired budget is a typed timeout, never an
-/// unavailable scheduler, and the seat lets the retry admit the dependency.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
+fn ignored_package_fixture() -> GitFixture {
     let fixture = GitFixture::new(&[
         (".gitignore", "node_modules/\n"),
         (
@@ -62,6 +58,39 @@ async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
         "node_modules/pkg/index.d.ts",
         "export interface PublicWidget { value: string }\n",
     );
+    fixture
+}
+
+/// The published generation, its verified `pkg` import, and its scope: what
+/// a graph read that found the import hands to admission.
+fn admission_inputs(
+    published: &LatestCompleteCodeIndexV1,
+) -> (CodeGenerationId, CodeIndexImportEvidenceV1, ResolvedScope) {
+    let generation = published.generation();
+    let import = generation
+        .imports()
+        .iter()
+        .find(|import| import.module_specifier == "pkg")
+        .expect("verified package import")
+        .clone();
+    let snapshot = generation.snapshot();
+    let scope = ResolvedScope::new(
+        generation.manifest().project_id.clone(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    (generation.manifest().generation_id.clone(), import, scope)
+}
+
+/// A first publication serves from its text owner before the worker's graph
+/// tail seats the decoded generation. Admission in that window waits on the
+/// seat within its budget: an expired budget is a typed timeout, never an
+/// unavailable scheduler, and the seat lets the retry admit the dependency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
+    let fixture = ignored_package_fixture();
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
@@ -100,22 +129,7 @@ async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
     .await
     .expect("read the published generation")
     .expect("published generation");
-    let generation = published.generation();
-    let source_generation = generation.manifest().generation_id.clone();
-    let import = generation
-        .imports()
-        .iter()
-        .find(|import| import.module_specifier == "pkg")
-        .expect("verified package import")
-        .clone();
-    let snapshot = generation.snapshot();
-    let scope = ResolvedScope::new(
-        generation.manifest().project_id.clone(),
-        snapshot.repository.clone(),
-        snapshot.worktree.clone().expect("worktree identity"),
-        snapshot.reference.clone(),
-    )
-    .expect("resolved scope");
+    let (source_generation, import, scope) = admission_inputs(&published);
     let port = project_code_index_ignored_dependency_admission_port(
         registry.clone(),
         fixture.path().to_path_buf(),
@@ -192,6 +206,88 @@ async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
         dependency_symbols.len(),
         1,
         "the dependency declaration is served once: {dependency_symbols:?}"
+    );
+    registry.shutdown().await;
+}
+
+/// A worktree parked on a failure a wake does not clear installs no decoded
+/// seat. Admission answers with that park and its remedy instead of spending
+/// the request budget on a seat that is not coming.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ignored_dependency_admission_answers_a_parked_worktree_with_its_park() {
+    let fixture = ignored_package_fixture();
+    let store = TempDir::new().expect("store root");
+    let first = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    first
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount first index");
+    assert!(first.request_complete_generation(fixture.path()).await);
+    let (source_generation, import, scope) =
+        admission_inputs(&wait_for_live_complete_generation(&first, fixture.path()).await);
+    first.shutdown().await;
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let _no_pass = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the remounted worker before its first pass");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("remount the published store");
+    assert!(
+        registry
+            .plant_terminal_publication_authority_park_for_test(
+                fixture.path(),
+                "publication authority corrupt before admission",
+            )
+            .await
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none(),
+        "the remounted worktree has no decoded seat"
+    );
+
+    let port = project_code_index_ignored_dependency_admission_port(
+        registry.clone(),
+        fixture.path().to_path_buf(),
+        scope.clone(),
+        true,
+    );
+    let context = request_context(scope, "parked", Duration::from_secs(10));
+    let refused = port
+        .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
+            &context,
+            &source_generation,
+            std::slice::from_ref(&import),
+        ))
+        .await
+        .expect_err("a parked worktree has no generation to admit against");
+    let CodeIndexIgnoredDependencyAdmissionErrorV1::Parked(parked) = refused else {
+        panic!("admission must answer with the park, observed {refused:?}");
+    };
+    assert_eq!(
+        parked.reason,
+        "publication authority corrupt before admission"
+    );
+    assert!(!parked.retries_on_wake);
+    assert_eq!(
+        Some(parked),
+        registry.convergence_park(fixture.path()).await,
+        "the answer is the worktree's live park, remedy included"
     );
     registry.shutdown().await;
 }
