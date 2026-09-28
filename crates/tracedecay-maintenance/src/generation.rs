@@ -2,17 +2,23 @@
 
 use crate::compaction_receipt::record_live_compaction_outcome;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
-use crate::store_maintenance::{CodeGenerationRetentionOutcomeV1, run_code_generation_retention};
+use crate::store_maintenance::{
+    CodeGenerationRetentionOutcomeV1, run_code_generation_retention,
+    run_code_index_scope_reconciliation,
+};
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 
 /// Run the production generation-maintenance journey for one admitted store lease.
 ///
-/// A fresh full tick runs bounded code-generation retention and then the
-/// independent compaction passes. A code-generation continuation runs only
-/// the bounded code-generation unit, draining a superseded backlog on the
-/// short cadence without re-running compaction.
+/// A fresh full tick runs bounded code-generation retention, then collects
+/// the scopes of removed worktrees, then the independent compaction passes.
+/// A collected scope continues on the short cadence so the next
+/// code-generation pass sweeps the shared segments and text artifacts only it
+/// named. A code-generation continuation runs only the bounded
+/// code-generation unit, draining a superseded backlog without re-running
+/// scope reconciliation or compaction.
 #[hotpath::measure(label = "daemon.maintenance.generation", future = true)]
 pub async fn run_project_generation_maintenance(
     lease: &ProjectStoreMaintenanceLeaseV1,
@@ -48,6 +54,12 @@ pub async fn run_project_generation_maintenance(
     };
     if continuation == Some(MaintenanceContinuation::CodeGenerationRetention) {
         return finalize_generation_outcome(outcome, cancellation);
+    }
+    if !cancellation.is_cancelled() {
+        outcome = outcome.combine(hotpath::measure_block!(
+            "daemon.maintenance.scope_reconciliation",
+            run_code_index_scope_reconciliation(lease, code_index_schedulers).await
+        ));
     }
     if !cancellation.is_cancelled()
         && let Some(compaction) = compaction
