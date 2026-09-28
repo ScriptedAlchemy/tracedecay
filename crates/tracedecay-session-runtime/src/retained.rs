@@ -19,7 +19,7 @@ pub mod session;
 pub mod session_refresh;
 mod wire;
 
-pub use lcm::DirectRetainedLcmPortV1;
+pub use lcm::{DirectRetainedLcmPortV1, lcm_doctor_projection};
 pub use profile::{
     ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1, ProfileRetainedTerminalV1,
     execute_profile_retained_application, profile_retained_connection_authority,

@@ -177,6 +177,22 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert_eq!(compact["schema_convergence"]["findings"], json!([]));
     assert!(compact.get("code_index_freshness_warning").is_none());
     assert!(compact.get("node_count").is_none());
+    assert_eq!(
+        compact["session_projection"],
+        json!({
+            "state": "current",
+            "worker": {
+                "last_progress_at_unix_micros": null,
+                "backlog": 0,
+                "blocker": null,
+                "retry_class": null
+            }
+        })
+    );
+    assert_eq!(
+        compact["session_git_evidence"],
+        json!({ "status": "unrecorded", "backfill_watermark": null })
+    );
     assert_eq!(compact["server"]["errors"], 0);
     assert!(compact["server"].get("worktree_mismatch").is_none());
     assert_eq!(
@@ -295,7 +311,9 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
              **retrieval_serving.status:** serving\n\
              **schema_convergence.status:** completed\n\
              **server:** {{14 field(s)}}\n\
-             **serving_branch:** status-proof\n"
+             **serving_branch:** status-proof\n\
+             **session_git_evidence.status:** unrecorded\n\
+             **session_projection:** current\n"
         )
     );
 }

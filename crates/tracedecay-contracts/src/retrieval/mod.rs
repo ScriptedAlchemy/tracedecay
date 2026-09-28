@@ -256,7 +256,7 @@ pub use project_info_surface::{
     StatusGitStalenessUnavailableV1, StatusGitStalenessV1, StatusMemoryOwnerV1,
     StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1, StatusRetrievalServingV1,
     StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1, StatusServingConditionV1,
-    StatusServingFreshnessV1, StatusSurfaceRequestV1,
+    StatusServingFreshnessV1, StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

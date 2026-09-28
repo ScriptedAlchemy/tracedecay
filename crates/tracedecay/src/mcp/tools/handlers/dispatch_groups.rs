@@ -31,6 +31,7 @@ use tracedecay_mcp::{
     McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls, ToolResult,
 };
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
+use tracedecay_sessions::serving::{RefreshWorkerMissing, SessionProjectionServingStatusPort};
 
 use super::ToolCallRegistryOptions;
 use super::{application_surface, dashboard, dispatch_controls, info};
@@ -363,10 +364,16 @@ async fn compute_project_info(
             let project = admitted_project_authorities(cg, options)?;
             let snapshots = admitted_status_snapshots(options).await;
             let ctx = admitted_tool_context_for(options, &project, &snapshots)?;
+            let session_projection = options
+                .dashboard_session_retrieval_service
+                .as_ref()
+                .and_then(|retrieval| retrieval.projection_serving_status())
+                .unwrap_or_else(|| RefreshWorkerMissing.serving_status());
             portable_info::compute_status(
                 &ctx,
                 &request,
                 options.server_stats.clone(),
+                session_projection,
                 scope_prefix,
                 wait,
                 reached_freshness,
