@@ -56,7 +56,7 @@ fn copy_dir(from: &Path, to: &Path) {
 
 /// What Kimi Code's interactive `/plugins install <staged>` writes: a managed
 /// copy of the staged source and an enabled `installed.json` entry for it.
-fn complete_kimi_plugins_install(cli: &IsolatedCli, staged: &Path) {
+pub(super) fn complete_kimi_plugins_install(cli: &IsolatedCli, staged: &Path) {
     let code_home = cli.home.path().join(".kimi-code");
     let managed = code_home.join("plugins/managed/tracedecay");
     copy_dir(staged, &managed);
