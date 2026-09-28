@@ -188,123 +188,78 @@ impl BoundedObservabilityProducerV1 {
     }
 }
 
-pub(super) async fn claim_and_settle_durable(
+pub(super) async fn claim_and_settle_owner_run(
     db: &RegisteredGlobalDb,
-    identity: &ObservabilityProducerIdentityV1,
     next_sequence: &AtomicU64,
-    envelope: ObservabilityEnvelopeV1,
-    owner_fact_json: String,
+    run: Vec<(ObservabilityEnvelopeV1, QueuedOwnerFact)>,
     progress: &mut ProducerWorkerProgress,
     persistence_deadline: Duration,
 ) {
-    let existing = match timeout(
-        persistence_deadline,
-        db.observability_emission_claim(
-            &envelope.scope_ref,
-            &envelope.idempotency_key,
-            &owner_fact_json,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(existing)) => existing,
-        Ok(Err(error)) => {
-            retain_first_error(
-                &mut progress.first_error,
-                ApplicationContractError::Domain(error),
-            );
-            return;
-        }
-        Err(_) => {
-            retain_first_error(
-                &mut progress.first_error,
-                ApplicationContractError::Domain("observability_persistence_deadline".to_owned()),
-            );
-            return;
-        }
-    };
-    if existing.is_some() {
-        // Exact replay is already owned by its stored carrier. In particular,
-        // do not stamp or allocate a fresh boot/sequence identity for it.
+    if run.is_empty() {
         return;
     }
-    let sequence = next_sequence.fetch_add(1, Ordering::AcqRel);
-    let envelope = match prepare_delivery_with_identity(identity, envelope, sequence, false) {
-        Ok(envelope) => envelope,
-        Err(error) => {
-            retain_first_error(
-                &mut progress.first_error,
-                ApplicationContractError::Domain(error.to_owned()),
-            );
-            return;
-        }
+    let emissions = run
+        .iter()
+        .map(|(envelope, owner)| ObservabilityOwnerEmissionWriteV1 {
+            project_id: envelope.scope_ref.clone(),
+            owner_event_id: envelope.idempotency_key.clone(),
+            owner_fact_json: owner.json.clone(),
+        })
+        .collect::<Vec<_>>();
+    let prepare_new = |index: usize| {
+        let (envelope, owner) = &run[index];
+        // Allocate only after the registered lookup has shown this fact is new.
+        let sequence = next_sequence.fetch_add(1, Ordering::AcqRel);
+        let envelope = prepare_delivery_with_identity(
+            &owner.emission_identity,
+            envelope.clone(),
+            sequence,
+            false,
+        )
+        .map_err(|error| error.to_owned())?;
+        let delivery_envelope_json = serde_json::to_string(&envelope)
+            .map_err(|error| format!("observability delivery serialization failed: {error}"))?;
+        let event = analytics_event_for_delivery(&envelope, delivery_envelope_json.clone());
+        Ok(PreparedObservabilityEmissionV1 {
+            delivery_envelope_json,
+            event,
+        })
     };
-    let delivery_envelope_json = match serde_json::to_string(&envelope) {
-        Ok(delivery) => delivery,
-        Err(error) => {
-            retain_first_error(
-                &mut progress.first_error,
-                ApplicationContractError::Domain(format!(
-                    "observability delivery serialization failed: {error}"
-                )),
-            );
-            return;
-        }
-    };
-    let claim = match timeout(
+    match timeout(
         persistence_deadline,
-        db.claim_observability_emission(
-            &envelope.scope_ref,
-            &envelope.idempotency_key,
-            &owner_fact_json,
-            &delivery_envelope_json,
-        ),
+        db.claim_and_settle_observability_emissions(&emissions, prepare_new),
     )
     .await
     {
-        Ok(Ok(claim)) => claim,
+        Ok(Ok(outcomes)) => {
+            for outcome in outcomes {
+                match outcome {
+                    ObservabilityOwnerEmissionWriteOutcomeV1::Settled { .. } => {
+                        progress.persisted = progress.persisted.saturating_add(1);
+                    }
+                    ObservabilityOwnerEmissionWriteOutcomeV1::Rejected { error } => {
+                        retain_first_error(
+                            &mut progress.first_error,
+                            ApplicationContractError::Domain(error),
+                        );
+                    }
+                    ObservabilityOwnerEmissionWriteOutcomeV1::Replayed => {}
+                }
+            }
+        }
         Ok(Err(error)) => {
             retain_first_error(
                 &mut progress.first_error,
                 ApplicationContractError::Domain(error),
             );
-            return;
         }
         Err(_) => {
             retain_first_error(
                 &mut progress.first_error,
                 ApplicationContractError::Domain("observability_persistence_deadline".to_owned()),
             );
-            return;
         }
-    };
-    let delivery = match claim {
-        ObservabilityEmissionClaimV1::Claimed { .. } => envelope,
-        ObservabilityEmissionClaimV1::Pending {
-            delivery_envelope_json,
-        } => match serde_json::from_str(&delivery_envelope_json) {
-            Ok(delivery) => delivery,
-            Err(error) => {
-                retain_first_error(
-                    &mut progress.first_error,
-                    ApplicationContractError::Domain(format!(
-                        "observability pending delivery decode failed: {error}"
-                    )),
-                );
-                return;
-            }
-        },
-        ObservabilityEmissionClaimV1::Settled { .. } => return,
-    };
-    settle_durable(
-        db,
-        delivery,
-        owner_fact_json,
-        &mut progress.persisted,
-        &mut progress.first_error,
-        persistence_deadline,
-    )
-    .await;
+    }
 }
 
 fn replay_owner_claim(_claim: ObservabilityEmissionClaimV1) -> ObservabilityOwnerEmissionOutcomeV1 {
