@@ -2296,6 +2296,66 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
     }
 }
 
+/// A project-routed client reads the managed unit from the caller's own home,
+/// so a held daemon is named as held and a missing unit as not installed.
+#[cfg(target_os = "linux")]
+#[test]
+fn project_routed_tool_names_a_held_managed_daemon() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    std::fs::write(
+        project_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    let socket = home_path.join(".tracedecay/daemon.sock");
+    let socket = socket.display();
+    let not_installed = format!(
+        "TraceDecay daemon socket '{socket}' is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+    );
+    let held = format!(
+        "TraceDecay daemon socket '{socket}' is not available. TraceDecay daemon unit is installed but socket '{socket}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running."
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let search_probe: [&str; 3] = ["search", "--args", r#"{"query":"answer"}"#];
+    let status_probe: [&str; 2] = ["status", "--json"];
+    let unit_dir = home_path.join(".config/systemd/user");
+
+    for (unit_installed, expected) in [(false, &not_installed), (true, &held)] {
+        if unit_installed {
+            std::fs::create_dir_all(&unit_dir).unwrap();
+            std::fs::write(
+                unit_dir.join("tracedecay.service"),
+                "[Service]\nExecStart=/bin/false\n",
+            )
+            .unwrap();
+        }
+        for probe in [&search_probe[..], &status_probe[..]] {
+            let output = tracedecay_command_with_home(&home_path)
+                .current_dir(&project_path)
+                .args(["tool", "--project", &project_arg])
+                .args(probe)
+                .output()
+                .expect("tracedecay tool should run");
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(
+                    tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+                )),
+                "{probe:?}: {output:?}"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(expected.as_str()),
+                "{probe:?} (unit installed: {unit_installed}): expected\n{expected}\ngot:\n{stderr}"
+            );
+        }
+    }
+}
+
 #[test]
 fn status_json_requests_compact_daemon_payload_noninteractively() {
     let home = TempDir::new().unwrap();

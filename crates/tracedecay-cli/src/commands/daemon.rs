@@ -136,6 +136,7 @@ pub(crate) async fn admin_cli_result(
             message: "the CLI tool deadline exceeds the supported monotonic range".to_owned(),
         })?;
     let result = crate::tool_command::owner_operation_result(
+        profile,
         client_handshake(profile, project_path)?,
         ApplicationSurfaceOperation::AdminCli,
         serde_json::to_value(request)?,
@@ -180,11 +181,11 @@ pub(crate) async fn daemon_tool_json(
     hotpath::val!("cli.daemon.tool").set(&tool_name);
     let handshake = client_handshake(profile, project_path)?;
     let result = hotpath::future!(
-        tracedecay::daemon::call_default_tool(&handshake, tool_name, arguments),
+        tracedecay::daemon::call_default_tool(profile, &handshake, tool_name, arguments),
         label = "cli.daemon.request"
     )
     .await?;
-    recover_truncated_payload(&handshake, tool_name, result, None).await
+    recover_truncated_payload(profile, &handshake, tool_name, result, None).await
 }
 
 /// Deadline-carrying variant for CLI journeys that deliberately trigger a cold
@@ -207,15 +208,16 @@ pub(crate) async fn daemon_tool_json_until(
     // with deliberate open waits.
     let result = hotpath::future!(
         tracedecay::daemon::call_default_tool_awaiting_project_open(
-            &handshake, tool_name, arguments, deadline,
+            profile, &handshake, tool_name, arguments, deadline,
         ),
         label = "cli.daemon.request_open_wait"
     )
     .await?;
-    recover_truncated_payload(&handshake, tool_name, result, Some(deadline)).await
+    recover_truncated_payload(profile, &handshake, tool_name, result, Some(deadline)).await
 }
 
 async fn recover_truncated_payload(
+    profile: &ProfileRoot,
     handshake: &tracedecay_daemon_protocol::DaemonHandshake,
     tool_name: &str,
     result: serde_json::Value,
@@ -244,6 +246,7 @@ async fn recover_truncated_payload(
             Some(deadline) => {
                 hotpath::future!(
                     tracedecay::daemon::call_default_tool_awaiting_project_open(
+                        profile,
                         handshake,
                         "tracedecay_retrieve",
                         arguments,
@@ -256,6 +259,7 @@ async fn recover_truncated_payload(
             None => {
                 hotpath::future!(
                     tracedecay::daemon::call_default_tool(
+                        profile,
                         handshake,
                         "tracedecay_retrieve",
                         arguments

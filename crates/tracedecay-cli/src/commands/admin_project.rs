@@ -19,16 +19,18 @@ pub(crate) async fn admin_project(
 ) -> Result<AdminProjectResultV1> {
     let handshake = super::client_handshake(profile, Some(project_path))?;
     let deadline = Instant::now() + crate::tool_command::tool_command_deadline()?;
-    admin_project_until(handshake, request, deadline).await
+    admin_project_until(profile, handshake, request, deadline).await
 }
 
 /// Asks the handshake project's owner for one action by `deadline`.
 pub(crate) async fn admin_project_until(
+    profile: &ProfileRoot,
     handshake: DaemonHandshake,
     request: AdminProjectSurfaceRequestV1,
     deadline: Instant,
 ) -> Result<AdminProjectResultV1> {
     match crate::tool_command::owner_operation_result(
+        profile,
         handshake,
         ApplicationSurfaceOperation::AdminProject,
         serde_json::to_value(&request)?,

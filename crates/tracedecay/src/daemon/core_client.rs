@@ -23,6 +23,7 @@ pub(crate) use tracedecay_daemon_protocol::connection::{
 pub use tracedecay_daemon_protocol::daemon_tool_response_bound;
 use tracedecay_daemon_protocol::tool_request_deadline;
 use tracedecay_mcp::server::attach_stateless_request_context;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::{
     BrokerStream, DaemonClientDeadline, DaemonHandshake, JsonRpcError, JsonRpcRequest,
@@ -128,24 +129,22 @@ pub(crate) async fn write_daemon_preamble(
     .await
 }
 
-/// The socket of the daemon serving the profile `handshake` names.
-pub(crate) fn default_available_socket_path(handshake: &DaemonHandshake) -> Result<PathBuf> {
-    let profile_root = &handshake.client_identity.profile_root;
-    let socket_path = default_socket_path(profile_root)?;
+/// The socket of the daemon serving `profile`. An absent socket's advice reads
+/// the boundary profile's home and config home, so it can name an installed
+/// but held managed service.
+pub(crate) fn default_available_socket_path(profile: &ProfileRoot) -> Result<PathBuf> {
+    let socket_path = default_socket_path(profile.data_dir())?;
     #[cfg(unix)]
     {
         if socket_path.exists() {
             Ok(socket_path)
         } else {
-            Err(unavailable_error(
-                &tracedecay_runtime_core::config::ProfileRoot::new(profile_root),
-                &socket_path,
-            ))
+            Err(unavailable_error(profile, &socket_path))
         }
     }
     #[cfg(not(unix))]
     {
-        current_daemon_connection(profile_root)?;
+        current_daemon_connection(profile.data_dir())?;
         Ok(socket_path)
     }
 }
@@ -155,9 +154,10 @@ pub(crate) fn default_available_socket_path(handshake: &DaemonHandshake) -> Resu
 /// An absent socket is the typed daemon-unreachable refusal, as on the
 /// `tools/call` transport.
 pub fn invocation_client_for_current_client(
+    profile: &ProfileRoot,
     handshake: DaemonHandshake,
 ) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
-    let socket_path = default_available_socket_path(&handshake)?;
+    let socket_path = default_available_socket_path(profile)?;
     let connection = client_connection(&handshake.client_identity.profile_root, &socket_path)?;
     Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
         connection.into_protocol(),
@@ -584,11 +584,12 @@ async fn call_tool_with_project_open_retry(
 /// Callers that need a different budget use [`call_default_tool_within`] or
 /// [`call_default_tool_awaiting_project_open`].
 pub async fn call_default_tool(
+    profile: &ProfileRoot,
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path(handshake)?;
+    let socket_path = default_available_socket_path(profile)?;
     let deadline = Instant::now() + tool_request_deadline()?;
     let result = call_tool_within(
         &socket_path,
@@ -614,12 +615,13 @@ pub async fn call_default_tool(
 }
 
 pub async fn call_default_tool_within(
+    profile: &ProfileRoot,
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path(handshake)?;
+    let socket_path = default_available_socket_path(profile)?;
     // Deadline-aware application callers need the daemon's typed warming
     // response. Retrying that response until `deadline` turns a useful
     // temporary state into a client-side timeout with no response body.
@@ -635,12 +637,13 @@ pub async fn call_default_tool_within(
 /// A completed mounting refusal is the same kind of progress and is re-sent
 /// until `deadline`. Every other completed result is returned immediately.
 pub async fn call_default_tool_awaiting_project_open(
+    profile: &ProfileRoot,
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path(handshake)?;
+    let socket_path = default_available_socket_path(profile)?;
     call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 
