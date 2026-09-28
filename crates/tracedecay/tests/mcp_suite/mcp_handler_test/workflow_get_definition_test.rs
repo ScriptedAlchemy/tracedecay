@@ -103,17 +103,18 @@ async fn workflow_get_definition_returns_the_stored_definition_and_conceals_a_mi
         version_zero.envelope["value"]["problem"]["kind"],
         "invalid_request"
     );
+    let invalid_message = "definition content, definition_version, or expected_revision failed validation; versions and revisions start at 1";
     assert_eq!(
         version_zero.envelope["value"]["problem"]["code"],
-        "workflow.invalid_request"
+        "workflow.definition.invalid"
     );
     assert_eq!(
         version_zero.envelope["value"]["problem"]["message"],
-        "The Workflow application request is invalid"
+        invalid_message
     );
     assert_eq!(
         version_zero.envelope["value"]["problem"]["owning_layer"],
-        "runtime"
+        "application"
     );
     assert_eq!(
         version_zero.envelope["value"]["problem"]["legal_actions"],
@@ -123,8 +124,8 @@ async fn workflow_get_definition_returns_the_stored_definition_and_conceals_a_mi
     assert_eq!(
         version_zero.envelope["value"]["problem"]["diagnostic"],
         json!({
-            "code": "workflow.invalid_request",
-            "message": "The Workflow application request is invalid"
+            "code": "workflow.definition.invalid",
+            "message": invalid_message
         })
     );
 
@@ -226,7 +227,7 @@ async fn concealed_miss(server: &tracedecay::mcp::McpServer, arguments: Value) -
         "diagnostic": null,
         "detail": null,
         "committed_receipt": null,
-        "owning_layer": "runtime",
+        "owning_layer": "application",
         "terminality": "pre_admission",
         "retryable": false,
         "retry": "never",

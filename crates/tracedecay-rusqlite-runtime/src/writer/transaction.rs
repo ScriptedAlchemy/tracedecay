@@ -13,9 +13,10 @@ use tracedecay_store::{
 };
 
 use crate::{
-    RuntimeWriteAuthorityStage,
+    RuntimeWriteAuthorityStage, StorageOperationExecutor,
     admission::QueueItem,
     connection,
+    persistence::RuntimeWriterPersistence,
     telemetry::{
         LockWorkScope, WriterBatchMetrics, WriterLockWorkSnapshot, WriterTelemetry,
         WriterTransactionMetrics, WriterTransactionOutcome, take_observed_vm,
@@ -24,7 +25,7 @@ use crate::{
 };
 
 use super::{
-    WriterPersistence, WriterState,
+    WriterState,
     request::{AcceptedRequest, ExecutionBatch, RequestResult},
     settlement::{
         DriverFailure, committed_outcome, driver_failure, idempotency_outcome, infrastructure,
@@ -73,12 +74,12 @@ pub(super) struct WriterReporting<'reporting> {
 }
 
 #[hotpath::measure(label = "rusqlite_runtime.writer.transaction_batch")]
-pub(super) fn process_batch(
+pub(super) fn process_batch<E: StorageOperationExecutor>(
     connection: &mut Connection,
     binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
     timing: BatchTiming,
-    persistence: &mut dyn WriterPersistence,
+    persistence: &mut RuntimeWriterPersistence<E>,
     reporting: WriterReporting<'_>,
 ) {
     let BatchTiming {
@@ -270,11 +271,11 @@ fn publish_results<'a>(
     Ok(())
 }
 
-fn process_request(
+fn process_request<E: StorageOperationExecutor>(
     transaction: &mut Transaction<'_>,
     binding: &StoreRuntimeBindingV1,
     item: AcceptedRequest,
-    persistence: &mut dyn WriterPersistence,
+    persistence: &mut RuntimeWriterPersistence<E>,
 ) -> Processed {
     if item
         .authority
@@ -314,11 +315,11 @@ fn process_request(
     apply_new(transaction, binding, item, persistence)
 }
 
-fn apply_new(
+fn apply_new<E: StorageOperationExecutor>(
     transaction: &mut Transaction<'_>,
     binding: &StoreRuntimeBindingV1,
     item: AcceptedRequest,
-    persistence: &mut dyn WriterPersistence,
+    persistence: &mut RuntimeWriterPersistence<E>,
 ) -> Processed {
     let mut savepoint = match transaction.savepoint() {
         Ok(savepoint) => savepoint,
@@ -327,7 +328,8 @@ fn apply_new(
             return processed(item, result, false);
         }
     };
-    let receipt = match apply_and_record(persistence, &mut savepoint, binding, &item.request) {
+    // One operation-and-ledger boundary: the receipt is the one this savepoint recorded.
+    let receipt = match persistence.apply_and_record(&mut savepoint, binding, &item.request) {
         Ok(receipt) => receipt,
         Err(error) => {
             if let Some(outcome) = interruption_outcome(
@@ -398,17 +400,6 @@ fn apply_new(
             processed(item, result, false)
         }
     }
-}
-
-/// The transaction path has one operation+ledger boundary. The persistence
-/// implementation must return the receipt produced by this same savepoint.
-fn apply_and_record(
-    persistence: &mut dyn WriterPersistence,
-    savepoint: &mut Savepoint<'_>,
-    binding: &StoreRuntimeBindingV1,
-    request: &tracedecay_store::RuntimeSubmitRequestV1,
-) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
-    persistence.apply_and_record(savepoint, binding, request)
 }
 
 fn processed(item: AcceptedRequest, result: RequestResult, fatal: bool) -> Processed {

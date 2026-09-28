@@ -299,8 +299,11 @@ pub struct ProcessResidentSampleV1 {
     pub resident_bytes: u64,
     /// Anonymous and shared-memory pages (`RssAnon + RssShmem`).
     pub unreclaimable_bytes: u64,
+    /// Anonymous pages the kernel moved to swap (`VmSwap`).
+    pub swapped_bytes: u64,
     /// Bytes the kernel charges toward a finite `memory.max`: `memory.current`
-    /// minus `inactive_file`, on the cgroup with the tightest finite ceiling.
+    /// minus `inactive_file`, plus `memory.swap.current`, on the cgroup with
+    /// the tightest finite ceiling.
     ///
     /// `None` when no cgroup has a finite `memory.max`. An unlimited cgroup's
     /// file cache is not a kill line, and inactive file pages are what the
@@ -312,13 +315,16 @@ pub struct ProcessResidentSampleV1 {
 impl ProcessResidentSampleV1 {
     /// Bytes admission compares with the watermark.
     ///
-    /// Unreclaimable pages are the floor. A finite cgroup ceiling also counts
-    /// its committed working set, so a build cannot be admitted while
-    /// `memory.current` is already at the kill line and only the anonymous
-    /// subset sits under the watermark.
+    /// The daemon's anonymous state is the floor, swapped pages included:
+    /// they are live heap the next touch faults back in, so a sample taken
+    /// while the kernel swaps under a cgroup ceiling must not read as room.
+    /// A finite cgroup ceiling also counts its committed working set, so a
+    /// build cannot be admitted while `memory.current` is already at the kill
+    /// line and only the anonymous subset sits under the watermark.
     #[must_use]
     pub fn admission_bytes(self) -> u64 {
         self.unreclaimable_bytes
+            .saturating_add(self.swapped_bytes)
             .max(self.cgroup_committed_bytes.unwrap_or(0))
     }
 }
@@ -340,6 +346,7 @@ fn process_resident_sample_from_status_v1(status: &str) -> Option<ProcessResiden
     Some(ProcessResidentSampleV1 {
         resident_bytes: status_kib_field_bytes(status, "VmRSS")?,
         unreclaimable_bytes: anon.checked_add(shmem)?,
+        swapped_bytes: status_kib_field_bytes(status, "VmSwap")?,
         cgroup_committed_bytes: None,
     })
 }
@@ -355,7 +362,9 @@ fn memory_stat_field_bytes(stat: &str, field: &str) -> Option<u64> {
 }
 
 /// Working set a finite `memory.max` will kill for: `memory.current` minus
-/// `inactive_file` on the cgroup directory with the tightest finite ceiling.
+/// `inactive_file`, plus the cgroup's swapped anonymous pages
+/// (`memory.swap.current`), on the cgroup directory with the tightest finite
+/// ceiling.
 ///
 /// `None` when every `memory.max` is absent or `max`. Counting `memory.current`
 /// on an unlimited cgroup treats the machine's page cache as a kill line and
@@ -389,7 +398,15 @@ fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Opt
         .ok()
         .and_then(|stat| memory_stat_field_bytes(&stat, "inactive_file"))
         .unwrap_or(0);
-    Some(current.saturating_sub(inactive_file))
+    let swapped = std::fs::read_to_string(directory.join("memory.swap.current"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    Some(
+        current
+            .saturating_sub(inactive_file)
+            .saturating_add(swapped),
+    )
 }
 
 /// Sample this process's resident set directly from the kernel.

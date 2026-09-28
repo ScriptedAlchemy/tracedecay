@@ -97,6 +97,9 @@ describe('coverage', () => {
 describe('uncertainty and calibration', () => {
   it('drops the degenerate interval the composer writes for every known value', () => {
     expect(metricPresentation(metric()).interval).toBeNull();
+    expect(
+      metricPresentation(metric({ uncertainty: { lower: 120, upper: 136, reason: null } })).interval,
+    ).toBe('120 – 136 events');
   });
 
   it('reports calibration only when the server attached one', () => {

@@ -371,6 +371,18 @@ def _workflow_environment_pins(
     raise JourneyError("Workflow validation never admitted the discovered pins")
 
 
+def _workflow_provider() -> dict[str, Any]:
+    return {
+        "route": {
+            "provider_id": "provider.work.codex-cli",
+            "route_id": "route.tool-sweep.workflow",
+        },
+        "backend": "codex_cli",
+        "model": "tool-sweep",
+        "priority": 1,
+    }
+
+
 def _workflow_definition(
     *,
     definition_id: str,
@@ -478,6 +490,102 @@ def _handoff_redeemed(
     raise JourneyError("handoff redeem omitted the issued grant frontier")
 
 
+def _start_handoff_run(
+    fixture: dict[str, Any],
+    call: Call,
+    deadline: Deadline,
+    pins: dict[str, str],
+    suffix: str,
+) -> dict[str, Any]:
+    """Admit the active definition version and run a handoff scope must name.
+
+    The shared fixture's definition is retired by the time handoffs run.
+    """
+    definition_id = f"workflow.tool-sweep.handoff.{suffix}"
+    definition = {
+        **_workflow_definition(
+            definition_id=definition_id, version=1, project_id=fixture["project_id"],
+        ),
+        **pins,
+    }
+    call(
+        "tracedecay_workflow_register_definition",
+        {"definition": definition, "format": "json"},
+        deadline("tracedecay_workflow_register_definition"),
+    )
+    active = _workflow_disposition(
+        call(
+            "tracedecay_workflow_activate_definition",
+            {
+                "definition_id": definition_id,
+                "definition_version": 1,
+                "expected_revision": 1,
+                "format": "json",
+            },
+            deadline("tracedecay_workflow_activate_definition"),
+        ),
+        definition_id,
+        "active",
+    )
+    run_id = f"workflow-run.tool-sweep.handoff.{suffix}"
+    run = _workflow_run(
+        call(
+            "tracedecay_workflow_start_run",
+            {
+                "run_id": run_id,
+                "definition_id": definition_id,
+                "definition_version": 1,
+                "provider": _workflow_provider(),
+                "fan_out": None,
+                "command_id": f"command.workflow.handoff.start.{suffix}",
+                "format": "json",
+            },
+            deadline("tracedecay_workflow_start_run"),
+        ),
+        run_id,
+        {"running"},
+    )
+    return {
+        "definition_id": definition_id,
+        "step_id": definition["steps"][0]["step_id"],
+        "revision": active["revision"],
+        "run_id": run_id,
+        "sequence": run["sequence"],
+        "suffix": suffix,
+    }
+
+
+def _retire_handoff_run(handoff_run: dict[str, Any], call: Call, deadline: Deadline) -> None:
+    _workflow_run(
+        call(
+            "tracedecay_workflow_cancel_run",
+            {
+                "run_id": handoff_run["run_id"],
+                "expected_sequence": handoff_run["sequence"],
+                "command_id": f"command.workflow.handoff.cancel.{handoff_run['suffix']}",
+                "format": "json",
+            },
+            deadline("tracedecay_workflow_cancel_run"),
+        ),
+        handoff_run["run_id"],
+        {"cancelled"},
+    )
+    _workflow_disposition(
+        call(
+            "tracedecay_workflow_retire_definition",
+            {
+                "definition_id": handoff_run["definition_id"],
+                "definition_version": 1,
+                "expected_revision": handoff_run["revision"],
+                "format": "json",
+            },
+            deadline("tracedecay_workflow_retire_definition"),
+        ),
+        handoff_run["definition_id"],
+        "retired",
+    )
+
+
 def _prepare_workflow_effect_journey(
     name: str,
     fixture: dict[str, Any],
@@ -495,16 +603,17 @@ def _prepare_workflow_effect_journey(
         actor = fixture["workflow_actor"]
         admitted_scope = fixture["workflow_scope"]
         task_id = f"task.tool-sweep.workflow.{suffix}"
+        handoff_run = _start_handoff_run(fixture, call, deadline, pins, suffix)
         scope = {
             "project_id": admitted_scope["project_id"],
             "repository_id": admitted_scope["repository_id"],
             "worktree_id": admitted_scope["worktree_id"],
-            "definition_id": definition_id,
+            "definition_id": handoff_run["definition_id"],
             "definition_version": 1,
-            "step_id": fixture["workflow_definition_v1"]["steps"][0]["step_id"],
+            "step_id": handoff_run["step_id"],
             "task_id": task_id,
             "thread_id": f"thread.tool-sweep.{suffix}",
-            "run_id": fixture["workflow_run_id"],
+            "run_id": handoff_run["run_id"],
             "from_actor_id": actor,
             "to_actor_id": actor,
         }
@@ -563,9 +672,11 @@ def _prepare_workflow_effect_journey(
                     deadline("tracedecay_workflow_handoff_redeem"),
                 )
                 _handoff_redeemed(redeemed, scope, grant["frontier_digest"])
+                _retire_handoff_run(handoff_run, call, deadline)
                 return "issued grant replayed exactly, then consumed with its scope and frontier"
             assert issued is not None
             _handoff_redeemed(response, scope, issued["frontier_digest"])
+            _retire_handoff_run(handoff_run, call, deadline)
             return "issued grant redeemed once in the disposable store"
 
         return PreparedJourney(
@@ -634,15 +745,7 @@ def _prepare_workflow_effect_journey(
         "run_id": run_id,
         "definition_id": effect_definition_id,
         "definition_version": 1,
-        "provider": {
-            "route": {
-                "provider_id": "provider.work.codex-cli",
-                "route_id": "route.tool-sweep.workflow",
-            },
-            "backend": "codex_cli",
-            "model": "tool-sweep",
-            "priority": 1,
-        },
+        "provider": _workflow_provider(),
         "fan_out": None,
         "command_id": f"command.workflow.effect.start.{suffix}",
         "format": "json",
@@ -853,15 +956,7 @@ def prime_workflow_lifecycle(
     active = _workflow_disposition(activated, definition_id, "active")
     workflow_actor, workflow_scope = _workflow_effect_authority(activated)
 
-    provider = {
-        "route": {
-            "provider_id": "provider.work.codex-cli",
-            "route_id": "route.tool-sweep.workflow",
-        },
-        "backend": "codex_cli",
-        "model": "tool-sweep",
-        "priority": 1,
-    }
+    provider = _workflow_provider()
     run_id = f"workflow-run.tool-sweep.{suffix}"
     start_arguments = {
         "run_id": run_id,

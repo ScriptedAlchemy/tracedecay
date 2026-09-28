@@ -31,14 +31,13 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOperation, ApplicationOutcome,
     ApplicationProblem, ApplicationProblemDetailV1, ApplicationProblemEnvelope,
-    ApplicationProblemKind, ApplicationResult, AuthorityReceipt, CancellationContext,
-    CancellationObservation, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
-    CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticsSearchedTsconfigV1,
-    DisclosureClass, EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, LegalAction,
-    Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission,
-    RequestContext, RequestCostReceiptV1, RequestId, ResolvedScope, RetrievalEvidence,
-    RetryDirective, SafeDiagnostic, TemporalState,
+    ApplicationProblemKind, ApplicationResult, AuthorityReceipt, CancellationObservation,
+    CancellationStage, CoverageCompleteness, CoverageDomainState, DiagnosticsSearchedTsconfigV1,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, Omission,
+    OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination,
+    PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext,
+    RequestCostReceiptV1, ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic,
+    TemporalState,
 };
 use tracedecay_domain::text::forward_slash_path;
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
@@ -122,8 +121,6 @@ macro_rules! dispatch_extended {
 }
 
 pub type PrimitiveDispatchFuture<'a> =
-    Pin<Box<dyn Future<Output = PrimitiveResult<Value>> + Send + 'a>>;
-pub type PrimitiveTransportDispatchFuture<'a> =
     Pin<Box<dyn Future<Output = PrimitiveResult<Value>> + Send + 'a>>;
 
 pub type ExtendedPrimitiveFuture<'a, T> =
@@ -240,16 +237,6 @@ pub trait PrimitiveDispatch: Send + Sync {
         context: RequestContext,
         observed_at: UtcMicros,
     ) -> PrimitiveDispatchFuture<'_>;
-
-    fn dispatch_transport(
-        &self,
-        request_id: RequestId,
-        operation: ApplicationOperation,
-        request: PrimitiveRequest,
-        observed_at: UtcMicros,
-        deadline: Deadline,
-        cancellation: CancellationContext,
-    ) -> PrimitiveTransportDispatchFuture<'_>;
 }
 
 /// Owned production authorities supplied by the daemon project-open path.
@@ -385,53 +372,6 @@ impl PrimitiveDispatch for OwnedPrimitiveRuntime {
     ) -> PrimitiveDispatchFuture<'_> {
         self.dispatch_invocation(invocation, context, observed_at)
     }
-
-    fn dispatch_transport(
-        &self,
-        request_id: RequestId,
-        operation: ApplicationOperation,
-        request: PrimitiveRequest,
-        observed_at: UtcMicros,
-        deadline: Deadline,
-        cancellation: CancellationContext,
-    ) -> PrimitiveTransportDispatchFuture<'_> {
-        Box::pin(hotpath::future!(
-            async move {
-                if let Some(problem) = pre_admission_problem(
-                    &request_id,
-                    &operation,
-                    observed_at,
-                    &deadline,
-                    &cancellation,
-                )? {
-                    return Ok(Err(problem));
-                }
-                if observed_at >= self.access.grant_expires_at {
-                    return Ok(Err(ApplicationProblemEnvelope::new(
-                        operation.result_contract().clone(),
-                        request_id,
-                        ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-                    )?));
-                }
-                let context = transport_context(
-                    &self.scope,
-                    &self.access,
-                    request_id,
-                    &operation,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                )?;
-                self.dispatch_invocation(
-                    PrimitiveInvocation { operation, request },
-                    context,
-                    observed_at,
-                )
-                .await
-            },
-            label = "usecases.primitives.dispatch"
-        ))
-    }
 }
 
 impl OwnedPrimitiveRuntime {
@@ -530,65 +470,6 @@ const fn reads_code_index(request: &PrimitiveRequest) -> bool {
         | PrimitiveRequest::DiagnosticsRead(_)
         | PrimitiveRequest::RecentTestResults(_) => false,
     }
-}
-
-fn pre_admission_problem(
-    request_id: &RequestId,
-    operation: &ApplicationOperation,
-    observed_at: UtcMicros,
-    deadline: &Deadline,
-    cancellation: &CancellationContext,
-) -> Result<Option<ApplicationProblemEnvelope>, ApplicationContractError> {
-    let problem = if cancellation.is_cancelled() {
-        ApplicationProblem::cancelled_before_admission()
-    } else if deadline.is_elapsed_at(observed_at) {
-        ApplicationProblem::timed_out_before_admission()
-    } else {
-        return Ok(None);
-    };
-    Ok(Some(ApplicationProblemEnvelope::new(
-        operation.result_contract().clone(),
-        request_id.clone(),
-        problem,
-    )?))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn transport_context(
-    scope: &ResolvedScope,
-    access: &ProjectSourceAccessSnapshot,
-    request_id: RequestId,
-    operation: &ApplicationOperation,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-    cancellation: CancellationContext,
-) -> Result<RequestContext, ApplicationContractError> {
-    let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
-    if observed_at.0 <= 0 || expires_at.0 <= observed_at.0 {
-        return Err(ApplicationContractError::InvalidRange {
-            field: "application primitive transport deadline",
-        });
-    }
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new(format!("grant.daemon.primitive.{}", request_id.as_str()))?,
-        1,
-        access.configuration_digest.clone(),
-        access.requester.clone(),
-        observed_at,
-        expires_at,
-        scope.clone(),
-        BTreeSet::from([operation.capability_id().clone()]),
-        BTreeSet::from([operation.use_case_id().clone()]),
-        DisclosureClass::Evidence,
-    )?;
-    RequestContext::new(
-        access.requester.clone(),
-        scope.clone(),
-        grant,
-        request_id,
-        Deadline::new(expires_at)?,
-        cancellation,
-    )
 }
 
 /// Concrete project-open factory for the complete owned application primitive
@@ -2253,9 +2134,9 @@ mod tests {
     use super::{
         ExtendedPrimitivePort, MAX_SAFE_DIAGNOSTIC_MESSAGE_BYTES, OmissionReason,
         PrimitiveCapacity, PrimitiveDispatch, PrimitiveRequest, StorageStatusPrimitiveRequest,
-        diagnostics_absence_problem, pre_admission_problem, safe_problem_message,
-        session_structural_refusal_problem, symbol_temporal_state, unchecked_owner_problem,
-        unpublished_diagnostics_problem, valid_owned_primitive_request, validate_admitted_root_uri,
+        diagnostics_absence_problem, safe_problem_message, session_structural_refusal_problem,
+        symbol_temporal_state, unchecked_owner_problem, unpublished_diagnostics_problem,
+        valid_owned_primitive_request, validate_admitted_root_uri,
     };
     use tracedecay_contracts::retrieval::{
         CodeGraphReadFreshnessV1, GraphRelationRequest, ImplementationSelector,
@@ -2264,9 +2145,8 @@ mod tests {
         SymbolGraphPage, SymbolGraphScope, SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
     };
     use tracedecay_contracts::{
-        ApplicationProblemDetailV1, ApplicationProblemKind, CancellationContext, Deadline,
-        DiagnosticsSearchedTsconfigV1, FreshnessState, LegalAction, PageRequest, RequestId,
-        RetryDirective, SafeDiagnostic,
+        ApplicationProblemDetailV1, ApplicationProblemKind, DiagnosticsSearchedTsconfigV1,
+        FreshnessState, LegalAction, PageRequest, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_domain::{
         CodeGenerationId, EphemeralSanitizedQueryViewV1, QueryNormalizationRevision,
@@ -2301,41 +2181,6 @@ mod tests {
         assert_eq!(temporal.code_graph_freshness, Some(page.freshness));
         assert_eq!(temporal.source_generation, Some(generation));
         assert_eq!(temporal.freshness, FreshnessState::Stale);
-    }
-
-    #[test]
-    fn transport_pre_admission_problems_are_canonical() {
-        let operation =
-            tracedecay_contracts::retrieval::catalog::primitive_read_operation("storage_status")
-                .expect("operation contract")
-                .expect("storage status operation");
-        let request_id = RequestId::new("request.primitive.pre-admission").expect("request id");
-        let deadline = Deadline::new(UtcMicros(200)).expect("deadline");
-        let cancelled =
-            CancellationContext::cancelled("cancel.primitive", UtcMicros(90)).expect("cancelled");
-
-        let problem = pre_admission_problem(
-            &request_id,
-            &operation,
-            UtcMicros(100),
-            &deadline,
-            &cancelled,
-        )
-        .expect("cancelled problem construction")
-        .expect("cancelled problem");
-        assert_eq!(problem.problem.kind(), ApplicationProblemKind::Cancelled);
-
-        let active = CancellationContext::active("cancel.primitive").expect("active");
-        let problem =
-            pre_admission_problem(&request_id, &operation, UtcMicros(200), &deadline, &active)
-                .expect("timeout problem construction")
-                .expect("timeout problem");
-        assert_eq!(problem.problem.kind(), ApplicationProblemKind::TimedOut);
-        assert!(
-            pre_admission_problem(&request_id, &operation, UtcMicros(100), &deadline, &active)
-                .expect("active problem construction")
-                .is_none()
-        );
     }
 
     /// A diagnostics read that reached no publishing authority must not render

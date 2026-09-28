@@ -14,6 +14,14 @@ deletions. Mutations consume the exact definition or run identity returned by a
 read or registration; a name, label, or filesystem path is not authority.
 Handoff redemption (`tracedecay_workflow_handoff_redeem`) consumes the grant
 `tracedecay_workflow_handoff_issue` returned, never an invented grant identity.
+Issue a handoff only for a step of an Active definition version and a run
+started from it; any other scope is refused as not found.
+
+Refusals are typed states: a stale `expected_revision` or `expected_sequence`
+is `stale` with the requested and current values in `detail` (refresh and
+resend); an illegal lifecycle edge or a run from an inactive version is a
+`conflict`; a redeemed or expired handoff needs a new handoff from its issuer
+(`reauthorize`).
 
 Starting a run (`tracedecay_workflow_start_run`) differs from controlling an
 existing run (`tracedecay_workflow_pause_run`, `tracedecay_workflow_resume_run`,

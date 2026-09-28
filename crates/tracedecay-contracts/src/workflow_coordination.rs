@@ -1002,7 +1002,9 @@ pub enum TaskHandoffConsumeOutcome {
 /// Wire request for [`TaskHandoffService::issue`].
 ///
 /// `secret` is the caller-supplied bearer token; the authority persists only
-/// its digest, never the secret itself.
+/// its digest, never the secret itself. The scope must name a step the
+/// Active definition version declares and a run admitted from that version;
+/// any other scope is refused as not found and journals no grant.
 #[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TaskHandoffIssueRequest {

@@ -1484,8 +1484,12 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .execute::<WorkflowHandoffRedeem>(&redeem)
         .expect_err("host handoff must be single-use");
     assert!(
-        matches!(replay, ClientError::Problem(ref problem) if problem.kind == "invalid_request"),
-        "handoff replay must be a typed refusal: {replay}"
+        matches!(
+            replay,
+            ClientError::Problem(ref problem)
+                if problem.kind == "conflict" && problem.code == "workflow.handoff.replayed"
+        ),
+        "handoff replay must be the typed replayed refusal: {replay}"
     );
     let retired = client
         .execute::<WorkflowRetireDefinition>(&WorkflowDefinitionRetireRequest {

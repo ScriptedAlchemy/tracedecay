@@ -3,10 +3,9 @@ use std::sync::Arc;
 use tracedecay_contracts::{ApplicationProblem, RequestContext};
 use tracedecay_domain::UtcMicros;
 
-use tracedecay_daemon_protocol::DaemonInvocationProblem;
-
 use super::super::recovery_schedule::run_recovery_loop;
 use super::RegisteredWorkRuntime;
+use super::workflow_run_control::workflow_runtime_unavailable;
 
 /// The durable-write signal is the prompt path. This interval reconciles
 /// writes from previous processes and notification loss after restarts.
@@ -44,16 +43,16 @@ fn try_persist_workflow_fan_out_census(
     projection: &tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
     producer: Option<Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>>,
-) -> Result<(), DaemonInvocationProblem> {
+) -> Result<(), ApplicationProblem> {
     if projection.fan_out_plans().is_empty() {
         return Ok(());
     }
     let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let workflow_use_case = tracedecay_tool_catalog::UseCaseId::new("use-case.work.mutate_graph")
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+        .map_err(|_| workflow_runtime_unavailable())?;
     // An unavailable projection is reported below as the typed
     // `WorkProjectionUnavailable` census evidence, not swallowed.
     let snapshot = super::preparation::current_work_product_snapshot(
@@ -73,7 +72,7 @@ fn try_persist_workflow_fan_out_census(
     ) {
         Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(binding)) => Some(
             tracedecay_domain::WorkTopologyGenerationRefV1::new(binding.generation)
-                .map_err(|_| DaemonInvocationProblem::Unavailable)?,
+                .map_err(|_| workflow_runtime_unavailable())?,
         ),
         Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Absent) | Err(_) => None,
     };
@@ -121,19 +120,19 @@ fn try_persist_workflow_fan_out_census(
         workflow.effects(),
         projection.run_id(),
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     if latest
         .as_ref()
         .is_some_and(|census| census.workflow_sequence > projection.sequence())
     {
-        return Err(DaemonInvocationProblem::Unavailable);
+        return Err(workflow_runtime_unavailable());
     }
     let previous = tracedecay_contracts::WorkflowFanOutCensusStoragePort::census_before(
         workflow.effects(),
         projection.run_id(),
         projection.sequence(),
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let non_duplicate_attempts = match (snapshot.as_ref(), topology_generation.as_ref()) {
         (_, None) => tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
             tracedecay_domain::WorkflowCensusEvidenceReasonV1::WorkTopologyUnavailable,
@@ -146,7 +145,7 @@ fn try_persist_workflow_fan_out_census(
         (Some(snapshot), Some(topology_generation)) => {
             let work_generation =
                 tracedecay_contracts::work_product_projection_generation(snapshot)
-                    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+                    .map_err(|_| workflow_runtime_unavailable())?;
             match work
                 .duplicate_adjudications()
                 .classify_attempts(
@@ -197,12 +196,12 @@ fn try_persist_workflow_fan_out_census(
                     observed_at,
                 },
             )
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            .map_err(|_| workflow_runtime_unavailable())?;
             tracedecay_contracts::WorkflowFanOutCensusStoragePort::persist_census(
                 workflow.effects(),
                 &census,
             )
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            .map_err(|_| workflow_runtime_unavailable())?;
             // `persist_census` is the canonical durable write; wake recovery
             // before optional observability enqueue so a later enqueue error
             // cannot hide the pending record.
@@ -222,7 +221,7 @@ fn try_persist_workflow_fan_out_census(
             tracedecay_application::observability::WorkOwnerObservationResultV1::Enqueued => {}
             tracedecay_application::observability::WorkOwnerObservationResultV1::DroppedAtCapacity
             | tracedecay_application::observability::WorkOwnerObservationResultV1::Unavailable => {
-                return Err(DaemonInvocationProblem::Unavailable);
+                return Err(workflow_runtime_unavailable());
             }
         }
     }
@@ -270,14 +269,14 @@ fn try_persist_workflow_fan_out_census(
             payload: tracedecay_domain::ObservabilityPayloadV1::ExecutionTopology(sample),
         },
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     match producer
         .try_emit_owner_fact(envelope)
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?
+        .map_err(|_| workflow_runtime_unavailable())?
     {
         tracedecay_application::observability::ObservabilityEmissionOutcomeV1::Enqueued => Ok(()),
         tracedecay_application::observability::ObservabilityEmissionOutcomeV1::DroppedAtCapacity => {
-            Err(DaemonInvocationProblem::Unavailable)
+            Err(workflow_runtime_unavailable())
         }
     }
 }

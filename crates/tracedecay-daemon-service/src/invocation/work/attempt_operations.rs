@@ -475,7 +475,7 @@ pub(super) fn resume_attempts(
             project_root,
             observability_producer.cloned(),
         ) {
-            return DaemonInvocationResponse::problem(request_id, problem);
+            return DaemonInvocationResponse::application_problem(request_id, problem);
         }
     }
     complete_work_effect(

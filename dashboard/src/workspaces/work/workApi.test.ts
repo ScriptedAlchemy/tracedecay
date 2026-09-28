@@ -101,10 +101,19 @@ describe('the Work problem taxonomy', () => {
     expect(workRefusal(504).state).toBe('timed_out');
   });
 
-  it('never reports a refusal without a reason', () => {
-    for (const status of [400, 404, 405, 408, 409, 422, 429, 500, 503, 504]) {
-      expect(workRefusal(status).detail, `HTTP ${status} carries no reason`).not.toBe('');
-    }
+  it('names the reason for every refusal, including a status it has no reading for', () => {
+    expect([400, 404, 405, 408, 409, 422, 429, 500, 503, 504].map((status) => workRefusal(status).detail)).toEqual([
+      'the daemon rejected the request as invalid',
+      'not found, or not authorized for this actor',
+      'this scope will not accept the write',
+      'the daemon cancelled the request',
+      'the task moved since it was read',
+      'the daemon does not support this request',
+      'the daemon is saturated',
+      'HTTP 500',
+      'the Work runtime is unavailable',
+      'the daemon timed out',
+    ]);
   });
 });
 
