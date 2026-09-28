@@ -638,9 +638,24 @@ mod tests {
 
     #[test]
     fn a_refused_connection_is_network_unreachable() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
+        // Bound but never listening, and held for the whole test: the port
+        // refuses connections and cannot be reused, whereas a dropped listener
+        // stays connectable while a sibling test's forked child still holds
+        // the inherited descriptor.
+        let refusing =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        refusing
+            .bind(
+                &"127.0.0.1:0"
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap()
+                    .into(),
+            )
+            .unwrap();
+        let base = format!(
+            "http://{}",
+            refusing.local_addr().unwrap().as_socket().unwrap()
+        );
 
         let error = latest_release_version(&base, true, None).unwrap_err();
 
