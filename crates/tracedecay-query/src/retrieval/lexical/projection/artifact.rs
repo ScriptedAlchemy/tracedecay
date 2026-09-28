@@ -14,7 +14,6 @@ use tracedecay_runtime_core::path_safety::{SqliteDatabasePathError, sqlite_datab
 mod builder;
 mod clone_census;
 mod clone_codec;
-mod delta;
 mod fingerprints;
 mod format;
 mod postings;
