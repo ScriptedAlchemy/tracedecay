@@ -19,7 +19,8 @@ use code_index_task_support::{
     code_index_search_unavailable_for_generation, generation_for_hydration,
 };
 
-const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;
+const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize =
+    tracedecay_query::retrieval::lexical::CodeLexicalArtifactReaderV1::MAX_CONCURRENT_READS;
 
 struct McpRetrievalExecutionControlV1<A> {
     started: std::time::Instant,
@@ -45,8 +46,8 @@ impl<A> McpRetrievalExecutionControlV1<A> {
     /// the one stretch of an admitted search that consults no control at all:
     /// it parks on the scheduler's mounted map and, when nothing is servable,
     /// on the in-flight decode. A request that settles inside that window has
-    /// no checkpoint to unwind at, so the single execution permit stayed held
-    /// by work no caller was waiting for, and every following search was
+    /// no checkpoint to unwind at, so the execution permit stayed held
+    /// by work no caller was waiting for, and following searches were
     /// refused `search_capacity_unavailable`, a refusal the dispatch contract
     /// advertises as retryable while guaranteeing the retry fails too.
     /// Awaiting this alongside the execution drops the abandoned work at its

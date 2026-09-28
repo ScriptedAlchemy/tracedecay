@@ -487,9 +487,6 @@ pub struct ProductionCodeIndexQueryOwnersV1 {
     >,
     lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
     hydration: CodeLexicalArtifactReaderV1,
-    /// Holds the complete advertised reader ceiling in the process resident-
-    /// memory authority while these owners serve.
-    _reader_reservation: Arc<ResidentMemoryReservationV1>,
 }
 
 struct CloneIndexArtifactSnapshotV1 {
@@ -513,13 +510,11 @@ impl ProductionCodeIndexQueryOwnersV1 {
         >,
         lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
         hydration: CodeLexicalArtifactReaderV1,
-        reader_reservation: ResidentMemoryReservationV1,
     ) -> Self {
         Self {
             exact,
             lexical,
             hydration,
-            _reader_reservation: Arc::new(reader_reservation),
         }
     }
 
@@ -3412,15 +3407,13 @@ impl LatestCodeTextGenerationV1 {
                      {error}"
                 ))
             })?;
+        let reader = reader.with_resident_memory_reservation(reader_reservation);
         let authority = exact_serving_authority()?;
         let exact = ExactLane::new(authority.clone(), reader.exact_adapter(authority));
         let hydration = reader.clone();
         let lexical = LexicalLane::new(reader);
         let owners = Arc::new(ProductionCodeIndexQueryOwnersV1::artifact(
-            exact,
-            lexical,
-            hydration,
-            reader_reservation,
+            exact, lexical, hydration,
         ));
         *self
             .query_owners

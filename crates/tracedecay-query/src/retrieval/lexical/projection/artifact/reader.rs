@@ -8,8 +8,15 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::num::NonZeroU64;
+use std::ops::Deref;
 use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
+use std::sync::{
+    Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock, TryLockError,
+};
+use std::time::Duration;
+
+use tracedecay_runtime_core::resident_memory::ResidentMemoryReservationV1;
 
 use roaring::RoaringBitmap;
 #[cfg(any(test, feature = "hotpath"))]
@@ -20,7 +27,7 @@ use tracedecay_code_index::clones::{
     CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneSelectedBlockV1,
     CodeIndexCloneBodyV1,
 };
-use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CompactCandidate, ExactFieldV1, ExactTechnicalTermKindV1, LanguageDescriptorRevision,
@@ -129,13 +136,46 @@ impl LexicalIndexedRow for ArtifactRowV1 {
 
 #[derive(Clone)]
 pub struct CodeLexicalArtifactReaderV1 {
-    connection: Arc<ArtifactConnectionMutex<Connection>>,
+    connections: Arc<ArtifactReaders>,
+    resident_memory: Option<Arc<ResidentMemoryReservationV1>>,
     metadata: super::super::CodeLexicalProjectionMetadataV1,
     receipt: VerifiedCodeLexicalArtifactV1,
     retained_owned_bytes: usize,
     /// Fuzzy expansion walks every in-fuzzy term; share one load across
     /// clones and later queries on this reader.
     fuzzy_vocabulary: Arc<OnceLock<Arc<Vec<String>>>>,
+}
+
+struct ArtifactReaders {
+    connections: Vec<StdMutex<Connection>>,
+    queue: StdMutex<()>,
+    available: Condvar,
+}
+
+struct ArtifactReaderWakeup<'a>(&'a ArtifactReaders);
+
+impl Drop for ArtifactReaderWakeup<'_> {
+    fn drop(&mut self) {
+        // Pair the availability check and sleep so a released handle cannot
+        // be missed between them. Poison still wakes waiters to report it.
+        let _queue = self.0.queue.lock();
+        self.0.available.notify_all();
+    }
+}
+
+struct ArtifactReadGuard<'a> {
+    connection: StdMutexGuard<'a, Connection>,
+    _scratch_reservation: Option<ResidentMemoryReservationV1>,
+    // Fields drop in order: unlock and release memory before waking a waiter.
+    _wakeup: ArtifactReaderWakeup<'a>,
+}
+
+impl Deref for ArtifactReadGuard<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,8 +238,6 @@ fn clone_authority_digest(
     ))
     .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
-
-type ArtifactConnectionMutex<T> = StdMutex<T>;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -330,6 +368,20 @@ impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
 }
 
 impl CodeLexicalArtifactReaderV1 {
+    /// Bounded parallel scans share the existing SQLite cache ceiling. Each
+    /// additional active reader must reserve scratch from the process owner.
+    pub const MAX_CONCURRENT_READS: usize = 8;
+
+    /// All clones retain the serving owner's admitted reader ceiling. A
+    /// concurrent scan reserves its own scratch against that same authority.
+    pub fn with_resident_memory_reservation(
+        mut self,
+        reservation: ResidentMemoryReservationV1,
+    ) -> Self {
+        self.resident_memory = Some(Arc::new(reservation));
+        self
+    }
+
     /// Explicit corpus-wide verification for diagnostics, repair, and
     /// publication checks. Unlike the bounded cold-restore path, this streams
     /// the whole file twice around SQLite's receipt and section verification.
@@ -405,6 +457,8 @@ impl CodeLexicalArtifactReaderV1 {
         })?;
         let reader = Self::open_connection_with_control(
             connection,
+            path,
+            &file,
             &receipt,
             authority,
             cache_budget_bytes,
@@ -553,6 +607,8 @@ impl CodeLexicalArtifactReaderV1 {
             "query.artifact.open.reader_restore",
             Self::open_connection_with_control(
                 connection,
+                path,
+                &file,
                 &receipt,
                 authority,
                 CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
@@ -582,7 +638,9 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
-        let metadata = path.symlink_metadata().map_err(map_artifact_file_error)?;
+        let file = open_private_file(path).map_err(map_private_artifact_file_error)?;
+        let file_state = stable_artifact_file_state(&file)?;
+        let metadata = file.metadata().map_err(map_artifact_file_error)?;
         if !metadata.file_type().is_file() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "artifact path is not a regular file".to_owned(),
@@ -606,6 +664,8 @@ impl CodeLexicalArtifactReaderV1 {
             "query.artifact.open.reader_restore",
             Self::open_connection_with_control(
                 connection,
+                path,
+                &file,
                 expected,
                 authority,
                 cache_budget_bytes,
@@ -614,6 +674,8 @@ impl CodeLexicalArtifactReaderV1 {
                 ReaderIntegrityAuthorityV1::ReceiptOnly,
             )
         )?;
+        verify_stable_artifact_file_state(&file, &file_state)?;
+        verify_named_path_identity(path, &file)?;
         crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
         hotpath::gauge!("query.artifact.bytes").set(expected.file_size_bytes());
         hotpath::gauge!("query.artifact.pages").set(expected.page_count());
@@ -625,6 +687,8 @@ impl CodeLexicalArtifactReaderV1 {
     /// repository, freshness, and clone route.
     fn open_connection_with_control(
         connection: Connection,
+        artifact_path: &Path,
+        artifact_file: &File,
         expected: &VerifiedCodeLexicalArtifactV1,
         authority: &super::super::CodeLexicalProjectionMetadataV1,
         cache_budget_bytes: usize,
@@ -670,10 +734,12 @@ impl CodeLexicalArtifactReaderV1 {
                         "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
                     )));
                 }
+                let width = Self::MAX_CONCURRENT_READS
+                    .min(sqlite_budget / ARTIFACT_SQLITE_CACHE_FLOOR_BYTES);
                 let page_cache_bytes = configure_reader_window(
                     &connection,
-                    cache_budget_bytes,
-                    stored_metadata_len,
+                    sqlite_budget.min(ARTIFACT_SQLITE_CACHE_BYTES) / width,
+                    0,
                     sealed_file_size_bytes,
                 )?;
                 let (stored_metadata_bytes, stored_metadata_digest): (Vec<u8>, String) = connection
@@ -765,13 +831,33 @@ impl CodeLexicalArtifactReaderV1 {
             ));
         }
         checkpoint(control)?;
-        let retained_owned_bytes = stored_metadata_bytes.len().saturating_add(page_cache_bytes);
+        let width = Self::MAX_CONCURRENT_READS.min(
+            (cache_budget_bytes - stored_metadata_bytes.len()) / ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
+        );
+        let mut connections = vec![StdMutex::new(connection)];
+        for _ in 1..width {
+            checkpoint(control)?;
+            verify_named_path_identity(artifact_path, artifact_file)?;
+            let sibling = Connection::open_with_flags(
+                artifact_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| map_reader_open_error(artifact_path, error))?;
+            verify_named_path_identity(artifact_path, artifact_file)?;
+            sibling
+                .pragma_update(None, "query_only", true)
+                .map_err(sqlite_error)?;
+            configure_reader_window(&sibling, page_cache_bytes, 0, sealed_file_size_bytes)?;
+            connections.push(StdMutex::new(sibling));
+        }
+        let retained_owned_bytes = stored_metadata_bytes.len() + page_cache_bytes * width;
         Ok(Self {
-            // Every clone shares one rusqlite handle. Readers are replaced on
-            // remount, while Hotpath 0.24 retains every instrumented mutex
-            // identity for the process lifetime, so this per-reader lock must
-            // remain plain. Static query spans retain operation visibility.
-            connection: Arc::new(StdMutex::new(connection)),
+            connections: Arc::new(ArtifactReaders {
+                connections,
+                queue: StdMutex::new(()),
+                available: Condvar::new(),
+            }),
+            resident_memory: None,
             metadata,
             receipt: stored,
             retained_owned_bytes,
@@ -798,7 +884,7 @@ impl CodeLexicalArtifactReaderV1 {
         &self,
         chunk: &CodeSearchChunkId,
     ) -> Result<Option<CodeLexicalArtifactOccurrenceV1>, CodeLexicalArtifactErrorV1> {
-        let connection = self.lock_connection()?;
+        let connection = self.lock_connection(None)?;
         let document: Option<i64> = connection
             .query_row(
                 "SELECT document_id FROM row_chunks WHERE chunk_id = ?1",
@@ -893,7 +979,7 @@ impl CodeLexicalArtifactReaderV1 {
         let fetch = limit.checked_add(1).ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract("clone exact page limit overflowed".to_owned())
         })?;
-        let connection = self.lock_connection()?;
+        let connection = self.lock_connection(Some(&|| checkpoint(control)))?;
         let mut statement = connection
             .prepare_cached(
                 "SELECT posting.occurrence_ordinal, \
@@ -956,7 +1042,7 @@ impl CodeLexicalArtifactReaderV1 {
     ) -> Result<CloneFingerprintArtifactReadV1, CodeLexicalArtifactErrorV1> {
         let route = self.validate_clone_lookup_authority(authority)?;
         let authority_digest = clone_authority_digest(authority)?;
-        let connection = self.lock_connection()?;
+        let connection = self.lock_connection(Some(&|| checkpoint(control)))?;
         read_clone_fingerprint_page(
             &connection,
             CloneFingerprintReadRequestV1 {
@@ -978,7 +1064,7 @@ impl CodeLexicalArtifactReaderV1 {
         symbol: &SymbolOccurrenceId,
     ) -> Result<Option<CodeIndexCloneBodyV1>, CodeLexicalArtifactErrorV1> {
         let route = self.clone_route()?;
-        let connection = self.lock_connection()?;
+        let connection = self.lock_connection(None)?;
         let row = connection
             .query_row(
                 "SELECT occurrence.symbol_key, payload.payload_digest, occurrence.path, \
@@ -1012,7 +1098,7 @@ impl CodeLexicalArtifactReaderV1 {
         span.validate()
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
         let route = self.clone_route()?;
-        let connection = self.lock_connection()?;
+        let connection = self.lock_connection(None)?;
         let row = connection
             .query_row(
                 "SELECT occurrence.symbol_key, payload.payload_digest, occurrence.path, \
@@ -1101,7 +1187,7 @@ impl CodeLexicalArtifactReaderV1 {
     ) -> Result<CloneSelectedBlockArtifactReadV1, CodeLexicalArtifactErrorV1> {
         let route = self.validate_clone_lookup_authority(authority)?;
         let authority_digest = clone_authority_digest(authority)?;
-        let connection = self.lock_connection()?;
+        let connection = self.lock_connection(Some(&|| checkpoint(control)))?;
         let read = read_clone_fingerprint_page(
             &connection,
             CloneFingerprintReadRequestV1 {
@@ -1209,16 +1295,72 @@ impl CodeLexicalArtifactReaderV1 {
         ))
     }
 
-    /// Reader queries serialize on this one connection; the wait span makes
-    /// cross-query contention (concurrent searches, hydration reads during
-    /// staging) attributable instead of vanishing into lane wall time.
-    fn lock_connection(&self) -> Result<StdMutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
+    /// Handles and their cache are fixed at verified open. Waiters use any
+    /// released handle; requests keep checking cancellation while parked.
+    fn lock_connection(
+        &self,
+        check: Option<&dyn Fn() -> Result<(), CodeLexicalArtifactErrorV1>>,
+    ) -> Result<ArtifactReadGuard<'_>, CodeLexicalArtifactErrorV1> {
         hotpath::measure_block!("query.artifact.reader.lock_wait", {
-            self.connection.lock().map_err(|_| {
+            let poisoned = || {
                 CodeLexicalArtifactErrorV1::Io(
                     "lexical artifact reader lock is poisoned".to_owned(),
                 )
-            })
+            };
+            let readers = self.connections.as_ref();
+            let mut queue = readers.queue.lock().map_err(|_| poisoned())?;
+            loop {
+                for (index, connection) in readers.connections.iter().enumerate() {
+                    let connection = match connection.try_lock() {
+                        Ok(connection) => connection,
+                        Err(TryLockError::WouldBlock) => continue,
+                        Err(TryLockError::Poisoned(_)) => return Err(poisoned()),
+                    };
+                    let scratch_reservation = if index == 0 {
+                        None
+                    } else {
+                        let Some(reservation) = &self.resident_memory else {
+                            break;
+                        };
+                        let bytes = NonZeroU64::new(
+                            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 as u64,
+                        )
+                        .ok_or_else(|| {
+                            CodeLexicalArtifactErrorV1::Contract(
+                                "reader reservation must be nonzero".to_owned(),
+                            )
+                        })?;
+                        match reservation.reserve_additional(bytes) {
+                            Ok(reservation) => Some(reservation),
+                            Err(reason) => {
+                                tracing::debug!(%reason, "concurrent artifact read queues within its existing reservation");
+                                break;
+                            }
+                        }
+                    };
+                    return Ok(ArtifactReadGuard {
+                        connection,
+                        _scratch_reservation: scratch_reservation,
+                        _wakeup: ArtifactReaderWakeup(readers),
+                    });
+                }
+                queue = if let Some(check) = check {
+                    check()?;
+                    // The read-control trait exposes a checkpoint, not a wake
+                    // signal. The condvar handles release; timed waits bound
+                    // cancellation/deadline observation while all handles run.
+                    readers
+                        .available
+                        .wait_timeout(queue, Duration::from_millis(10))
+                        .map_err(|_| poisoned())?
+                        .0
+                } else {
+                    readers.available.wait(queue).map_err(|_| poisoned())?
+                };
+                if let Some(check) = check {
+                    check()?;
+                }
+            }
         })
     }
 
@@ -1244,7 +1386,17 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
             crate::hotpath_metrics::Residency::Rebuilding.record("query.lane.lexical.residency");
             return Ok(RetrieverOutcome::Stale(self.metadata.freshness.clone()));
         }
-        let connection = self.lock_connection().map_err(map_query_artifact_error)?;
+        let connection = self
+            .lock_connection(Some(&|| {
+                if request.control.is_cancelled() {
+                    Err(CodeLexicalArtifactErrorV1::Interrupted(
+                        CodeIndexInterruptionV1::Cancelled,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }))
+            .map_err(map_query_artifact_error)?;
         let outcome = ArtifactQueryV1::new(
             &connection,
             &self.metadata,
@@ -1289,7 +1441,15 @@ where
         }
         let connection = self
             .reader
-            .lock_connection()
+            .lock_connection(Some(&|| {
+                if request.control.is_cancelled() {
+                    Err(CodeLexicalArtifactErrorV1::Interrupted(
+                        CodeIndexInterruptionV1::Cancelled,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }))
             .map_err(map_query_artifact_error)?;
         let outcome = ArtifactQueryV1::new(
             &connection,

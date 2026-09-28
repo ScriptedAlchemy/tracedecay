@@ -142,7 +142,7 @@ impl CodeLexicalArtifactReaderV1 {
             .map(|position| digest_key(&position.digest))
             .transpose()?
             .unwrap_or_default();
-        let connection = self.lock_connection()?;
+        let connection = self.lock_connection(Some(&|| checkpoint(control)))?;
         install_generated_path_function(&connection)?;
         install_pull_request_path_function(&connection, pull_request_paths)?;
         let mut statement = connection

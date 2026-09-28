@@ -83,7 +83,7 @@ async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path)
     .await
 }
 /// One `tracedecay_search` read that consumes the executor's contract the way
-/// a production client does. Search execution is single-flight per project,
+/// a production client does. Search execution has bounded concurrency per project,
 /// and every dispatched `tracedecay_search` carries the daemon's operation
 /// deadline, so a request arriving while another holds the execution permit
 /// queues for it under that deadline and is served once the holder finishes,
