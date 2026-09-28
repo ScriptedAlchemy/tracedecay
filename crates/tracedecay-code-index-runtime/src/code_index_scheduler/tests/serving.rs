@@ -15,11 +15,11 @@ use tracedecay_code_index_retention::code_index_generations::{
     code_text_artifact_staging_root, code_text_artifacts_root,
 };
 use tracedecay_contracts::{
-    CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, CodeRelationRequest,
-    CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRequest, OpaqueCursor,
-    PageRequest, PhraseSearchRequest, QualifiedNameRequest, ResolvedScope, ResultProjection,
-    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
-    SourceMetadataRequest, callable_code_operation,
+    CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryPage, CodeQueryScope,
+    CodeRelationRequest, CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRequest,
+    OpaqueCursor, PageRequest, PhraseSearchRequest, QualifiedNameRequest, ResolvedScope,
+    ResultProjection, RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome,
+    RetrievalRequestMeta, SourceMetadataRequest, callable_code_operation,
     retrieval::{
         CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
         CodeImplementationsRequest, CodeNavigationRequest, CodeTimelineRequest,
@@ -5206,7 +5206,7 @@ async fn direct_recursion_is_reported_by_callers_and_callees() {
         scope,
         meta: callers_page_meta(CALLER_PAGE, None),
     };
-    let names = |outcome: RetrievalPortOutcome<SymbolRelationRecord>| {
+    let names = |outcome: RetrievalPortOutcome<CodeQueryPage<SymbolRelationRecord>>| {
         let RetrievalPortOutcome::Completed(evidence) = outcome else {
             panic!("expected a complete relation page, got {outcome:?}");
         };
