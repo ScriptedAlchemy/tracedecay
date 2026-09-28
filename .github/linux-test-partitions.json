@@ -16,7 +16,7 @@
       "features": [
         "tracedecay/test-helpers"
       ],
-      "linux_group": "root-lib-sessions"
+      "linux_group": "sessions-runtime-contracts"
     },
     {
       "name": "root-sessions",
@@ -41,7 +41,7 @@
       "features": [
         "tracedecay/test-helpers"
       ],
-      "linux_group": "root-lib-sessions"
+      "linux_group": "sessions-runtime-contracts"
     },
     {
       "name": "root-journeys",
@@ -76,7 +76,7 @@
         "tracedecay/test-helpers",
         "tracedecay/search-eval"
       ],
-      "linux_group": "root-journeys"
+      "linux_group": "transport-journeys-storage"
     },
     {
       "name": "root-transport",
@@ -100,7 +100,7 @@
         "tracedecay/test-transport",
         "tracedecay-cli/test-transport"
       ],
-      "linux_group": "root-transport"
+      "linux_group": "transport-journeys-storage"
     },
     {
       "name": "root-dashboard-api",
@@ -118,7 +118,7 @@
         "tracedecay/test-transport",
         "tracedecay-cli/test-transport"
       ],
-      "linux_group": "root-transport"
+      "linux_group": "transport-journeys-storage"
     },
     {
       "name": "runtime",
@@ -160,7 +160,7 @@
         "tracedecay-session-runtime/test-helpers",
         "tracedecay-store-runtime/test-helpers"
       ],
-      "linux_group": "runtime"
+      "linux_group": "sessions-runtime-contracts"
     },
     {
       "name": "core-storage",
@@ -190,7 +190,7 @@
         "tracedecay-session-temporal-store/test-helpers",
         "tracedecay-sessions/test-helpers"
       ],
-      "linux_group": "core-storage"
+      "linux_group": "transport-journeys-storage"
     },
     {
       "name": "core-contracts",
@@ -230,7 +230,7 @@
         "tracedecay-rusqlite-runtime/test-transport",
         "tracedecay-temporal-query/test-helpers"
       ],
-      "linux_group": "core-contracts"
+      "linux_group": "sessions-runtime-contracts"
     }
   ],
   "windows_budget_basis": "Measured wall time in run 36077289779 (windows-latest, 4 vCPU, prefix-matched dependency cache) x1.5, rounded up to 5: root-lib 46.0 (35.2 compile + 8.1 tests), root-sessions 30.8 (24.0 + 4.3), root-journeys 54.4 (38.7 + 10.9), root-transport 57.7 (38.0 + 17.3 with 36 failures and one hung test), root-dashboard-api 40.6 (34.4 + 3.3), runtime 66.5 (48.4 + 14.8), core-storage 36.5 (27.5 + 6.3), core-contracts 44.5 (39.4 + 2.5). The wider headroom is for this runner class: the archive lane's one workspace build measured 64.8 and 106.5 min on the same cache key (docs/ci-release-timing-census.md).",
@@ -263,34 +263,14 @@
   },
   "linux_groups": [
     {
-      "name": "root-lib-sessions",
-      "timeout_minutes": 120,
-      "budget_basis": "Sum of existing partition ceilings: 40 + 80 minutes. This is an outer group ceiling, not a measured warm runtime."
+      "name": "transport-journeys-storage",
+      "timeout_minutes": 180,
+      "budget_basis": "Three previous warm groups (transport, journeys, storage) sum to about 118 worker-minutes across two PRs; 180 minutes leaves headroom for a cold checkout and test variance on one PR."
     },
     {
-      "name": "root-journeys",
-      "timeout_minutes": 75,
-      "budget_basis": "Sum of existing partition ceilings: 75 minutes. This is an outer group ceiling, not a measured warm runtime."
-    },
-    {
-      "name": "root-transport",
-      "timeout_minutes": 160,
-      "budget_basis": "Sum of existing partition ceilings: 90 + 70 minutes. This is an outer group ceiling, not a measured warm runtime."
-    },
-    {
-      "name": "runtime",
-      "timeout_minutes": 65,
-      "budget_basis": "Sum of existing partition ceilings: 65 minutes. This is an outer group ceiling, not a measured warm runtime."
-    },
-    {
-      "name": "core-storage",
-      "timeout_minutes": 50,
-      "budget_basis": "Sum of existing partition ceilings: 50 minutes. This is an outer group ceiling, not a measured warm runtime."
-    },
-    {
-      "name": "core-contracts",
-      "timeout_minutes": 55,
-      "budget_basis": "Sum of existing partition ceilings: 55 minutes. This is an outer group ceiling, not a measured warm runtime."
+      "name": "sessions-runtime-contracts",
+      "timeout_minutes": 180,
+      "budget_basis": "Three previous warm groups (lib/sessions, runtime, contracts) sum to about 121 worker-minutes across two PRs; 180 minutes leaves headroom for a cold checkout and test variance on one PR."
     }
   ]
 }
