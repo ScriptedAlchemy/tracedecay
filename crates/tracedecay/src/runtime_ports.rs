@@ -105,7 +105,8 @@ fn daemon_tool_json<'a>(
                 false,
                 require_project_identity,
             )?;
-            let result = crate::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
+            let result =
+                crate::daemon::call_default_tool(profile, &handshake, tool_name, arguments).await?;
             let payload = crate::daemon::tool_json_payload(&result, tool_name)?;
             // An owner refusal is a semantic result whose payload is its
             // problem envelope; the hook reads it as the owner's typed error.
