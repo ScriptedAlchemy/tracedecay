@@ -53,6 +53,8 @@ jobs:
               if gh api -X POST "repos/$REPO/actions/runs/$run/cancel" >/dev/null; then
                 echo "cancelled run $run ($status) for PR $PR_NUMBER"
                 cancelled=$((cancelled + 1))
+              elif [[ $(gh api "repos/$REPO/actions/runs/$run" --jq .status) == completed ]]; then
+                echo "run $run completed before cancellation"
               else
                 failed=1
               fi
