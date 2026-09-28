@@ -193,8 +193,8 @@ def run_head(worker, entry, group, output, state, partitions):
     row = {"pr": entry["pr"], "sha": entry["sha"], "merge": entry["merge"],
            "exit_code": None, "partitions": []}
     try:
-        if not current(entry):
-            raise ValueError("PR changed, closed, or became draft")
+        if merge_ref(entry["pr"]) != entry["merge"]:
+            raise ValueError("PR merge ref changed before testing")
         exact_head(worker, entry["merge"])
         row["install"] = command_log(["pnpm", "install", "--frozen-lockfile", "--store-dir",
                                       str(state.parent / "pnpm-store")], worker, env,
@@ -233,8 +233,8 @@ def run_head(worker, entry, group, output, state, partitions):
                     item["junit"] = junit_counts(target)
                 row["partitions"].append(item)
         exact_head(worker, entry["merge"])
-        if not current(entry):
-            raise ValueError("PR changed, closed, or became draft during testing")
+        if merge_ref(entry["pr"]) != entry["merge"]:
+            raise ValueError("PR merge ref changed during testing")
     except Exception as error:
         row["error"] = str(error)[:2000]
     finally:
@@ -307,6 +307,8 @@ def row_conclusion(row, entry, group, root, partitions):
 
 
 def measure(repo, plan_data, group, output):
+    if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
+        raise ValueError("Warm worker must run without a GitHub token")
     partitions = groups().get(group)
     if not partitions or not plan_data["heads"]:
         raise ValueError("Unknown or empty Linux group plan")
@@ -321,8 +323,8 @@ def measure(repo, plan_data, group, output):
         preflight = {}
         for index, entry in enumerate(plan_data["heads"]):
             try:
-                if not current(entry):
-                    raise ValueError("PR is no longer current")
+                if merge_ref(entry["pr"]) != entry["merge"]:
+                    raise ValueError("PR merge ref changed before fetch")
                 git(repo, "fetch", "--no-tags", "origin", f"refs/pull/{entry['pr']}/merge")
                 if git(repo, "rev-parse", "FETCH_HEAD") != entry["merge"]:
                     raise ValueError("Merge ref moved during fetch")

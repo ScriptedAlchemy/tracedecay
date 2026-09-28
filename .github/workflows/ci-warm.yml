@@ -59,15 +59,15 @@ jobs:
     runs-on: ubuntu-24.04-arm
     # Two heads can each consume the existing 160-minute transport budget.
     timeout-minutes: 350
-    permissions:
-      contents: read
-      pull-requests: read
+    permissions: {}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
+      - name: Fetch reviewed controller without credentials
+        env:
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_ASKPASS: /bin/false
+        run: |
+          git -c credential.helper= clone --no-checkout "https://github.com/$GITHUB_REPOSITORY.git" .
+          git checkout --detach "$GITHUB_SHA"
 
       - uses: actions/setup-node@v4
         with:
@@ -99,7 +99,6 @@ jobs:
 
       - name: Run all partitions for each admitted head
         env:
-          GH_TOKEN: ${{ github.token }}
           WARM_PLAN: ${{ needs.plan.outputs.plan }}
           GROUP: ${{ matrix.group }}
           OUTPUT: ${{ runner.temp }}/warm-linux/${{ matrix.group }}

@@ -29,6 +29,11 @@ def pr(number, sha, *, draft=False, repo=automatic.REPOSITORY, base="master",
 
 
 class AutomaticTest(unittest.TestCase):
+    def test_worker_rejects_token_in_environment(self):
+        with patch.dict(os.environ, {"GH_TOKEN": "example-test-token"}):
+            with self.assertRaisesRegex(ValueError, "without a GitHub token"):
+                automatic.measure(Path(), {}, "core-contracts", Path())
+
     def test_setup_key_allows_dependency_changes_but_detects_runner_changes(self):
         self.assertTrue(automatic.setup_path(".github/workflows/ci.yml"))
         def tree(action, cargo):
@@ -166,7 +171,7 @@ class AutomaticTest(unittest.TestCase):
                 return ""
 
             with patch.object(automatic, "groups", return_value={"core-contracts": ["contracts"]}), \
-                 patch.object(automatic, "current", return_value=True), \
+                 patch.object(automatic, "merge_ref", return_value=SHA_B), \
                  patch.object(automatic, "git", side_effect=git):
                 self.assertEqual(automatic.measure(repo, plan, "core-contracts", root / "out"), 1)
             result = json.loads((root / "out/report.json").read_text())
@@ -196,13 +201,14 @@ class AutomaticTest(unittest.TestCase):
 
             b_row = {"pr": 2, "sha": SHA_B, "exit_code": 0, "partitions": []}
             with patch.object(automatic, "groups", return_value={"core-contracts": ["contracts"]}), \
-                 patch.object(automatic, "current", side_effect=[False, True]), \
+                 patch.object(automatic, "merge_ref", side_effect=[None, SHA_D]), \
+                 patch.object(automatic, "api", side_effect=AssertionError("Worker called GitHub API")), \
                  patch.object(automatic, "git", side_effect=git), \
                  patch.object(automatic, "run_head", return_value=b_row) as ran:
                 self.assertEqual(automatic.measure(repo, plan, "core-contracts", root / "out"), 1)
             result = json.loads((root / "out/report.json").read_text())
             self.assertEqual([row["pr"] for row in result["rows"]], [1, 2])
-            self.assertEqual(result["rows"][0]["error"], "PR is no longer current")
+            self.assertEqual(result["rows"][0]["error"], "PR merge ref changed before fetch")
             self.assertEqual(result["rows"][1], b_row)
             self.assertEqual(ran.call_args.args[1]["pr"], 2)
 
@@ -290,7 +296,8 @@ class AutomaticTest(unittest.TestCase):
                     {"partition": "contracts", "build": None, "test": {"exit_code": 0}, "error": None}]}))
                 return {"seconds": 1, "exit_code": 0}
 
-            with patch.object(automatic, "current", return_value=True), \
+            with patch.object(automatic, "merge_ref", side_effect=lambda number: SHA_B if number == 1 else SHA_A), \
+                 patch.object(automatic, "api", side_effect=AssertionError("Worker called GitHub API")), \
                  patch.object(automatic, "exact_head"), patch.object(automatic, "stop"), \
                  patch.object(automatic, "command_log", side_effect=run), \
                  patch.dict(os.environ, {"GH_TOKEN": "must-not-reach-tests"}):
@@ -316,7 +323,7 @@ class AutomaticTest(unittest.TestCase):
             worker.mkdir()
             output = root / "out"
             output.mkdir()
-            with patch.object(automatic, "current", return_value=True), \
+            with patch.object(automatic, "merge_ref", return_value=SHA_B), \
                  patch.object(automatic, "exact_head"), patch.object(automatic, "stop"), \
                  patch.object(automatic, "command_log", return_value={"seconds": 2, "exit_code": 1}) as command:
                 row = automatic.run_head(worker, entry, "core-contracts", output, root / "state", ["contracts"])
@@ -333,7 +340,7 @@ class AutomaticTest(unittest.TestCase):
             worker.mkdir()
             output = root / "out"
             output.mkdir()
-            with patch.object(automatic, "current", return_value=True), \
+            with patch.object(automatic, "merge_ref", return_value=SHA_B), \
                  patch.object(automatic, "exact_head"), patch.object(automatic, "stop"), \
                  patch.object(automatic, "command_log", side_effect=[
                      {"seconds": 1, "exit_code": 0}, {"seconds": 2, "exit_code": 1}]) as command:
@@ -354,7 +361,7 @@ class AutomaticTest(unittest.TestCase):
             worker.mkdir()
             output = root / "out"
             output.mkdir()
-            with patch.object(automatic, "current", return_value=True), \
+            with patch.object(automatic, "merge_ref", return_value=SHA_B), \
                  patch.object(automatic, "exact_head"), patch.object(automatic, "stop"), \
                  patch.object(automatic, "command_log", side_effect=[
                      {"seconds": 1, "exit_code": 0}, {"seconds": 1, "exit_code": 0},
