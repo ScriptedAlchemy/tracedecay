@@ -4,7 +4,7 @@ use tracedecay_domain::{CanonicalObservationIdV1, ObservationCollisionOutcomeV1,
 use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
 
 use tracedecay_sessions::observation::{
-    CaptureClaudeObservationRequestError, ObservationApplicationError,
+    CaptureObservationRequestError, ObservationApplicationError,
 };
 
 use crate::structured_hook_error_data;
@@ -47,9 +47,8 @@ fn hook_error_response_fixtures_are_legal_and_redacted() {
 
 #[test]
 fn claude_observation_request_errors_are_bounded_hook_errors() {
-    let error = ClaudeObservationIngestError::Request(
-        CaptureClaudeObservationRequestError::SourceRangeMismatch,
-    );
+    let error =
+        ClaudeObservationIngestError::Request(CaptureObservationRequestError::SourceRangeMismatch);
     let mapped = map_claude_observation_ingest_error(&error);
     let rendered = mapped.to_string();
 

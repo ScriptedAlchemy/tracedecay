@@ -15,10 +15,10 @@ use super::detect::{
 };
 use super::sanitize::OBSERVATION_SANITIZER_VERSION_V1;
 use super::{
-    CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1,
-    ClaudeSanitizerPolicyV1, CodeSourceShapeV1, DetectionConfidenceV1,
-    LcmSensitiveRedactionPolicyV1, MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1,
-    ObservationRecordParseErrorV1, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
+    CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeSanitizerPolicyV1, CodeSourceShapeV1,
+    DetectionConfidenceV1, LcmSensitiveRedactionPolicyV1, MEMORY_FACT_SANITIZER_VERSION_V1,
+    MemoryFactSanitizationV1, ObservationRecordParseErrorV1, ObservationSanitizationOutcomeV1,
+    PrivacyDetectorV1, PrivacySanitizerError, RecordSanitizerV1, SanitizationActionV1,
     SanitizationFindingV1, SanitizedPayloadVerificationError,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
     redact_lcm_sensitive_payload, sanitize_code_source_bytes, sanitize_memory_fact_payload,
@@ -49,15 +49,15 @@ fn retention_class() -> RetentionClass {
     RetentionClass::new("retention.privacy-test").expect("valid test retention class")
 }
 
-fn sanitize(sanitizer: &ClaudeRecordSanitizerV1, record: &[u8]) -> ClaudeSanitizationOutcomeV1 {
+fn sanitize(sanitizer: &RecordSanitizerV1, record: &[u8]) -> ObservationSanitizationOutcomeV1 {
     sanitize_with_identity(sanitizer, record, identity_for(record))
 }
 
 fn sanitize_with_identity(
-    sanitizer: &ClaudeRecordSanitizerV1,
+    sanitizer: &RecordSanitizerV1,
     record: &[u8],
     identity: ObservationIdentityMaterialV1,
-) -> ClaudeSanitizationOutcomeV1 {
+) -> ObservationSanitizationOutcomeV1 {
     let parsed = parse_observation_record_v1(
         record,
         identity.position(),
@@ -70,7 +70,7 @@ fn sanitize_with_identity(
 }
 
 fn assert_non_durable(
-    outcome: &ClaudeSanitizationOutcomeV1,
+    outcome: &ObservationSanitizationOutcomeV1,
     disposition: SanitizerDispositionV1,
     detector: PrivacyDetectorV1,
     action: SanitizationActionV1,
@@ -323,7 +323,7 @@ fn sanitize_parsed_consumes_token_without_reparsing_raw_bytes() {
     .expect("parse sanitizer fixture once");
     record.fill(b'!');
 
-    let outcome = ClaudeRecordSanitizerV1::claude_v1()
+    let outcome = RecordSanitizerV1::claude_v1()
         .expect("valid Claude V1 sanitizer")
         .sanitize_parsed(parsed, identity, retention_class())
         .expect("sanitize parser-issued token");
@@ -350,7 +350,7 @@ fn sanitize_parsed_rejects_identity_range_mismatch() {
     )
     .expect("parse shifted fixture");
 
-    let error = ClaudeRecordSanitizerV1::claude_v1()
+    let error = RecordSanitizerV1::claude_v1()
         .expect("valid Claude V1 sanitizer")
         .sanitize_parsed(parsed, identity_for(&record), retention_class())
         .expect_err("mismatched identity range must fail");
@@ -370,7 +370,7 @@ fn sanitize_parsed_rejects_ordering_domain_mismatch() {
     )
     .expect("parse row-ordered fixture");
 
-    let error = ClaudeRecordSanitizerV1::claude_v1()
+    let error = RecordSanitizerV1::claude_v1()
         .expect("valid Claude V1 sanitizer")
         .sanitize_parsed(parsed, identity, retention_class())
         .expect_err("mismatched ordering domain must fail");
@@ -429,7 +429,7 @@ fn provider_sanitizer_uses_provider_neutral_policy_and_receipt_domain() {
     )
     .unwrap();
 
-    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = RecordSanitizerV1::observation_v1()
         .expect("valid provider sanitizer")
         .sanitize_parsed(parsed, identity, retention_class())
         .expect("sanitize provider fixture");
@@ -495,7 +495,7 @@ fn provider_sanitizer_allows_only_legacy_claude_to_omit_native_record_identity()
     };
 
     let (parsed, identity) = fixture("claude");
-    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = RecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(parsed, identity, retention_class())
         .expect("legacy Claude range identity remains compatible");
@@ -509,7 +509,7 @@ fn provider_sanitizer_allows_only_legacy_claude_to_omit_native_record_identity()
     );
 
     let (parsed, identity) = fixture("hermes");
-    let error = ClaudeRecordSanitizerV1::observation_v1()
+    let error = RecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(parsed, identity, retention_class())
         .expect_err("non-Claude canonical observations require native record identity");
@@ -563,7 +563,7 @@ fn provider_sanitizer_preserves_stable_public_structural_ids() {
     )
     .unwrap();
 
-    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = RecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(parsed, identity, retention_class())
         .unwrap();
@@ -629,7 +629,7 @@ fn provider_sanitizer_protects_credential_shaped_structural_ids_consistently() {
     )
     .unwrap();
 
-    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = RecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(parsed, identity, retention_class())
         .unwrap();
@@ -720,7 +720,7 @@ fn provider_neutral_workflow_fact_redaction_leaks_no_raw_secret() {
         ObservationId::new("workflow.privacy-fixture").unwrap(),
     )
     .unwrap();
-    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = RecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(parsed, identity, retention_class())
         .unwrap();
@@ -760,7 +760,7 @@ fn provider_sanitizer_rejects_raw_provider_json_without_normalization() {
     )
     .unwrap();
 
-    let error = ClaudeRecordSanitizerV1::observation_v1()
+    let error = RecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(parsed, identity, retention_class())
         .unwrap_err();
@@ -781,7 +781,7 @@ fn clean_record_is_accepted_and_receipt_binds_the_payload() {
     let record = serde_json::to_vec(&expected_payload).expect("serialize clean fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
+        &RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -817,7 +817,7 @@ fn json_is_parsed_before_unknown_fields_are_scanned() {
     });
     let valid_record = serde_json::to_vec(&payload).expect("serialize unknown-field fixture");
 
-    let sanitizer = ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
+    let sanitizer = RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
     let valid_outcome = sanitize(&sanitizer, &valid_record);
     let valid_observation = valid_outcome
         .durable_observation()
@@ -877,7 +877,7 @@ fn default_exact_formats_are_detected_and_redacted() {
     });
     let record = serde_json::to_vec(&payload).expect("serialize exact-format fixture");
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
+        &RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -919,7 +919,7 @@ fn configured_sensitive_keys_redact_nested_values() {
     let policy = ClaudeSanitizerPolicyV1::claude_v1()
         .expect("valid Claude V1 policy")
         .with_sensitive_keys(["custom credential"]);
-    let sanitizer = ClaudeRecordSanitizerV1::new(policy);
+    let sanitizer = RecordSanitizerV1::new(policy);
     let payload = json!({
         "outer": {
             "custom_credential": {
@@ -986,7 +986,7 @@ fn normalized_secret_key_variants_and_semantic_suffixes_are_redacted() {
     let record = serde_json::to_vec(&payload).expect("serialize semantic-key fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
+        &RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -1039,7 +1039,7 @@ fn quoted_assignments_with_punctuation_are_redacted() {
     let record = serde_json::to_vec(&payload).expect("serialize quoted-assignment fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
+        &RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -1072,7 +1072,7 @@ fn credential_bearing_object_keys_quarantine_without_key_collisions() {
         .collect(),
     );
     let record = serde_json::to_vec(&payload).expect("serialize sensitive-key-name fixture");
-    let sanitizer = ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
+    let sanitizer = RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
     let identity = identity_for(&record);
 
     let first = sanitize_with_identity(&sanitizer, &record, identity.clone());
@@ -1106,7 +1106,7 @@ fn wholesale_sensitive_value_redaction_skips_nested_object_keys() {
     let record = serde_json::to_vec(&payload).expect("serialize wholesale-redaction fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
+        &RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
 
@@ -1131,7 +1131,7 @@ fn contextual_high_entropy_token_is_detected() {
     let record = serde_json::to_vec(&payload).expect("serialize entropy fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
+        &RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -1158,7 +1158,7 @@ fn finding_contract_serializes_complete_safe_detector_evidence() {
     let credential_prefix = ["s", "k", "-"].concat();
     let secret = format!("{credential_prefix}{}", "Z9".repeat(10));
     let record = serde_json::to_vec(&json!({ "payload": secret })).unwrap();
-    let outcome = sanitize(&ClaudeRecordSanitizerV1::claude_v1().unwrap(), &record);
+    let outcome = sanitize(&RecordSanitizerV1::claude_v1().unwrap(), &record);
     let finding = outcome.findings().first().expect("credential finding");
 
     assert_eq!(
@@ -1202,7 +1202,7 @@ fn finding_contract_rejects_missing_or_unsafe_evidence_metadata() {
         "password": "finding-contract-secret"
     }))
     .unwrap();
-    let outcome = sanitize(&ClaudeRecordSanitizerV1::claude_v1().unwrap(), &record);
+    let outcome = sanitize(&RecordSanitizerV1::claude_v1().unwrap(), &record);
     let finding = outcome.findings().first().unwrap();
     let serialized = serde_json::to_value(finding).unwrap();
 
@@ -1247,7 +1247,7 @@ fn policy_limit_findings_report_incomplete_scanned_coverage() {
         .unwrap()
         .with_limits(32, 16, 100)
         .unwrap();
-    let sanitizer = ClaudeRecordSanitizerV1::new(policy);
+    let sanitizer = RecordSanitizerV1::new(policy);
     let record = serde_json::to_vec(&json!({ "message": "x".repeat(64) })).unwrap();
     let outcome = sanitize(&sanitizer, &record);
     let finding = outcome.findings().first().unwrap();
@@ -1276,7 +1276,7 @@ fn findings_never_contain_detected_secret_text() {
         .expect("serialize finding-safety fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
+        &RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let diagnostic = format!("{:?}", outcome.findings());
@@ -1317,7 +1317,7 @@ fn invalid_records_stop_at_the_parser_and_policy_limited_records_have_no_payload
         .expect("valid Claude V1 policy")
         .with_limits(32, 16, 100)
         .expect("valid small test limits");
-    let limited_sanitizer = ClaudeRecordSanitizerV1::new(limited_policy);
+    let limited_sanitizer = RecordSanitizerV1::new(limited_policy);
     let oversized = serde_json::to_vec(&json!({ "message": "x".repeat(64) }))
         .expect("serialize oversized fixture");
     let identity = identity_for(&oversized);
@@ -1353,7 +1353,7 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
         ObservationOrderingDomainV1::FileBytes,
     )
     .expect("canonical parser accepts policy-limited depth fixture");
-    let depth_outcome = ClaudeRecordSanitizerV1::new(depth_policy)
+    let depth_outcome = RecordSanitizerV1::new(depth_policy)
         .sanitize_parsed(depth_parsed, depth_identity, retention_class())
         .expect("limited sanitizer returns a typed outcome");
     assert_non_durable(
@@ -1376,7 +1376,7 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
         ObservationOrderingDomainV1::FileBytes,
     )
     .expect("canonical parser accepts policy-limited value fixture");
-    let value_outcome = ClaudeRecordSanitizerV1::new(value_policy)
+    let value_outcome = RecordSanitizerV1::new(value_policy)
         .sanitize_parsed(value_parsed, value_identity, retention_class())
         .expect("limited sanitizer returns a typed outcome");
     assert_non_durable(
@@ -1389,7 +1389,7 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
 
 #[test]
 fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
-    let sanitizer = ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
+    let sanitizer = RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
     assert_eq!(
         sanitizer.policy().version().as_str(),
         "privacy.claude-record.v1"
@@ -1436,7 +1436,7 @@ fn equal_length_distinct_secrets_produce_distinct_raw_bound_receipts() {
     let second_record = serde_json::to_vec(&json!({"password": "bravo456?"})).unwrap();
     assert_eq!(first_record.len(), second_record.len());
     let identity = identity_for(&first_record);
-    let sanitizer = ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
+    let sanitizer = RecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
 
     let first = sanitize_with_identity(&sanitizer, &first_record, identity.clone());
     let second = sanitize_with_identity(&sanitizer, &second_record, identity);
@@ -1478,7 +1478,7 @@ fn custom_policy_behavior_has_a_deterministic_version_fingerprint() {
     assert_ne!(first.version(), limited.version());
 
     let record = serde_json::to_vec(&json!({"custom_one": "secret-value"})).unwrap();
-    let outcome = sanitize(&ClaudeRecordSanitizerV1::new(first.clone()), &record);
+    let outcome = sanitize(&RecordSanitizerV1::new(first.clone()), &record);
     assert_eq!(
         outcome.receipt().receipt().sanitizer_version(),
         first.version()

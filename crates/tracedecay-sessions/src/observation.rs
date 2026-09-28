@@ -151,9 +151,6 @@ impl CaptureObservationRequest {
     }
 }
 
-pub type CaptureClaudeObservationRequest = CaptureObservationRequest;
-pub type CaptureClaudeObservationRequestError = CaptureObservationRequestError;
-
 pub struct GetObservationRequest {
     observation_id: CanonicalObservationIdV1,
     cancellation: ObservationCancellation,
@@ -281,8 +278,6 @@ impl ExternalSourceProjectionRetryHandleV1 {
         &self.source_receipt_digest
     }
 }
-
-pub type CaptureClaudeObservationOutcome = CaptureObservationOutcome;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObservationReplayCoverage {
@@ -686,14 +681,6 @@ where
             },
             label = "sessions.observation.capture"
         ))
-    }
-
-    #[hotpath::skip]
-    pub async fn capture_claude_observation(
-        &self,
-        request: CaptureClaudeObservationRequest,
-    ) -> Result<CaptureClaudeObservationOutcome, ObservationApplicationError> {
-        self.capture_observation(request).await
     }
 
     #[hotpath::measure(label = "sessions.observation.get", future = true)]

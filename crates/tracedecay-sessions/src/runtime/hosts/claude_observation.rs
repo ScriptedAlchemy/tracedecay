@@ -24,8 +24,8 @@ use tracedecay_store::{
 
 use crate::admission::{HostAdmission, is_admission_cancellation};
 use crate::observation::{
-    CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
-    CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
+    CaptureObservationOutcome, CaptureObservationRequest, CaptureObservationRequestError,
+    ObservationApplicationError, ObservationCancellation,
 };
 use crate::runtime::hosts::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
@@ -147,7 +147,7 @@ pub enum ClaudeObservationIngestError {
     #[error("Claude observation application failed")]
     Application(#[from] ObservationApplicationError),
     #[error("Claude observation request is invalid")]
-    Request(#[from] CaptureClaudeObservationRequestError),
+    Request(#[from] CaptureObservationRequestError),
     #[error("Claude observation privacy policy is unavailable")]
     Privacy(#[from] PrivacySanitizerError),
     #[error("Claude observation store operation failed")]
@@ -342,7 +342,7 @@ fn build_claude_capture_request(
     frame: &mut ClaudeSourceFrame,
     expected_cursor: Option<ObservationSourceCursorV1>,
     context: &FrameCaptureContext,
-) -> Result<CaptureClaudeObservationRequest, ClaudeObservationIngestError> {
+) -> Result<CaptureObservationRequest, ClaudeObservationIngestError> {
     let parsed_record = frame
         .take_parsed_record()
         .ok_or(ClaudeObservationIngestError::MissingParsedRecord)?;
@@ -362,7 +362,7 @@ fn build_claude_capture_request(
         parsed_record.ordering_domain(),
         native_record_id,
     )?;
-    Ok(CaptureClaudeObservationRequest::new(
+    Ok(CaptureObservationRequest::new(
         parsed_record,
         identity,
         expected_cursor,
@@ -439,8 +439,8 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
         }
     };
     match captured {
-        CaptureClaudeObservationOutcome::Persisted { outcome, .. }
-        | CaptureClaudeObservationOutcome::AcceptedForReplay { outcome, .. } => {
+        CaptureObservationOutcome::Persisted { outcome, .. }
+        | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
             let receipt = outcome.receipt();
             Ok(FrameCaptureOutcome::Persisted(CapturedClaudeFrame {
                 committed_cursor: receipt.committed_cursor().clone(),
@@ -451,10 +451,10 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
                 ),
             }))
         }
-        CaptureClaudeObservationOutcome::Rejected { receipt, .. } => {
+        CaptureObservationOutcome::Rejected { receipt, .. } => {
             Ok(FrameCaptureOutcome::Rejected(receipt))
         }
-        CaptureClaudeObservationOutcome::Quarantined { receipt, .. } => {
+        CaptureObservationOutcome::Quarantined { receipt, .. } => {
             Ok(FrameCaptureOutcome::Quarantined(receipt))
         }
     }
@@ -921,8 +921,8 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
             }
             for outcome in outcomes {
                 match outcome {
-                    CaptureClaudeObservationOutcome::Persisted { outcome, .. }
-                    | CaptureClaudeObservationOutcome::AcceptedForReplay { outcome, .. } => {
+                    CaptureObservationOutcome::Persisted { outcome, .. }
+                    | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
                         let receipt = outcome.receipt();
                         *observation_cursor = Some(cursor_after_receipt(
                             observation_cursor.take(),
@@ -945,8 +945,8 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
                     // a time and surfaces non-durable outcomes inline. Either
                     // way the per-frame replay pass owns typed rejected and
                     // quarantined coverage advances.
-                    CaptureClaudeObservationOutcome::Rejected { .. }
-                    | CaptureClaudeObservationOutcome::Quarantined { .. } => {
+                    CaptureObservationOutcome::Rejected { .. }
+                    | CaptureObservationOutcome::Quarantined { .. } => {
                         return Err(ClaudeWindowedCaptureFailure::ScalarReplay(std::mem::take(
                             stats,
                         )));
