@@ -509,7 +509,7 @@ fn render_doctor_finding(
         // that is not installed or configured): reported, counted nowhere.
         State::Absent => dc.info(&message),
         State::Unsupported | State::Stale | State::Partial | State::Unknown | State::Denied => {
-            dc.warn(&message)
+            dc.warn(&message);
         }
     }
 }
