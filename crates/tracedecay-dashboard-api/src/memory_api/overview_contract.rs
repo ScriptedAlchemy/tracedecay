@@ -94,6 +94,10 @@ pub(super) struct MemoryFactRowV1 {
     pub(super) source_label: Option<String>,
     pub(super) entities: Option<Vec<String>>,
     pub(super) linked_entities: Option<Vec<MemoryEntityRowV1>>,
+    /// Present only when a newer fact replaced this one; such a fact stays
+    /// readable by id but leaves current list and search reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) superseded_by: Option<FactId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) score_millionths: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

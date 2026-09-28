@@ -3440,6 +3440,7 @@ export type MemoryFactRowV1 = {
   retrieval_count: number | null;
   score_millionths?: number | null | undefined;
   source_label: string | null;
+  superseded_by?: FactId | null | undefined;
   tags: Array<string> | null;
   trust_score: number | null;
   unhelpful_count: number | null;

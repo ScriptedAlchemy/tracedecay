@@ -589,9 +589,18 @@ pub(super) async fn dispatch_work_application(
                         );
                     }
                 };
-                let adjudicated = services
-                    .duplicate_adjudications()
-                    .adjudicate(&context, command);
+                let adjudicated = preparation::current_duplicate_adjudication_evidence(
+                    &registered,
+                    &context,
+                    capability,
+                    &use_case,
+                    observed_at,
+                )
+                .and_then(|evidence| {
+                    services
+                        .duplicate_adjudications()
+                        .adjudicate(&context, command, evidence)
+                });
                 if let Ok(outcome) = &adjudicated {
                     let _observation =
                         tracedecay_application::observability::record_work_duplicate_observation(
