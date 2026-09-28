@@ -435,7 +435,18 @@ fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
     let id = canonical.scope_set_id().as_str().to_owned();
     let digest = canonical.digest().as_str().to_owned();
 
-    for (name, revision) in [("zero-revision", 0_i64), ("negative-revision", -1_i64)] {
+    for (name, revision, refusal) in [
+        (
+            "zero-revision",
+            0_i64,
+            "authorized scope-set persisted data is invalid: scope set revision is not canonical",
+        ),
+        (
+            "negative-revision",
+            -1_i64,
+            "authorized scope-set persisted data is invalid: scope-set revision is negative",
+        ),
+    ] {
         let payload = payload.clone();
         let id = id.clone();
         let digest = digest.clone();
@@ -452,7 +463,14 @@ fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
                 )
                 .unwrap();
         });
-        assert!(store.storage.read(canonical.scope_set_id()).is_err());
+        assert_eq!(
+            store
+                .storage
+                .read(canonical.scope_set_id())
+                .unwrap_err()
+                .to_string(),
+            refusal
+        );
     }
 
     let corrupt = RegisteredScopeSetStore::start("corrupt-payload", move |connection| {
@@ -465,5 +483,12 @@ fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
             )
             .unwrap();
     });
-    assert!(corrupt.storage.read(canonical.scope_set_id()).is_err());
+    assert_eq!(
+        corrupt
+            .storage
+            .read(canonical.scope_set_id())
+            .unwrap_err()
+            .to_string(),
+        "authorized scope-set serialization failed"
+    );
 }

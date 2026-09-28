@@ -82,7 +82,7 @@ async fn temporal_schema_rejects_direct_cursor_retirement() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "UPDATE session_query_cursor_keys
              SET retired_at = 200
@@ -90,7 +90,9 @@ async fn temporal_schema_rejects_direct_cursor_retirement() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session cursor key retirement",
         "the sole active cursor key cannot be retired directly"
     );
 }
@@ -261,8 +263,13 @@ async fn temporal_schema_cursor_audit_rejects_nonmax_active_key() {
 
     let restart_path = tmp.path().join(".tracedecay").join("cursor-audit.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    assert!(
-        open_global_db(&restart_path).await.is_err(),
+    assert_eq!(
+        open_global_db(&restart_path)
+            .await
+            .err()
+            .expect("restart audit refuses the database")
+            .to_string(),
+        "database error: session cursor key rotation state is invalid (operation: ensure global database authority invariants)",
         "restart audit must reject an active key that is not the monotonic maximum"
     );
 }
@@ -313,8 +320,13 @@ async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
             .join(".tracedecay")
             .join("restart.db");
         copy_database_for_temporal_restart(&db_path, &restart_path).await;
-        assert!(
-            open_global_db(&restart_path).await.is_err(),
+        assert_eq!(
+            open_global_db(&restart_path)
+                .await
+                .err()
+                .expect("restart audit refuses the database")
+                .to_string(),
+            "database error: session cursor key rotation state is invalid (operation: ensure global database authority invariants)",
             "{fixture}: a later key must not satisfy a skipped immediate-successor retirement"
         );
     }
