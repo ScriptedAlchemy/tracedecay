@@ -11,8 +11,8 @@ use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
-    CodeIndexStalenessStateV1,
+    CodeIndexBuildBlockedReasonV1, CodeIndexReadinessTargetV1, CodeIndexReadinessV1,
+    CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, Deadline,
@@ -3115,16 +3115,33 @@ async fn wait_for_ready_generation(
     }
 }
 
-/// A publication's serving decode can meet another holder of the
-/// code-generation store lock. That holder releases without waking the
-/// worktree, so the refusal itself must re-arm the seat: once the lock is
-/// free the new generation seats and reads `ready`, instead of staying
-/// `indexing` on a sealed generation nothing retries.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+/// A second publication held at its serving decode, after its text owner
+/// already serves it.
+struct HeldPublicationDecode {
+    scoped_store: PathBuf,
+    second: String,
+    release_decode: tokio::sync::oneshot::Sender<()>,
+    after_decode: tokio::sync::oneshot::Receiver<()>,
+    release_after_decode: tokio::sync::oneshot::Sender<()>,
+}
+
+impl HeldPublicationDecode {
+    /// Let the held decode run and wait until it returned.
+    async fn decode(self) -> (String, tokio::sync::oneshot::Sender<()>) {
+        self.release_decode.send(()).expect("release the decode");
+        tokio::time::timeout(Duration::from_secs(10), self.after_decode)
+            .await
+            .expect("the decode returns")
+            .expect("decode gate stays armed");
+        (self.second, self.release_after_decode)
+    }
+}
+
+async fn hold_second_publication_at_decode(
+    registry: &CodeIndexSchedulerRegistryV1,
+    fixture: &GitFixture,
+    store: &TempDir,
+) -> HeldPublicationDecode {
     let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     registry
         .mount_worktree(
@@ -3135,7 +3152,7 @@ async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release()
         .await
         .expect("mount worktree");
     assert!(registry.request_complete_generation(fixture.path()).await);
-    let first = wait_for_ready_generation(&registry, fixture.path())
+    let first = wait_for_ready_generation(registry, fixture.path())
         .await
         .expect("the first generation reaches ready");
     assert_eq!(first.split('.').nth(3), Some("00000001"), "{first}");
@@ -3144,10 +3161,7 @@ async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release()
         (before_decode, release_decode),
         (after_decode, release_after_decode),
     ] = registry.pause_around_next_graph_decode(canonical_root.clone());
-    fixture.edit(
-        "src/lib.rs",
-        "pub fn seated_after_store_lock_release() {}\n",
-    );
+    fixture.edit("src/lib.rs", "pub fn changed_before_the_seat() {}\n");
     assert!(matches!(
         registry
             .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
@@ -3158,29 +3172,43 @@ async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release()
         .await
         .expect("the publication reaches its serving decode")
         .expect("decode gate stays armed");
-    // The publication's own text projection runs beside graph prepare; the
-    // held lock must refuse only the decode, not that projection's writes.
-    let (root, registry_ref, first_ref) = (fixture.path(), &registry, first.as_str());
-    let text = wait_until_serving_seat(&registry, root, Duration::from_secs(10), || async move {
-        registry_ref
+    // The publication's own text projection runs beside graph prepare; wait
+    // for it so what the test does to the store reaches only the decode.
+    let root = fixture.path();
+    let first = first.as_str();
+    let text = wait_until_serving_seat(registry, root, Duration::from_secs(10), || async move {
+        registry
             .latest_text_serving_for_root(root)
             .await
-            .filter(|text| text.metadata().manifest().generation_id.as_str() != first_ref)
+            .filter(|text| text.metadata().manifest().generation_id.as_str() != first)
     })
     .await;
     let second = text.metadata().manifest().generation_id.as_str().to_owned();
     assert_eq!(second.split('.').nth(3), Some("00000002"), "{second}");
+    HeldPublicationDecode {
+        scoped_store: super::super::scoped_code_index_store_root(store.path(), &canonical_root),
+        second,
+        release_decode,
+        after_decode,
+        release_after_decode,
+    }
+}
 
-    let holder = acquire_code_generation_store_lock(&super::super::scoped_code_index_store_root(
-        store.path(),
-        &canonical_root,
-    ))
-    .expect("hold the code-generation store lock");
-    release_decode.send(()).expect("release the decode");
-    tokio::time::timeout(Duration::from_secs(10), after_decode)
-        .await
-        .expect("the decode returns while the lock is held")
-        .expect("decode gate stays armed");
+/// A publication's serving decode can meet another holder of the
+/// code-generation store lock. That holder releases without waking the
+/// worktree, so the refusal itself must re-arm the seat: once the lock is
+/// free the new generation seats and reads `ready`, instead of staying
+/// `indexing` on a sealed generation nothing retries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let held = hold_second_publication_at_decode(&registry, &fixture, &store).await;
+
+    let holder = acquire_code_generation_store_lock(&held.scoped_store)
+        .expect("hold the code-generation store lock");
+    let (second, release_after_decode) = held.decode().await;
     drop(holder);
     release_after_decode
         .send(())
@@ -3202,6 +3230,88 @@ async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release()
                 .to_owned()),
         Some(second),
         "ready names the generation the serving slot holds"
+    );
+    registry.shutdown().await;
+}
+
+/// A serving decode that fails for a reason no holder will release parks
+/// typed, so status names the failure instead of an eternal `indexing`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_decode_failure_parks_typed_instead_of_indexing() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let held = hold_second_publication_at_decode(&registry, &fixture, &store).await;
+
+    let pointer: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(held.scoped_store.join("active-code-generation-v1.json"))
+            .expect("read durable pointer"),
+    )
+    .expect("parse durable pointer");
+    let generation_path = held.scoped_store.join("code-generations-v1").join(
+        pointer["generation_file"]
+            .as_str()
+            .expect("sealed generation file"),
+    );
+    let sealed_len = std::fs::metadata(&generation_path)
+        .expect("sealed generation metadata")
+        .len();
+    let mut permissions = std::fs::metadata(&generation_path)
+        .expect("sealed generation metadata")
+        .permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&generation_path, permissions).expect("make the seal writable");
+    std::fs::write(
+        &generation_path,
+        vec![b'x'; usize::try_from(sealed_len).expect("seal length fits usize")],
+    )
+    .expect("corrupt the sealed generation");
+    let (second, release_after_decode) = held.decode().await;
+    release_after_decode
+        .send(())
+        .expect("release graph prepare");
+
+    let parked = wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        Duration::from_secs(10),
+        || async {
+            registry
+                .dashboard_freshness_read(fixture.path())
+                .await
+                .expect("freshness read")
+                .expect("mounted worktree")
+                .parked
+        },
+    )
+    .await;
+    assert_eq!(
+        parked.blocked_reason,
+        Some(CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable),
+        "{parked:?}"
+    );
+    assert!(
+        parked
+            .reason
+            .starts_with("the publication authority is corrupt"),
+        "{parked:?}"
+    );
+    let freshness = registry
+        .dashboard_freshness_read(fixture.path())
+        .await
+        .expect("freshness read")
+        .expect("mounted worktree");
+    assert_eq!(
+        freshness.latest_generation_id.as_deref(),
+        Some(second.as_str())
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none_or(|seat| seat.generation().manifest().generation_id.as_str() != second),
+        "a corrupt generation never seats"
     );
     registry.shutdown().await;
 }
