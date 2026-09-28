@@ -5387,6 +5387,7 @@ dependencies = [
  "jsonschema",
  "keyring",
  "libc",
+ "notify",
  "regex",
  "rmcp 3.4.0",
  "rusqlite",

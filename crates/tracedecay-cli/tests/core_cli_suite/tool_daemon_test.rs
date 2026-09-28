@@ -1013,6 +1013,316 @@ fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
     );
 }
 
+fn run_native_hook_with_stdin(home: &Path, cwd: &Path, command_arg: &str, stdin: &[u8]) -> Output {
+    tracedecay_command_with_home(home)
+        .env_remove("RUST_LOG")
+        .current_dir(cwd)
+        .arg(command_arg)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            let mut stdin_pipe = child.stdin.take().expect("stdin should be piped");
+            // An oversized payload may be refused before it is fully read;
+            // the refusal, not the write, is what the test observes.
+            let _ = stdin_pipe.write_all(stdin);
+            drop(stdin_pipe);
+            child.wait_with_output()
+        })
+        .expect("hook command should run")
+}
+
+fn hook_analytics_rows(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("analytics row is JSON"))
+        .collect()
+}
+
+/// The `(event, agent, hook_name, session_id, disposition.reason_code)` of
+/// every row, the attribution a reader of `hook_analytics.jsonl` sees.
+fn hook_row_attribution(rows: &[Value]) -> Vec<(String, String, String, Value, Value)> {
+    rows.iter()
+        .filter(|row| {
+            matches!(
+                row["event"].as_str(),
+                Some("hook_invoked" | "hook_completed")
+            )
+        })
+        .map(|row| {
+            (
+                row["event"].as_str().unwrap_or_default().to_owned(),
+                row["agent"].as_str().unwrap_or_default().to_owned(),
+                row["hook_name"].as_str().unwrap_or_default().to_owned(),
+                row["session_id"].clone(),
+                row["disposition"]["reason_code"].clone(),
+            )
+        })
+        .collect()
+}
+
+fn attribution(
+    event: &str,
+    agent: &str,
+    hook_name: &str,
+    session_id: Value,
+    reason_code: Value,
+) -> (String, String, String, Value, Value) {
+    (
+        event.to_owned(),
+        agent.to_owned(),
+        hook_name.to_owned(),
+        session_id,
+        reason_code,
+    )
+}
+
+#[test]
+fn capture_hook_rows_name_host_event_and_session_whatever_the_payload() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_capture_attribution");
+    let analytics = data_root.join("hook_analytics.jsonl");
+
+    let stop = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-stop",
+        &json!({
+            "conversation_id": "conv-attribution",
+            "generation_id": "gen-attribution",
+            "hook_event_name": "stop",
+            "model": "auto",
+            "status": "completed",
+            "loop_count": 0,
+            "workspace_roots": [project_path],
+        }),
+    );
+    assert_capture_transport_response("cursor stop", &stop, 0);
+    let empty = run_native_hook_with_stdin(&home_path, &project_path, "hook-cursor-stop", b"");
+    assert_eq!(empty.status.code(), Some(1), "{empty:?}");
+    let oversized = run_native_hook_with_stdin(
+        &home_path,
+        &project_path,
+        "hook-codex-subagent-start",
+        &vec![b' '; tracedecay_framing::MAX_WIRE_MESSAGE_BYTES + 1],
+    );
+    assert_eq!(oversized.status.code(), Some(1), "{oversized:?}");
+
+    assert_eq!(
+        hook_row_attribution(&hook_analytics_rows(&analytics)),
+        vec![
+            attribution(
+                "hook_invoked",
+                "cursor",
+                "stop",
+                json!("conv-attribution"),
+                Value::Null
+            ),
+            attribution(
+                "hook_completed",
+                "cursor",
+                "stop",
+                json!("conv-attribution"),
+                json!("hook_v2_spooled"),
+            ),
+            attribution("hook_invoked", "cursor", "stop", Value::Null, Value::Null),
+            attribution(
+                "hook_completed",
+                "cursor",
+                "stop",
+                Value::Null,
+                json!("native_capture_rejected"),
+            ),
+            attribution(
+                "hook_invoked",
+                "codex",
+                "SubagentStart",
+                Value::Null,
+                Value::Null
+            ),
+            attribution(
+                "hook_completed",
+                "codex",
+                "SubagentStart",
+                Value::Null,
+                json!("hook_stdin_oversized"),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn unenrolled_kimi_and_opencode_hooks_record_their_host_event_and_session() {
+    let home = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let workspace_path = canonical_existing_path(workspace.path());
+    let profile_root = home_path.join(".tracedecay");
+    tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("install fixture profile identity");
+
+    let kimi = run_native_capture_hook(
+        &home_path,
+        &workspace_path,
+        "hook-kimi-event",
+        &json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "kimi-session",
+            "cwd": workspace_path,
+            "tool_name": "WriteFile",
+        }),
+    );
+    assert_eq!(kimi.status.code(), Some(0), "{kimi:?}");
+    let opencode = run_native_capture_hook(
+        &home_path,
+        &workspace_path,
+        "hook-opencode-event",
+        &json!({
+            "type": "session.idle",
+            "properties": {"sessionID": "ses_opencode"},
+        }),
+    );
+    assert_eq!(opencode.status.code(), Some(0), "{opencode:?}");
+    let tool_after = run_native_capture_hook(
+        &home_path,
+        &workspace_path,
+        "hook-opencode-tool-after",
+        &json!({
+            "input": {"tool": "edit", "sessionID": "ses_tool", "callID": "call-1"},
+            "output": {"title": "edit"},
+        }),
+    );
+    assert_eq!(tool_after.status.code(), Some(0), "{tool_after:?}");
+
+    let invoked = hook_row_attribution(&hook_analytics_rows(
+        &profile_root.join("hook_analytics.jsonl"),
+    ))
+    .into_iter()
+    .filter(|row| row.0 == "hook_invoked")
+    .collect::<Vec<_>>();
+    assert_eq!(
+        invoked,
+        vec![
+            attribution(
+                "hook_invoked",
+                "kimi",
+                "PostToolUse",
+                json!("kimi-session"),
+                Value::Null
+            ),
+            attribution(
+                "hook_invoked",
+                "opencode",
+                "session.idle",
+                json!("ses_opencode"),
+                Value::Null
+            ),
+            attribution(
+                "hook_invoked",
+                "opencode",
+                "tool.execute.after",
+                json!("ses_tool"),
+                Value::Null,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn capture_spool_refusal_names_its_typed_cause_on_stderr() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = NativeHostIdentityV1::CursorDesktop;
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_capture_typed_cause");
+    // A directory where the spool's records file belongs is a spool the hook
+    // must refuse; the refusal must say which spool fault it hit.
+    std::fs::create_dir_all(native_capture_spool_root(&data_root, host).join("records.v1.bin"))
+        .unwrap();
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-stop",
+        &json!({
+            "conversation_id": "conv-typed-cause",
+            "generation_id": "gen-typed-cause",
+            "hook_event_name": "stop",
+            "model": "auto",
+            "status": "completed",
+            "loop_count": 0,
+            "workspace_roots": [project_path],
+        }),
+    );
+
+    assert_capture_transport_response("stop refused", &output, 1);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "tracedecay hook: native capture did not land: \
+         Unavailable(UnsafePath: hook spool root or member path is unsafe)\n"
+    );
+}
+
+#[test]
+fn delivery_receipt_refusal_after_the_event_spooled_is_not_a_failed_capture() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = NativeHostIdentityV1::CursorDesktop;
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_capture_receipt_refused");
+    // The receipt spool root is a regular file, so its writer cannot open.
+    let receipt_root = tracedecay_hooks::hook_delivery_receipt_spool_root(&data_root, host);
+    if receipt_root.exists() {
+        std::fs::remove_dir_all(&receipt_root).unwrap();
+    }
+    std::fs::create_dir_all(receipt_root.parent().unwrap()).unwrap();
+    std::fs::write(&receipt_root, b"not a spool").unwrap();
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-stop",
+        &json!({
+            "conversation_id": "conv-receipt",
+            "generation_id": "gen-receipt",
+            "hook_event_name": "stop",
+            "model": "auto",
+            "status": "completed",
+            "loop_count": 0,
+            "workspace_roots": [project_path],
+        }),
+    );
+
+    assert_capture_transport_response("stop spooled without receipt", &output, 0);
+    assert_eq!(native_capture_pending_records(&data_root, host), 1);
+    let completed = hook_row_attribution(&hook_analytics_rows(
+        &data_root.join("hook_analytics.jsonl"),
+    ))
+    .into_iter()
+    .filter(|row| row.0 == "hook_completed")
+    .collect::<Vec<_>>();
+    assert_eq!(
+        completed,
+        vec![attribution(
+            "hook_completed",
+            "cursor",
+            "stop",
+            json!("conv-receipt"),
+            json!("hook_v2_spooled_delivery_receipt_unavailable"),
+        )]
+    );
+}
+
 #[test]
 fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
     let home = TempDir::new().unwrap();

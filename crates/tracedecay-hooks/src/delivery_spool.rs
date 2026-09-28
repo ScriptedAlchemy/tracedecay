@@ -285,15 +285,33 @@ impl HookDeliveryReceiptSpoolV1 {
 
     #[hotpath::measure(label = "hooks.delivery.acknowledge")]
     pub fn acknowledge(&self, receipt_id: [u8; 16]) -> Result<bool, HookDeliverySpoolError> {
-        let path = self.receipt_path(receipt_id);
-        if !validate_regular_or_missing(&path).map_err(map_read_error)? {
-            return Ok(false);
+        Ok(self.acknowledge_many(&[receipt_id])? > 0)
+    }
+
+    /// Releases settled receipts with one directory sync. The drain holds the
+    /// writer lock for this call and hook callbacks wait on that lock within
+    /// their synchronous budget, so releasing a pass must not cost one sync
+    /// per receipt. Returns how many receipts were still present.
+    #[hotpath::measure(label = "hooks.delivery.acknowledge_many")]
+    pub fn acknowledge_many(
+        &self,
+        receipt_ids: &[[u8; 16]],
+    ) -> Result<usize, HookDeliverySpoolError> {
+        let mut removed = 0;
+        for receipt_id in receipt_ids {
+            let path = self.receipt_path(*receipt_id);
+            if !validate_regular_or_missing(&path).map_err(map_read_error)? {
+                continue;
+            }
+            fs::remove_file(path).map_err(|_| HookDeliverySpoolError::Io)?;
+            removed += 1;
         }
-        fs::remove_file(path).map_err(|_| HookDeliverySpoolError::Io)?;
-        hotpath::measure_block!("hooks.delivery.fsync.ack", {
-            sync_directory(&self.root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
-        })?;
-        Ok(true)
+        if removed > 0 {
+            hotpath::measure_block!("hooks.delivery.fsync.ack", {
+                sync_directory(&self.root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
+            })?;
+        }
+        Ok(removed)
     }
 
     #[hotpath::measure(label = "hooks.delivery.receipt_paths")]

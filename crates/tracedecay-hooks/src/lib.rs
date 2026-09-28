@@ -39,8 +39,8 @@ pub use delivery_spool::{
 };
 pub use hook_v2_replay::{
     HookReplayAdmissionOutcomeV1, HookReplayPassReportV1, HookReplayTombstoneReasonV1,
-    admit_replayed_envelope_with_authoritative_session, drain_host_spool_once, hook_v2_spool_root,
-    published_hook_scope_binding,
+    admit_replayed_envelope_with_authoritative_session, drain_host_spool_once,
+    hook_v2_spool_directory, hook_v2_spool_root, published_hook_scope_binding,
 };
 pub use native::{
     DecodedNativeHookEventV1, NativeContextScoutLifecycleV1, NativeEnvelopeMaterialV1,
@@ -59,8 +59,8 @@ pub use runtime::{
     finish_synchronous_hook,
 };
 pub use spool::{
-    HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1, HookSpoolError,
-    HookSpoolRecordV1, HookSpoolV1,
+    HOOK_SPOOL_RECORDS_FILE, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
+    HookSpoolError, HookSpoolRecordV1, HookSpoolResetReasonV1, HookSpoolV1,
 };
 
 use serde::{Deserialize, Serialize};

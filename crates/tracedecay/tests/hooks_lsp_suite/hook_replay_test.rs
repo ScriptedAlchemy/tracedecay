@@ -34,6 +34,8 @@ struct Replay {
     subcommand: &'static str,
     agent: &'static str,
     hook_name: &'static str,
+    /// The session the host payload names, which the row must carry.
+    session: &'static str,
     /// JSON piped to stdin; `None` for the legacy Claude `preToolUse` contract
     /// which reads `TOOL_INPUT` from the environment instead.
     stdin: Option<Value>,
@@ -46,6 +48,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-claude-session-start",
             agent: "claude",
             hook_name: "SessionStart",
+            session: "claude-s1",
             stdin: Some(json!({
                 "session_id": "claude-s1",
                 "cwd": root,
@@ -58,6 +61,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-claude-post-tool-use",
             agent: "claude",
             hook_name: "PostToolUse",
+            session: "claude-s1",
             stdin: Some(json!({
                 "session_id": "claude-s1",
                 "cwd": root,
@@ -77,6 +81,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-pre-tool-use",
             agent: "claude",
             hook_name: "preToolUse",
+            session: "claude-s1",
             stdin: None,
             tool_input_env: Some(json!({
                 "session_id": "claude-s1",
@@ -88,6 +93,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-codex-session-start",
             agent: "codex",
             hook_name: "SessionStart",
+            session: "codex-s1",
             stdin: Some(
                 json!({ "hook_event_name": "SessionStart", "session_id": "codex-s1", "cwd": root }),
             ),
@@ -97,6 +103,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-codex-user-prompt-submit",
             agent: "codex",
             hook_name: "UserPromptSubmit",
+            session: "codex-s1",
             stdin: Some(json!({
                 "session_id": "codex-s1",
                 "cwd": root,
@@ -109,6 +116,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-codex-post-tool-use",
             agent: "codex",
             hook_name: "PostToolUse",
+            session: "codex-s1",
             stdin: Some(json!({
                 "session_id": "codex-s1",
                 "cwd": root,
@@ -128,6 +136,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-codex-stop",
             agent: "codex",
             hook_name: "Stop",
+            session: "codex-s1",
             stdin: Some(json!({
                 "session_id": "codex-s1",
                 "turn_id": "codex-t1",
@@ -145,6 +154,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-cursor-session-start",
             agent: "cursor",
             hook_name: "sessionStart",
+            session: "cursor-s1",
             stdin: Some(
                 json!({ "hook_event_name": "sessionStart", "conversation_id": "cursor-s1", "cwd": root }),
             ),
@@ -154,6 +164,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-cursor-post-tool-use",
             agent: "cursor",
             hook_name: "postToolUse",
+            session: "cursor-s1",
             stdin: Some(json!({
                 "conversation_id": "cursor-s1",
                 "cwd": root,
@@ -165,6 +176,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-cursor-stop",
             agent: "cursor",
             hook_name: "stop",
+            session: "cursor-s1",
             stdin: Some(json!({
                 "hook_event_name": "stop",
                 "conversation_id": "cursor-s1",
@@ -180,6 +192,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-kiro-pre-tool-use",
             agent: "kiro",
             hook_name: "preToolUse",
+            session: "kiro-s1",
             stdin: Some(json!({
                 "hook_event_name": "preToolUse",
                 "session_id": "kiro-s1",
@@ -192,6 +205,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-kiro-prompt-submit",
             agent: "kiro",
             hook_name: "userPromptSubmit",
+            session: "kiro-s1",
             stdin: Some(json!({
                 "session_id": "kiro-s1",
                 "cwd": root,
@@ -204,6 +218,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-kiro-post-tool-use",
             agent: "kiro",
             hook_name: "postToolUse",
+            session: "kiro-s1",
             stdin: Some(json!({
                 "hook_event_name": "postToolUse",
                 "session_id": "kiro-s1",
@@ -217,6 +232,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-pi-event",
             agent: "pi",
             hook_name: "session_start",
+            session: "pi-s1",
             stdin: Some(json!({
                 "hook_event_name": "session_start",
                 "id": "pi-e1",
@@ -230,11 +246,52 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-pi-event",
             agent: "pi",
             hook_name: "agent_end",
+            session: "pi-s1",
             stdin: Some(json!({
                 "hook_event_name": "agent_end",
                 "id": "pi-e2",
                 "session_id": "pi-s1",
                 "cwd": root,
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-kimi-event",
+            agent: "kimi",
+            hook_name: "PostToolUse",
+            session: "kimi-s1",
+            stdin: Some(json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "kimi-s1",
+                "cwd": root,
+                "tool_name": "Shell",
+                "tool_input": { "command": "cargo build" },
+                "tool_call_id": "kimi-call-1",
+                "tool_output": "Finished",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-kimi-event",
+            agent: "kimi",
+            hook_name: "Stop",
+            session: "kimi-s1",
+            stdin: Some(json!({
+                "hook_event_name": "Stop",
+                "session_id": "kimi-s1",
+                "cwd": root,
+                "stop_hook_active": false,
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-opencode-event",
+            agent: "opencode",
+            hook_name: "session.idle",
+            session: "ses_opencode_s1",
+            stdin: Some(json!({
+                "type": "session.idle",
+                "properties": { "sessionID": "ses_opencode_s1" },
             })),
             tool_input_env: None,
         },
@@ -383,6 +440,13 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             replay.agent,
             replay.hook_name
         );
+        assert_eq!(
+            str_field(matched[0], "session_id"),
+            replay.session,
+            "{}/{} row must carry the session its payload names",
+            replay.agent,
+            replay.hook_name
+        );
     }
     let fallback_rows = read_jsonl_rows(&profile_root.join("hook_analytics.jsonl"));
     assert!(
@@ -484,6 +548,12 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         assert_eq!(
             event.project_id, canonical_project,
             "{provider}/{} must be attributed to the replay project",
+            replay.hook_name
+        );
+        assert_eq!(
+            event.session_id.as_deref(),
+            Some(replay.session),
+            "{provider}/{} must bridge the session its payload names",
             replay.hook_name
         );
     }

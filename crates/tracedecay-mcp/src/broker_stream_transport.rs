@@ -507,7 +507,29 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                         ),
                     }
                 }
-                write_result.map_err(RmcpResponseWriteFailure::into_io_error)
+                match write_result {
+                    // The client closed before its response, as a hook does
+                    // when it abandons the call at its own deadline and spools
+                    // the event for replay. A work delivery riding on the
+                    // response is settled above as `Disconnected`; nothing is
+                    // left to deliver and the daemon did not fail, so the
+                    // serve loop must not report a transport error.
+                    Err(RmcpResponseWriteFailure::Transport(error))
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::NotConnected
+                        ) =>
+                    {
+                        tracing::debug!(
+                            %error,
+                            "client closed before its response; response dropped as disconnected"
+                        );
+                        Ok(())
+                    }
+                    result => result.map_err(RmcpResponseWriteFailure::into_io_error),
+                }
             },
             label = "daemon.broker.send"
         )
