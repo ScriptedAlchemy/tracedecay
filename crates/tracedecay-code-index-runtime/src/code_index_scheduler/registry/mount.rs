@@ -290,13 +290,13 @@ impl CodeIndexSchedulerRegistryV1 {
         serving_source_witness: &RwLock<Option<super::super::ServingSourceWitnessV1>>,
         serving_seats: &tokio::sync::watch::Sender<u64>,
         serving_generation_changed: &tokio::sync::watch::Sender<()>,
-    ) {
+    ) -> bool {
         let displaced = serving_generation
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if displaced.is_none() {
-            return;
+            return false;
         }
         serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
         *serving_source_witness
@@ -305,6 +305,7 @@ impl CodeIndexSchedulerRegistryV1 {
         drop(displaced);
         Self::record_serving_seat(serving_seats);
         serving_generation_changed.send_replace(());
+        true
     }
 
     /// A same-root remount keeps the incumbent owner: it may only refresh the
@@ -606,6 +607,10 @@ impl CodeIndexSchedulerRegistryV1 {
             // query owners already serving, so its finish changes no owner the
             // seat reads and owes the worker no successor pass.
             let mut retained_projection_successor_only = false;
+            // A publication's lexical build must not pin this worker. The
+            // sealed text owner already serves reads; the build task wakes a
+            // later pass to seat the decoded generation when it finishes.
+            let mut published_projection_detached = false;
             loop {
                 let notified = worker_wake.notified();
                 tokio::pin!(notified);
@@ -1123,6 +1128,23 @@ impl CodeIndexSchedulerRegistryV1 {
                 // `code_index_serving_generation_seated` this lets a status
                 // reader attribute a `progress: null` warming window to the
                 // uninstrumented capture+seal instead of to text or graph work.
+                // An external edit must not index behind the previous
+                // generation's lexical build. Retire that build before this
+                // pass captures source. A worker-owned continuation is the
+                // seat pass for the build still in flight and leaves it alone.
+                if published_projection_detached && arrival.wake_micros().is_some() {
+                    if let Some(previous_projection) = retained_text_projection.take() {
+                        if let Some(previous) = worker_text_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone()
+                        {
+                            previous.text_execution_control().retire();
+                        }
+                        previous_projection.abort();
+                        published_projection_detached = false;
+                    }
+                }
                 tracing::info!(
                     event = "code_index_reconcile_pass_started",
                     path = "background_worker",
@@ -1321,17 +1343,29 @@ impl CodeIndexSchedulerRegistryV1 {
                     Ok(Ok(CodeIndexReconcileOutcomeV1::Published(_)))
                 );
                 let mut graph_text = retained_text.clone();
-                // The replacement owner's bounded projection runs on its own
-                // task while this pass prepares and activates the graph. Both
-                // consume the same sealed generation and are corpus-sized, so
-                // graph starts only after text's first advance has opened the
-                // build and taken its reservation: graph replay can then no
-                // longer hold the source or the RSS headroom text needs to
-                // open. The serving swap still waits for the text outcome.
+                // Lexical projection is corpus-sized and used to pin this
+                // worker until the artifact was published, so a sealed
+                // generation could not serve and the next edit could not
+                // reconcile for the whole build. The text owner is installed
+                // and the predecessor seat released in this pass; the build
+                // continues on its own task and wakes a later pass to decode.
                 let mut published_text_projection_outcome = None;
-                let mut published_text_projection = None;
-                let mut published_text_opened = None;
+                let mut published_text_projection: Option<
+                    tokio::task::JoinHandle<PublishedTextProjectionOutcomeV1>,
+                > = None;
+                let mut published_text_opened: Option<tokio::sync::oneshot::Receiver<()>> = None;
                 if published_pass {
+                    if let Some(previous_projection) = retained_text_projection.take() {
+                        if let Some(previous) = worker_text_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone()
+                        {
+                            previous.text_execution_control().retire();
+                        }
+                        previous_projection.abort();
+                        published_projection_detached = false;
+                    }
                     *worker_text_generation
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
@@ -1360,9 +1394,32 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(published_text.clone());
-                            // The publication broadcast went out while this
-                            // slot was empty; the reopened owner must wake
-                            // waiters that probed it then.
+                            // A predecessor decode would keep answering the
+                            // previous generation id. Drop it so reads fall
+                            // through to this sealed text owner before the
+                            // lexical artifact exists. An empty slot still
+                            // records a seat: cold-start waiters only watch
+                            // that counter, and the publication broadcast
+                            // already fired while the slot was empty.
+                            let text_generation_id =
+                                published_text.metadata().manifest().generation_id.clone();
+                            let seated_generation_id = worker_serving_generation
+                                .read()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                                .map(|seated| seated.generation.manifest().generation_id.clone());
+                            if seated_generation_id.as_ref() != Some(&text_generation_id) {
+                                let displaced = Self::release_superseded_serving_seat(
+                                    &worker_serving_generation,
+                                    &worker_serving_generation_epoch,
+                                    &worker_serving_source_witness,
+                                    &worker_serving_seats,
+                                    &worker_serving_generation_changed,
+                                );
+                                if !displaced {
+                                    Self::record_serving_seat(&worker_serving_seats);
+                                }
+                            }
                             worker_serving_generation_changed.send_replace(());
                             Some(published_text)
                         }
@@ -1376,14 +1433,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                         Ok(Ok(Ok(None)) | Err(_)) | Err(_) => None,
                     };
-                    // Drive the replacement text owner in this pass. Exact and
-                    // lexical are the required fresh-index product; graph
-                    // activation is an optional projection that must not take
-                    // the source or resident-memory headroom text needs to
-                    // open. Yielding back to the loop instead would hand the
-                    // next pass a checkout that has already moved, and on a
-                    // shared repository that pass publishes again - which is
-                    // exactly how a sealed generation stayed unseated forever.
+                    // Exact and lexical owners are installed by the projection
+                    // task when the artifact is published. This pass does not
+                    // wait for that. The sealed text owner is already in the
+                    // slot, so a later edit reconciles immediately and a quiet
+                    // follow-up seats the decoded generation after the build.
                     if graph_activation_enabled
                         && !graph_activation_deferred
                         && let Some(text) = graph_text.clone()
@@ -1404,42 +1458,47 @@ impl CodeIndexSchedulerRegistryV1 {
                         } else {
                             None
                         };
-                        let (opened, text_opened) = tokio::sync::oneshot::channel();
-                        published_text_opened = Some(text_opened);
-                        let shutting_down = Arc::clone(&worker_shutting_down);
-                        let park = Arc::clone(&worker_convergence_park);
-                        let projection_pending_wake = Arc::clone(&worker_pending_wake);
-                        let projection_wake = Arc::clone(&worker_wake);
+                let shutting_down = Arc::clone(&worker_shutting_down);
+                let park = Arc::clone(&worker_convergence_park);
+                let projection_pending_wake = Arc::clone(&worker_pending_wake);
+                let projection_wake = Arc::clone(&worker_wake);
+                let projection_memory_retry = Arc::clone(&worker_memory_retry);
                         #[cfg(test)]
                         let project_root = worker_project_root.clone();
-                        published_text_projection = Some(tokio::spawn(async move {
+                        retained_text_projection = Some(tokio::spawn(async move {
                             let _projection_pass = projection_pass;
                             let outcome = Self::drive_text_projection(
                                 text.clone(),
-                                shutting_down,
+                                Arc::clone(&shutting_down),
                                 park,
                                 None,
-                                Some(opened),
+                                None,
                                 #[cfg(test)]
                                 project_root,
                             )
                             .await;
-                            let schedule_continuation = match outcome {
-                                PublishedTextProjectionOutcomeV1::Finished => {
-                                    text.text_projection_needs_work()
+                            // Source verification and the decoded seat stay on the
+                            // worker, which observes this outcome before it
+                            // swaps. The wake is what brings a pass that
+                            // already moved on back to that observation.
+                            match outcome {
+                                PublishedTextProjectionOutcomeV1::Finished
+                                | PublishedTextProjectionOutcomeV1::Unfinished => {
+                                    Self::note_worker_continuation(
+                                        &projection_pending_wake,
+                                        &projection_wake,
+                                    );
                                 }
-                                PublishedTextProjectionOutcomeV1::Unfinished => true,
-                                PublishedTextProjectionOutcomeV1::WaitingForMemory
-                                | PublishedTextProjectionOutcomeV1::Shutdown => false,
-                            };
-                            if schedule_continuation {
-                                Self::note_worker_continuation(
-                                    &projection_pending_wake,
-                                    &projection_wake,
-                                );
+                                PublishedTextProjectionOutcomeV1::WaitingForMemory => {
+                                    projection_memory_retry
+                                        .schedule(&projection_pending_wake, &projection_wake);
+                                }
+                                PublishedTextProjectionOutcomeV1::Shutdown => {}
                             }
                             outcome
                         }));
+                        retained_projection_successor_only = false;
+                        published_projection_detached = true;
                     } else if graph_text
                         .as_ref()
                         .is_none_or(LatestCodeTextGenerationV1::text_projection_needs_work)
@@ -1469,7 +1528,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 // A successor-only retained projection holds no pass guard of
                 // its own; keeping the worker's guard through graph seat would
                 // report rebuild_in_flight for work that is not query serving.
-                if retained_text_projection.is_none() || retained_projection_successor_only {
+                // A detached publication build is the same shape: its task
+                // holds the guard until lexical owners exist, and the pass
+                // that then seats must not keep a second one. Holding it
+                // through the swap left a ready text owner at `verifying`.
+                if retained_text_projection.is_none()
+                    || retained_projection_successor_only
+                    || published_projection_detached
+                {
                     drop(reconcile_pass.take());
                 }
                 let gate = GraphSeatGateV1::decide(
@@ -1477,12 +1543,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     graph_activation_deferred,
                     matches!(&source_result, Ok(Ok(_))),
                     published_pass,
-                    if published_pass {
-                        published_text_projection.is_some()
-                            || exact_and_lexical_ready_for_graph(graph_text.as_ref())
-                    } else {
-                        graph_text.is_some()
-                    },
+                    // A publication used to admit graph only once its lexical
+                    // handle was in this pass. That handle is detached now, so
+                    // the reopened text owner is the admission. Waiting for
+                    // the artifact left a busy checkout publishing forever
+                    // without a decoded seat.
+                    graph_text.is_some(),
                 );
                 // An arrival that landed during this retained pass is
                 // exact/lexical work waiting for the worker. The optional
@@ -1752,10 +1818,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 // decode and replay below. Otherwise a failed fresh text pass
                 // becomes a retained pass on its next wake and recreates the
                 // same source and resident-memory contention we avoid above.
-                // A publication's own projection is the exception: it already
-                // holds its build reservation once `opened` fires, and the
-                // swap joins it before seating.
+                // A publication seats from the sealed generation in this pass.
+                // Its lexical build keeps running on the detached task and
+                // must not withhold the decoded seat; a later edit would
+                // otherwise supersede every generation before any one seated.
+                // Retained full replay still waits for exact and lexical
+                // owners, which read the durable artifact rather than the
+                // seal the publication just wrote.
                 if prepare_graph
+                    && !published_pass
                     && published_text_projection.is_none()
                     && !graph_already_serves
                     && !exact_and_lexical_ready_for_graph(graph_text.as_ref())
@@ -2249,6 +2320,17 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                 }
+                // A published build that already finished can be proved and
+                // seated in this pass. One still running must not be joined:
+                // that join is what kept the next edit behind the artifact.
+                if published_projection_detached
+                    && retained_text_projection
+                        .as_ref()
+                        .is_some_and(|projection| projection.is_finished())
+                {
+                    published_text_projection = retained_text_projection.take();
+                    published_projection_detached = false;
+                }
                 // Join the publication's projection, then process its outcome
                 // at the existing source-proof and serving-swap boundary. Graph
                 // work above overlapped it; nothing seats before text is done.
@@ -2313,6 +2395,18 @@ impl CodeIndexSchedulerRegistryV1 {
                                     &worker_pending_wake,
                                     &worker_wake,
                                 );
+                            } else {
+                                // The projection task stamps a continuation so a
+                                // pass that already moved on can still seat.
+                                // This pass is the seat, and a non-attributable
+                                // stamp would keep freshness at `verifying`
+                                // through the swap.
+                                let mut pending = worker_pending_wake.lock();
+                                if !pending.attributable {
+                                    pending.micros = 0;
+                                    pending.trigger = 0;
+                                    pending.owner = 0;
+                                }
                             }
                             // Source evidence (a hint, an observed change, or a
                             // Git metadata move) can land during a large text
@@ -2911,6 +3005,31 @@ impl CodeIndexSchedulerRegistryV1 {
                 // serving. `reconcile_in_progress` stays truthful until here so
                 // admission does not misread in-flight text work as
                 // unavailability.
+                //
+                // A published lexical build is the exception. Joining it here
+                // held the next reconcile for the whole artifact. Leave the
+                // task running; its completion already wakes the seat pass.
+                if published_projection_detached {
+                    let finished = retained_text_projection
+                        .as_ref()
+                        .is_some_and(|projection| projection.is_finished());
+                    if finished {
+                        drop(retained_text_projection.take());
+                        published_projection_detached = false;
+                        let still_needs_work = worker_text_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_ref()
+                            .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work);
+                        if still_needs_work {
+                            Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                        }
+                    }
+                    if !worker_shutting_down.load(Ordering::Acquire) {
+                        drop(reconcile_pass.take());
+                        continue;
+                    }
+                }
                 if let Some(projection) = retained_text_projection.as_mut() {
                     let projection_result = if retained_head_recovered_without_complete_replay {
                         let mut preserve_worker_wake = false;
