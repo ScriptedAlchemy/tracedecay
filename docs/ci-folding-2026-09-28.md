@@ -14,7 +14,7 @@ in the initial census below are background evidence; they receive no workflow
 changes or scheduling integration. Cargo Hauler's compact CLI responses are
 a separate requested improvement in the Cargo Hauler repository.
 
-## Hosted delivery in progress
+## Hosted rollout
 
 The production change folds the eight existing Linux test partitions into six
 worker jobs. `root-lib` runs with `root-sessions`, and `root-transport` runs
@@ -38,8 +38,36 @@ at `3e635b8a0e0d5c5fe259122e622d04787c38d389`. Its eight Linux test workers
 consumed 157.8 runner-minutes. The slowest took 24.3 minutes. Most jobs queued
 for two to five seconds. Clippy and six test partitions failed before this
 change. `evals/ci-folding/hosted-baseline.json` retains job and step timings.
-The treatment run must distinguish those existing failures from changes to
-orchestration. Local framing measurements below are not full-suite evidence.
+[Treatment run 36384828151](https://github.com/ScriptedAlchemy/tracedecay/actions/runs/36384828151)
+at `3036ab39c015b3b1989e426fbf1a29c469e88627` completed the real suite.
+All 13,653 test identities match the baseline. No test report is missing and
+no new failed-test identity appeared. Nineteen baseline failures became 17;
+two tests passed on this run. Clippy still reports its two existing findings.
+
+| Hosted measure | Baseline | Folded workers |
+| --- | ---: | ---: |
+| Linux worker allocations | 8 | 6 |
+| Linux busy runner-minutes | 157.77 | 129.38 |
+| Slowest Linux worker, minutes | 24.27 | 26.93 |
+| Linux aggregate verdict, minutes from workflow creation | 25.93 | 28.57 |
+| Observed whole workflow, minutes | 33.30 | 28.57 |
+
+Linux runner consumption fell 18.0%. The slowest worker grew 11.0%, and the
+repository-gate dependency adds startup latency. Linux readiness is slower
+on an uncongested account. The whole workflow happened to finish sooner,
+but unrelated jobs also varied; that improvement cannot be attributed to
+folding. This rollout buys runner capacity, not a proven lower Linux latency.
+
+The paired workers both continued after their first member failed and passed
+their second member. The root-sessions build fell from 966 seconds to
+240.454 seconds. Root-dashboard-api build plus tests fell from 1,036 seconds
+to 98.657 seconds. Cargo reused the common build outputs and compiled the
+additional target. `evals/ci-folding/hosted-treatment.json` retains the hosted
+jobs and per-partition evidence. Local framing measurements below remain a
+separate experiment.
+
+[PR #2443](https://github.com/ScriptedAlchemy/tracedecay/pull/2443) records the
+independent review, rollout and manual hosted probe results.
 
 ## What was measured
 
@@ -280,21 +308,23 @@ proposed contribution is admission, coalescing and routing work to those workers
 - Status no longer duplicates in-flight tickets in its recent list.
 
 On the same cancelled ticket, await text fell from 555 to 249 bytes (55%),
-and JSON from 2,160 to 423 bytes (80%). These are measured byte sizes, not
+and JSON from 2,160 to 442 bytes (80%). These are measured byte sizes, not
 tokenizer counts or a claim about prompt-cache hit rates. Successful settled
 await output has no changing relative-age fields; repeated pending reads still
 carry genuinely changing queue state. `await.request` is intentionally a
 smaller public shape; consumers needing the old detailed record use `result`.
 
-The manual Action has been linted; the probe has run locally. The Action has
-not been dispatched on GitHub, and the demand controller/multi-head check
-publisher is a design, not a deployed service. The Linux worker integration is being verified against the hosted baseline.
-Release workflows retain their current behavior.
+The six-worker Linux integration has completed its hosted treatment run.
+The manual Action runs the separate warm-snapshot probe and publishes its
+measurement artifact. Its hosted result is recorded on PR #2443. The demand
+controller and multi-head check publisher below remain a design. Production
+workers do not persist across workflow runs. Release workflows retain their
+current behavior.
 
-In the Cargo Hauler checkout, `pnpm run check` passed validation, build,
-typechecking, Effect diagnostics,
-1,288 unit/integration/acceptance tests (two existing skips), 48 route tests
-and two browser tests. The timing-sensitive Cargo acceptance fixtures now
+For the compact-await change released as Cargo Hauler 0.10.0, `pnpm run check`
+passed artifact freshness, validation, build, typechecking, Effect diagnostics,
+1,334 unit/integration/acceptance tests (one existing skip), 51 route tests
+and three browser tests. Hosted checks also passed on Linux, macOS and Node 22. The timing-sensitive Cargo acceptance fixtures now
 disable the operator's compiler wrappers so their build-script delays really
 execute. Actionlint, replay assertions and Python syntax checks also passed.
 

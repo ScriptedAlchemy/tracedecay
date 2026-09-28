@@ -87,7 +87,7 @@ def probe(repo, head):
                                  env=dict(os.environ, CARGO_HAULER_STATE_DIR=str(root / "state")),
                                  text=True, capture_output=True)
         if stopped.returncode:
-            raise RuntimeError(f"Probe daemon did not stop; retained {root}: {stopped.stderr}")
+            raise RuntimeError(f"Probe daemon did not stop; retained {root}: {stopped.stdout}{stopped.stderr}")
         # This exact path belongs to the probe; never select worktrees by prefix.
         git(repo, "worktree", "remove", "--force", str(worker))
         shutil.rmtree(root)
