@@ -19,8 +19,9 @@ use code_index_task_support::{
     code_index_search_unavailable_for_generation, generation_for_hydration,
 };
 
-const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize =
-    tracedecay_query::retrieval::lexical::CodeLexicalArtifactReaderV1::MAX_CONCURRENT_READS;
+fn concurrent_search_limit() -> usize {
+    tracedecay_query::retrieval::lexical::CodeLexicalArtifactReaderV1::concurrent_read_limit()
+}
 
 struct McpRetrievalExecutionControlV1<A> {
     started: std::time::Instant,
@@ -640,9 +641,7 @@ where
     A: CodeIndexMcpReadAdmissionV1,
     S: CodeIndexScopeResolverV1,
 {
-    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
-        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
-    ));
+    let execution_admission = Arc::new(tokio::sync::Semaphore::new(concurrent_search_limit()));
     Arc::new(move |request| {
         let schedulers = schedulers.clone();
         let project_id = project_id.clone();
@@ -1414,9 +1413,7 @@ where
     A: CodeIndexMcpReadAdmissionV1,
     S: CodeIndexScopeResolverV1,
 {
-    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
-        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
-    ));
+    let execution_admission = Arc::new(tokio::sync::Semaphore::new(concurrent_search_limit()));
     Arc::new(move |request| {
         let schedulers = schedulers.clone();
         let project_id = project_id.clone();
@@ -1564,9 +1561,7 @@ where
     A: CodeIndexMcpReadAdmissionV1,
     S: CodeIndexScopeResolverV1,
 {
-    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
-        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
-    ));
+    let execution_admission = Arc::new(tokio::sync::Semaphore::new(concurrent_search_limit()));
     Arc::new(move |request| {
         let schedulers = schedulers.clone();
         let project_id = project_id.clone();

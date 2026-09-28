@@ -368,9 +368,28 @@ impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
 }
 
 impl CodeLexicalArtifactReaderV1 {
-    /// Bounded parallel scans share the existing SQLite cache ceiling. Each
-    /// additional active reader must reserve scratch from the process owner.
-    pub const MAX_CONCURRENT_READS: usize = 8;
+    /// Hard ceiling on live connections for one artifact. Host parallelism
+    /// selects a smaller width; see [`Self::concurrent_read_limit`].
+    pub const CONCURRENT_READ_CEILING: usize = 8;
+
+    /// How many searches of one artifact may hold a connection at once.
+    ///
+    /// The floor is two so a single-core host still overlaps independent
+    /// scans instead of returning to a project-wide permit of one. The
+    /// ceiling stays small so a burst queues instead of opening another
+    /// SQLite connection and page cache per request.
+    pub fn concurrent_read_limit() -> usize {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .clamp(2, Self::CONCURRENT_READ_CEILING)
+    }
+
+    /// Heap window of each connection after the primary. The primary keeps
+    /// the configured reader window; siblings share the file mmap and only
+    /// need the kernel SQLite cache floor.
+    pub fn concurrent_reader_scratch_bytes() -> u64 {
+        ARTIFACT_SQLITE_CACHE_FLOOR_BYTES as u64
+    }
 
     /// All clones retain the serving owner's admitted reader ceiling. A
     /// concurrent scan reserves its own scratch against that same authority.
@@ -685,6 +704,7 @@ impl CodeLexicalArtifactReaderV1 {
     /// `authority` is the opener's projection: the artifact stores only its
     /// content part, and the reader serves the opener's generation,
     /// repository, freshness, and clone route.
+    #[allow(clippy::too_many_arguments)] // seated open carries the verified file, budget, and integrity authority together
     fn open_connection_with_control(
         connection: Connection,
         artifact_path: &Path,
@@ -734,11 +754,10 @@ impl CodeLexicalArtifactReaderV1 {
                         "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
                     )));
                 }
-                let width = Self::MAX_CONCURRENT_READS
-                    .min(sqlite_budget / ARTIFACT_SQLITE_CACHE_FLOOR_BYTES);
+                let width = seated_reader_width(sqlite_budget);
                 let page_cache_bytes = configure_reader_window(
                     &connection,
-                    sqlite_budget.min(ARTIFACT_SQLITE_CACHE_BYTES) / width,
+                    primary_reader_cache_budget(sqlite_budget, width),
                     0,
                     sealed_file_size_bytes,
                 )?;
@@ -831,9 +850,12 @@ impl CodeLexicalArtifactReaderV1 {
             ));
         }
         checkpoint(control)?;
-        let width = Self::MAX_CONCURRENT_READS.min(
-            (cache_budget_bytes - stored_metadata_bytes.len()) / ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
-        );
+        // Siblings are opened here, while `artifact_file` still names the
+        // inode this reader authenticated. A later replacement of the path
+        // must not be served: both checks refuse a different device/inode,
+        // and these connections keep the verified file's descriptor.
+        let sqlite_budget = cache_budget_bytes - stored_metadata_bytes.len();
+        let width = seated_reader_width(sqlite_budget);
         let mut connections = vec![StdMutex::new(connection)];
         for _ in 1..width {
             checkpoint(control)?;
@@ -847,10 +869,17 @@ impl CodeLexicalArtifactReaderV1 {
             sibling
                 .pragma_update(None, "query_only", true)
                 .map_err(sqlite_error)?;
-            configure_reader_window(&sibling, page_cache_bytes, 0, sealed_file_size_bytes)?;
+            configure_reader_window(
+                &sibling,
+                ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
+                0,
+                sealed_file_size_bytes,
+            )?;
             connections.push(StdMutex::new(sibling));
         }
-        let retained_owned_bytes = stored_metadata_bytes.len() + page_cache_bytes * width;
+        let retained_owned_bytes = stored_metadata_bytes.len()
+            + page_cache_bytes
+            + ARTIFACT_SQLITE_CACHE_FLOOR_BYTES * width.saturating_sub(1);
         Ok(Self {
             connections: Arc::new(ArtifactReaders {
                 connections,
@@ -1318,25 +1347,23 @@ impl CodeLexicalArtifactReaderV1 {
                     };
                     let scratch_reservation = if index == 0 {
                         None
-                    } else {
-                        let Some(reservation) = &self.resident_memory else {
-                            break;
-                        };
-                        let bytes = NonZeroU64::new(
-                            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 as u64,
-                        )
-                        .ok_or_else(|| {
-                            CodeLexicalArtifactErrorV1::Contract(
-                                "reader reservation must be nonzero".to_owned(),
-                            )
-                        })?;
+                    } else if let Some(reservation) = &self.resident_memory {
+                        let bytes = NonZeroU64::new(Self::concurrent_reader_scratch_bytes())
+                            .ok_or_else(|| {
+                                CodeLexicalArtifactErrorV1::Contract(
+                                    "sibling reader scratch must be nonzero".to_owned(),
+                                )
+                            })?;
                         match reservation.reserve_additional(bytes) {
                             Ok(reservation) => Some(reservation),
                             Err(reason) => {
                                 tracing::debug!(%reason, "concurrent artifact read queues within its existing reservation");
+                                drop(connection);
                                 break;
                             }
                         }
+                    } else {
+                        None
                     };
                     return Ok(ArtifactReadGuard {
                         connection,
@@ -3073,6 +3100,24 @@ fn sealed_reader_mmap_bytes(file_size_bytes: u64) -> Result<i64, CodeLexicalArti
             "sealed lexical artifact is larger than SQLite's mmap_size domain: {error}"
         ))
     })
+}
+
+/// Live connection count for one seated artifact. Each connection needs at
+/// least the cache floor; the primary then keeps whatever budget remains,
+/// capped at the configured window.
+fn seated_reader_width(sqlite_budget: usize) -> usize {
+    let affordable = sqlite_budget / ARTIFACT_SQLITE_CACHE_FLOOR_BYTES;
+    CodeLexicalArtifactReaderV1::concurrent_read_limit()
+        .min(affordable)
+        .max(1)
+}
+
+fn primary_reader_cache_budget(sqlite_budget: usize, width: usize) -> usize {
+    let sibling_bytes = ARTIFACT_SQLITE_CACHE_FLOOR_BYTES.saturating_mul(width.saturating_sub(1));
+    sqlite_budget.saturating_sub(sibling_bytes).clamp(
+        ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
+        ARTIFACT_SQLITE_CACHE_BYTES,
+    )
 }
 
 fn configure_reader_window(

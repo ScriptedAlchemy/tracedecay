@@ -2184,10 +2184,9 @@ fn concurrent_artifact_reads_are_bounded_and_keep_the_verified_file() {
     let fixture = real_lexical_source_fixture_with_files(24);
     let mut artifact = sealed_artifact(&fixture, fixture.metadata.clone());
     let reader_bytes = CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 as u64;
-    let ceiling = NonZeroU64::new(
-        (CodeLexicalArtifactReaderV1::MAX_CONCURRENT_READS as u64 + 1) * reader_bytes,
-    )
-    .expect("memory ceiling");
+    let read_limit = CodeLexicalArtifactReaderV1::concurrent_read_limit();
+    let sibling_scratch = CodeLexicalArtifactReaderV1::concurrent_reader_scratch_bytes();
+    let ceiling = NonZeroU64::new((read_limit as u64 + 1) * reader_bytes).expect("memory ceiling");
     let observed = Arc::new(AtomicU64::new(0));
     let sampler_observed = Arc::clone(&observed);
     let pressure = ResidentMemoryPressureV1::with_sampler(
@@ -2230,7 +2229,7 @@ fn concurrent_artifact_reads_are_bounded_and_keep_the_verified_file() {
     std::thread::scope(|scope| {
         let mut resumes = Vec::new();
         let mut workers = Vec::new();
-        for _ in 0..CodeLexicalArtifactReaderV1::MAX_CONCURRENT_READS {
+        for _ in 0..read_limit {
             let (entered, reached) = std::sync::mpsc::channel();
             let (resume, receiver) = std::sync::mpsc::channel();
             resumes.push(resume);
@@ -2251,25 +2250,46 @@ fn concurrent_artifact_reads_are_bounded_and_keep_the_verified_file() {
         }
         assert_eq!(
             memory.snapshot().used_bytes,
-            CodeLexicalArtifactReaderV1::MAX_CONCURRENT_READS as u64 * reader_bytes,
-            "the overlapping scan has its own scratch reservation"
+            reader_bytes + (read_limit as u64 - 1) * sibling_scratch,
+            "each overlapping sibling charges its cache floor, not another full reader budget"
         );
         let (started, starting) = std::sync::mpsc::channel();
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
         let (completed, completion) = std::sync::mpsc::channel();
         let artifact = &artifact;
         let queued = scope.spawn(move || {
+            struct QueueProbe {
+                parked: std::sync::mpsc::Sender<()>,
+                reported: AtomicBool,
+            }
+            impl RetrievalExecutionControl for QueueProbe {
+                fn is_cancelled(&self) -> bool {
+                    if !self.reported.swap(true, Ordering::SeqCst) {
+                        self.parked.send(()).expect("report queued checkpoint");
+                    }
+                    false
+                }
+                fn elapsed_micros(&self) -> u64 {
+                    0
+                }
+            }
             started.send(()).expect("report queued reader");
-            let request = artifact.request("widget", &["widget"], &[], &[], 0, 64);
+            let probe = QueueProbe {
+                parked: parked_tx,
+                reported: AtomicBool::new(false),
+            };
+            let mut request = artifact.request("widget", &["widget"], &[], &[], 0, 64);
+            request.control = &probe;
             let result = artifact.reader.read_lexical_postings(&request);
             completed.send(()).expect("report completion");
             result
         });
         starting.recv().expect("queued read starts");
+        parked_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("a search past the cap reaches the reader queue");
         assert!(
-            matches!(
-                completion.recv_timeout(std::time::Duration::from_millis(50)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ),
+            completion.try_recv().is_err(),
             "a burst must queue instead of allocating another reader"
         );
         struct WaitingCancellation {
@@ -2392,20 +2412,16 @@ fn concurrent_artifact_reads_are_bounded_and_keep_the_verified_file() {
                     completed.send(()).expect("report second completion");
                     result
                 });
-                if over_budget {
-                    assert!(
-                        matches!(
-                            completion.recv_timeout(std::time::Duration::from_millis(50)),
-                            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                        ),
-                        "refused extra scratch queues instead of refusing the existing read"
-                    );
-                    assert_eq!(memory.snapshot().used_bytes, reader_bytes);
-                } else {
-                    completion
-                        .recv_timeout(std::time::Duration::from_secs(30))
-                        .expect("second handle reads the original inode concurrently");
-                }
+                // Sibling scratch is under the process admission floor, so an
+                // over-budget sample does not refuse a seated handle. The
+                // connection cap, not that charge, is what queues a burst.
+                completion
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .expect(if over_budget {
+                        "over-budget sibling scratch still reads the original inode"
+                    } else {
+                        "second handle reads the original inode concurrently"
+                    });
                 resume.send(()).expect("release first handle");
                 assert_eq!(
                     second

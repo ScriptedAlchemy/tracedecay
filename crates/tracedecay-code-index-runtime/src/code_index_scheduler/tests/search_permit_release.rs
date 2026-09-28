@@ -6,6 +6,7 @@
 //! the request control, instead of hydrating the rest of its corpus.
 
 use super::*;
+use std::sync::Condvar;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -17,6 +18,7 @@ use tracedecay_query::code_search::{
     CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1, CodeIndexSimilarOutcomeV1,
     CodeIndexSimilarRequestV1, CodeIndexSimilarTargetV1,
 };
+use tracedecay_query::retrieval::lexical::CodeLexicalArtifactReaderV1;
 
 use crate::code_index_executor::{code_index_search_executor, code_index_similar_executor};
 use crate::mcp_admission::{
@@ -782,6 +784,247 @@ async fn a_family_read_that_loses_the_permit_race_waits_for_the_permit() {
         SimilarSettlementV1::Complete,
         "the read parked with the first settles exactly as the first did: {second:?}"
     );
+
+    registry.shutdown().await;
+}
+
+/// Counts blocking-pool threads that have entered the candidate scan and
+/// holds each of them there until the test releases the scan.
+#[derive(Clone)]
+struct OverlappingScanAdmission {
+    authority: CodeIndexSearchAuthorityV1,
+    runtime_thread: ThreadId,
+    entered_threads: Arc<StdMutex<Vec<ThreadId>>>,
+    entered: Arc<AtomicUsize>,
+    entered_notify: Arc<tokio::sync::Notify>,
+    release: Arc<(StdMutex<bool>, Condvar)>,
+}
+
+impl CodeIndexMcpReadAdmissionV1 for OverlappingScanAdmission {
+    type Grant = FixtureGrant;
+
+    fn route_is_registered(&self) -> bool {
+        if std::thread::current().id() == self.runtime_thread {
+            return true;
+        }
+        let thread = std::thread::current().id();
+        let mut threads = self
+            .entered_threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !threads.contains(&thread) {
+            threads.push(thread);
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            self.entered_notify.notify_one();
+        }
+        drop(threads);
+        let (lock, condvar) = &*self.release;
+        let mut released = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*released {
+            released = condvar
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        true
+    }
+
+    fn admit_current(
+        &self,
+        _scope: &ResolvedScope,
+    ) -> Result<Self::Grant, CodeIndexMcpAdmissionUnavailableV1> {
+        Ok(FixtureGrant(self.authority.clone()))
+    }
+}
+
+async fn wait_until_entered(entered: &AtomicUsize, notify: &tokio::sync::Notify, target: usize) {
+    loop {
+        if entered.load(Ordering::SeqCst) >= target {
+            return;
+        }
+        notify.notified().await;
+    }
+}
+
+fn release_overlapping_scans(release: &Arc<(StdMutex<bool>, Condvar)>) {
+    let (lock, condvar) = &**release;
+    let mut released = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *released = true;
+    condvar.notify_all();
+}
+
+fn overlapping_executor(
+    registry: &CodeIndexSchedulerRegistryV1,
+    scope: ResolvedScope,
+    entered: Arc<AtomicUsize>,
+    entered_notify: Arc<tokio::sync::Notify>,
+    release: Arc<(StdMutex<bool>, Condvar)>,
+) -> CodeIndexSearchExecutor {
+    let admission = OverlappingScanAdmission {
+        authority: CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.overlapping-search.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.overlapping-search.fixture",
+            )
+            .expect("authorization revision"),
+        },
+        runtime_thread: std::thread::current().id(),
+        entered_threads: Arc::new(StdMutex::new(Vec::new())),
+        entered,
+        entered_notify,
+        release,
+    };
+    code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        admission,
+        FixedScopeResolver(scope),
+    )
+}
+
+/// Two searches on one project are inside the candidate scan together.
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_searches_on_one_project_overlap_inside_the_scan() {
+    const WIDTH: usize = 2;
+    let sources = (0..16)
+        .map(|ordinal| {
+            (
+                format!("src/alpha_{ordinal:03}.rs"),
+                format!(
+                    "pub fn alpha_{ordinal:03}() -> u32 {{ let value = {ordinal}; return value; }}\n"
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let files = sources
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let entered = Arc::new(AtomicUsize::new(0));
+    let entered_notify = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new((StdMutex::new(false), Condvar::new()));
+    let executor = overlapping_executor(
+        &registry,
+        scope,
+        Arc::clone(&entered),
+        Arc::clone(&entered_notify),
+        Arc::clone(&release),
+    );
+    let mut tasks = Vec::with_capacity(WIDTH);
+    for _ in 0..WIDTH {
+        let executor = Arc::clone(&executor);
+        let root = fixture.path().to_path_buf();
+        tasks.push(tokio::spawn(async move {
+            executor(search_request(&root, None)).await
+        }));
+    }
+
+    tokio::time::timeout(
+        Duration::from_mins(1),
+        wait_until_entered(&entered, &entered_notify, WIDTH),
+    )
+    .await
+    .expect("searches on one project must be inside the candidate scan together");
+
+    release_overlapping_scans(&release);
+
+    for task in tasks {
+        let outcome = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("a search finishes once its scan is released")
+            .expect("search task joins");
+        assert!(
+            matches!(outcome, CodeIndexSearchOutcomeV1::Complete(_)),
+            "a search that overlapped another scan still completes: {outcome:?}"
+        );
+    }
+
+    registry.shutdown().await;
+}
+
+/// A search past the seated connection cap waits outside the scan.
+#[tokio::test(flavor = "current_thread")]
+async fn search_past_the_reader_cap_waits_outside_the_scan() {
+    let width = CodeLexicalArtifactReaderV1::concurrent_read_limit();
+    let sources = (0..16)
+        .map(|ordinal| {
+            (
+                format!("src/alpha_{ordinal:03}.rs"),
+                format!(
+                    "pub fn alpha_{ordinal:03}() -> u32 {{ let value = {ordinal}; return value; }}\n"
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let files = sources
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let entered = Arc::new(AtomicUsize::new(0));
+    let entered_notify = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new((StdMutex::new(false), Condvar::new()));
+    let executor = overlapping_executor(
+        &registry,
+        scope,
+        Arc::clone(&entered),
+        Arc::clone(&entered_notify),
+        Arc::clone(&release),
+    );
+    let mut holders = Vec::with_capacity(width);
+    for _ in 0..width {
+        let executor = Arc::clone(&executor);
+        let root = fixture.path().to_path_buf();
+        holders.push(tokio::spawn(async move {
+            executor(search_request(&root, None)).await
+        }));
+    }
+    tokio::time::timeout(
+        Duration::from_mins(1),
+        wait_until_entered(&entered, &entered_notify, width),
+    )
+    .await
+    .expect("every seated reader enters the scan");
+
+    let deadline = Deadline::new(UtcMicros(
+        tracedecay_contracts::clock::now_micros().0 + 300_000,
+    ))
+    .expect("deadline");
+    let queued = executor(CodeIndexSearchRequestV1 {
+        deadline: Some(deadline),
+        ..search_request(fixture.path(), None)
+    })
+    .await;
+    assert_eq!(
+        unavailable_reason(&queued),
+        Some(CodeIndexSearchUnavailableReasonV1::TimedOut),
+        "a search past the cap queues until its deadline: {queued:?}"
+    );
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        width,
+        "the queued search must not enter the scan while every seated reader is held"
+    );
+
+    release_overlapping_scans(&release);
+    for holder in holders {
+        let outcome = tokio::time::timeout(Duration::from_secs(30), holder)
+            .await
+            .expect("a held scan finishes once released")
+            .expect("held scan joins");
+        assert!(
+            matches!(outcome, CodeIndexSearchOutcomeV1::Complete(_)),
+            "a held scan still completes: {outcome:?}"
+        );
+    }
 
     registry.shutdown().await;
 }
