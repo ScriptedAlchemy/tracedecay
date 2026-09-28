@@ -199,7 +199,8 @@ fn typescript() -> BTreeMap<&'static str, &'static str> {
     ])
 }
 
-fn fixture_files(language: &str) -> Vec<(String, String)> {
+/// Every file under `root`, path-sorted, as `(root-relative path, source)`.
+fn fixture_files(root: &Path) -> Vec<(String, String)> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
         let mut entries = std::fs::read_dir(dir)
             .expect("fixture directory")
@@ -222,10 +223,9 @@ fn fixture_files(language: &str) -> Vec<(String, String)> {
             }
         }
     }
-    let root = Path::new(FIXTURE_ROOT).join(language);
     let mut files = Vec::new();
-    walk(&root, &root, &mut files);
-    assert!(files.len() >= 8, "{language} fixture is present: {files:?}");
+    walk(root, root, &mut files);
+    assert!(!files.is_empty(), "fixture {} is present", root.display());
     files
 }
 
@@ -238,16 +238,19 @@ fn language_for(path: &str) -> &'static str {
         Some("rs") => "rust",
         Some("toml") => "toml",
         Some("ts") => "typescript",
+        Some("json") => "json",
         other => panic!("fixture file {path} has an unexpected extension {other:?}"),
     }
 }
 
-fn published(language: &str) -> Arc<CodeIndexPublishedGenerationV1> {
+/// Publish one generation of every file under `root` through the production
+/// owner, with identities derived from `tag`.
+pub(crate) fn publish_fixture_tree(root: &Path, tag: &str) -> Arc<CodeIndexPublishedGenerationV1> {
     let mut request = request_with_source(
-        &format!("file.calls-{language}.seed"),
+        &format!("file.{tag}.seed"),
         1_700_000,
-        &format!("commit.calls-{language}.1"),
-        &format!("tree.calls-{language}.1"),
+        &format!("commit.{tag}.1"),
+        &format!("tree.{tag}.1"),
         "",
     );
     request.snapshot.files.clear();
@@ -255,9 +258,8 @@ fn published(language: &str) -> Arc<CodeIndexPublishedGenerationV1> {
     request.captured_files.clear();
     request.changed_files.clear();
     let mut identity = Vec::new();
-    for (ordinal, (path, source)) in fixture_files(language).into_iter().enumerate() {
-        let file_occurrence_id =
-            id::<FileOccurrenceId>(&format!("file.calls-{language}.{ordinal:02}"));
+    for (ordinal, (path, source)) in fixture_files(root).into_iter().enumerate() {
+        let file_occurrence_id = id::<FileOccurrenceId>(&format!("file.{tag}.{ordinal:02}"));
         let bytes = source.as_bytes();
         request.snapshot.files.push(SanitizedCodeFileV1 {
             file_occurrence_id: file_occurrence_id.clone(),
@@ -270,7 +272,7 @@ fn published(language: &str) -> Arc<CodeIndexPublishedGenerationV1> {
             .snapshot
             .sanitization_receipts
             .push(id::<SanitizationReceiptId>(&format!(
-                "receipt.calls-{language}.{ordinal:02}"
+                "receipt.{tag}.{ordinal:02}"
             )));
         request.captured_files.push(CodeIndexCapturedFileV1 {
             file_occurrence_id,
@@ -299,6 +301,13 @@ fn published(language: &str) -> Arc<CodeIndexPublishedGenerationV1> {
     .expect("production owner")
     .build_and_publish(request, &ActiveControl)
     .expect("fixture generation publishes")
+}
+
+fn published(language: &str) -> Arc<CodeIndexPublishedGenerationV1> {
+    publish_fixture_tree(
+        &Path::new(FIXTURE_ROOT).join(language),
+        &format!("calls-{language}"),
+    )
 }
 
 struct CallGraphV1 {
@@ -402,7 +411,7 @@ fn bindable_calls() -> BTreeSet<(&'static str, &'static str)> {
 /// complete exactly where every call site bound: the receiver calls leave
 /// `add` and `get` partial while `normalize` and `clamp`, called from five
 /// files through five import forms, report complete.
-fn assert_import_language_graph(graph: &CallGraphV1, util_file: &str, dependents: [&str; 5]) {
+fn assert_import_language_graph(graph: &CallGraphV1, util_file: &str, dependents: &[&str]) {
     assert_eq!(graph.calls(), bindable_calls());
     for role in ["add", "get"] {
         assert!(
@@ -415,7 +424,10 @@ fn assert_import_language_graph(graph: &CallGraphV1, util_file: &str, dependents
     }
     assert_eq!(
         graph.file_dependents(util_file),
-        (dependents.into_iter().map(str::to_owned).collect(), false)
+        (
+            dependents.iter().copied().map(str::to_owned).collect(),
+            false
+        )
     );
 }
 
@@ -425,7 +437,7 @@ fn python_calls_bind_through_from_module_alias_and_relative_imports() {
     assert_import_language_graph(
         &graph,
         "app/util.py",
-        [
+        &[
             "app/compat.py",
             "app/math.py",
             "app/report.py",
@@ -441,7 +453,7 @@ fn go_calls_bind_through_go_mod_import_paths_and_the_same_package() {
     assert_import_language_graph(
         &graph,
         "util/util.go",
-        [
+        &[
             "compat/compat.go",
             "mathx/stats.go",
             "report/report.go",
@@ -457,7 +469,7 @@ fn java_calls_bind_through_class_static_glob_and_same_package_imports() {
     assert_import_language_graph(
         &graph,
         "src/app/util/Util.java",
-        [
+        &[
             "src/app/compat/Compat.java",
             "src/app/math/MathOps.java",
             "src/app/report/Report.java",
@@ -473,13 +485,28 @@ fn ruby_constant_calls_bind_through_require_relative_chains() {
     assert_import_language_graph(
         &graph,
         "lib/util.rb",
-        [
+        &[
             "lib/compat.rb",
             "lib/math_ops.rb",
+            "lib/nested.rb",
             "lib/report.rb",
             "lib/shapes.rb",
             "lib/store.rb",
         ],
+    );
+    // Inside `module App`, `Tools` names `App::Tools` and `::Util` the
+    // top-level module.
+    let nested = CallGraphV1::new(
+        "ruby",
+        BTreeMap::from([
+            ("run", "lib/nested.rb::App::Runner::run"),
+            ("helper", "lib/nested.rb::App::Tools::helper"),
+            ("normalize", "lib/util.rb::Util::normalize"),
+        ]),
+    );
+    assert_eq!(
+        nested.calls(),
+        BTreeSet::from([("run", "helper"), ("run", "normalize")])
     );
 }
 

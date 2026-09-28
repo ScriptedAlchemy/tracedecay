@@ -8,128 +8,26 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay_code_index::{
-    chunks::content_digest,
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, CodeGraphInteractiveReader, CodeGraphProjectionStore,
         code_graph_projection_identity,
     },
-    production::{
-        CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
-    },
+    production::CodeIndexPublishedGenerationV1,
 };
-use tracedecay_domain::{
-    EdgeAuthorityV1, FileOccurrenceId, LanguageId, RelationEdgeKindV1, SanitizationReceiptId,
-    SanitizedCodeFileV1, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
-};
+use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::{
     GraphNamespace, GraphProjectorRevision, NeverCancelled, VerifiedGraphSnapshot,
 };
 
-use crate::{
-    production_orchestration::{
-        ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
-    },
-    support::{PartitionedSealV1, id},
-};
+use crate::{cross_file_import_calls::publish_fixture_tree, support::PartitionedSealV1};
 
 const FIXTURE_ROOT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../tracedecay-code-extraction/fixtures/typescript-monorepo"
 );
 
-fn fixture_files() -> Vec<(String, String)> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
-        let mut entries = std::fs::read_dir(dir)
-            .expect("fixture directory")
-            .map(|entry| entry.expect("fixture entry").path())
-            .collect::<Vec<_>>();
-        entries.sort();
-        for path in entries {
-            if path.is_dir() {
-                walk(root, &path, out);
-            } else {
-                let relative = path
-                    .strip_prefix(root)
-                    .expect("fixture path under root")
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                out.push((
-                    relative,
-                    std::fs::read_to_string(&path).expect("fixture source"),
-                ));
-            }
-        }
-    }
-    let mut files = Vec::new();
-    walk(Path::new(FIXTURE_ROOT), Path::new(FIXTURE_ROOT), &mut files);
-    assert!(files.len() >= 10, "fixture monorepo is present: {files:?}");
-    files
-}
-
-fn language_for(path: &str) -> &'static str {
-    match path.rsplit('.').next() {
-        Some("ts") => "typescript",
-        Some("json") => "json",
-        other => panic!("fixture file {path} has an unexpected extension {other:?}"),
-    }
-}
-
 fn published_fixture() -> Arc<CodeIndexPublishedGenerationV1> {
-    let mut request = request_with_source(
-        "file.ts-monorepo.seed",
-        1_700_000,
-        "commit.ts-monorepo.1",
-        "tree.ts-monorepo.1",
-        "",
-    );
-    request.snapshot.files.clear();
-    request.snapshot.sanitization_receipts.clear();
-    request.captured_files.clear();
-    request.changed_files.clear();
-    let mut identity = Vec::new();
-    for (ordinal, (path, source)) in fixture_files().into_iter().enumerate() {
-        let file_occurrence_id = id::<FileOccurrenceId>(&format!("file.ts-monorepo.{ordinal:02}"));
-        let bytes = source.as_bytes();
-        request.snapshot.files.push(SanitizedCodeFileV1 {
-            file_occurrence_id: file_occurrence_id.clone(),
-            logical_path: path.clone(),
-            language: Some(id::<LanguageId>(language_for(&path))),
-            content_digest: content_digest(bytes),
-            disposition: SnapshotFileDispositionV1::Present,
-        });
-        request
-            .snapshot
-            .sanitization_receipts
-            .push(id::<SanitizationReceiptId>(&format!(
-                "receipt.ts-monorepo.{ordinal:02}"
-            )));
-        request.captured_files.push(CodeIndexCapturedFileV1 {
-            file_occurrence_id,
-            sanitized_bytes: Arc::from(bytes),
-            sensitivity_level: SensitivityLevelV1::Public,
-        });
-        request.changed_files.insert(path.clone());
-        identity.extend_from_slice(path.as_bytes());
-        identity.push(0);
-        identity.extend_from_slice(bytes);
-    }
-    request.snapshot.files.sort_by(|left, right| {
-        (&left.logical_path, &left.file_occurrence_id)
-            .cmp(&(&right.logical_path, &right.file_occurrence_id))
-    });
-    request.snapshot.content_identity = content_digest(&identity);
-    request
-        .snapshot
-        .validate()
-        .expect("TypeScript monorepo snapshot is canonical");
-    CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner")
-    .build_and_publish(request, &ActiveControl)
-    .expect("TypeScript monorepo generation publishes")
+    publish_fixture_tree(Path::new(FIXTURE_ROOT), "ts-monorepo")
 }
 
 fn symbol(generation: &CodeIndexPublishedGenerationV1, qualified_name: &str) -> SymbolOccurrenceId {

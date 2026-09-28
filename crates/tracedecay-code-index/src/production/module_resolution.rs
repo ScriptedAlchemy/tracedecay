@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
-use tracedecay_domain::{NodeKind, RelationEdgeKindV1};
+use tracedecay_domain::{NodeKind, RelationEdgeKindV1, SymbolOccurrenceId};
 
 use super::FileGenerationArtifactsV1;
 use super::typescript_resolution::{ImportBindingOutcomeV1, join_normalized, split_parent};
@@ -87,6 +87,8 @@ pub(super) struct ModuleImportIndexV1<'a> {
     java_packages: HashMap<&'a str, Vec<usize>>,
     /// File index to its Java package name.
     java_file_packages: HashMap<usize, &'a str>,
+    /// Ruby symbols by occurrence: a caller's lexical module nesting.
+    ruby_symbols: HashMap<&'a SymbolOccurrenceId, &'a LineageSymbolRecordV1>,
     /// Constant names a Ruby module or class definition introduces.
     ruby_constants: HashSet<&'a str>,
     /// A Ruby path under a `lib/` load path to the files it names.
@@ -119,6 +121,7 @@ impl<'a> ModuleImportIndexV1<'a> {
             go_packages: HashMap::new(),
             java_packages: HashMap::new(),
             java_file_packages: HashMap::new(),
+            ruby_symbols: HashMap::new(),
             ruby_constants: HashSet::new(),
             ruby_load_path: HashMap::new(),
             ruby_loaded: (0..files.len()).map(|_| OnceLock::new()).collect(),
@@ -212,11 +215,13 @@ impl<'a> ModuleImportIndexV1<'a> {
                 self.java_packages.entry(name).or_default().push(file_index);
                 self.java_file_packages.insert(file_index, name);
             }
-            "ruby"
+            "ruby" => {
+                self.ruby_symbols.insert(&symbol.occurrence, symbol);
                 if symbol.kind == NodeKind::Module.as_str()
-                    || symbol.kind == NodeKind::Class.as_str() =>
-            {
-                self.ruby_constants.insert(name);
+                    || symbol.kind == NodeKind::Class.as_str()
+                {
+                    self.ruby_constants.insert(name);
+                }
             }
             _ => {}
         }
@@ -272,7 +277,14 @@ impl<'a> ModuleImportIndexV1<'a> {
             "python" => self.python_call(file, &identifier_path(name, &["."])?),
             "go" => self.go_call(index, file, &identifier_path(name, &["."])?),
             "java" => self.java_call(index, file, &identifier_path(name, &["."])?),
-            "ruby" => self.ruby_call(index, &identifier_path(name, &[".", "::"])?),
+            "ruby" => {
+                let (absolute, name) = match name.strip_prefix("::") {
+                    Some(rest) => (true, rest),
+                    None => (false, name),
+                };
+                let segments = identifier_path(name, &[".", "::"])?;
+                self.ruby_call(index, &reference.from_occurrence, absolute, &segments)
+            }
             _ => None,
         }?;
         Some(match target {
@@ -797,7 +809,17 @@ impl<'a> ModuleImportIndexV1<'a> {
 
     // --- Ruby -----------------------------------------------------------
 
-    fn ruby_call(&self, index: usize, segments: &[&str]) -> Option<TargetV1<'a>> {
+    /// `A::B.m()` binds through Ruby's lexical constant lookup: the
+    /// innermost module enclosing the caller that, with `A::B` appended,
+    /// names a module or class defining `m` in a loaded file. A `::`-rooted
+    /// path is looked up at the top level only.
+    fn ruby_call(
+        &self,
+        index: usize,
+        from: &SymbolOccurrenceId,
+        absolute: bool,
+        segments: &[&str],
+    ) -> Option<TargetV1<'a>> {
         let (method, constant) = segments.split_last()?;
         if constant.is_empty()
             || !constant
@@ -807,22 +829,49 @@ impl<'a> ModuleImportIndexV1<'a> {
             return None;
         }
         let constant = constant.join("::");
+        let path = self.files[index].authority.logical_path.as_str();
+        let nesting = if absolute {
+            Vec::new()
+        } else {
+            // The caller's own name ends its qualified path.
+            let Some(mut scope) = self
+                .ruby_symbols
+                .get(from)
+                .and_then(|symbol| symbol.qualified_name.strip_prefix(path)?.strip_prefix("::"))
+                .map(|scope| scope.split("::").collect::<Vec<_>>())
+            else {
+                return Some(TargetV1::Unresolved);
+            };
+            scope.pop();
+            scope
+        };
         let (loaded, unresolved_require) =
             self.ruby_loaded[index].get_or_init(|| self.ruby_require_closure(index));
-        let found = loaded
-            .iter()
-            .filter_map(|file_index| {
-                let path = self.files[*file_index].authority.logical_path.as_str();
-                self.member(*file_index, &format!("{path}::{constant}"), method)
-            })
-            .collect::<Vec<_>>();
-        Some(match found.as_slice() {
-            [target] => target.clone(),
-            [] if !*unresolved_require && !self.ruby_constants.contains(segments[0]) => {
-                TargetV1::External
+        for depth in (0..=nesting.len()).rev() {
+            let qualified = match nesting[..depth].join("::") {
+                prefix if prefix.is_empty() => constant.clone(),
+                prefix => format!("{prefix}::{constant}"),
+            };
+            let found = loaded
+                .iter()
+                .filter_map(|file_index| {
+                    let path = self.files[*file_index].authority.logical_path.as_str();
+                    self.member(*file_index, &format!("{path}::{qualified}"), method)
+                })
+                .collect::<Vec<_>>();
+            match found.as_slice() {
+                [] => {}
+                [target] => return Some(target.clone()),
+                _ => return Some(TargetV1::Unresolved),
             }
-            _ => TargetV1::Unresolved,
-        })
+        }
+        Some(
+            if !*unresolved_require && !self.ruby_constants.contains(segments[0]) {
+                TargetV1::External
+            } else {
+                TargetV1::Unresolved
+            },
+        )
     }
 
     /// The files `index` loads through `require_relative` and project
