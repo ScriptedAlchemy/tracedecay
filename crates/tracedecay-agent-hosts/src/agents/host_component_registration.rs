@@ -563,6 +563,42 @@ impl CatalogHostComponentRegistrationAuthority {
         Ok(())
     }
 
+    /// Runs after the transaction wrote the refreshed staged source. When Kimi
+    /// refreshes its installed copy from it, activation continues as for an
+    /// already-active plugin; otherwise the deferred `/plugins install` stays
+    /// and carries the reason.
+    fn refresh_kimi_plugin_through_its_installer(
+        &mut self,
+        component_set: &crate::agents::host_bundle::HostComponentSetV1,
+        operation_id: [u8; 16],
+    ) -> Result<(), crate::agents::host_bundle::HostBundleError> {
+        match crate::agents::kimi::refresh_installed_plugin(&self.context.home) {
+            Ok(refreshed) => {
+                eprintln!(
+                    "\x1b[32m✔\x1b[0m Kimi Code refreshed its TraceDecay plugin to {} through \
+                     `kimi web`",
+                    refreshed.version
+                );
+                self.deferred_activation = None;
+                self.should_apply = true;
+                // Kimi's installer owns what it just wrote, so a later rollback
+                // restores only the registration TraceDecay itself writes.
+                self.staged = Some(self.stage_registration(component_set, operation_id)?);
+            }
+            Err(crate::agents::kimi::KimiWebRefreshError::NotInstalledFromStagedSource) => {}
+            Err(reason) => {
+                tracing::warn!(%reason, "Kimi Code plugin refresh through `kimi web` failed");
+                if let Some(action) = self.deferred_activation.as_mut() {
+                    action.remediation = format!(
+                        "{}. The automatic refresh through `kimi web` did not apply: {reason}",
+                        action.remediation
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Restore the staged pre-effect bytes. Every path must still hold either
     /// its original or its just-applied state before any byte is rewritten, so
     /// a foreign edit made during the operation is never overwritten.
@@ -934,6 +970,11 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
                     return Err(host_bundle_stale_preview!());
                 }
             }
+        }
+        if self.deferred_activation.is_some()
+            && component_set.host == crate::agents::host_bundle::HostKindV1::KimiCode
+        {
+            self.refresh_kimi_plugin_through_its_installer(component_set, request.operation_id)?;
         }
         if !self.should_apply {
             return self.capture_applied_registration(request.operation_id);

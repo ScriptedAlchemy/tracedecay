@@ -10,14 +10,21 @@ TraceDecay writes a complete plugin tree to
 `~/.tracedecay/host-bundle-stage/kimi/tracedecay` and prints the exact deferred
 remediation. Kimi Code owns its plugin registry, so TraceDecay does not edit
 `$KIMI_CODE_HOME/plugins/installed.json` or the current managed plugin tree.
-For install and update, open Kimi Code and run:
+For the first install, open Kimi Code and run:
 
 ```text
 /plugins install <staged-path>
 ```
 
-Replace `<staged-path>` with the exact path printed by TraceDecay. `/plugins
-install` only activates the managed plugin; it does not write MCP config. After
+Replace `<staged-path>` with the exact path printed by TraceDecay; Kimi asks
+you to trust the plugin. After that, TraceDecay install and update refresh the
+plugin without a Kimi step: when Kimi lists TraceDecay as installed and
+enabled from exactly the staged path, TraceDecay briefly starts
+`kimi web --no-open` on a loopback port and has Kimi's own installer reinstall
+the staged source. If that refresh cannot be proven (no `kimi` on `PATH`, a
+Kimi without `kimi web`, a refused token, or a timeout), TraceDecay prints the
+reason and the same `/plugins install <staged-path>` step. `/plugins install`
+only activates the managed plugin; it does not write MCP config. After
 that host action succeeds, re-run the same TraceDecay install/repair command so
 activation can register MCP in Kimi's session/user `mcp.json` (not the plugin
 manifest) with the resolved absolute `tracedecay` executable path. For

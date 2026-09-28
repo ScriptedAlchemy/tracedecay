@@ -244,7 +244,7 @@ MCP registration or native plugin tools, with permissions where available.
   `~/.config/devin/mcp_config.json`, preserving other Devin MCP entries and
   leaving Devin's permission policy unchanged.
 - Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then drives `codex plugin add tracedecay@personal` to install Codex's cache from that source. The plugin owns MCP, hooks, and skills. TraceDecay does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, or `[hooks.state]` trust hashes. Codex still asks you to trust new command hooks via `/hooks`.
-- Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; run the printed `/plugins install <staged-path>` command in Kimi Code, then rerun TraceDecay so it can record the staged source. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths.
+- Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; for the first install, run the printed `/plugins install <staged-path>` command in Kimi Code (it asks you to trust the plugin), then rerun TraceDecay so it can record the staged source. Later installs and updates refresh that plugin without a Kimi step: TraceDecay briefly starts `kimi web` on a loopback port and asks Kimi's own installer to reinstall it. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths.
 
 Hermes setup writes the single user integration to
 `~/.hermes/plugins/tracedecay/` and enables it in `~/.hermes/config.yaml` under
@@ -376,11 +376,22 @@ cannot reload an active Codex session or trust plugin command hooks for you
 tracedecay@personal` and then removes the staged source. The legacy Codex
 config surfaces are intentionally left alone.
 
-Kimi's global lifecycle is also two-step: TraceDecay stages source, then Kimi
-Code's `/plugins install <staged-path>` registers it. To remove it, use Kimi
-Code's `/plugins remove tracedecay` first, then rerun `tracedecay uninstall
---agent kimi` to remove the staged source. TraceDecay never writes Kimi's
-managed plugin directory or `installed.json`.
+Kimi's first global install is also two-step: TraceDecay stages source, then
+Kimi Code's `/plugins install <staged-path>` registers it after Kimi's trust
+prompt. Once Kimi lists the TraceDecay plugin as installed and enabled from
+exactly that staged path, `tracedecay update`, `update-plugin`, and a repeated
+`install --agent kimi` refresh it themselves. TraceDecay starts
+`kimi web --no-open --port <ephemeral>` (loopback only, with Kimi's auto-update
+disabled), authenticates with Kimi's server token from
+`~/.kimi-code/server.token`, calls `POST /api/v1/plugins` with the staged path,
+accepts the refresh only when Kimi reports the staged version in state `ok`,
+and stops the server it started. A missing `kimi`, an older Kimi without
+`kimi web`, a refused token, a timeout, or any other answer leaves the
+`/plugins install <staged-path>` step pending and prints why. To remove it, use
+Kimi Code's `/plugins remove tracedecay` first, then rerun `tracedecay
+uninstall --agent kimi` to remove the staged source. TraceDecay never writes
+Kimi's managed plugin directory or `installed.json`; only Kimi's installer
+does.
 
 The generated MCP entries use the resolved absolute path to the current `tracedecay` executable.
 

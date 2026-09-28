@@ -174,38 +174,13 @@ const TEXT_FILE_BUSY: i32 = i32::MIN;
 /// workspace.
 #[hotpath::measure(label = "hosts.agent.host_cli.invoke")]
 pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result<HostCliOutcomeV1> {
-    // Resolve the executable before admitting the child working directory.
-    // A relative PATH entry is relative to the operator's current directory;
-    // once `current_dir(home)` is applied below, asking the OS to resolve it
-    // again could launch a different file (or fail despite a successful
-    // preflight resolution).
-    let resolved_program =
-        std::fs::canonicalize(program).map_err(|error| TraceDecayError::Config {
-            message: format!("could not resolve `{}`: {error}", program.display()),
-        })?;
+    let (mut command, resolved_program) = admitted_host_command(program, args, home)?;
     let rendered_program = resolved_program
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("host cli")
         .to_string();
     let rendered_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-
-    let (launch_program, launch_args) = resolve_launch_command(&resolved_program)?;
-    let mut command = Command::new(&launch_program);
-    command
-        .args(&launch_args)
-        .args(args)
-        // Host lifecycle commands must observe the profile and directory the
-        // transaction admitted, not the operator's ambient process state.
-        .current_dir(home)
-        .env_clear()
-        .env("HOME", home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    admit_windows_profile_environment(&mut command, home);
 
     let mut child =
         spawn_admitting_recent_writes(&mut command).map_err(|error| TraceDecayError::Config {
@@ -250,6 +225,164 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
         stdout,
         stderr,
     })
+}
+
+/// The host command for `program args` under the admitted `home`, with the
+/// resolved executable path for diagnostics.
+///
+/// `home` is both `HOME` and the working directory and the rest of the
+/// environment is cleared: host lifecycle commands must observe the profile
+/// and directory the transaction admitted, not the operator's ambient state.
+fn admitted_host_command(program: &Path, args: &[&str], home: &Path) -> Result<(Command, PathBuf)> {
+    // Resolve the executable before admitting the child working directory.
+    // A relative PATH entry is relative to the operator's current directory;
+    // once `current_dir(home)` is applied, asking the OS to resolve it again
+    // could launch a different file (or fail despite a successful preflight
+    // resolution).
+    let resolved_program =
+        std::fs::canonicalize(program).map_err(|error| TraceDecayError::Config {
+            message: format!("could not resolve `{}`: {error}", program.display()),
+        })?;
+    let (launch_program, launch_args) = resolve_launch_command(&resolved_program)?;
+    let mut command = Command::new(&launch_program);
+    command
+        .args(&launch_args)
+        .args(args)
+        .current_dir(home)
+        .env_clear()
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    admit_windows_profile_environment(&mut command, home);
+
+    Ok((command, resolved_program))
+}
+
+/// How long a host server TraceDecay started gets to exit after SIGTERM
+/// before it is killed.
+const HOST_SERVER_TERMINATION_GRACE: Duration = Duration::from_secs(5);
+
+/// A long-running host command TraceDecay started, such as a host's local API
+/// server. Its combined output is captured for diagnostics while it runs.
+/// Dropping it without [`HostServerChild::terminate`] still kills and reaps
+/// the process, so no failure path can leak it.
+pub(crate) struct HostServerChild {
+    child: Option<std::process::Child>,
+    output: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+/// Start `program args` under the admitted `home` (see [`run_host_cli`]) with
+/// `env` added to the cleared environment, and keep it running.
+#[hotpath::measure(label = "hosts.agent.host_cli.spawn_server")]
+pub(crate) fn spawn_host_server(
+    program: &Path,
+    args: &[&str],
+    home: &Path,
+    env: &[(&str, &std::ffi::OsStr)],
+) -> Result<HostServerChild> {
+    let (mut command, resolved_program) = admitted_host_command(program, args, home)?;
+    command.envs(env.iter().copied());
+    let mut child =
+        spawn_admitting_recent_writes(&mut command).map_err(|error| TraceDecayError::Config {
+            message: format!("could not run `{}`: {error}", resolved_program.display()),
+        })?;
+    let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    if let Some(stdout) = child.stdout.take() {
+        spawn_shared_reader(stdout, std::sync::Arc::clone(&output));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_shared_reader(stderr, std::sync::Arc::clone(&output));
+    }
+    Ok(HostServerChild {
+        child: Some(child),
+        output,
+    })
+}
+
+impl HostServerChild {
+    /// Everything the server has written to stdout and stderr so far.
+    pub(crate) fn output(&self) -> String {
+        self.output.lock().map_or_else(
+            |poisoned| poisoned.into_inner().clone(),
+            |output| output.clone(),
+        )
+    }
+
+    /// The exit status when the server has already exited on its own.
+    pub(crate) fn exited(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        match self.child.as_mut() {
+            Some(child) => child.try_wait().map_err(TraceDecayError::Io),
+            None => Ok(None),
+        }
+    }
+
+    /// Ask the server to shut down, kill it after
+    /// [`HOST_SERVER_TERMINATION_GRACE`], and return the exit status that
+    /// proves the process is gone.
+    pub(crate) fn terminate(mut self) -> Result<std::process::ExitStatus> {
+        let Some(mut child) = self.child.take() else {
+            return Err(TraceDecayError::Config {
+                message: "host server was already reaped".to_string(),
+            });
+        };
+        request_graceful_exit(&child);
+        let deadline = Instant::now() + HOST_SERVER_TERMINATION_GRACE;
+        while Instant::now() < deadline {
+            if let Some(status) = child.try_wait().map_err(TraceDecayError::Io)? {
+                return Ok(status);
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        child.kill().map_err(TraceDecayError::Io)?;
+        child.wait().map_err(TraceDecayError::Io)
+    }
+}
+
+impl Drop for HostServerChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// SIGTERM by PID lets the host run its own shutdown (Kimi removes its
+/// server instance record). The child is not reaped yet, so the PID cannot
+/// name another process.
+#[cfg(unix)]
+fn request_graceful_exit(child: &std::process::Child) {
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `kill` takes plain integers and has no memory effects.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+}
+
+/// Windows has no graceful signal for a console-less child; the grace wait
+/// then ends in `kill`.
+#[cfg(not(unix))]
+fn request_graceful_exit(_child: &std::process::Child) {}
+
+fn spawn_shared_reader<R: Read + Send + 'static>(
+    mut source: R,
+    output: std::sync::Arc<std::sync::Mutex<String>>,
+) {
+    std::thread::spawn(move || {
+        let mut chunk = [0_u8; 4096];
+        while let Ok(read) = source.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            if let Ok(mut output) = output.lock() {
+                output.push_str(&String::from_utf8_lossy(&chunk[..read]));
+            }
+        }
+    });
 }
 
 /// Convert a finished host CLI invocation into success or the host's own
