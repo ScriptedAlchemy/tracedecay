@@ -2521,3 +2521,37 @@ fn short_socket_derivation_uses_the_installed_profile_not_the_shell_profile() {
     assert_ne!(installed_socket, shell_socket);
     assert_ne!(installed_socket, installed_profile.join("daemon.sock"));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn socket_advice_names_what_it_observed_about_the_unit() {
+    let home = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(home.path());
+    let socket = profile.data_dir().join("daemon.sock");
+
+    assert_eq!(
+        super::unavailable_daemon_socket_advice(&profile, &socket, None),
+        "No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+    );
+
+    let unit_dir = home.path().join(".config/systemd/user");
+    std::fs::create_dir_all(&unit_dir).unwrap();
+    std::fs::write(unit_dir.join(crate::SERVICE_NAME), "[Service]\n").unwrap();
+    assert_eq!(
+        super::unavailable_daemon_socket_advice(&profile, &socket, None),
+        format!(
+            "TraceDecay daemon unit is installed but socket '{}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+            socket.display()
+        )
+    );
+
+    assert_eq!(
+        super::unavailable_daemon_socket_advice(
+            &ProfileRoot::new(profile.data_dir()),
+            &socket,
+            None
+        ),
+        "This client cannot see whether a managed TraceDecay daemon service is installed. Check `tracedecay daemon status` before starting or installing a daemon.",
+        "a profile with no home cannot see the unit, so it must not claim none is installed"
+    );
+}
