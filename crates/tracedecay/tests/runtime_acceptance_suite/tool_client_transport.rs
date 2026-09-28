@@ -319,7 +319,7 @@ fn generic_tool_rejects_truncated_frame_as_typed_failure() {
     let envelope: Value = serde_json::from_slice(&result.output.stdout).expect("problem envelope");
     assert_eq!(
         envelope["problem"]["diagnostic"]["code"],
-        "transport_unavailable"
+        "daemon_unavailable"
     );
     assert!(!String::from_utf8_lossy(&result.output.stdout).contains("partial-must-not-escape"));
 }
