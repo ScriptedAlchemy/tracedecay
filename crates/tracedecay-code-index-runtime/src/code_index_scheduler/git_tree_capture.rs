@@ -13,7 +13,7 @@ use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1,
+    SnapshotFileDispositionV1, validate_code_logical_path,
 };
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
@@ -79,6 +79,10 @@ pub(super) enum CapturedFileOutcomeV1 {
         file: SanitizedCodeFileV1,
         reason: String,
     },
+    /// A Git path the portable logical-path grammar cannot carry (for example
+    /// a literal backslash, legal on Unix). No snapshot can name it, so it
+    /// leaves the roster instead of failing the whole capture.
+    Unrepresentable(String),
     Absent,
 }
 
@@ -90,6 +94,7 @@ pub(super) struct CapturedFileRosterV1 {
     pub(super) retained_bytes: Vec<Arc<[u8]>>,
     pub(super) retained_reservations: Vec<ResidentMemoryReservationV1>,
     withheld_sources: Vec<(String, String)>,
+    unrepresentable_paths: Vec<String>,
 }
 
 // Keep privacy diagnostics bounded to one summary record per capture.
@@ -113,11 +118,26 @@ impl CapturedFileRosterV1 {
                     .push((file.logical_path.clone(), reason));
                 self.files.push(file);
             }
+            CapturedFileOutcomeV1::Unrepresentable(path) => self.unrepresentable_paths.push(path),
             CapturedFileOutcomeV1::Absent => {}
         }
     }
 
     pub(super) fn finish(mut self) -> Result<Self, CodeIndexSchedulerErrorV1> {
+        if !self.unrepresentable_paths.is_empty() {
+            let named = self
+                .unrepresentable_paths
+                .iter()
+                .take(MAX_REPORTED_WITHHELD_SOURCES)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!(
+                skipped = self.unrepresentable_paths.len(),
+                named = %named,
+                "code_index_sources_skipped_unrepresentable_path"
+            );
+        }
         if !self.withheld_sources.is_empty() {
             let named = self
                 .withheld_sources
@@ -409,6 +429,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             progress.observe_candidate(raw_bytes.len());
         }
         let result = (|| {
+            if validate_code_logical_path(logical_path).is_err() {
+                return Ok(CapturedFileOutcomeV1::Unrepresentable(
+                    logical_path.to_owned(),
+                ));
+            }
             if !explicitly_admitted && crate::config::is_generated_path_segment(logical_path) {
                 return self
                     .omitted_source_file(

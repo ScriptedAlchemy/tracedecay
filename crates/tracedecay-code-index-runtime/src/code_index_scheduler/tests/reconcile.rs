@@ -4775,6 +4775,84 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
     registry.shutdown().await;
 }
 
+/// Unix filenames may hold a literal backslash (systemd escapes `-` in unit
+/// names as `\x2d`), which no logical path can carry. Such files leave the
+/// snapshot instead of rejecting it, and the freshness witness skips them the
+/// same way, so an unchanged checkout is not reported as moved.
+#[cfg(unix)]
+#[tokio::test]
+async fn backslash_paths_are_skipped_and_the_worktree_stays_fresh() {
+    let fixture = GitFixture::new(&[
+        ("src/main.rs", "fn main() {}\n"),
+        ("src/odd\\name.rs", "pub fn odd() {}\n"),
+        (
+            "deploy/mnt-data\\x2dfiles.mount",
+            "[Mount]\nWhat=/dev/sdb\n",
+        ),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let seated_paths = seated
+        .generation()
+        .snapshot()
+        .files
+        .iter()
+        .map(|file| file.logical_path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(seated_paths, ["src/main.rs"]);
+    drop(seated);
+
+    settle_text_projection(&registry, fixture.path()).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    wait_for_event_to_ready(&registry).await;
+    let canonical = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    {
+        let mounted = registry.mounted.lock().await;
+        let scheduler = &mounted.get(&canonical).expect("mounted worktree").scheduler;
+        scheduler
+            .lock()
+            .expect("scheduler")
+            .policy
+            .staleness_threshold = Duration::ZERO;
+    }
+    let probe_at = tracedecay_contracts::now_micros().0;
+    registry.probe_freshness_admission(fixture.path()).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+
+    let mounted = registry.mounted.lock().await;
+    let scheduler = mounted.get(&canonical).expect("mounted worktree");
+    assert_eq!(
+        scheduler
+            .scheduler
+            .lock()
+            .expect("scheduler")
+            .pending_hint_count(),
+        Some(0),
+        "an unchanged checkout with a skipped path must not become an overflow hint"
+    );
+    let receipts = registry.event_to_ready_receipts();
+    assert!(
+        receipts.iter().all(|receipt| {
+            receipt
+                .arrival
+                .wake_micros()
+                .is_none_or(|wake_micros| wake_micros < probe_at)
+        }),
+        "an unchanged checkout with a skipped path must not reconcile again: {receipts:#?}"
+    );
+    drop(mounted);
+    registry.shutdown().await;
+}
+
 #[tokio::test]
 async fn diagnostics_change_generation_is_stable_until_a_sibling_edit_hint() {
     let fixture = GitFixture::new(&[
