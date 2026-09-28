@@ -183,11 +183,12 @@ mod tests {
     use std::io;
     use std::io::Write;
     use std::sync::Arc;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, Once};
     use std::time::Duration;
 
     use tracedecay_runtime_core::cancellation::CancellationToken;
+    use tracing::subscriber::NoSubscriber;
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::{
@@ -427,8 +428,22 @@ mod tests {
         task.await.expect("failing recovery task");
     }
 
-    #[test]
-    fn identical_failure_logs_are_byte_and_event_bounded() {
+    /// Runs `f` under a subscriber scoped to this thread and returns what it
+    /// wrote.
+    ///
+    /// tracing-core caches each callsite's interest process-wide. While only
+    /// one dispatcher is registered, a callsite first reached on another
+    /// thread takes its interest from that thread's default, so a parallel
+    /// test emitting the same event without a subscriber caches `never` and
+    /// the capture silently loses it. A registered global dispatcher makes
+    /// every later registration consult the registered set, which includes
+    /// this capture.
+    fn captured_tracing(f: impl FnOnce()) -> String {
+        static REGISTERED_GLOBAL: Once = Once::new();
+        REGISTERED_GLOBAL.call_once(|| {
+            tracing::subscriber::set_global_default(NoSubscriber::default())
+                .expect("no other global subscriber in the daemon-service tests");
+        });
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
@@ -438,18 +453,23 @@ mod tests {
                 bytes: Arc::clone(&bytes),
             })
             .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        String::from_utf8(bytes).expect("captured tracing is UTF-8")
+    }
+
+    #[test]
+    fn identical_failure_logs_are_byte_and_event_bounded() {
+        let output = captured_tracing(|| {
             let mut failures = RecoveryFailureTrackerV1::default();
             for _ in 0..100 {
                 failures.fail("fixture recovery", "same fixture failure".to_owned());
             }
             failures.recover("fixture recovery");
         });
-        let bytes = bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let output = String::from_utf8(bytes).expect("captured tracing is UTF-8");
 
         assert_eq!(
             output.matches("durable recovery attempt failed").count(),
@@ -471,27 +491,13 @@ mod tests {
 
     #[test]
     fn skipped_receipt_logs_are_byte_and_event_bounded() {
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .without_time()
-            .with_ansi(false)
-            .with_writer(CapturedWriter {
-                bytes: Arc::clone(&bytes),
-            })
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        let output = captured_tracing(|| {
             let mut warnings = RecoveryWarningTrackerV1::default();
             for _ in 0..100 {
                 warnings.warn("fixture recovery", "invalid fixture receipt");
             }
             warnings.recover("fixture recovery");
         });
-        let bytes = bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let output = String::from_utf8(bytes).expect("captured tracing is UTF-8");
 
         assert_eq!(
             output.matches("durable recovery receipt skipped").count(),

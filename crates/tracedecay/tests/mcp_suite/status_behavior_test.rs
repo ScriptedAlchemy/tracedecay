@@ -97,27 +97,29 @@ fn parse_status(text: &str) -> Value {
     })
 }
 
+/// The JSON status read held by `wait_for` until the sealed generation is
+/// ready, the one readiness authority agent hosts wait on.
 async fn sealed_json_status(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
 ) -> Value {
-    let started = Instant::now();
-    let mut last = Value::Null;
-    while started.elapsed() < Duration::from_secs(20) {
-        let payload =
-            parse_status(&call_status(harness, project_root, json!({ "format": "json" })).await);
-        let freshness = &payload["code_index_freshness"];
-        let graph = &freshness["worktree"]["code_graph_serving"];
-        if freshness["status"] == "current" && graph["state"] == "ready" {
-            return payload;
-        }
-        if graph["state"] == "refused" || graph["reason"] == "activation_disabled" {
-            panic!("code index refused to serve: {payload}");
-        }
-        last = payload;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("tracedecay_status did not report a current sealed generation: {last}");
+    let payload = parse_status(
+        &call_status(
+            harness,
+            project_root,
+            json!({
+                "format": "json",
+                "wait_for": { "state": "ready", "timeout_ms": 20_000 },
+            }),
+        )
+        .await,
+    );
+    assert_eq!(
+        payload["wait"],
+        json!({ "outcome": "reached" }),
+        "tracedecay_status did not report a ready sealed generation: {payload}"
+    );
+    payload
 }
 
 #[tokio::test]

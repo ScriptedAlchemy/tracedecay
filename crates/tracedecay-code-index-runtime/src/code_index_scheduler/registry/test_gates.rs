@@ -15,10 +15,10 @@ use super::super::{
 use super::{
     CodeIndexSchedulerRegistryV1, ColdMountOpenEventV1, ColdMountOpenTestControlV1,
     ColdMountPostCheckTestControlV1, PendingWakeDropGateTestV1, PendingWakeV1,
-    PublishedTextProjectionGateV1, QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
-    ServingGenerationRollbackOutcomeV1, cold_mount_admission_barriers, cold_mount_open_controls,
-    cold_mount_post_check_controls, published_text_projection_gate, query_admission_controls,
-    unique_mounted_for_scope, wait_notified_if_unset,
+    QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
+    ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, cold_mount_admission_barriers,
+    cold_mount_open_controls, cold_mount_post_check_controls, published_text_projection_gate,
+    query_admission_controls, serving_swap_gate, unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -38,10 +38,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             gates
-                .insert(
-                    project_root.clone(),
-                    PublishedTextProjectionGateV1 { entered, release },
-                )
+                .insert(project_root.clone(), WorkerStepGateV1 { entered, release })
                 .is_none(),
             "one published text projection gate per worktree: {}",
             project_root.display()
@@ -52,6 +49,39 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub(super) async fn wait_for_published_text_projection_gate(project_root: &Path) {
         let gate = published_text_projection_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.await;
+        }
+    }
+
+    /// Hold the next graph tail of the worker for `project_root` right before
+    /// it seats the decoded generation. The first receiver resolves once the
+    /// worker waits there; sending on the returned sender releases it.
+    #[cfg(test)]
+    pub fn pause_next_serving_swap(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let replaced = serving_swap_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, WorkerStepGateV1 { entered, release });
+        assert!(replaced.is_none(), "one serving swap gate per worktree");
+        (entered_observed, released)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_serving_swap_gate(project_root: &Path) {
+        let gate = serving_swap_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(project_root);
