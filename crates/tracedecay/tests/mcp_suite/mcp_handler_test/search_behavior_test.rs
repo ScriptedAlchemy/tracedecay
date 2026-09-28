@@ -225,3 +225,99 @@ async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed
 
     fixture.harness.shutdown().await;
 }
+
+/// One ledger function per file, so the per-file diversity cap keeps all of
+/// them in the fused set a page walks.
+const LEDGER_FAMILY: [&str; 5] = [
+    "ledger_open",
+    "ledger_close",
+    "ledger_post",
+    "ledger_void",
+    "ledger_audit",
+];
+
+#[tokio::test]
+async fn a_search_cursor_pages_only_the_request_and_operation_that_minted_it() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("search fixture sources");
+        for (value, name) in LEDGER_FAMILY.iter().enumerate() {
+            fs::write(
+                project.join(format!("src/{name}.rs")),
+                format!("pub fn {name}() -> usize {{\n    {value}\n}}\n"),
+            )
+            .expect("write ledger source");
+        }
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production search server");
+    warm_code_index_search(&server, "ledger_open").await;
+    let search = |arguments: Value| {
+        let server = &server;
+        async move {
+            let response =
+                handle_real_server_tool_call(server, "tracedecay_search", arguments).await;
+            serde_json::from_str::<Value>(extract_real_server_text(&response)).expect("search JSON")
+        }
+    };
+
+    let first = search(json!({"query": "ledger", "limit": 2, "format": "json"})).await;
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("first page continues: {first}"))
+        .to_owned();
+
+    let resized = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_search",
+        json!({"query": "ledger", "limit": 3, "cursor": cursor, "format": "json"}),
+    )
+    .await;
+    let problem = refusal_problem(&resized["result"]);
+    assert_eq!(problem["kind"], "invalid_request", "{resized}");
+    assert_eq!(problem["code"], "cursor.parameter_changed", "{resized}");
+    assert_eq!(
+        problem["message"],
+        "The cursor was issued for a request with a different `limit`. Repeat the request \
+         with the parameters that returned the cursor, or restart without it.",
+        "{resized}"
+    );
+
+    let branch_search = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_branch_search",
+        json!({"branch": "master", "query": "ledger", "limit": 2, "cursor": cursor}),
+    )
+    .await;
+    assert_eq!(
+        refusal_problem(&branch_search["result"])["code"],
+        "cursor.invalid",
+        "{branch_search}"
+    );
+
+    let second = search(json!({
+        "query": "ledger", "limit": 2, "cursor": cursor, "format": "json",
+    }))
+    .await;
+    let names = |page: &Value| -> Vec<String> {
+        search_displays(page)
+            .iter()
+            .map(|display| display["name"].as_str().expect("display name").to_owned())
+            .collect()
+    };
+    let (first_names, second_names) = (names(&first), names(&second));
+    assert_eq!(
+        (first_names.len(), second_names.len()),
+        (2, 2),
+        "{first} / {second}"
+    );
+    assert!(
+        second_names
+            .iter()
+            .all(|name| LEDGER_FAMILY.contains(&name.as_str()) && !first_names.contains(name)),
+        "page two repeated page one: {first_names:?} / {second_names:?}"
+    );
+    fixture.harness.shutdown().await;
+}
