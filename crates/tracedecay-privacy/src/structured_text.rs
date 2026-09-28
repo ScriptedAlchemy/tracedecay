@@ -21,8 +21,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_capture::ParseLimits;
 use tracedecay_domain::{
-    ComponentVersion, PayloadReferenceV1, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    ComponentVersion, LanguageId, PayloadReferenceV1, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
 };
 
 use super::assessment::{
@@ -626,6 +626,21 @@ pub enum CodeSourceShapeV1 {
     /// document is never quarantined for failing to be a data format it
     /// never claimed to be.
     CodeOrProse,
+}
+
+/// The sanitizer shape a captured file's registry-declared language implies.
+///
+/// Only declared structured data formats get whole-document field semantics
+/// (and the fail-closed quarantine of an ambiguous parse). Everything else in
+/// the language registry is code or prose and takes the bounded raw
+/// credential scan: sniffing the shape out of the bytes misread markdown
+/// frontmatter and shell assignments as malformed structured documents and
+/// withheld hundreds of ordinary sources from indexing.
+pub fn declared_code_source_shape(language: &LanguageId) -> CodeSourceShapeV1 {
+    match language.as_str() {
+        "json" | "toml" | "yaml" => CodeSourceShapeV1::StructuredData,
+        _ => CodeSourceShapeV1::CodeOrProse,
+    }
 }
 
 /// Sanitizes arbitrary source bytes and issues receipt evidence bound to both
