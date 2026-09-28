@@ -277,6 +277,7 @@ mod tests {
                     byte_offset: 4,
                     mtime: 100,
                     file_id: 0,
+                    coverage_reason: None,
                 },
             )
             .await
@@ -288,6 +289,7 @@ mod tests {
                     byte_offset: 20,
                     mtime: 200,
                     file_id: 0,
+                    coverage_reason: None,
                 },
             )
             .await
@@ -303,14 +305,22 @@ mod tests {
                         byte_offset: 1,
                         mtime: 0,
                         file_id: 1,
+                        coverage_reason: None,
                     },
                 )
                 .await
                 .unwrap();
         }
-        for (provider, state, deferred_units) in
-            [("kimi", 1, 0), ("opencode", 2, 3), ("claude", 3, 1)]
-        {
+        for (provider, state, deferred_units, reason) in [
+            ("kimi", 1, 0, None),
+            ("opencode", 2, 3, None),
+            (
+                "claude",
+                3,
+                1,
+                Some(crate::HostCoverageReason::DatabaseMissing as u64),
+            ),
+        ] {
             database
                 .set_parse_offset(
                     &format!("host-coverage://{provider}/v1"),
@@ -318,6 +328,7 @@ mod tests {
                         byte_offset: deferred_units,
                         mtime: 1,
                         file_id: state,
+                        coverage_reason: reason,
                     },
                 )
                 .await
@@ -349,7 +360,7 @@ mod tests {
                     provider: "claude".into(),
                     state: SessionProviderCoverageState::Unavailable,
                     deferred_units: 1,
-                    reason: None,
+                    reason: Some(crate::HostCoverageReason::DatabaseMissing),
                 },
                 SessionProviderCoverage {
                     provider: "kimi".into(),

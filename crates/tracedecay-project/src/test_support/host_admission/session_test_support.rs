@@ -602,6 +602,7 @@ impl HostAdmissionTestRuntimeV1 {
             byte_offset: decode(0)?,
             mtime: decode(1)?,
             file_id: decode(2)?,
+            coverage_reason: None,
         }))
     }
 

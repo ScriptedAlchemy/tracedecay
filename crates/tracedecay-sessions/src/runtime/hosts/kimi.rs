@@ -675,6 +675,7 @@ pub async fn capture_kimi_observations(
                             byte_offset: sequence,
                             mtime: queue_frontier.mtime.saturating_add(1),
                             file_id: KIMI_FRONTIER_VERSION,
+                            coverage_reason: None,
                         },
                     )
                     .await
@@ -693,12 +694,14 @@ pub async fn capture_kimi_observations(
                         byte_offset: 0,
                         mtime: discovery_frontier.mtime.saturating_add(1),
                         file_id: 0,
+                        coverage_reason: None,
                     })
                 } else {
                     last_discovered_entry.map(|entry| ParseOffset {
                         byte_offset: entry.sequence,
                         mtime: discovery_frontier.mtime.saturating_add(1),
                         file_id: entry.sequence,
+                        coverage_reason: None,
                     })
                 };
                 if let Some(next_frontier) = next_frontier

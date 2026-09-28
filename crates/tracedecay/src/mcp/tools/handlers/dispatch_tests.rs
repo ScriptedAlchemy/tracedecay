@@ -461,6 +461,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
                 byte_offset: 4,
                 mtime: 100,
                 file_id: 0,
+                coverage_reason: None,
             },
         )
         .await
@@ -472,6 +473,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
                 byte_offset: 20,
                 mtime: 200,
                 file_id: 0,
+                coverage_reason: None,
             },
         )
         .await

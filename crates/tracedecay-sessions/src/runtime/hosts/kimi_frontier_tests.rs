@@ -155,6 +155,7 @@ async fn cancellation_after_discovery_preserves_the_exact_frontier() {
         byte_offset: 17,
         mtime: 23,
         file_id: cursor.sequence,
+        coverage_reason: None,
     };
     admission
         .advance_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY, original)

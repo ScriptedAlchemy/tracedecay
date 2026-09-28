@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::storage::{ProjectStorageLocation, classify_registry_storage_fields};
 
 pub use tracedecay_sessions::runtime::{
-    SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
-    TranscriptBatch,
+    HostCoverageReason, SessionActivityRow, SessionIngestHealth, SessionProviderCoverage,
+    SessionProviderCoverageState, TranscriptBatch,
 };
 
 /// Total savings + call count for a project (or all projects when `project` is None).

@@ -97,6 +97,7 @@ async fn transcript_batch_survives_restart_and_replay_is_idempotent() {
         byte_offset: 512,
         mtime: 1_800_000_000,
         file_id: 42,
+        coverage_reason: None,
     };
 
     let db = profile_runtime(&tmp).await;
@@ -190,6 +191,7 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
             byte_offset: 384,
             mtime: 1_800_000_100,
             file_id: 43,
+            coverage_reason: None,
         },
     )
     .unwrap();
@@ -296,6 +298,7 @@ async fn invalid_batch_mutates_no_transcript_state() {
             byte_offset: 77,
             mtime: 1_715_000_350,
             file_id: 12,
+            coverage_reason: None,
         },
     )
     .expect_err("a mismatched message identity must be rejected");
@@ -346,11 +349,13 @@ async fn stale_higher_batch_is_rejected_until_reparsed_from_durable_cursor() {
         byte_offset: 100,
         mtime: 1_000,
         file_id: 7,
+        coverage_reason: None,
     };
     let second_offset = ParseOffset {
         byte_offset: 200,
         mtime: 2_000,
         file_id: 7,
+        coverage_reason: None,
     };
 
     store
@@ -501,11 +506,13 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
         byte_offset: 100,
         mtime: 1_000,
         file_id: 7,
+        coverage_reason: None,
     };
     let higher_offset = ParseOffset {
         byte_offset: 200,
         mtime: 2_000,
         file_id: 7,
+        coverage_reason: None,
     };
     let first_batch = TranscriptWriteBatch::upsert(
         session.clone(),
@@ -591,6 +598,7 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
                     byte_offset: 150,
                     mtime: 1_500,
                     file_id: 7,
+                    coverage_reason: None,
                 },
             )
             .unwrap(),
@@ -617,6 +625,7 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
                     byte_offset: 400,
                     mtime: 4_000,
                     file_id: 8,
+                    coverage_reason: None,
                 },
             )
             .unwrap(),
@@ -679,6 +688,7 @@ async fn transcript_summary_message_keeps_native_compaction_evidence() {
                     byte_offset: 120,
                     mtime: 1_000,
                     file_id: 11,
+                    coverage_reason: None,
                 },
             )
             .unwrap(),
@@ -742,11 +752,13 @@ async fn concurrent_empty_advances_converge_to_highest_compatible_offset_without
         byte_offset: 80,
         mtime: 1_000,
         file_id: 9,
+        coverage_reason: None,
     };
     let second_offset = ParseOffset {
         byte_offset: 160,
         mtime: 2_000,
         file_id: 9,
+        coverage_reason: None,
     };
 
     let (first_result, second_result) = tokio::join!(
@@ -791,6 +803,7 @@ async fn concurrent_empty_advances_converge_to_highest_compatible_offset_without
                     byte_offset: 320,
                     mtime: 3_000,
                     file_id: 10,
+                    coverage_reason: None,
                 },
             )
             .unwrap(),
@@ -813,6 +826,7 @@ async fn concurrent_empty_advances_converge_to_highest_compatible_offset_without
                     byte_offset: 320,
                     mtime: 500,
                     file_id: second_offset.file_id,
+                    coverage_reason: None,
                 },
             )
             .unwrap(),
@@ -851,6 +865,7 @@ async fn duplicate_empty_advances_are_idempotent_under_concurrency() {
         byte_offset: 96,
         mtime: 1_500,
         file_id: 11,
+        coverage_reason: None,
     };
 
     let (first_result, second_result) = tokio::join!(
@@ -908,6 +923,7 @@ async fn content_hash_offsets_never_retry_by_numeric_order() {
         byte_offset: 900,
         mtime: 1_000,
         file_id: 0,
+        coverage_reason: None,
     };
 
     store
@@ -930,6 +946,7 @@ async fn content_hash_offsets_never_retry_by_numeric_order() {
                     byte_offset: 1_200,
                     mtime: 1_000,
                     file_id: 0,
+                    coverage_reason: None,
                 },
             )
             .unwrap(),

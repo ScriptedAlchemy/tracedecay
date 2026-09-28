@@ -41,11 +41,16 @@ pub struct SessionMessageRecord {
 }
 
 /// Persisted parse cursor for one transcript path.
+///
+/// `coverage_reason` is set only on host-coverage rows. It holds the
+/// `HostCoverageReason` discriminant beside `file_id`, which remains the
+/// coverage state alone. Transcript cursors leave it unset.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ParseOffset {
     pub byte_offset: u64,
     pub mtime: u64,
     pub file_id: u64,
+    pub coverage_reason: Option<u64>,
 }
 
 /// Validated authoritative transcript persistence request.

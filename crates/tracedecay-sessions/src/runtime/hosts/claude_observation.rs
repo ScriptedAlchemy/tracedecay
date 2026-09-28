@@ -1251,6 +1251,7 @@ async fn advance_source_frontier<A: HostAdmission + ?Sized>(
                 byte_offset: previous.byte_offset.saturating_add(processed),
                 mtime: 0,
                 file_id: 1,
+                coverage_reason: None,
             },
         )
         .await

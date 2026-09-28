@@ -1858,11 +1858,13 @@ impl CodexDiscoveryFrontier {
                     byte_offset: 0,
                     mtime: 0,
                     file_id: 0,
+                    coverage_reason: None,
                 },
                 ParseOffset {
                     byte_offset: 0,
                     mtime: 0,
                     file_id: 0,
+                    coverage_reason: None,
                 },
             );
         }
@@ -1875,6 +1877,7 @@ impl CodexDiscoveryFrontier {
                 byte_offset: 0,
                 mtime: 0,
                 file_id: state,
+                coverage_reason: None,
             },
             self.epoch.into_parse_offset(),
         )
@@ -1918,6 +1921,7 @@ impl CodexCorpusEpoch {
             byte_offset: self.high,
             mtime: self.low,
             file_id: self.files,
+            coverage_reason: None,
         }
     }
 

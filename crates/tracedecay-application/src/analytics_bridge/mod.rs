@@ -222,6 +222,7 @@ pub async fn import_source(
                     byte_offset: start + frontier,
                     mtime,
                     file_id: 0,
+                    coverage_reason: None,
                 },
             )
             .await
@@ -235,6 +236,7 @@ pub async fn import_source(
             byte_offset: start + frontier,
             mtime,
             file_id: 0,
+            coverage_reason: None,
         };
         result.imported = result.imported.saturating_add(events.len() as u64);
     }
@@ -248,6 +250,7 @@ pub async fn import_source(
                     byte_offset: start + consumed as u64,
                     mtime,
                     file_id: 0,
+                    coverage_reason: None,
                 },
             )
             .await

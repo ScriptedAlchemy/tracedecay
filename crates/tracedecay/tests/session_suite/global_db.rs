@@ -633,6 +633,7 @@ async fn parse_offset_writes_canonicalize_only_proven_windows_paths() {
         byte_offset: 17,
         mtime: 23,
         file_id: 29,
+        coverage_reason: None,
     };
     db.set_parse_offset(r"\\?\C:\Repo\Case\transcript.jsonl", drive_offset)
         .await;
@@ -653,6 +654,7 @@ async fn parse_offset_writes_canonicalize_only_proven_windows_paths() {
         byte_offset: 31,
         mtime: 37,
         file_id: 41,
+        coverage_reason: None,
     };
     let error = store
         .replace_parse_offset(
@@ -676,6 +678,7 @@ async fn parse_offset_writes_canonicalize_only_proven_windows_paths() {
         byte_offset: 43,
         mtime: 47,
         file_id: 53,
+        coverage_reason: None,
     };
     db.set_parse_offset(r"\\?\UNC\server\Share\transcript.jsonl", unc_offset)
         .await;
@@ -693,6 +696,7 @@ async fn parse_offset_writes_canonicalize_only_proven_windows_paths() {
         byte_offset: 59,
         mtime: 61,
         file_id: 67,
+        coverage_reason: None,
     };
     db.set_parse_offset(r"/repo/a\b", unix_literal).await;
     assert_eq!(
@@ -1528,6 +1532,7 @@ async fn session_ingest_health_reports_pending_transcript_backlog() {
         byte_offset,
         mtime,
         file_id: 0,
+        coverage_reason: None,
     };
     db.set_parse_offset(&drained.to_string_lossy(), cursor(100, 1_000))
         .await;
@@ -1569,6 +1574,7 @@ async fn session_ingest_health_can_filter_by_provider() {
         byte_offset,
         mtime,
         file_id: 0,
+        coverage_reason: None,
     };
     db.set_parse_offset(&cursor_transcript.to_string_lossy(), cursor(100, 1_000))
         .await;
