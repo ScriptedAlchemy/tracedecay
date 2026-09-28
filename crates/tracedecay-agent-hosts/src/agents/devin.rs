@@ -178,10 +178,6 @@ impl AgentIntegration for DevinIntegration {
         uninstall_mcp_if_selected(components, &config_path)
     }
 
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
-    }
-
     fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(&devin_mcp_config_path(home), "mcpServers", load_json_file)
     }
@@ -289,11 +285,7 @@ fn install_mcp_if_selected(
             settings["mcpServers"]["tracedecay"] = entry;
             Ok((
                 outcome,
-                TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
-                    config_path,
-                    existing,
-                    &settings,
-                )?),
+                JsonConfigDialect::Json.mutation(config_path, existing, settings)?,
             ))
         })?;
         outcome.report(config_path);
@@ -323,11 +315,7 @@ fn uninstall_mcp_if_selected(
             }
             Ok((
                 true,
-                TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
-                    config_path,
-                    existing,
-                    &settings,
-                )?),
+                JsonConfigDialect::Json.mutation(config_path, existing, settings)?,
             ))
         })?;
         if removed {

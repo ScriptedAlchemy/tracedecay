@@ -875,8 +875,8 @@ impl ProcessAllocatorTrimV1 {
     }
 }
 
-/// The process allocator's release call, installed once by the composition
-/// root that chose the allocator. Without one, a glibc build trims its arenas.
+/// The Rust global allocator's release call, installed once by the composition
+/// root that chose the allocator. glibc's arenas are trimmed either way.
 static PROCESS_ALLOCATOR_RELEASE_V1: OnceLock<fn()> = OnceLock::new();
 
 /// Install `release` as the call that returns the process allocator's freed
@@ -896,15 +896,35 @@ pub fn install_process_allocator_release_v1(release: fn()) -> Result<(), String>
 /// mimalloc in pages it purges only after a delay or on collection. Measured
 /// RSS is what admission trusts, so those pages refuse real work until the
 /// allocator is asked for them.
+///
+/// A mimalloc global allocator serves only Rust allocations. `SQLite`,
+/// tree-sitter, and libgit2 call `malloc` directly, so glibc's arenas are
+/// trimmed after the installed release as well.
 #[must_use]
 pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
+    measured_trim(|| {
+        let released = PROCESS_ALLOCATOR_RELEASE_V1
+            .get()
+            .map(|release| release())
+            .is_some();
+        glibc_trim() || released
+    })
+}
+
+/// Return freed glibc arena pages to the kernel without the installed release.
+///
+/// C-library churn (`SQLite` statements and caches on the store writers,
+/// tree-sitter parses on the index workers) accumulates between the events
+/// that run the full release, so the daemon runs this on its resident-memory
+/// sampling cadence. It never waits on a busy worker pool.
+#[must_use]
+pub fn release_c_library_heap_v1() -> ProcessAllocatorTrimV1 {
+    measured_trim(glibc_trim)
+}
+
+fn measured_trim(trim: impl FnOnce() -> bool) -> ProcessAllocatorTrimV1 {
     let before_bytes = sampled_process_resident_bytes_v1();
-    let trimmed = if let Some(release) = PROCESS_ALLOCATOR_RELEASE_V1.get() {
-        release();
-        true
-    } else {
-        glibc_trim()
-    };
+    let trimmed = trim();
     let after_bytes = sampled_process_resident_bytes_v1();
     let trim = ProcessAllocatorTrimV1 {
         trimmed,

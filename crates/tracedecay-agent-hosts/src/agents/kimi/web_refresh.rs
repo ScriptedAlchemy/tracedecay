@@ -83,7 +83,7 @@ pub(crate) fn refresh_installed_plugin(
     let source = staged.to_str().ok_or_else(|| {
         KimiWebRefreshError::StagedBundle(format!("{} is not UTF-8", staged.display()))
     })?;
-    let kimi = require_host_cli("kimi", "Kimi Code plugin refresh")
+    let kimi = require_host_cli(super::KIMI_CLI, "Kimi Code plugin refresh")
         .map_err(|error| KimiWebRefreshError::KimiUnavailable(error.to_string()))?;
     let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .and_then(|listener| listener.local_addr())

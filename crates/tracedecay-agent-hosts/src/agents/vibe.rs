@@ -218,10 +218,6 @@ impl AgentIntegration for VibeIntegration {
         deactivate_components(components, &config, &prompt)
     }
 
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
-    }
-
     fn export_managed_skills(
         &self,
         home: &Path,
@@ -435,10 +431,10 @@ fn uninstall_mcp(config: &Path) -> Result<()> {
         if servers.is_empty() {
             document.remove("mcp_servers");
         }
-        if document.is_empty() {
-            return Ok(((), TextFileMutation::Remove));
-        }
-        Ok(((), TextFileMutation::Write(document.to_string())))
+        Ok((
+            (),
+            super::emptied_text_mutation(config, document.to_string()),
+        ))
     })
 }
 
@@ -549,14 +545,21 @@ mod tests {
         let prompt = vibe_prompt_path(home.path());
         let install = install_context(home.path(), "/tmp/tracedecay");
 
-        activate_components(&[HostComponentV1::Core], &config, &prompt, &install).unwrap();
+        let mut facts = Vec::new();
+        crate::agents::recorded_lifecycle(home.path(), &mut facts, false, || {
+            activate_components(&[HostComponentV1::Core], &config, &prompt, &install)
+        })
+        .unwrap();
         assert_eq!(
             prompt_registration_state(&prompt),
             HostBundleRegistrationStateV1::Current
         );
         assert!(!config.exists());
 
-        deactivate_components(&[HostComponentV1::Core], &config, &prompt).unwrap();
+        crate::agents::recorded_lifecycle(home.path(), &mut facts, true, || {
+            deactivate_components(&[HostComponentV1::Core], &config, &prompt)
+        })
+        .unwrap();
         activate_components(&[HostComponentV1::ContextMcp], &config, &prompt, &install).unwrap();
         assert_eq!(
             mcp_registration_state(&config, Some("/tmp/tracedecay")),
@@ -573,8 +576,14 @@ mod tests {
         let install = install_context(home.path(), "/tmp/tracedecay");
         let components = [HostComponentV1::ContextMcp, HostComponentV1::Core];
 
-        activate_components(&components, &config, &prompt, &install).unwrap();
-        deactivate_components(&components, &config, &prompt).unwrap();
+        crate::agents::recorded_install_then_uninstall(
+            home.path(),
+            || activate_components(&components, &config, &prompt, &install),
+            || {
+                assert!(config.is_file() && prompt.is_file());
+                deactivate_components(&components, &config, &prompt)
+            },
+        );
 
         assert!(!config.exists());
         assert!(!prompt.exists());

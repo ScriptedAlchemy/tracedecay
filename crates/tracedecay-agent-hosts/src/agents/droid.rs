@@ -143,8 +143,8 @@ fn install_droid_hooks(hooks_path: &Path, tracedecay_bin: &str) -> Result<bool> 
     })
 }
 
-/// Remove every TraceDecay hook group from the host-owned hooks document and
-/// drop event keys that become empty, removing the file once nothing remains.
+/// Remove every TraceDecay hook group from the host-owned hooks document;
+/// the event keys and the file go too exactly when install created them.
 /// Returns true when the document changed.
 fn remove_droid_hooks(hooks_path: &Path) -> Result<bool> {
     update_json_config_transactionally(hooks_path, JsonConfigDialect::Json, |mut config| {
@@ -159,13 +159,8 @@ fn remove_droid_hooks(hooks_path: &Path) -> Result<bool> {
             let before = groups.len();
             groups.retain(|group| !hook_group_is_tracedecay(group));
             changed |= groups.len() != before;
-            if groups.is_empty() {
-                object.remove(event);
-            }
         }
-        if changed && object.is_empty() {
-            Ok((true, JsonConfigMutation::Remove))
-        } else if changed {
+        if changed {
             Ok((true, JsonConfigMutation::Write(config)))
         } else {
             Ok((false, JsonConfigMutation::Unchanged))
@@ -250,8 +245,8 @@ impl AgentIntegration for DroidIntegration {
         false
     }
 
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
-        require_droid_cli().map(drop)
+    fn require_host(&self, _home: &Path) -> Result<super::HostPresence> {
+        require_droid_cli().map(|_| super::HostPresence::HostCli)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -600,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_removal_leaves_operator_entries_and_drops_empty_events() {
+    fn hook_removal_leaves_operator_entries_and_event_keys() {
         let home = tempfile::tempdir().unwrap();
         write_hooks(
             home.path(),
@@ -639,9 +634,10 @@ mod tests {
             remaining["SessionStart"][0]["hooks"][0]["command"],
             "/usr/local/bin/operator-hook.sh"
         );
-        assert!(
-            remaining.get("Stop").is_none(),
-            "emptied events are dropped"
+        assert_eq!(
+            remaining["Stop"],
+            serde_json::json!([]),
+            "an event key no recorded install created stays"
         );
         assert_eq!(
             droid_hooks_registration_state(home.path()),
@@ -769,7 +765,13 @@ mod tests {
         std::fs::create_dir_all(droid_config_dir(home.path())).unwrap();
         std::fs::write(&hooks_path, OPERATOR_HOOKS).unwrap();
 
-        assert!(install_droid_hooks(&hooks_path, "/usr/local/bin/tracedecay").unwrap());
+        let mut facts = Vec::new();
+        assert!(
+            crate::agents::recorded_lifecycle(home.path(), &mut facts, false, || {
+                install_droid_hooks(&hooks_path, "/usr/local/bin/tracedecay")
+            })
+            .unwrap()
+        );
         let installed = std::fs::read_to_string(&hooks_path).unwrap();
         assert_eq!(
             installed,
@@ -808,7 +810,12 @@ mod tests {
 "#
         );
 
-        assert!(remove_droid_hooks(&hooks_path).unwrap());
+        assert!(
+            crate::agents::recorded_lifecycle(home.path(), &mut facts, true, || {
+                remove_droid_hooks(&hooks_path)
+            })
+            .unwrap()
+        );
         assert_eq!(
             std::fs::read_to_string(&hooks_path).unwrap(),
             OPERATOR_HOOKS

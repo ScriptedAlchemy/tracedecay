@@ -55,14 +55,12 @@ pub use locking::{
 };
 pub use scope_roots::{
     RefusedCodeIndexScopeV1, SCOPE_ROOT_RECORD_FILE, ScopeRootAuthorityReceiptV1,
-    ScopeRootBindingCleanupReplayV1, ScopeRootCandidateBindingV1, ScopeRootLivenessProofV1,
-    ScopeRootRetentionPlanV1, ScopeRootRetentionReceiptV1, ScopeRootRetentionReportV1,
-    StrandedCodeIndexScopeV1, StrandedScopeRefusalV1, code_index_scope_store_root,
-    code_index_store_root, complete_scope_root_binding_cleanup, execute_scope_root_retention,
+    ScopeRootLivenessProofV1, ScopeRootRetentionPlanV1, ScopeRootRetentionReceiptV1,
+    ScopeRootRetentionReportV1, StrandedCodeIndexScopeV1, StrandedScopeRefusalV1,
+    code_index_scope_store_root, code_index_store_root, execute_scope_root_retention,
     git_worktree_scope_root_inventory, insert_live_root_variants, plan_scope_root_retention,
-    plan_scope_root_retention_with_liveness_proof, prepare_scope_root_binding_cleanup,
-    record_scope_root, recover_scope_root_binding_cleanup, recover_scope_root_retention,
-    resolve_live_code_index_roots,
+    plan_scope_root_retention_with_liveness_proof, record_scope_root, recover_scope_root_retention,
+    resolve_live_code_index_roots, scope_root_liveness_proof,
 };
 pub use text_artifacts::{
     attach_verified_text_artifact_under_lock, find_shared_text_artifact,
@@ -160,15 +158,11 @@ const SCOPE_RETENTION_LOCK_FILE: &str = ".code-index-scope-retention.lock";
 const SCOPE_RETENTION_TRANSACTION_FILE: &str = ".code-index-scope-retention-transaction-v1.json";
 const SCOPE_RETENTION_QUARANTINE_DIRECTORY: &str = ".code-index-scope-retention-quarantine-v1";
 const SCOPE_RETENTION_RECEIPTS_DIRECTORY: &str = "code-index-scope-retention-receipts-v1";
-const SCOPE_RETENTION_RECEIPT_SCHEMA: &str = "tracedecay.code-index-scope-retention-receipt.v1";
+const SCOPE_RETENTION_RECEIPT_SCHEMA: &str = "tracedecay.code-index-scope-retention-receipt.v2";
 const SCOPE_RETENTION_TRANSACTION_SCHEMA: &str =
-    "tracedecay.code-index-scope-retention-transaction.v1";
-const SCOPE_BINDING_CLEANUP_INTENT_FILE: &str = ".code-index-scope-binding-cleanup-intent-v1.json";
-const SCOPE_BINDING_CLEANUP_INTENT_SCHEMA: &str =
-    "tracedecay.code-index-scope-binding-cleanup-intent.v1";
-const SCOPE_ROOT_LIVENESS_PROOF_SCHEMA: &str = "tracedecay.code-index-scope-liveness-proof.v1";
+    "tracedecay.code-index-scope-retention-transaction.v2";
+const SCOPE_ROOT_LIVENESS_PROOF_SCHEMA: &str = "tracedecay.code-index-scope-liveness-proof.v2";
 const MAX_SCOPE_TRANSACTION_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_SCOPE_BINDING_CLEANUP_INTENT_BYTES: u64 = 4 * 1024 * 1024;
 
 const MAX_GENERATION_METADATA_PREFIX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TRANSACTION_BYTES: u64 = 1024 * 1024;

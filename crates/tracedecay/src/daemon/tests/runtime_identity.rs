@@ -2,6 +2,9 @@
 
 use std::path::Path;
 
+use tracedecay_code_index_retention::code_index_generations::{
+    DurablePublicationPointerV1, code_text_artifacts_root, scoped_code_index_store_root,
+};
 use tracedecay_code_index_runtime::code_index_scheduler;
 
 use super::bootstrap::run_git;
@@ -668,4 +671,171 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
         .expect("opted-in linked-worktree shutdown must remain bounded");
+}
+
+/// The text artifact a scope's active generation names, once one is attached.
+fn active_text_artifact_file(scope: &Path) -> Option<String> {
+    let bytes = std::fs::read(scope.join("active-code-generation-v1.json")).ok()?;
+    let pointer: DurablePublicationPointerV1 =
+        serde_json::from_slice(&bytes).expect("decode publication pointer");
+    pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == pointer.generation_id)
+        .and_then(|entry| entry.text_artifact())
+        .map(|descriptor| descriptor.artifact_file.clone())
+}
+
+/// Removing an indexed linked worktree through Git reclaims its whole
+/// code-index scope and the text artifact only it named on the ordinary
+/// maintenance journey, while the primary's scope and artifact stay served.
+/// The linked route stays mounted throughout, as it does in a running daemon.
+#[tokio::test]
+async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_only_it_named() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let (primary, linked) = create_linked_worktree_fixture(&root);
+    let profile_root = root.join("profile");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&primary, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "removed linked worktree retention");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let primary_handshake = DaemonHandshake {
+        project_path: Some(primary.clone()),
+        client_identity: client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    let linked_handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    apply_project_setting_via_surface(&engine, &primary_handshake, |_snapshot| {
+        (
+            tracedecay_domain::configuration::SettingKey::new(
+                tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            )
+            .expect("linked worktree watch setting key"),
+            tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
+        )
+    })
+    .await;
+    let primary_server = engine
+        .project_server(&primary_handshake)
+        .await
+        .expect("primary project must open");
+    let linked_server = engine
+        .project_server(&linked_handshake)
+        .await
+        .expect("opted-in linked worktree must open");
+    let primary_graph = primary_server.cg().await;
+    let linked_graph = linked_server.cg().await;
+
+    let code_index_root = primary_graph.store_layout().data_root.join("code-index-v1");
+    let primary_scope = scoped_code_index_store_root(&code_index_root, &primary);
+    let linked_scope = scoped_code_index_store_root(&code_index_root, &linked);
+    let (primary_artifact, linked_artifact) =
+        tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            loop {
+                if let (Some(primary_artifact), Some(linked_artifact)) = (
+                    active_text_artifact_file(&primary_scope),
+                    active_text_artifact_file(&linked_scope),
+                ) {
+                    return (primary_artifact, linked_artifact);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both worktrees publish a text artifact");
+    assert_ne!(
+        primary_artifact, linked_artifact,
+        "the worktrees index different trees"
+    );
+    let shared = code_text_artifacts_root(&primary_scope);
+    assert!(shared.join(&primary_artifact).is_file());
+    assert!(shared.join(&linked_artifact).is_file());
+
+    run_git(
+        &primary,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            linked.to_str().expect("utf-8 linked path"),
+        ],
+    );
+    let observations = engine.store_administration.store_telemetry_sampling();
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    let lease = crate::daemon::maintenance::project_store_maintenance_lease(primary_graph.as_ref());
+    tokio::time::timeout(std::time::Duration::from_mins(1), async {
+        let mut continuation = None;
+        loop {
+            let outcome = tracedecay_maintenance::generation::run_project_generation_maintenance(
+                &lease,
+                &engine.invocation.code_index_schedulers,
+                &observations,
+                &cancellation,
+                None,
+                continuation,
+            )
+            .await;
+            if outcome.is_complete() && !linked_scope.exists() {
+                return;
+            }
+            continuation = match outcome {
+                tracedecay_maintenance::tick::MaintenanceTickOutcome::Continue(next) => Some(next),
+                _ => None,
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("generation maintenance converges after the worktree is removed");
+
+    assert!(
+        !linked_scope.exists(),
+        "the removed worktree's scope is collected"
+    );
+    assert!(
+        !shared.join(&linked_artifact).exists(),
+        "the text artifact only the removed worktree named is collected"
+    );
+    assert!(primary_scope.is_dir(), "the primary's scope survives");
+    assert!(
+        shared.join(&primary_artifact).is_file(),
+        "the primary's text artifact survives"
+    );
+    assert_eq!(
+        active_text_artifact_file(&primary_scope).as_deref(),
+        Some(primary_artifact.as_str())
+    );
+
+    // The removed worktree's route stays mounted, so its lease keeps ticking;
+    // with nothing left to prove it settles instead of retrying forever.
+    let linked_lease =
+        crate::daemon::maintenance::project_store_maintenance_lease(linked_graph.as_ref());
+    assert_eq!(
+        tracedecay_maintenance::generation::run_project_generation_maintenance(
+            &linked_lease,
+            &engine.invocation.code_index_schedulers,
+            &observations,
+            &cancellation,
+            None,
+            None,
+        )
+        .await,
+        tracedecay_maintenance::tick::MaintenanceTickOutcome::Complete
+    );
+    assert!(primary_scope.is_dir());
+    assert!(shared.join(&primary_artifact).is_file());
+
+    drop(linked_graph);
+    drop(primary_graph);
+    drop(linked_server);
+    drop(primary_server);
+    tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
+        .await
+        .expect("shutdown after scope retention must remain bounded");
 }

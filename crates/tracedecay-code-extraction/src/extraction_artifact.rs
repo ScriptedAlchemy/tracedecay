@@ -145,9 +145,15 @@ pub enum ImportModuleKindV1 {
 pub fn import_module_kind(language: &str, module_specifier: &str) -> Option<ImportModuleKindV1> {
     match language {
         "rust" => Some(rust_import_module_kind(module_specifier)),
-        "typescript" | "tsx" | "javascript" | "astro" | "svelte" => {
-            Some(typescript_import_module_kind(module_specifier))
+        "typescript" | "tsx" | "javascript" | "astro" | "svelte" | "go" | "ruby" => {
+            Some(path_import_module_kind(module_specifier))
         }
+        "python" => Some(if module_specifier.starts_with('.') {
+            ImportModuleKindV1::ProjectRelative
+        } else {
+            ImportModuleKindV1::BareModule
+        }),
+        "java" => Some(ImportModuleKindV1::BareModule),
         _ => None,
     }
 }
@@ -164,7 +170,9 @@ pub(crate) fn rust_import_module_kind(module_specifier: &str) -> ImportModuleKin
     }
 }
 
-pub(crate) fn typescript_import_module_kind(module_specifier: &str) -> ImportModuleKindV1 {
+/// A path specifier is project-relative only when it starts at the importing
+/// file's directory; Ruby's `require_relative` is recorded in that form.
+pub(crate) fn path_import_module_kind(module_specifier: &str) -> ImportModuleKindV1 {
     if matches!(module_specifier, "." | "..")
         || module_specifier.starts_with("./")
         || module_specifier.starts_with("../")
@@ -204,6 +212,62 @@ pub struct ExtractedImportEvidenceV1 {
     pub span: SourceSpan,
     pub start_line: u32,
     pub start_column: u32,
+}
+
+/// The binding one private import row records.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ImportBindingV1<'a> {
+    /// `imported` bound under `local` (`from m import a as b`).
+    Named { imported: &'a str, local: &'a str },
+    /// The whole module bound under `local` (`import m as b`, a Go package).
+    Namespace { local: &'a str },
+    /// Every public name of the module (`from m import *`, `import m.*`).
+    Glob,
+    /// A load with no binding (`require_relative "m"`, `import _ "m"`).
+    SideEffect,
+}
+
+impl ExtractedImportEvidenceV1 {
+    /// One private import row attested by the parser node `evidence`.
+    pub(crate) fn private_binding(
+        logical_path: &str,
+        language: &str,
+        module_specifier: &str,
+        binding: ImportBindingV1<'_>,
+        namespace: ImportNamespaceV1,
+        evidence: tree_sitter::Node<'_>,
+    ) -> Result<Self, String> {
+        let module_kind = import_module_kind(language, module_specifier)
+            .ok_or_else(|| format!("{language} import rows have no module classification"))?;
+        let span_error = || format!("{language} import span exceeds canonical span width");
+        let span = SourceSpan {
+            start_byte: u64::try_from(evidence.start_byte()).map_err(|_| span_error())?,
+            end_byte: u64::try_from(evidence.end_byte()).map_err(|_| span_error())?,
+        };
+        let start = evidence.start_position();
+        let (imported_name, local_name, is_glob, namespace) = match binding {
+            ImportBindingV1::Named { imported, local } => {
+                (Some(imported), Some(local), false, namespace)
+            }
+            ImportBindingV1::Namespace { local } => (Some("*"), Some(local), false, namespace),
+            ImportBindingV1::Glob => (Some("*"), None, true, namespace),
+            ImportBindingV1::SideEffect => (None, None, false, ImportNamespaceV1::SideEffect),
+        };
+        Ok(Self {
+            logical_path: logical_path.to_owned(),
+            module_specifier: module_specifier.to_owned(),
+            imported_name: imported_name.map(str::to_owned),
+            local_name: local_name.map(str::to_owned),
+            is_public: false,
+            reexport_scope: None,
+            is_glob,
+            namespace,
+            module_kind,
+            span,
+            start_line: u32::try_from(start.row).map_err(|_| span_error())?,
+            start_column: u32::try_from(start.column).map_err(|_| span_error())?,
+        })
+    }
 }
 
 impl Ord for ExtractedImportEvidenceV1 {
@@ -248,6 +312,17 @@ impl ExtractionArtifactV1 {
             imports: Vec::new(),
             clone_bodies: Vec::new(),
             schema_evidence: None,
+        }
+    }
+
+    /// A graph extraction with the import rows the same traversal attested.
+    pub(crate) fn with_imports(
+        result: ExtractionResult,
+        imports: Vec<ExtractedImportEvidenceV1>,
+    ) -> Self {
+        Self {
+            imports,
+            ..Self::from_result(result)
         }
     }
 

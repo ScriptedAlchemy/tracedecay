@@ -29,8 +29,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpUninstallPolicy, install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay,
-    safe_write_json_file, uninstall_mcp_server_entry,
+    install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay, safe_write_json_file,
+    uninstall_mcp_server_entry,
 };
 
 pub struct KiroIntegration;
@@ -145,33 +145,11 @@ fn workspace_mcp_config_path(project_path: &Path) -> PathBuf {
 }
 
 enum KiroDoctorInstallationState {
-    HostAbsent,
     TraceDecayAbsent,
     Installed,
 }
 
 fn kiro_doctor_installation_state(home: &Path) -> Result<KiroDoctorInstallationState> {
-    let host_home = kiro_home(home);
-    match std::fs::metadata(&host_home) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => {
-            return Err(TraceDecayError::Config {
-                message: format!("Kiro home {} is not a directory", host_home.display()),
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(KiroDoctorInstallationState::HostAbsent);
-        }
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "failed to inspect Kiro home {}: {error}",
-                    host_home.display()
-                ),
-            });
-        }
-    }
-
     let mcp_path = mcp_config_path(home);
     match std::fs::metadata(&mcp_path) {
         Ok(metadata) if metadata.is_file() => {}
@@ -333,21 +311,14 @@ impl AgentIntegration for KiroIntegration {
         Ok(())
     }
 
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
-        require_kiro_cli().map(drop)
+    fn require_host(&self, home: &Path) -> Result<super::HostPresence> {
+        require_signed_in_kiro_cli(home).map(|_| super::HostPresence::HostCli)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKiro integration\x1b[0m");
         let host_home = kiro_home(&ctx.home);
         match kiro_doctor_installation_state(&ctx.home) {
-            Ok(KiroDoctorInstallationState::HostAbsent) => {
-                dc.warn(&format!(
-                    "Kiro is not detected at {}, run `tracedecay install --agent kiro` if you use Kiro",
-                    host_home.display()
-                ));
-                return;
-            }
             Ok(KiroDoctorInstallationState::TraceDecayAbsent) => {
                 dc.warn(&format!(
                     "Kiro is detected at {}, but TraceDecay is not installed, run `tracedecay install --agent kiro` if you use Kiro",
@@ -378,10 +349,6 @@ impl AgentIntegration for KiroIntegration {
             ],
             SkillInstallTarget::Kiro,
         );
-    }
-
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
     }
 
     fn host_component_registration(
@@ -428,7 +395,7 @@ impl AgentIntegration for KiroIntegration {
         ctx: &InstallContext,
     ) -> Result<()> {
         if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
-            let kiro_cli = require_kiro_cli()?;
+            let kiro_cli = require_signed_in_kiro_cli(&ctx.home)?;
             kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
         }
         Ok(())
@@ -440,7 +407,7 @@ impl AgentIntegration for KiroIntegration {
         ctx: &InstallContext,
     ) -> Result<()> {
         if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
-            let kiro_cli = require_kiro_cli()?;
+            let kiro_cli = require_signed_in_kiro_cli(&ctx.home)?;
             kiro_mcp_remove_with(&kiro_cli, &ctx.home)?;
         }
         Ok(())
@@ -516,6 +483,31 @@ fn mcp_server_entry(tracedecay_bin: &str) -> serde_json::Value {
 /// indistinguishable on disk from a corrupt one.
 fn require_kiro_cli() -> Result<PathBuf> {
     super::host_cli::require_host_cli(KIRO_CLI, KIRO_CLI_LIFECYCLE)
+}
+
+/// Kiro's CLI refuses every `mcp` command until the operator logs in, and
+/// says so only in its output.
+const KIRO_LOGIN_REFUSAL: &str = "You are not logged in";
+
+const KIRO_LOGIN_COMMAND: &str = "kiro-cli login";
+
+/// [`require_kiro_cli`], refusing with `HostCliNotSignedIn` while Kiro's CLI
+/// demands a login. `mcp list` is the read-only member of the registry
+/// command family the lifecycle drives, so its login refusal is the
+/// lifecycle's refusal.
+fn require_signed_in_kiro_cli(home: &Path) -> Result<PathBuf> {
+    let kiro_cli = require_kiro_cli()?;
+    let outcome = super::host_cli::run_host_cli(&kiro_cli, &["mcp", "list"], home)?;
+    if !outcome.succeeded()
+        && (outcome.stderr.contains(KIRO_LOGIN_REFUSAL)
+            || outcome.stdout.contains(KIRO_LOGIN_REFUSAL))
+    {
+        return Err(TraceDecayError::HostCliNotSignedIn {
+            program: KIRO_CLI.to_string(),
+            login: KIRO_LOGIN_COMMAND.to_string(),
+        });
+    }
+    Ok(kiro_cli)
 }
 
 /// Drive Kiro's own registry to add the tracedecay MCP server globally.
@@ -709,15 +701,7 @@ missing decision or an external or destructive action outside that authority.",
 // ---------------------------------------------------------------------------
 
 fn uninstall_mcp_server(path: &Path) -> Result<()> {
-    uninstall_mcp_server_entry(
-        path,
-        "mcpServers",
-        JsonConfigDialect::Json,
-        McpUninstallPolicy {
-            prune_empty_root: true,
-            remove_empty_file: true,
-        },
-    )
+    uninstall_mcp_server_entry(path, "mcpServers", JsonConfigDialect::Json)
 }
 
 /// Remove every tracedecay-owned steering block.

@@ -1074,6 +1074,31 @@ mod tests {
         }
     }
 
+    /// CLI and MCP handlers clamp application calls with the capability
+    /// deadline read from the schema-free dispatch catalog; it must be the
+    /// ceiling the MCP dispatch contract advertises for the same tool.
+    #[test]
+    fn application_operation_ceiling_is_the_advertised_dispatch_ceiling() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        let mut compared = 0;
+        for operation in ApplicationSurfaceOperation::ALL {
+            let Some(contract) = catalog.contract(operation.mcp_tool_name()) else {
+                continue;
+            };
+            assert_eq!(
+                tracedecay_daemon_service::application_surface::application_operation_deadline_ceiling(
+                    operation
+                )
+                .unwrap(),
+                std::time::Duration::from_millis(contract.deadline().maximum_millis()),
+                "{} ceiling differs from its dispatch contract",
+                operation.mcp_tool_name()
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, ApplicationSurfaceOperation::ALL.len());
+    }
+
     /// The budget that cut `tracedecay_context` at ten seconds in the #1203
     /// dogfood run is this capability's own deadline contract, the retrieval
     /// primitive declares `DeadlineContract::new(10_000, ..)`, and not

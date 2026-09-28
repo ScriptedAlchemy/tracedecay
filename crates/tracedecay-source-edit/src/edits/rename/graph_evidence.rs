@@ -9,8 +9,8 @@ use tracedecay_contracts::source_edit::{
     RenameHazardKindV1, RenameSiteKindV1, RenameSymbolBindingV1,
 };
 use tracedecay_domain::{
-    ContentDigest, EdgeAuthorityV1, ManifestDigest, RelationEdgeKindV1, SnapshotFileDispositionV1,
-    SourceSpan, SymbolOccurrenceId, canonical_sha256,
+    ContentDigest, EdgeAuthorityV1, LanguageId, ManifestDigest, RelationEdgeKindV1,
+    SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
 
@@ -31,6 +31,7 @@ const RENAME_REFERENCE_RELATIONS: &[RelationEdgeKindV1] = &[
 #[derive(Clone)]
 pub(super) struct RenameGraphFileV1 {
     pub(super) path: String,
+    pub(super) language: Option<LanguageId>,
     pub(super) content_digest: ContentDigest,
     pub(super) disposition: SnapshotFileDispositionV1,
 }
@@ -433,6 +434,7 @@ pub(super) fn load(
             .into_iter()
             .map(|file| RenameGraphFileV1 {
                 path: file.logical_path,
+                language: file.language,
                 content_digest: file.content_digest,
                 disposition: file.disposition,
             })

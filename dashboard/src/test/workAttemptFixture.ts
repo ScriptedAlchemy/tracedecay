@@ -8,7 +8,7 @@ import type {
   WorkRecoveryStateV1,
   WorkTerminalEvidenceV1,
   WorkTopologyPolicyV1,
-} from '../contracts/index.ts';
+} from '../contracts/generated.ts';
 
 /**
  * Attempt-list pages for the Work tests, shaped the way the daemon shapes them.

@@ -1,4 +1,4 @@
-import type { WorkAttemptStateV1, WorkGraphReadV1 } from '../../contracts/index.ts';
+import type { WorkAttemptStateV1, WorkGraphReadV1 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkResult } from '../work/workApi.ts';
 import { latestGraphEntry } from './handoff.ts';

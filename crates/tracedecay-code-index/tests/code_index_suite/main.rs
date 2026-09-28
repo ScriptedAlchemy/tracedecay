@@ -5,6 +5,7 @@
 //! `tests/<module>.rs` binary keeps that name as its module prefix.
 
 mod chunk_incremental;
+mod cross_file_import_calls;
 mod deterministic_extraction;
 mod diagnostic_generation;
 mod generations;

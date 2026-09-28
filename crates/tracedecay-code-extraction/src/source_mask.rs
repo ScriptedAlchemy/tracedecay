@@ -74,12 +74,24 @@ pub fn masked_rust_source_with(source: &str, opts: MaskOptions) -> String {
     String::from_utf8(out).unwrap_or_else(|_| source.to_string())
 }
 
+/// Why [`rust_test_lines`] could not classify a source's test scopes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RustTestScopeError {
+    /// The Rust grammar produced no tree at all.
+    #[error("failed to parse Rust source")]
+    ParseFailed,
+    /// The tree has error nodes, so item boundaries cannot be trusted. Valid
+    /// Rust the grammar only partly parses (heavy `macro_rules!`) lands here.
+    #[error("Rust source contains syntax errors")]
+    SyntaxErrors,
+}
+
 /// Returns one entry per source line identifying lines wholly contained in a
 /// Rust item enabled only for tests (`#[cfg(test)]`) or a `#[test]` function.
-pub fn rust_test_lines(source: &str) -> Result<Vec<bool>, String> {
-    let tree = parse(source).ok_or_else(|| "failed to parse Rust source".to_string())?;
+pub fn rust_test_lines(source: &str) -> Result<Vec<bool>, RustTestScopeError> {
+    let tree = parse(source).ok_or(RustTestScopeError::ParseFailed)?;
     if tree.root_node().has_error() {
-        return Err("Rust source contains syntax errors".to_string());
+        return Err(RustTestScopeError::SyntaxErrors);
     }
     let mut spans = Vec::new();
     collect_test_spans(tree.root_node(), source.as_bytes(), &mut spans);

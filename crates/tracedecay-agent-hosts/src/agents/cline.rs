@@ -14,8 +14,8 @@ use tracedecay_domain::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, McpUninstallPolicy, install_mcp_server_entry, load_json_file,
-    mcp_servers_registration_state, report_mcp_registration, uninstall_mcp_server_entry,
+    McpDoctorLabels, install_mcp_server_entry, load_json_file, mcp_servers_registration_state,
+    report_mcp_registration, uninstall_mcp_server_entry,
 };
 
 pub struct ClineIntegration;
@@ -111,7 +111,6 @@ impl AgentIntegration for ClineIntegration {
                 &cline_mcp_settings_path(&ctx.home),
                 "mcpServers",
                 JsonConfigDialect::Json,
-                McpUninstallPolicy::default(),
             )?;
         }
         Ok(())

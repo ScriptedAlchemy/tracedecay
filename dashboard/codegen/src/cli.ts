@@ -82,19 +82,28 @@ function exportSdkSources(): Record<string, string> {
 }
 
 /** Validate decoder implementations once at generation, outside dashboard checks. */
-function checkDecoderTypes(source: string): void {
-  const filename = join(DASHBOARD_ROOT, OUTPUT_FILES.GENERATED_FILE);
+function checkDecoderTypes(files: Record<string, string>): void {
+  const decodersPath = join(DASHBOARD_ROOT, OUTPUT_FILES.DECODERS_FILE);
+  const typesPath = join(DASHBOARD_ROOT, OUTPUT_FILES.TYPES_FILE);
+  const generatedPath = join(DASHBOARD_ROOT, OUTPUT_FILES.GENERATED_FILE);
+  const sources = new Map<string, string>([
+    [decodersPath, (files[OUTPUT_FILES.DECODERS_FILE] ?? "").replace("// @ts-nocheck\n", "")],
+    [typesPath, files[OUTPUT_FILES.TYPES_FILE] ?? ""],
+    [generatedPath, files[OUTPUT_FILES.GENERATED_FILE] ?? ""],
+  ]);
   const options: ts.CompilerOptions = {
     strict: true, noEmit: true, skipLibCheck: true,
     target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
     moduleResolution: ts.ModuleResolutionKind.Bundler,
+    allowImportingTsExtensions: true,
     exactOptionalPropertyTypes: true,
   };
   const host = ts.createCompilerHost(options);
-  const readFile = host.readFile;
-  host.readFile = (path) => path === filename
-    ? source.replace("// @ts-nocheck", "") : readFile(path);
-  const program = ts.createProgram([filename], options, host);
+  const readFile = host.readFile.bind(host);
+  const fileExists = host.fileExists.bind(host);
+  host.fileExists = (path) => sources.has(path) || fileExists(path);
+  host.readFile = (path) => sources.get(path) ?? readFile(path);
+  const program = ts.createProgram([decodersPath, generatedPath], options, host);
   const diagnostics = ts.getPreEmitDiagnostics(program);
   if (diagnostics.length > 0) {
     throw new Error(ts.formatDiagnosticsWithColorAndContext(diagnostics, {
@@ -109,7 +118,7 @@ function checkDecoderTypes(source: string): void {
 function generatedOutputs(): Record<string, string> {
   const exported = exportRustBundle();
   const { files } = generateContracts([exported.bundle]);
-  checkDecoderTypes(files[OUTPUT_FILES.GENERATED_FILE]!);
+  checkDecoderTypes(files);
   files[RUST_SCHEMA_FILE] = exported.source;
   const outputs: Record<string, string> = {};
   for (const [rel, content] of Object.entries(files)) outputs[`dashboard/${rel}`] = content;

@@ -130,6 +130,8 @@ fn report(match_count: u64, by_kind: Value, matches: Vec<Value>) -> Value {
         "match_count": match_count,
         "by_kind": by_kind,
         "matches": matches,
+        "coverage": "complete",
+        "omissions": [],
     })
 }
 
@@ -554,6 +556,69 @@ fn attributed_test() { Some(4).unwrap(); }
     assert_eq!(
         parse_json(&excluded),
         report(4, json!({"panic": 1, "unwrap": 3}), excluded_matches)
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+/// A file the Rust grammar cannot parse cleanly has unknown test scopes, so
+/// its sites are withheld and named as a coverage gap while the rest of the
+/// repository is still analysed.
+#[tokio::test]
+async fn unsafe_patterns_withholds_an_unclassifiable_file_and_reports_the_rest() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            "pub mod risky;\npub mod unparsed;\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/risky.rs"),
+            "pub fn checked() -> u8 {\n    Some(1).unwrap()\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/unparsed.rs"),
+            "pub fn withheld() -> u8 {\n    Some(2).unwrap()\n}\n\npub fn broken( {\n    panic!(\"x\");\n}\n",
+        )
+        .unwrap();
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production MCP server");
+    wait_for_current_graph(&server).await;
+
+    let full = tool_text(&fixture, json!({"format": "json"})).await;
+    assert_eq!(
+        parse_json(&full),
+        json!({
+            "match_count": 1,
+            "by_kind": {"unwrap": 1},
+            "matches": [site(
+                "unwrap",
+                "src/risky.rs",
+                2,
+                "Some(1).unwrap()",
+                "src/risky.rs::checked",
+                false,
+            )],
+            "coverage": "partial",
+            "omissions": [{
+                "file": "src/unparsed.rs",
+                "reason": "test_scope_unclassified",
+                "cause": "syntax_errors",
+                "withheld_match_count": 2,
+            }],
+        })
+    );
+
+    let markdown = tool_text(&fixture, json!({"path": "src/unparsed.rs"})).await;
+    assert_eq!(
+        markdown,
+        "## Risky Patterns\n**Match count:** 0\n**Coverage:** partial\n\n### Omitted files\n- **src/unparsed.rs**: test_scope_unclassified (syntax_errors), 2 site(s) withheld\n\n_No risky patterns found._\n"
     );
 
     fixture.harness.shutdown().await;

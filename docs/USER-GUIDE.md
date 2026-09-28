@@ -44,6 +44,25 @@ Pick whichever method suits your platform.
 curl -fsSL https://raw.githubusercontent.com/ScriptedAlchemy/tracedecay/master/install.sh | bash
 ```
 
+The installer verifies the archive's build-provenance attestation with the
+[GitHub CLI](https://cli.github.com/) (`gh attestation verify`), so `gh` must
+be installed and signed in (`gh auth login`). Without `gh` it refuses, because
+the release's `SHA256SUMS` sits beside the archive in the same release and
+proves only that the download is intact, not who built it. To install on
+that checksum alone, set `TRACEDECAY_INSTALL_UNATTESTED=1`; the installer then
+warns that provenance was not verified. Later `tracedecay upgrade` runs verify
+the attestation themselves and need no `gh`.
+
+To verify a downloaded archive by hand:
+
+```bash
+gh attestation verify tracedecay-beta-<tag>-<platform>.tar.gz --repo ScriptedAlchemy/tracedecay \
+  --signer-workflow ScriptedAlchemy/tracedecay/.github/workflows/release-beta.yml
+```
+
+Stable archives (`tracedecay-<tag>-<platform>`) are signed by
+`.github/workflows/release.yml`.
+
 **Windows:**
 
 Download the x86_64 Windows archive from the
@@ -625,13 +644,29 @@ capability and the supported install/update operation. Doctor only reports
 state; refresh, retention, recreation, and host-config changes are separate
 authorized daemon operations.
 
-To check only a specific agent:
+### Hosts that are not installed
 
-```bash
-tracedecay doctor
+A host TraceDecay tracks or finds leftover config for, but whose CLI is not on
+`PATH` (or, for Kiro, whose `kiro-cli` is not logged in), is reported as
+skipped with its reason and nothing else:
+
+```text
+Kiro integration
+  - kiro: skipped, not signed in (host CLI `kiro-cli` is not signed in; run `kiro-cli login` to use it)
 ```
 
-The accepted agent values are the same values supported by `tracedecay install --agent`.
+A skipped host never counts as an issue, warning, or pending operator step, in
+`doctor`, `install`, `update-plugin`, `reinstall`, or `update`. Only defects in
+TraceDecay's own state, or in a host TraceDecay can reach, change the exit
+status.
+
+### Exit status
+
+| Exit | `doctor` | `install`, `update-plugin`, `reinstall`, `update` |
+|------|----------|---------------------------------------------------|
+| `0`  | no issue found; warnings and skipped hosts may be printed | every host completed, or was skipped as not applicable, `not installed`, or `not signed in` |
+| `1`  | an issue was found | a host's lifecycle ran and failed (or, for `update`, the upgrade failed) |
+| `75` | no issue, but an operator step is pending: a store the daemon serves reset-required, or a host's interactive activation (Kimi Code's `/plugins install`) | nothing failed, but a host waits on an interactive step (Kimi Code's `/plugins install`) |
 
 ---
 
@@ -967,6 +1002,18 @@ tracedecay upgrade
 ```
 
 Beta and stable are separate update channels, a beta build only sees beta releases and vice versa. Any attached MCP servers will continue running with the previous binary until you restart your agent.
+
+Before anything is unpacked, `upgrade` checks the archive against the
+release's `SHA256SUMS` and then against its build-provenance attestation:
+it fetches the attestations GitHub holds for the archive's SHA-256 digest
+and verifies one of them against the Sigstore public-good trust root built
+into the binary (Fulcio certificate chain, Rekor transparency-log entry, DSSE
+signature, and an in-toto subject equal to the archive digest). The signing
+certificate must name this repository's release workflow for the channel
+(`release-beta.yml` or `release.yml`) run from `master` or from the release
+tag. On success it prints `Build provenance verified: <workflow identity>`.
+A missing attestation, one that fails verification, or one signed by any
+other identity refuses the upgrade; the checksum alone never suffices.
 
 Release lookups send the same GitHub credential as project reads (`GH_TOKEN`,
 then `gh auth token`, then the git credential helper), which raises GitHub's

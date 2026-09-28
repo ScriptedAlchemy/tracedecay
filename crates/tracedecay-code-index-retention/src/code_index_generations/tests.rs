@@ -2151,40 +2151,13 @@ fn live_root_set() -> BTreeSet<PathBuf> {
     [PathBuf::from(LIVE_ROOT)].into_iter().collect()
 }
 
-fn authority_receipt(
-    revision: &str,
-    terminal_count: u64,
-    digest_byte: char,
-) -> ScopeRootAuthorityReceiptV1 {
-    ScopeRootAuthorityReceiptV1 {
-        revision: revision.to_owned(),
-        terminal_count,
-        digest: format!("sha256:{}", digest_byte.to_string().repeat(64)),
-    }
-}
-
-fn fixture_scope_liveness_proof(
-    live_scope_hash: String,
-    candidate_scope_hash: String,
-) -> ScopeRootLivenessProofV1 {
-    let source_scope = tracedecay_store::StoreShardIdV1::project(
-        tracedecay_domain::BrainId::new("brain.scope-retention").expect("fixture brain"),
-        tracedecay_domain::UserProfileId::new("profile.scope-retention").expect("fixture profile"),
-        tracedecay_domain::ProjectId::new("project.scope-retention").expect("fixture project"),
-    );
+fn fixture_scope_liveness_proof(live_scope_hash: String) -> ScopeRootLivenessProofV1 {
     ScopeRootLivenessProofV1::new(
         [live_scope_hash].into_iter().collect(),
-        authority_receipt("registry-r1", 1, '1'),
-        authority_receipt("git-r1", 1, '2'),
-        authority_receipt("mount-r1", 1, '3'),
-        authority_receipt("config-r1", 1, '4'),
-        authority_receipt("vector-r1", 2, '5'),
-        authority_receipt("dependency-r1", 1, '6'),
-        ScopeRootCandidateBindingV1 {
-            scope_hash: candidate_scope_hash,
-            source_scope,
-            vector_census_revision: "vector-r1".to_owned(),
-            live: false,
+        ScopeRootAuthorityReceiptV1 {
+            revision: "git-r1".to_owned(),
+            terminal_count: 1,
+            digest: format!("sha256:{}", "2".repeat(64)),
         },
     )
     .expect("valid fixture liveness proof")
@@ -2193,7 +2166,7 @@ fn fixture_scope_liveness_proof(
 #[test]
 fn scope_apply_refuses_a_changed_terminal_authority_receipt() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live, stranded.clone());
+    let proof = fixture_scope_liveness_proof(live);
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof.clone(),
@@ -2201,18 +2174,8 @@ fn scope_apply_refuses_a_changed_terminal_authority_receipt() {
         AGED_NOW_SECS,
     )
     .expect("plan proof-bound scope reconciliation");
-    let completed_at = UtcMicros(10);
-    prepare_scope_root_binding_cleanup(
-        store.path(),
-        &plan,
-        &stranded,
-        &proof.candidate_binding.source_scope,
-        &proof,
-        completed_at,
-    )
-    .expect("persist exact proof-bound cleanup intent");
     let mut changed = proof;
-    changed.mounted_leases.revision = "mount-r2".to_owned();
+    changed.git_worktrees.revision = "git-r2".to_owned();
     changed
         .refresh_digest()
         .expect("refresh changed proof digest");
@@ -2223,7 +2186,7 @@ fn scope_apply_refuses_a_changed_terminal_authority_receipt() {
         &changed,
         CodeGenerationRetentionModeV1::Apply,
         AGED_NOW_SECS,
-        completed_at,
+        UtcMicros(10),
     )
     .expect_err("pre-quarantine CAS must reject a changed root authority");
 
@@ -2236,9 +2199,9 @@ fn scope_apply_refuses_a_changed_terminal_authority_receipt() {
 }
 
 #[test]
-fn cleanup_replay_preserves_exact_source_shard_and_liveness_proof() {
+fn scope_apply_collects_the_stranded_scope_and_keeps_the_live_one() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live, stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof.clone(),
@@ -2246,32 +2209,31 @@ fn cleanup_replay_preserves_exact_source_shard_and_liveness_proof() {
         AGED_NOW_SECS,
     )
     .expect("plan proof-bound scope reconciliation");
-    let completed_at = UtcMicros(11);
-    prepare_scope_root_binding_cleanup(
-        store.path(),
-        &plan,
-        &stranded,
-        &proof.candidate_binding.source_scope,
-        &proof,
-        completed_at,
-    )
-    .expect("persist proof-bound cleanup intent");
-    execute_scope_root_retention(
+    let report = execute_scope_root_retention(
         store.path(),
         plan,
         &proof,
         CodeGenerationRetentionModeV1::Apply,
         AGED_NOW_SECS,
-        completed_at,
+        UtcMicros(11),
     )
     .expect("collect proof-bound stranded scope");
 
-    let replay = recover_scope_root_binding_cleanup(store.path())
-        .expect("read cleanup replay")
-        .expect("pending cleanup replay");
-    assert_eq!(replay.scope_hash, stranded);
-    assert_eq!(replay.source_scope, proof.candidate_binding.source_scope);
-    assert_eq!(replay.liveness_proof, proof);
+    assert_eq!(
+        report
+            .collected_scopes
+            .iter()
+            .map(|scope| scope.scope_hash.as_str())
+            .collect::<Vec<_>>(),
+        vec![stranded.as_str()]
+    );
+    let receipt = report.receipt.expect("durable collection receipt");
+    assert_eq!(receipt.liveness_proof, proof);
+    assert_eq!(receipt.reclaimed_bytes, "stranded".len() as u64);
+    assert!(scope_receipt_path(store.path(), &receipt).is_file());
+    assert!(!store.path().join(&stranded).exists());
+    assert!(store.path().join(&live).is_dir());
+    assert!(!scope_transaction_path(store.path()).exists());
 }
 
 #[test]
@@ -2363,7 +2325,7 @@ fn scope_plan_skips_the_stranding_age_when_the_recorded_root_is_gone() {
 #[test]
 fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof,
@@ -2414,7 +2376,7 @@ fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
 #[test]
 fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof,
@@ -2463,93 +2425,11 @@ fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
     assert!(scope_receipt_path(store.path(), &receipt).is_file());
 }
 
-#[test]
-fn scope_apply_refuses_collection_without_exact_binding_cleanup_intent() {
-    let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live, stranded.clone());
-    let plan = plan_scope_root_retention_with_liveness_proof(
-        store.path(),
-        proof.clone(),
-        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
-        AGED_NOW_SECS,
-    )
-    .expect("plan scope reconciliation");
-
-    let error = execute_scope_root_retention(
-        store.path(),
-        plan,
-        &proof,
-        CodeGenerationRetentionModeV1::Apply,
-        AGED_NOW_SECS,
-        UtcMicros(13),
-    )
-    .expect_err("physical collection must require a durable relational cleanup intent");
-
-    assert!(matches!(
-        error,
-        CodeGenerationRetentionErrorV1::UnsafeState(_)
-    ));
-    assert!(store.path().join(stranded).is_dir());
-    assert!(!scope_transaction_path(store.path()).exists());
-}
-
-#[test]
-fn scope_binding_cleanup_intent_replays_after_filesystem_collection_restart() {
-    let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
-    let plan = plan_scope_root_retention_with_liveness_proof(
-        store.path(),
-        proof.clone(),
-        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
-        AGED_NOW_SECS,
-    )
-    .expect("plan scope reconciliation");
-    let completed_at = UtcMicros(14);
-
-    prepare_scope_root_binding_cleanup(
-        store.path(),
-        &plan,
-        &stranded,
-        &proof.candidate_binding.source_scope,
-        &proof,
-        completed_at,
-    )
-    .expect("journal relational cleanup before filesystem collection");
-    let report = execute_scope_root_retention(
-        store.path(),
-        plan,
-        &proof,
-        CodeGenerationRetentionModeV1::Apply,
-        AGED_NOW_SECS,
-        completed_at,
-    )
-    .expect("complete filesystem collection");
-    assert_eq!(report.collected_scopes[0].scope_hash, stranded);
-    assert!(!store.path().join(&stranded).exists());
-    assert!(store.path().join(&live).is_dir());
-
-    // Simulate restart exactly after durable filesystem completion and
-    // before the caller removes the semantic source-scope binding.
-    recover_scope_root_retention(store.path()).expect("recover filesystem transaction");
-    let replay = recover_scope_root_binding_cleanup(store.path())
-        .expect("replay binding cleanup intent")
-        .expect("pending replay");
-    assert_eq!(replay.scope_hash, stranded);
-    assert_eq!(replay.source_scope, proof.candidate_binding.source_scope);
-    assert_eq!(replay.liveness_proof, proof);
-    complete_scope_root_binding_cleanup(store.path(), &replay)
-        .expect("complete exact binding cleanup intent");
-    assert_eq!(
-        recover_scope_root_binding_cleanup(store.path()).expect("completed cleanup stays complete"),
-        None
-    );
-}
-
 #[cfg(windows)]
 #[test]
 fn pending_scope_journal_refuses_new_generation_locks_until_recovery() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof,
@@ -2624,7 +2504,7 @@ fn pending_scope_journal_refuses_new_generation_locks_until_recovery() {
 #[test]
 fn scope_collection_defers_an_external_generation_owner_then_retries() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live, stranded.clone());
+    let proof = fixture_scope_liveness_proof(live);
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof.clone(),
@@ -2633,15 +2513,6 @@ fn scope_collection_defers_an_external_generation_owner_then_retries() {
     )
     .expect("plan scope collection");
     let completed_at = UtcMicros(16);
-    prepare_scope_root_binding_cleanup(
-        store.path(),
-        &plan,
-        &stranded,
-        &proof.candidate_binding.source_scope,
-        &proof,
-        completed_at,
-    )
-    .expect("persist binding cleanup intent");
     let held = try_acquire_code_generation_store_lock(&store.path().join(&stranded))
         .expect("open external generation owner")
         .expect("take external generation owner");
@@ -2684,7 +2555,7 @@ fn scope_collection_defers_an_external_generation_owner_then_retries() {
 #[test]
 fn scope_transaction_never_journals_a_live_scope() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let mut receipt = ScopeRootRetentionReceiptV1 {
         schema: SCOPE_RETENTION_RECEIPT_SCHEMA.to_owned(),
         receipt_digest: String::new(),

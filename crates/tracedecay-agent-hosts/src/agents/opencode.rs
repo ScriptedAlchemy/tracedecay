@@ -670,11 +670,7 @@ fn install_registration_entries(
         };
         Ok((
             outcome,
-            TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
-                config_path,
-                existing,
-                &config,
-            )?),
+            JsonConfigDialect::Json.mutation(config_path, existing, config)?,
         ))
     })?;
     outcome.report(config_path);
@@ -877,27 +873,11 @@ fn strip_registration_entries(
             .get_mut("mcp")
             .and_then(|value| value.as_object_mut())
             .is_some_and(|mcp| mcp.remove("tracedecay").is_some());
-    if removed_mcp
-        && config
-            .get("mcp")
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(serde_json::Map::is_empty)
-    {
-        config.as_object_mut().map(|object| object.remove("mcp"));
-    }
     let removed_lsp = remove_lsp
         && config
             .get_mut("lsp")
             .and_then(|value| value.as_object_mut())
             .is_some_and(|lsp| lsp.remove("tracedecay").is_some());
-    if removed_lsp
-        && config
-            .get("lsp")
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(serde_json::Map::is_empty)
-    {
-        config.as_object_mut().map(|object| object.remove("lsp"));
-    }
     if !removed_mcp && !removed_lsp {
         return Ok((
             OpenCodeRegistrationRemoval::NoEntry,
@@ -909,21 +889,14 @@ fn strip_registration_entries(
         &config,
         config_path,
     )?;
-    if config.as_object().is_some_and(serde_json::Map::is_empty) {
-        Ok((
-            OpenCodeRegistrationRemoval::RemovedFile,
-            TextFileMutation::Remove,
-        ))
-    } else {
-        Ok((
-            OpenCodeRegistrationRemoval::Rewritten,
-            TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
-                config_path,
-                existing,
-                &config,
-            )?),
-        ))
-    }
+    let mutation = JsonConfigDialect::Json.mutation(config_path, existing, config)?;
+    let removal = match mutation {
+        TextFileMutation::Remove => OpenCodeRegistrationRemoval::RemovedFile,
+        TextFileMutation::Unchanged | TextFileMutation::Write(_) => {
+            OpenCodeRegistrationRemoval::Rewritten
+        }
+    };
+    Ok((removal, mutation))
 }
 
 fn uninstall_prompt_rules(prompt_path: &Path) -> Result<()> {
@@ -1118,15 +1091,35 @@ mod tests {
         }
     }
 
-    fn installed_prompt(path: &Path, operator_contents: Option<&[u8]>) {
+    /// Install the rules as one recorded lifecycle, returning its creation
+    /// facts.
+    fn installed_prompt(
+        path: &Path,
+        operator_contents: Option<&[u8]>,
+    ) -> Vec<tracedecay_host_integration::HostConfigCreationV1> {
         if let Some(contents) = operator_contents {
             std::fs::write(path, contents).unwrap();
         }
-        install_prompt_rules(path).unwrap();
+        let mut facts = Vec::new();
+        crate::agents::recorded_lifecycle(path.parent().unwrap(), &mut facts, false, || {
+            install_prompt_rules(path)
+        })
+        .unwrap();
+        facts
+    }
+
+    fn recorded_uninstall(
+        path: &Path,
+        mut facts: Vec<tracedecay_host_integration::HostConfigCreationV1>,
+    ) -> Result<()> {
+        crate::agents::recorded_lifecycle(path.parent().unwrap(), &mut facts, true, || {
+            uninstall_prompt_rules(path)
+        })
     }
 
     fn start_paused_uninstall(
         path: &Path,
+        facts: Vec<tracedecay_host_integration::HostConfigCreationV1>,
     ) -> (
         crate::agents::TestHostConfigWritePauseController,
         std::thread::JoinHandle<std::result::Result<(), String>>,
@@ -1134,7 +1127,7 @@ mod tests {
         let pause = crate::agents::pause_next_host_config_write_at_publication(path);
         let writer_path = path.to_path_buf();
         let remover = std::thread::spawn(move || {
-            uninstall_prompt_rules(&writer_path).map_err(|error| error.to_string())
+            recorded_uninstall(&writer_path, facts).map_err(|error| error.to_string())
         });
         pause.wait_until_reached();
         (pause, remover)
@@ -1144,8 +1137,8 @@ mod tests {
     fn opencode_prompt_uninstall_refuses_a_concurrent_nonempty_rewrite() {
         let root = tempfile::tempdir().unwrap();
         let prompt = root.path().join("AGENTS.md");
-        installed_prompt(&prompt, Some(b"operator rules\n"));
-        let (pause, remover) = start_paused_uninstall(&prompt);
+        let facts = installed_prompt(&prompt, Some(b"operator rules\n"));
+        let (pause, remover) = start_paused_uninstall(&prompt, facts);
 
         let foreign = b"foreign OpenCode edit\n";
         std::fs::write(&prompt, foreign).unwrap();
@@ -1160,8 +1153,8 @@ mod tests {
     fn opencode_prompt_uninstall_refuses_a_concurrent_empty_deletion() {
         let root = tempfile::tempdir().unwrap();
         let prompt = root.path().join("AGENTS.md");
-        installed_prompt(&prompt, None);
-        let (pause, remover) = start_paused_uninstall(&prompt);
+        let facts = installed_prompt(&prompt, None);
+        let (pause, remover) = start_paused_uninstall(&prompt, facts);
 
         let foreign = b"foreign OpenCode edit\n";
         std::fs::write(&prompt, foreign).unwrap();
@@ -1176,16 +1169,16 @@ mod tests {
     fn opencode_prompt_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
         let root = tempfile::tempdir().unwrap();
         let nonempty = root.path().join("nonempty.md");
-        installed_prompt(&nonempty, Some(b"operator rules\n"));
+        let facts = installed_prompt(&nonempty, Some(b"operator rules\n"));
 
-        uninstall_prompt_rules(&nonempty).unwrap();
+        recorded_uninstall(&nonempty, facts).unwrap();
 
         assert_eq!(std::fs::read(&nonempty).unwrap(), b"operator rules\n");
 
         let empty = root.path().join("empty.md");
-        installed_prompt(&empty, None);
+        let facts = installed_prompt(&empty, None);
 
-        uninstall_prompt_rules(&empty).unwrap();
+        recorded_uninstall(&empty, facts).unwrap();
 
         assert!(!empty.exists());
     }
@@ -1198,9 +1191,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let prompt = root.path().join("AGENTS.md");
         let outside = root.path().join("outside.md");
-        installed_prompt(&prompt, None);
+        let facts = installed_prompt(&prompt, None);
         std::fs::write(&outside, b"outside OpenCode rules\n").unwrap();
-        let (pause, remover) = start_paused_uninstall(&prompt);
+        let (pause, remover) = start_paused_uninstall(&prompt, facts);
 
         std::fs::remove_file(&prompt).unwrap();
         symlink(&outside, &prompt).unwrap();
@@ -1227,10 +1220,10 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let prompt = root.path().join("AGENTS.md");
-        installed_prompt(&prompt, Some(b"operator rules\n"));
+        let facts = installed_prompt(&prompt, Some(b"operator rules\n"));
         let before = std::fs::read(&prompt).unwrap();
         std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let (pause, remover) = start_paused_uninstall(&prompt);
+        let (pause, remover) = start_paused_uninstall(&prompt, facts);
 
         std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o640)).unwrap();
         pause.resume();
@@ -1267,8 +1260,8 @@ mod tests {
     fn opencode_prompt_uninstall_refuses_a_missing_file_race() {
         let root = tempfile::tempdir().unwrap();
         let prompt = root.path().join("AGENTS.md");
-        installed_prompt(&prompt, None);
-        let (pause, remover) = start_paused_uninstall(&prompt);
+        let facts = installed_prompt(&prompt, None);
+        let (pause, remover) = start_paused_uninstall(&prompt, facts);
 
         std::fs::remove_file(&prompt).unwrap();
         pause.resume();
