@@ -400,6 +400,45 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     }
 }
 
+/// A git sync sent to a freshly started daemon reaches the project while its
+/// session authorities are still mounting; it must wait for that mount and
+/// complete, never report the session sync authority as unavailable.
+#[test]
+fn sessions_git_sync_on_a_cold_daemon_waits_for_the_project_mount() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+
+    for (args, previews) in [
+        (&["sessions", "git-sync", "--dry-run"][..], true),
+        (&["sessions", "git-sync"][..], false),
+    ] {
+        let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+        command.args(args);
+        let output = run_with_timeout(command, cli_timeout());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{args:?} should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.starts_with("session git sync completed (session-sync."),
+            "{args:?}\nstdout:\n{stdout}"
+        );
+        assert_eq!(
+            stdout
+                .lines()
+                .any(|line| line == "git-sync (dry-run): no rows were written"),
+            previews,
+            "{args:?}\nstdout:\n{stdout}"
+        );
+    }
+}
+
 fn refresh_json(output: &Output, step: &str) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
