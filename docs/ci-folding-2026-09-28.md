@@ -326,12 +326,18 @@ The measured reuse comes from Cargo itself. This experiment does not establish
 an additional speedup over plain Cargo on the same warm worker; Hauler's
 proposed contribution is admission, coalescing and routing work to those workers.
 
-## Delivered and remaining
+## Initial delivery
 
-- A runnable composite experiment at `evals/ci-folding/action.yml` and manual
-  `.github/workflows/ci-folding.yml` in TraceDecay. Manual dispatch measures
+This section records the initial ancestor-snapshot experiment. The current
+workflow accepts two explicitly trusted PR heads and runs the existing
+`core-contracts` group. Its usage and trust boundary are documented in
+[`evals/ci-folding/README.md`](../evals/ci-folding/README.md). The historical
+measurements below are not evidence for the cross-PR worker.
+
+- A composite experiment at `evals/ci-folding/action.yml` and manual
+  `.github/workflows/ci-folding.yml` in TraceDecay. Its initial dispatch measured
   the dispatched commit and its two first-parent predecessors, using this
-  repository's existing dependency setup. It refuses changed dependency or
+  repository's existing dependency setup. It refused changed dependency or
   toolchain inputs; the historical measurements remain pinned.
 - The actual local probe, negative control, measurement JSON and admission
   replay with executable assertions.
@@ -349,10 +355,9 @@ carry genuinely changing queue state. `await.request` is intentionally a
 smaller public shape; consumers needing the old detailed record use `result`.
 
 The six-worker Linux integration has completed its hosted treatment run.
-The manual Action runs the separate warm-snapshot probe and publishes its
-measurement artifact. Each successful dispatch retains its JSON result in
-Actions. The demand
-controller and multi-head check publisher below remain a design. Production
+The initial manual Action ran the separate warm-snapshot probe and published its
+measurement artifact. The current manual trial adds multi-head checks, while
+automatic multi-PR demand admission remains unimplemented. Production
 workers do not persist across workflow runs. Release workflows retain their
 current behavior.
 
@@ -363,7 +368,8 @@ and three browser tests. Hosted checks also passed on Linux, macOS and Node 22. 
 disable the operator's compiler wrappers so their build-script delays really
 execute. Actionlint, replay assertions and Python syntax checks also passed.
 
-Reproduce the local experiment after installing the source checkout's deps:
+The original local command below applies to the initial experiment revision,
+`c8e06a9f9b1ba6ae7cd0af3b9086915710893485`, after installing that checkout's deps:
 
 ```sh
 python3 evals/ci-folding/warm.py . \

@@ -358,6 +358,7 @@ hex = "0.4"
 toml = "1"
 regex = "1.12.3"
 filetime = "0.2"
+socket2 = "0.6"
 rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 # test-util enables tokio::test(start_paused = true) so timer-driven unit

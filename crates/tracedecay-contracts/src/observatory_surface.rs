@@ -19,6 +19,7 @@ use tracedecay_tool_catalog::{
 use crate::capability_manifest::{
     ApplicationCapabilityManifestInput, application_capability_manifest,
 };
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 use crate::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationOperation, CostsReadModelV1,
     ObservatoryReadModelV1, ResultContractRef, current_application_bindings,
@@ -68,6 +69,12 @@ pub struct ObservatoryReadResultV1 {
 
 pub fn observatory_read_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
+    observatory_read_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn observatory_read_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let capability_id = CapabilityId::new(CAPABILITY_ID)?;
     let (bindings, binding_ids) = current_application_bindings(
         &capability_id,
@@ -127,8 +134,9 @@ pub fn observatory_read_catalog_contribution()
         vec![manifest],
         bindings,
     ))?;
-    let executable_schema = observatory_read_executable_schema(&contribution)?;
-    Ok(contribution.with_executable_schemas(vec![executable_schema])?)
+    attach_schema_bodies(contribution, materialize, |contribution| {
+        Ok(vec![observatory_read_executable_schema(contribution)?])
+    })
 }
 
 pub fn observatory_read_handler_descriptor()

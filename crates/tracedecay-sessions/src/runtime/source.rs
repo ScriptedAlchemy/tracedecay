@@ -54,6 +54,7 @@ use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 /// it from.
 pub use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
+pub use super::host_coverage::HostCoverageReason;
 use crate::admission::HostAdmission;
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 use crate::runtime::store_port::TranscriptIngestStore;
@@ -69,71 +70,48 @@ static TRANSCRIPT_PARSE_POOL: OnceLock<Result<rayon::ThreadPool, String>> = Once
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HostProviderCoverage {
-    Complete = 1,
-    Partial = 2,
-    Unavailable = 3,
+    Complete,
+    Partial,
+    Unavailable,
 }
 
-/// Why an unavailable host sweep could not read its source.
-///
-/// The low byte of a coverage `file_id` remains the state. A refusal reason,
-/// when one exists, occupies the following bits so status can name it without
-/// a second coverage record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u64)]
-pub(super) enum HostCoverageReason {
-    DatabaseMissing = 1,
-    DatabaseNotAFile = 2,
-    DatabaseUnreadable = 3,
-    SourceIdentityUnavailable = 4,
-}
-
-impl HostCoverageReason {
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::DatabaseMissing => "database_missing",
-            Self::DatabaseNotAFile => "database_not_a_file",
-            Self::DatabaseUnreadable => "database_unreadable",
-            Self::SourceIdentityUnavailable => "source_identity_unavailable",
-        }
-    }
-
-    const fn from_code(code: u64) -> Option<Self> {
-        match code {
-            1 => Some(Self::DatabaseMissing),
-            2 => Some(Self::DatabaseNotAFile),
-            3 => Some(Self::DatabaseUnreadable),
-            4 => Some(Self::SourceIdentityUnavailable),
-            _ => None,
-        }
-    }
-}
-
+/// Closed `host-coverage://` `file_id` code table. Codes 1-3 are the
+/// reason-free states released before refusal reasons were recorded; each
+/// unavailable refusal owns one further code. A code outside this table
+/// decodes to no coverage, so the next sweep rewrites it.
 impl HostProviderCoverage {
-    const STATE_MASK: u64 = 0xff;
-
     pub(super) const fn file_id(self, reason: Option<HostCoverageReason>) -> u64 {
-        let state = self as u64;
         match (self, reason) {
-            (Self::Unavailable, Some(reason)) => state | (reason as u64) << 8,
-            _ => state,
+            (Self::Complete, _) => 1,
+            (Self::Partial, _) => 2,
+            (Self::Unavailable, None) => 3,
+            (Self::Unavailable, Some(HostCoverageReason::DatabaseMissing)) => 4,
+            (Self::Unavailable, Some(HostCoverageReason::DatabaseNotAFile)) => 5,
+            (Self::Unavailable, Some(HostCoverageReason::DatabaseUnreadable)) => 6,
+            (Self::Unavailable, Some(HostCoverageReason::SourceIdentityUnavailable)) => 7,
         }
     }
 
-    pub(super) const fn from_file_id(file_id: u64) -> Option<Self> {
-        match file_id & Self::STATE_MASK {
-            1 => Some(Self::Complete),
-            2 => Some(Self::Partial),
-            3 => Some(Self::Unavailable),
+    pub(super) const fn from_file_id(file_id: u64) -> Option<(Self, Option<HostCoverageReason>)> {
+        match file_id {
+            1 => Some((Self::Complete, None)),
+            2 => Some((Self::Partial, None)),
+            3 => Some((Self::Unavailable, None)),
+            4 => Some((Self::Unavailable, Some(HostCoverageReason::DatabaseMissing))),
+            5 => Some((
+                Self::Unavailable,
+                Some(HostCoverageReason::DatabaseNotAFile),
+            )),
+            6 => Some((
+                Self::Unavailable,
+                Some(HostCoverageReason::DatabaseUnreadable),
+            )),
+            7 => Some((
+                Self::Unavailable,
+                Some(HostCoverageReason::SourceIdentityUnavailable),
+            )),
             _ => None,
         }
-    }
-
-    pub(super) fn coverage_reason_name(file_id: u64) -> Option<&'static str> {
-        if !matches!(Self::from_file_id(file_id), Some(Self::Unavailable)) {
-            return None;
-        }
-        HostCoverageReason::from_code(file_id >> 8).map(HostCoverageReason::as_str)
     }
 }
 
@@ -153,7 +131,9 @@ pub(super) async fn read_host_provider_coverage(
         .map_err(|outcome| {
             crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
         })?;
-    Ok(offset.and_then(|stored| HostProviderCoverage::from_file_id(stored.file_id)))
+    Ok(offset
+        .and_then(|stored| HostProviderCoverage::from_file_id(stored.file_id))
+        .map(|(coverage, _)| coverage))
 }
 
 pub(super) async fn read_codex_history_frontier(

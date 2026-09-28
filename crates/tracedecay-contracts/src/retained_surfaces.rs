@@ -24,6 +24,7 @@ use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 use crate::surface_name;
 
 mod automation;
@@ -250,6 +251,12 @@ pub(super) const CURRENT_SURFACES: &[BindingSurface] = &[
 ];
 pub fn retained_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
+    retained_surface_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn retained_surface_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let specs = surface_specs();
     let mut capabilities = Vec::with_capacity(specs.len());
     let mut bindings =
@@ -281,8 +288,11 @@ pub fn retained_surface_catalog_contribution()
         capabilities,
         bindings,
     ))?;
-    let schemas = retained_surface_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(
+        contribution,
+        materialize,
+        retained_surface_executable_schemas,
+    )
 }
 
 fn retained_surface_executable_schemas(

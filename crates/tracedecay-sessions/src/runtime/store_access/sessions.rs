@@ -212,19 +212,19 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             let Ok(file_id) = u64::try_from(file_id) else {
                 continue;
             };
-            let state = match HostProviderCoverage::from_file_id(file_id) {
-                Some(HostProviderCoverage::Complete) => SessionProviderCoverageState::Complete,
-                Some(HostProviderCoverage::Partial) => SessionProviderCoverageState::Partial,
-                Some(HostProviderCoverage::Unavailable) => {
-                    SessionProviderCoverageState::Unavailable
-                }
-                None => continue,
+            let Some((coverage, reason)) = HostProviderCoverage::from_file_id(file_id) else {
+                continue;
+            };
+            let state = match coverage {
+                HostProviderCoverage::Complete => SessionProviderCoverageState::Complete,
+                HostProviderCoverage::Partial => SessionProviderCoverageState::Partial,
+                HostProviderCoverage::Unavailable => SessionProviderCoverageState::Unavailable,
             };
             health.provider_coverage.push(SessionProviderCoverage {
                 provider: provider_name.to_owned(),
                 state,
                 deferred_units,
-                reason: HostProviderCoverage::coverage_reason_name(file_id).map(str::to_owned),
+                reason,
             });
         }
         drop(coverage_rows);

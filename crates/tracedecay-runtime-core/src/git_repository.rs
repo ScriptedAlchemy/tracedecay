@@ -465,7 +465,7 @@ impl RepositoryDiscoveryBlockGate {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        let _ = self.entered.send(true);
+        self.entered.send_replace(true);
         if let Some(entered) = self
             .entered_tx
             .lock()
@@ -1401,5 +1401,35 @@ fn operation(operation: &'static str, error: impl std::fmt::Display) -> GitRepos
     GitRepositoryError::Operation {
         operation,
         detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{
+        block_repository_discovery_for_test, observe_repository_discovery,
+        reset_repository_discovery_for_test, wait_until_repository_discovery_blocks,
+    };
+
+    #[tokio::test]
+    async fn discovery_block_retains_entry_for_late_subscribers() {
+        let root = tempfile::tempdir().expect("discovery root");
+        let mut block = block_repository_discovery_for_test(root.path());
+        let path = root.path().to_path_buf();
+        let discovery = tokio::task::spawn_blocking(move || observe_repository_discovery(&path));
+        block.wait_entered().await;
+
+        let entered = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_until_repository_discovery_blocks(root.path()),
+        )
+        .await;
+        block.release();
+        discovery.await.expect("discovery worker");
+        reset_repository_discovery_for_test(root.path());
+
+        assert!(entered.expect("late subscriber sees the parked walk"));
     }
 }

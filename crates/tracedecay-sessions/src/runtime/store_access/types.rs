@@ -2,6 +2,8 @@ use std::error::Error;
 
 use tracedecay_store::{ParseOffset, SessionMessageRecord, SessionRecord};
 
+use crate::runtime::host_coverage::HostCoverageReason;
+
 /// Inclusive unix-millis threshold used to normalize mixed-resolution timestamps.
 pub const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
@@ -32,10 +34,10 @@ pub struct SessionProviderCoverage {
     pub provider: String,
     pub state: SessionProviderCoverageState,
     pub deferred_units: u64,
-    /// Stable refusal name when `state` is unavailable. Absent once a sweep
-    /// can read its source.
+    /// Refusal recorded when `state` is unavailable. Absent once a sweep can
+    /// read its source.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+    pub reason: Option<HostCoverageReason>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
