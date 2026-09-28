@@ -18,13 +18,14 @@
 //!   or refresh a second analyzer process for it.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 use tracedecay_lsp::analyzer::adapters::{DiagnosticMode, LspAdapterDefinition};
 use tracedecay_lsp::analyzer::broker::{DiagnosticBroker, EngineState};
 use tracedecay_lsp::analyzer::host_ownership::HostAnalyzerOwnership;
+use tracedecay_runtime_core::test_executable::link_or_copy_executable;
 
 use crate::isolated_profile::{apply_isolated_profile_env, hermetic_path};
 
@@ -50,17 +51,7 @@ impl IsolatedCli {
         } else {
             "tracedecay"
         });
-        if fs::hard_link(env!("CARGO_BIN_EXE_tracedecay"), &shim).is_err() {
-            fs::copy(env!("CARGO_BIN_EXE_tracedecay"), &shim).unwrap();
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = fs::metadata(&shim).unwrap().permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&shim, permissions).unwrap();
-        }
+        link_or_copy_executable(Path::new(env!("CARGO_BIN_EXE_tracedecay")), &shim).unwrap();
         Self {
             home,
             project,

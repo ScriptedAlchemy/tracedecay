@@ -524,8 +524,6 @@ mod tests {
     use std::path::Path;
 
     #[cfg(unix)]
-    use std::io::Write;
-    #[cfg(unix)]
     use std::path::PathBuf;
 
     #[cfg(unix)]
@@ -534,6 +532,8 @@ mod tests {
     use tracedecay_domain::test_fixtures::id;
     #[cfg(unix)]
     use tracedecay_lsp::typescript_projects;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     use super::{
         CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, TypeScriptProjectCheckV1,
@@ -663,9 +663,9 @@ mod tests {
             let log = temp.path().join("tsc.log");
             let bin = root.join("node_modules/.bin");
             std::fs::create_dir_all(&bin).expect("bin");
-            write_script(
+            write_executable_script(
                 &bin.join("tsc"),
-                &format!(
+                format!(
                     "#!/bin/sh\n\
                      echo \"$2\" >> {log}\n\
                      dir=$(dirname \"$2\")\n\
@@ -677,7 +677,7 @@ mod tests {
                      exit 2\n",
                     log = log.display()
                 ),
-            );
+            ).expect("write script");
             let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
                 &temp.path().join("diagnostics.db"),
             );
@@ -840,26 +840,5 @@ mod tests {
             published("generation.producer.4", 1, 2)
         );
         assert_eq!(fixture.checked(), ["broken"]);
-    }
-
-    /// Writes an executable script from a child shell so this process never
-    /// holds a writable descriptor to it: a sibling test forking while one is
-    /// open makes executing the script fail with `ETXTBSY`.
-    #[cfg(unix)]
-    fn write_script(path: &Path, body: &str) {
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("cat > \"$0\" && chmod 755 \"$0\"")
-            .arg(path)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn sh");
-        child
-            .stdin
-            .take()
-            .expect("stdin")
-            .write_all(body.as_bytes())
-            .expect("write script");
-        assert!(child.wait().expect("wait sh").success());
     }
 }
