@@ -6047,6 +6047,10 @@ async fn shutdown_timeout_retains_blocked_worker_owner_until_retry_joins_it() {
         .await
         .expect("mount worktree");
     wait_for_initial_generation(&registry, fixture.path()).await;
+    // The initial pass's graph tail runs after its text seat. Only an idle
+    // worker takes the edit's wake at once, so the admission bound below
+    // measures the edit's pass and not the rest of the mount.
+    wait_for_settled_owner(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
@@ -6105,6 +6109,10 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
         .await
         .expect("mount worktree");
     wait_for_initial_generation(&registry, fixture.path()).await;
+    // The initial pass's graph tail runs after its text seat. Only an idle
+    // worker takes the edit's wake at once, so the admission bound below
+    // measures the edit's pass and not the rest of the mount.
+    wait_for_settled_owner(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
