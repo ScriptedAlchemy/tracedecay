@@ -1634,7 +1634,7 @@ mod tests {
             Err(regex::Error::CompiledTooBig(_))
         ));
         let translated = Regex::new(&re2_compatible_regex(upstream)).unwrap();
-        let token = format!("pypi-AgEIcHlwaS5vcmc{}", "a-".repeat(30));
+        let token = format!("pypi-AgEIcHlwaS5vcmc{}", "aZ_9-".repeat(12));
         assert_eq!(
             translated.find(&token).map(|found| found.as_str()),
             Some(token.as_str())
