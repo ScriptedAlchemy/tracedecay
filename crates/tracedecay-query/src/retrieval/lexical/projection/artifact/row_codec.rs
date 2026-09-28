@@ -1116,38 +1116,12 @@ fn decode_preface_rows(
     preface: &[u8],
 ) -> Result<Vec<ScoringPrefaceRowV1>, CodeLexicalArtifactErrorV1> {
     let mut cursor = RowCursorV1 { bytes: preface };
-    let count = usize::try_from(cursor.take_varint()?).map_err(corrupt)?;
-    if count == 0 || count > ROW_BLOCK_MAX_ROWS {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact scoring preface row count is out of range".to_owned(),
-        ));
-    }
+    let count = take_preface_row_count(&mut cursor)?;
     let mut rows = Vec::with_capacity(count);
     let mut document = first_document;
     for index in 0..count {
-        let gap = i64::try_from(cursor.take_varint()?).map_err(corrupt)?;
-        document = if index == 0 {
-            if gap != first_document {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "lexical artifact scoring preface does not start at its key".to_owned(),
-                ));
-            }
-            first_document
-        } else {
-            document
-                .checked_add(1)
-                .and_then(|next| next.checked_add(gap))
-                .ok_or_else(|| corrupt("lexical artifact scoring preface document overflowed"))?
-        };
-        let chunk_id = take_chunk_id(&mut cursor)?;
-        let field_lengths = decode_field_lengths(&mut cursor)?;
-        let trimmed_normalized_len = usize::try_from(cursor.take_varint()?).map_err(corrupt)?;
-        rows.push(ScoringPrefaceRowV1 {
-            document_id: u32::try_from(document).map_err(corrupt)?,
-            chunk_id,
-            field_lengths,
-            trimmed_normalized_len,
-        });
+        document = take_preface_document(&mut cursor, index, document, first_document)?;
+        rows.push(take_preface_fields(&mut cursor, document)?);
     }
     if !cursor.bytes.is_empty() {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -1155,6 +1129,93 @@ fn decode_preface_rows(
         ));
     }
     Ok(rows)
+}
+
+/// The preface row for `document` in one block, skipping earlier rows
+/// without decoding their chunk ids or field lengths.
+fn find_preface_row(
+    first_document: i64,
+    preface: &[u8],
+    document: i64,
+) -> Result<Option<ScoringPrefaceRowV1>, CodeLexicalArtifactErrorV1> {
+    let mut cursor = RowCursorV1 { bytes: preface };
+    let mut current = first_document;
+    for index in 0..take_preface_row_count(&mut cursor)? {
+        current = take_preface_document(&mut cursor, index, current, first_document)?;
+        if current == document {
+            return take_preface_fields(&mut cursor, document).map(Some);
+        }
+        if current > document {
+            break;
+        }
+        skip_preface_fields(&mut cursor)?;
+    }
+    Ok(None)
+}
+
+fn take_preface_row_count(
+    cursor: &mut RowCursorV1<'_>,
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    let count = usize::try_from(cursor.take_varint()?).map_err(corrupt)?;
+    if count == 0 || count > ROW_BLOCK_MAX_ROWS {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact scoring preface row count is out of range".to_owned(),
+        ));
+    }
+    Ok(count)
+}
+
+/// The first row is the block key itself; each later row stores the gap
+/// after its predecessor.
+fn take_preface_document(
+    cursor: &mut RowCursorV1<'_>,
+    index: usize,
+    previous: i64,
+    first_document: i64,
+) -> Result<i64, CodeLexicalArtifactErrorV1> {
+    let gap = i64::try_from(cursor.take_varint()?).map_err(corrupt)?;
+    if index > 0 {
+        return previous
+            .checked_add(1)
+            .and_then(|next| next.checked_add(gap))
+            .ok_or_else(|| corrupt("lexical artifact scoring preface document overflowed"));
+    }
+    if gap != first_document {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact scoring preface does not start at its key".to_owned(),
+        ));
+    }
+    Ok(first_document)
+}
+
+fn take_preface_fields(
+    cursor: &mut RowCursorV1<'_>,
+    document: i64,
+) -> Result<ScoringPrefaceRowV1, CodeLexicalArtifactErrorV1> {
+    Ok(ScoringPrefaceRowV1 {
+        document_id: u32::try_from(document).map_err(corrupt)?,
+        chunk_id: take_chunk_id(cursor)?,
+        field_lengths: decode_field_lengths(cursor)?,
+        trimmed_normalized_len: usize::try_from(cursor.take_varint()?).map_err(corrupt)?,
+    })
+}
+
+fn skip_preface_fields(cursor: &mut RowCursorV1<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
+    match cursor.take_u8()? {
+        BLOCK_CHUNK_DIGEST => cursor.take_exact(32).map(drop)?,
+        BLOCK_CHUNK_LITERAL => cursor.take_bytes().map(drop)?,
+        _ => {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact scoring preface chunk tag is unknown".to_owned(),
+            ));
+        }
+    }
+    let bitmap = take_field_bitmap(cursor)?;
+    // One varint per present field length, then the trimmed length.
+    for _ in 0..bitmap.count_ones() + 1 {
+        cursor.take_varint()?;
+    }
+    Ok(())
 }
 
 fn take_chunk_id(cursor: &mut RowCursorV1<'_>) -> Result<String, CodeLexicalArtifactErrorV1> {
@@ -1202,15 +1263,20 @@ fn encode_field_lengths(
     Ok(())
 }
 
-fn decode_field_lengths(
-    cursor: &mut RowCursorV1<'_>,
-) -> Result<BTreeMap<LexicalFieldV1, usize>, CodeLexicalArtifactErrorV1> {
+fn take_field_bitmap(cursor: &mut RowCursorV1<'_>) -> Result<u16, CodeLexicalArtifactErrorV1> {
     let bitmap = cursor.take_u16()?;
     if bitmap >> FIELD_LENGTH_ORDER.len() != 0 {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact row field bitmap names an unknown field".to_owned(),
         ));
     }
+    Ok(bitmap)
+}
+
+fn decode_field_lengths(
+    cursor: &mut RowCursorV1<'_>,
+) -> Result<BTreeMap<LexicalFieldV1, usize>, CodeLexicalArtifactErrorV1> {
+    let bitmap = take_field_bitmap(cursor)?;
     let mut field_lengths = BTreeMap::new();
     for (bit, field) in FIELD_LENGTH_ORDER.iter().enumerate() {
         if bitmap & (1 << bit) != 0 {
@@ -1303,74 +1369,6 @@ impl ScoringPrefaceIndexV1 {
         self.bytes.extend_from_slice(preface);
         Ok(())
     }
-}
-
-/// The preface row for `document` in one block, skipping earlier rows
-/// without decoding their chunk ids or field lengths.
-fn find_preface_row(
-    first_document: i64,
-    preface: &[u8],
-    document: i64,
-) -> Result<Option<ScoringPrefaceRowV1>, CodeLexicalArtifactErrorV1> {
-    let mut cursor = RowCursorV1 { bytes: preface };
-    let count = usize::try_from(cursor.take_varint()?).map_err(corrupt)?;
-    if count == 0 || count > ROW_BLOCK_MAX_ROWS {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact scoring preface row count is out of range".to_owned(),
-        ));
-    }
-    let mut current = first_document;
-    for index in 0..count {
-        let gap = i64::try_from(cursor.take_varint()?).map_err(corrupt)?;
-        current = if index == 0 {
-            if gap != first_document {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "lexical artifact scoring preface does not start at its key".to_owned(),
-                ));
-            }
-            first_document
-        } else {
-            current
-                .checked_add(1)
-                .and_then(|next| next.checked_add(gap))
-                .ok_or_else(|| corrupt("lexical artifact scoring preface document overflowed"))?
-        };
-        if current > document {
-            return Ok(None);
-        }
-        if current == document {
-            return Ok(Some(ScoringPrefaceRowV1 {
-                document_id: u32::try_from(document).map_err(corrupt)?,
-                chunk_id: take_chunk_id(&mut cursor)?,
-                field_lengths: decode_field_lengths(&mut cursor)?,
-                trimmed_normalized_len: usize::try_from(cursor.take_varint()?).map_err(corrupt)?,
-            }));
-        }
-        match cursor.take_u8()? {
-            BLOCK_CHUNK_DIGEST => {
-                cursor.take_exact(32)?;
-            }
-            BLOCK_CHUNK_LITERAL => {
-                cursor.take_bytes()?;
-            }
-            _ => {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "lexical artifact scoring preface chunk tag is unknown".to_owned(),
-                ));
-            }
-        }
-        let bitmap = cursor.take_u16()?;
-        if bitmap >> FIELD_LENGTH_ORDER.len() != 0 {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact row field bitmap names an unknown field".to_owned(),
-            ));
-        }
-        // One varint per present field length, then the trimmed length.
-        for _ in 0..bitmap.count_ones() + 1 {
-            cursor.take_varint()?;
-        }
-    }
-    Ok(None)
 }
 
 /// Load every block's preface, refusing with `Unreserved` once the encoded
