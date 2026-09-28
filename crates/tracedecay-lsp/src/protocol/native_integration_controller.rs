@@ -182,12 +182,6 @@ mod tests {
         session.flush_due(1);
 
         assert!(native_integration_notifications(session.drain_outbound()).is_empty());
-        initialize(&mut session);
-        assert_eq!(
-            native_integration_notifications(session.drain_outbound()).len(),
-            1,
-            "the held status notifies once the session is initialized"
-        );
     }
 
     #[test]

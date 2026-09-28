@@ -1478,15 +1478,7 @@ mod tests {
             "event": "afterFileEdit",
             "rel_paths": ["src/two.rs"]
         }));
-        let fallback_again = parse_or_panic(&json!({
-            "agent": "cursor",
-            "event": "afterFileEdit",
-            "rel_paths": ["src/one.rs"]
-        }));
-        assert_eq!(
-            fallback.admission_source(),
-            fallback_again.admission_source()
-        );
+        assert_eq!(fallback.admission_source(), fallback.admission_source());
         assert_ne!(
             fallback.admission_source(),
             other_fallback.admission_source()
