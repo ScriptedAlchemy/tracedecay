@@ -5423,10 +5423,7 @@ export type WorkAttemptListCoverageV1 =
     returned: number;
   };
 
-export type WorkAttemptListCursorV1 = {
-  generation: string;
-  start_after: WorkAttemptIdentityV1;
-};
+export type WorkAttemptListCursorV1 = string;
 
 export type WorkAttemptListRequestV1 = {
   cursor: WorkAttemptListCursorV1 | null;
@@ -7175,6 +7172,7 @@ export type WorkSynthesisSourceSetV1 = {
 
 export type WorkTaskSessionContinuationV1 = {
   attempt: WorkAttemptIdentityV1;
+  binding: string;
   participant_epoch: ManifestDigest;
   ranking_cursor: string | null;
   source: ObservationSourceIdentityV1;
