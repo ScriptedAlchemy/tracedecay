@@ -116,6 +116,46 @@ fn catalog_authority(store: &CodeGraphProjectionStore) -> usize {
     }
 }
 
+#[test]
+fn restart_resolves_persisted_name_and_file_when_projection_scan_cannot_finish() {
+    let cache = tempfile::TempDir::new().expect("catalog cache");
+    let snapshot = VerifiedGraphSnapshot::memory(production_manifest(), Arc::new(NeverCancelled))
+        .expect("snapshot");
+    let open = |snapshot| {
+        CodeGraphProjectionStore::from_verified_snapshot_with_catalog_cache(
+            snapshot,
+            generation(),
+            cache.path().to_path_buf(),
+        )
+        .expect("store")
+    };
+    let first = open(snapshot.clone());
+    first
+        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
+        .expect("publish the name and file catalog");
+    drop(first);
+
+    // A cold scan of this fixture observes 70 cancellation checks, and every
+    // budget through 39 cancels that scan. Reopening the persisted catalog
+    // is the only way this budget still resolves the published name and file.
+    let restarted = open(snapshot);
+    restarted
+        .warm_interactive_catalog_with_cancellation(cancellation_budget(39))
+        .expect("restart reopens the persisted catalog");
+    let reader = reader(&restarted);
+    let hits = reader
+        .resolve_simple_name("run", Some("function"), 8, request())
+        .expect("simple name lookup");
+    assert!(
+        hits.iter()
+            .any(|hit| hit.occurrence.as_str() == "sym.beta.run")
+    );
+    let file = reader
+        .file_by_logical_path("src/beta.rs", request())
+        .expect("logical path lookup");
+    assert_eq!(file.expect("published file").logical_path, "src/beta.rs");
+}
+
 fn many_import_manifest() -> GraphGenerationManifest {
     let mut files = Vec::new();
     let mut imports = Vec::new();

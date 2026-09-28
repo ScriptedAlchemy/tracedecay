@@ -313,6 +313,12 @@ impl SealedGenerationStore {
         self.canonical_bytes
     }
 
+    /// Directory holding `generation.grafeo` and its receipt. Derived caches
+    /// for this generation live beside those artifacts.
+    pub(crate) fn directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+
     /// Whether this reader's native engine is currently materialized.
     ///
     /// A retained sealed generation with no resident engine costs its

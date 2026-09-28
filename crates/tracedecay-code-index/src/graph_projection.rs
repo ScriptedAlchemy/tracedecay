@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::path::PathBuf;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -381,6 +382,27 @@ impl CodeGraphProjectionStore {
         snapshot: VerifiedGraphSnapshot,
         generation: CodeGenerationId,
     ) -> Result<Self, CodeGraphProjectionError> {
+        let directory = snapshot.sealed_artifact_directory();
+        Self::open(snapshot, generation, directory)
+    }
+
+    /// Opens a store that reads and writes its name/file catalog under
+    /// `catalog_cache_dir`, including a memory snapshot that has no sealed
+    /// artifact of its own.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn from_verified_snapshot_with_catalog_cache(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+        catalog_cache_dir: PathBuf,
+    ) -> Result<Self, CodeGraphProjectionError> {
+        Self::open(snapshot, generation, Some(catalog_cache_dir))
+    }
+
+    fn open(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+        catalog_cache_dir: Option<PathBuf>,
+    ) -> Result<Self, CodeGraphProjectionError> {
         let projection = snapshot.projection().clone();
         let expected = code_graph_generation_id(
             &generation,
@@ -393,7 +415,7 @@ impl CodeGraphProjectionStore {
             snapshot: Arc::new(snapshot),
             projection,
             generation,
-            interactive_catalog: Arc::new(InteractiveCatalogCache::new()),
+            interactive_catalog: Arc::new(InteractiveCatalogCache::new(catalog_cache_dir)),
             serving_engine: Arc::new(Mutex::new(None)),
             released: Arc::new(AtomicBool::new(false)),
             rewarming: Arc::new(AtomicBool::new(false)),

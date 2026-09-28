@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -1510,6 +1511,18 @@ impl GraphDb {
         database
             .compact()
             .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
+    }
+
+    /// Parent directory of this database file, when the handle is persistent.
+    /// A direct sealed open's file is `generation.grafeo`, so the parent is
+    /// that generation's artifact directory.
+    pub(crate) fn persistent_container_directory(&self) -> Option<PathBuf> {
+        self.inner
+            .reopen
+            .as_ref()
+            .and_then(|reopen| reopen.config.path.as_ref())
+            .and_then(|path| path.parent())
+            .map(PathBuf::from)
     }
 
     /// Marks this handle as a reopened sealed store: every later write
