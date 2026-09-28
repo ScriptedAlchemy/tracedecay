@@ -103,8 +103,12 @@ class SupersededSelectionTests(unittest.TestCase):
         self.assertEqual(list(self.prune.parse_entries("  \n")), [])
 
     def test_parse_entries_rejects_values_that_are_not_cache_listings(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as raised:
             list(self.prune.parse_entries(json.dumps({"message": "Not Found", "status": "404"})))
+        self.assertEqual(
+            str(raised.exception),
+            'not an Actions cache listing: {"message": "Not Found", "status": "404"}',
+        )
 
     def test_command_prints_one_superseded_id_per_line_and_reports_on_stderr(self) -> None:
         listing = {

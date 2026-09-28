@@ -36,21 +36,32 @@ def main() -> int:
         if Path(windows.stdout.strip()) != windows_binary.resolve():
             raise SystemExit("Windows resolver did not return tracedecay.exe")
 
+        unix_binary = binary_directory / "tracedecay"
         extensionless = resolve(root, "Linux")
         if extensionless.returncode == 0:
             raise SystemExit("Unix resolver incorrectly accepted tracedecay.exe")
+        if extensionless.stderr != (
+            f"installed binary layout did not produce {unix_binary.resolve()}\n"
+        ):
+            raise SystemExit(f"Unix resolver failed for an unexpected reason: {extensionless.stderr}")
 
         windows_binary.unlink()
-        unix_binary = binary_directory / "tracedecay"
         unix_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        if os.name != "nt":
+            unix_binary.chmod(0o644)
+            unexecutable = resolve(root, "Linux")
+            if unexecutable.stderr != (
+                f"cargo-installed binary is not executable: {unix_binary.resolve()}\n"
+            ):
+                raise SystemExit(
+                    f"Unix resolver accepted a non-executable binary: {unexecutable.stderr}"
+                )
         unix_binary.chmod(unix_binary.stat().st_mode | 0o111)
         unix = resolve(root, "Linux")
         if unix.returncode != 0:
             raise SystemExit(unix.stderr)
         if Path(unix.stdout.strip()) != unix_binary.resolve():
             raise SystemExit("Unix resolver did not return tracedecay")
-        if not os.access(unix_binary, os.X_OK):
-            raise SystemExit("Unix fixture unexpectedly lost executable mode")
 
     print("installed binary path fixtures passed")
     return 0
