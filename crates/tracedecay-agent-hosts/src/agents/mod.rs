@@ -73,6 +73,8 @@ pub use vibe::VibeIntegration;
 pub use zed::ZedIntegration;
 
 pub use git_post_commit_hook::{install_git_post_commit_hook, report_git_post_commit_hook_status};
+#[cfg(test)]
+pub(crate) use host_config_io::recorded_lifecycle;
 pub use host_config_io::{
     HostFileMetadataIdentityV1, JsonConfigDialect, capture_host_file_metadata, copilot_cli_dir,
     host_config_write_intent_path, kiro_data_dir, load_json_file, load_json_file_strict,
@@ -83,10 +85,12 @@ pub use host_config_io::{
     with_host_config_write_intents,
 };
 pub(crate) use host_config_io::{
-    JsonConfigMutation, collect_regular_files, ensure_project_local_safe_path,
-    ensure_project_local_safe_paths, hook_command, host_home_override,
-    record_host_config_observation_bytes, update_json_config_transactionally,
-    update_toml_config_transactionally,
+    JsonConfigMutation, collect_regular_files, emptied_text_mutation,
+    ensure_project_local_safe_path, ensure_project_local_safe_paths, hook_command,
+    host_home_override, lifecycle_created_container, lifecycle_created_file,
+    note_created_container, record_host_config_observation_bytes,
+    update_json_config_transactionally, update_toml_config_transactionally,
+    with_host_config_creations,
 };
 #[cfg(test)]
 use host_config_io::{
@@ -95,7 +99,7 @@ use host_config_io::{
 };
 pub(crate) use mcp_registration::doctor_check_prompt_contains_tracedecay;
 pub use mcp_registration::{
-    McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry,
+    McpDoctorLabels, doctor_check_mcp_registration, install_mcp_server_entry,
     mcp_config_has_tracedecay, mcp_registration_entry, mcp_servers_registration_state,
     read_only_tool_names, report_mcp_registration, tool_names, uninstall_mcp_server_entry,
 };

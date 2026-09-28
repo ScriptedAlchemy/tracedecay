@@ -283,9 +283,7 @@ fn install_mcp_if_selected(
         );
         Ok((
             (),
-            TextFileMutation::Write(
-                JsonConfigDialect::Jsonc.render_edit(config, existing, &settings)?,
-            ),
+            JsonConfigDialect::Jsonc.mutation(config, existing, settings)?,
         ))
     })?;
     Ok(())
@@ -311,17 +309,9 @@ fn uninstall_mcp_if_selected(components: &[HostComponentV1], config: &Path) -> R
         if servers.remove("tracedecay").is_none() {
             return Ok(((), TextFileMutation::Unchanged));
         }
-        if servers.is_empty() {
-            root.remove("context_servers");
-        }
-        if root.is_empty() {
-            return Ok(((), TextFileMutation::Remove));
-        }
         Ok((
             (),
-            TextFileMutation::Write(
-                JsonConfigDialect::Jsonc.render_edit(config, existing, &settings)?,
-            ),
+            JsonConfigDialect::Jsonc.mutation(config, existing, settings)?,
         ))
     })
 }
@@ -402,14 +392,17 @@ mod tests {
         let components = [HostComponentV1::ContextMcp];
         let install = install_context(home.path(), "/tmp/tracedecay");
 
-        ZedIntegration
-            .activate_deployed_host_component_registration(&components, &install)
-            .unwrap();
+        let mut facts = Vec::new();
+        crate::agents::recorded_lifecycle(home.path(), &mut facts, false, || {
+            ZedIntegration.activate_deployed_host_component_registration(&components, &install)
+        })
+        .unwrap();
         assert!(config.is_file());
 
-        ZedIntegration
-            .deactivate_deployed_host_component_registration(&components, &install)
-            .unwrap();
+        crate::agents::recorded_lifecycle(home.path(), &mut facts, true, || {
+            ZedIntegration.deactivate_deployed_host_component_registration(&components, &install)
+        })
+        .unwrap();
 
         assert!(!config.exists());
     }

@@ -142,6 +142,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
             })
             .collect(),
         created_directories: Vec::new(),
+        created_config: Some(Vec::new()),
     };
     let control = lifecycle_root.path().join(".tracedecay-host-bundle-v1");
     fs::create_dir_all(&control).unwrap();
@@ -246,6 +247,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
             })
             .collect(),
         created_directories: Vec::new(),
+        created_config: Some(Vec::new()),
     };
     let extension_prefix = format!(
         ".cursor/extensions/tracedecay.cursor-native-{}/",

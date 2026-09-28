@@ -360,14 +360,14 @@ pub(super) fn snapshot_diff(
     diff
 }
 
-fn run_phase(cli: &IsolatedCli, host: HostKindV1, args: &[&str], pending_allowed: bool) {
+fn run_phase(cli: &IsolatedCli, id: &str, args: &[&str], pending_allowed: bool) {
     let output = cli.run(args);
     let code = output.status.code();
     let accepted =
         code == Some(0) || (pending_allowed && code == Some(PENDING_OPERATOR_ACTION_EXIT));
     assert!(
         accepted,
-        "{host:?} `{}` exited {code:?}\nstdout:\n{}\nstderr:\n{}",
+        "{id} `{}` exited {code:?}\nstdout:\n{}\nstderr:\n{}",
         args.join(" "),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -401,6 +401,128 @@ fn assert_install_changed_surface(host: HostKindV1, home: &Path) {
     }
 }
 
+/// Rewrite every receipt as a release that predates creation records wrote
+/// it: the same records without `created_directories` or `created_config`.
+fn strip_creation_records(cli: &IsolatedCli) {
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(members) => {
+                members.remove("created_directories");
+                members.remove("created_config");
+                members.values_mut().for_each(strip);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let control = cli.lifecycle_root().join(".tracedecay-host-bundle-v1");
+    for entry in fs::read_dir(control).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        strip(&mut receipt);
+        fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    }
+}
+
+const LEGACY_CURSOR_EXTENSION: &str =
+    ".cursor/extensions/tracedecay.cursor-native-1.0.0-beta.52/dist/extension.js";
+
+/// The native extension beta releases deployed as a receipt-owned Cursor
+/// artifact, which the current catalog no longer ships.
+fn deposit_legacy_cursor_extension(cli: &IsolatedCli) {
+    let bytes = b"legacy cursor-native extension\n";
+    let path = cli.home.path().join(LEGACY_CURSOR_EXTENSION);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, bytes).unwrap();
+    let control = cli.lifecycle_root().join(".tracedecay-host-bundle-v1");
+    let receipt_path = fs::read_dir(control)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            name.starts_with("receipt.")
+                && fs::read_to_string(path)
+                    .unwrap()
+                    .contains("\"relative_path\":\".cursor/plugins/local/tracedecay/")
+        })
+        .expect("cursor component receipt");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let artifacts = receipt["artifacts"].as_array_mut().unwrap();
+    let marker = artifacts[0]["ownership_marker"].clone();
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    artifacts.push(serde_json::json!({
+        "relative_path": LEGACY_CURSOR_EXTENSION,
+        "artifact_digest": digest,
+        "ownership_marker": marker,
+    }));
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+}
+
+/// An install an earlier release made, refreshed and then removed by this
+/// build: every directory in TraceDecay's own namespace goes, including the
+/// retired extension the refresh drops, while structure nothing proves the
+/// old install created stays exactly as the uninstall left it.
+#[test]
+fn uninstall_after_an_upgrade_removes_tracedecay_residue_and_keeps_unprovable_structure() {
+    let cli = IsolatedCli::new();
+    seed_operator_home(cli.home.path());
+    let foreign_extension = cli
+        .home
+        .path()
+        .join(".cursor/extensions/foreign.ext-1.0.0/package.json");
+    fs::create_dir_all(foreign_extension.parent().unwrap()).unwrap();
+    fs::write(&foreign_extension, b"{\"name\":\"ext\"}\n").unwrap();
+    install_fake_native_hosts(&cli.bin_dir);
+    let before = home_snapshot(&cli);
+
+    for id in ["cline", "cursor"] {
+        run_phase(&cli, id, &["install", "--agent", id], false);
+    }
+    strip_creation_records(&cli);
+    deposit_legacy_cursor_extension(&cli);
+    let upgraded = home_snapshot(&cli);
+    for residue in [
+        ".cline/tracedecay",
+        ".cursor/plugins/local/tracedecay",
+        LEGACY_CURSOR_EXTENSION,
+    ] {
+        assert!(upgraded.contains_key(residue), "old layout lacks {residue}");
+    }
+
+    run_phase(&cli, "cline+cursor", &["update-plugin"], false);
+    assert!(
+        !cli.home
+            .path()
+            .join(".cursor/extensions/tracedecay.cursor-native-1.0.0-beta.52")
+            .exists()
+    );
+    for id in ["cline", "cursor"] {
+        run_phase(&cli, id, &["uninstall", "--agent", id], false);
+    }
+
+    let skeleton = b"{\n  \"mcpServers\": {}\n}\n";
+    assert_eq!(
+        fs::read(cli.home.path().join(".cline/mcp.json")).unwrap(),
+        skeleton
+    );
+    assert_eq!(
+        snapshot_diff(&before, &home_snapshot(&cli)),
+        [
+            format!(
+                "  + .cline/mcp.json: file 600 {}",
+                hex::encode(Sha256::digest(skeleton))
+            ),
+            "  + .cursor/plugins: dir 755".to_string(),
+            "  + .cursor/plugins/local: dir 755".to_string(),
+        ]
+    );
+}
+
 #[test]
 fn uninstall_restores_the_exact_pre_install_home_on_every_host() {
     let mut residue = Vec::new();
@@ -412,13 +534,16 @@ fn uninstall_restores_the_exact_pre_install_home_on_every_host() {
         install_fake_native_hosts(&cli.bin_dir);
         let before = home_snapshot(&cli);
 
-        run_phase(&cli, host, &["install", "--agent", id], pending_allowed);
+        run_phase(&cli, id, &["install", "--agent", id], pending_allowed);
         assert_install_changed_surface(host, cli.home.path());
-        let installed = home_snapshot(&cli);
-        assert_ne!(installed, before, "{id} install changed nothing");
-        run_phase(&cli, host, &["update-plugin"], pending_allowed);
+        // Kimi defers activation to the operator's own `/plugins install`,
+        // so its install stages under `.tracedecay` and nothing else yet.
+        if host != HostKindV1::KimiCode {
+            assert_ne!(home_snapshot(&cli), before, "{id} install changed nothing");
+        }
+        run_phase(&cli, id, &["update-plugin"], pending_allowed);
         let _ = cli.run(&["doctor"]);
-        run_phase(&cli, host, &["uninstall", "--agent", id], false);
+        run_phase(&cli, id, &["uninstall", "--agent", id], false);
 
         let diff = snapshot_diff(&before, &home_snapshot(&cli));
         if !diff.is_empty() {
