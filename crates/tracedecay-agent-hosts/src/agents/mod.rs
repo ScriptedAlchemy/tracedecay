@@ -253,7 +253,6 @@ pub fn export_managed_skills_to_agent_hosts(
 // AgentIntegration trait
 // ---------------------------------------------------------------------------
 
-/// A CLI agent that can be configured to use tracedecay via MCP.
 /// What [`AgentIntegration::require_host`] proved about the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostPresence {
@@ -263,6 +262,7 @@ pub enum HostPresence {
     NoHostCli,
 }
 
+/// A CLI agent that can be configured to use tracedecay via MCP.
 pub trait AgentIntegration {
     /// Human-readable name (e.g. "Claude Code").
     fn name(&self) -> &'static str;
