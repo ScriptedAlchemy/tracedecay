@@ -2,6 +2,8 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::TypeScriptExtractor;
 use tracedecay_domain::*;
 
+include!("support/calls.rs");
+
 #[test]
 fn test_ts_file_node_is_root() {
     let source = r#"function main() {}"#;
@@ -1001,5 +1003,128 @@ test.describe("", () => {
         has_call_ref(&result, &inner.id, "add"),
         "inner test keeps call attribution; refs: {:?}",
         result.unresolved_refs
+    );
+}
+
+/// Calls-reference names attributed to the extracted node named `owner`.
+fn calls_from<'a>(result: &'a ExtractionResult, owner: &str) -> Vec<&'a str> {
+    let owner = result
+        .nodes
+        .iter()
+        .find(|node| node.name == owner)
+        .unwrap_or_else(|| panic!("no node named {owner}"));
+    result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls && r.from_node_id == owner.id)
+        .map(|r| r.reference_name.as_str())
+        .collect()
+}
+
+#[test]
+fn test_jsx_calls_in_callbacks_fields_and_initializers_keep_their_owner() {
+    let source = r#"
+var registry = createRegistry();
+
+export function List({ rows }) {
+  return <ul>{rows.map((row) => <Row key={row.id} onPick={() => pick(row)} />)}</ul>;
+}
+
+class Panel {
+  onClose = () => close();
+}
+
+function outer() {
+  function inner() {
+    helperCall();
+  }
+  inner();
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("list.jsx", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    assert_eq!(calls_from(&result, "registry"), ["createRegistry"]);
+    assert_eq!(calls_from(&result, "List"), ["rows.map", "Row", "pick"]);
+    assert_eq!(calls_from(&result, "onClose"), ["close"]);
+    // `inner` is a local binding, not the graph symbol of that name.
+    assert_eq!(calls_from(&result, "outer"), ["helperCall"]);
+}
+
+#[test]
+fn test_module_scope_calls_belong_to_module_init_blocks_and_declarations() {
+    let source = r#"import { render } from "./render";
+
+createRoot(document.body).render(<App />);
+
+if (import.meta.env.DEV) {
+  enableDevtools();
+}
+
+export default defineConfig({ plugins: [react()] });
+
+@Component({ selector: "panel" })
+abstract class Panel {
+  static {
+    register(Panel);
+  }
+  abstract draw(): void;
+  @memo()
+  paint(size = defaultSize()) {
+    paintAll(size);
+  }
+}
+
+enum Size {
+  Small = compute(),
+}
+
+namespace Setup {
+  configure();
+}
+
+describe("panel", () => {
+  it("paints", () => {
+    expect(paint()).toBe(true);
+  });
+});
+
+function helper(options = defaults()) {
+  return work(options);
+}
+
+export = createApi();
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("main.tsx", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    assert_eq!(
+        calls_by_owner(&result),
+        [
+            (
+                "init_block",
+                "<module>",
+                2,
+                vec!["createRoot", "createRoot(document.body).render", "App"]
+            ),
+            ("init_block", "<module>", 4, vec!["enableDevtools"]),
+            ("init_block", "<module>", 8, vec!["defineConfig", "react"]),
+            ("class", "Panel", 10, vec!["Component", "register", "memo"]),
+            ("method", "paint", 17, vec!["defaultSize", "paintAll"]),
+            ("enum", "Size", 22, vec!["compute"]),
+            ("namespace", "Setup", 26, vec!["configure"]),
+            (
+                "function",
+                "paints",
+                31,
+                vec!["expect", "expect(paint()).toBe", "paint"]
+            ),
+            ("function", "helper", 36, vec!["defaults", "work"]),
+            ("init_block", "<module>", 40, vec!["createApi"]),
+        ]
     );
 }

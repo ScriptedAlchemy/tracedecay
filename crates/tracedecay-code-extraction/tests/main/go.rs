@@ -3,6 +3,7 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
 include!("support/edges.rs");
+include!("support/calls.rs");
 
 #[test]
 fn test_go_extract_package() {
@@ -384,4 +385,56 @@ func HandleRequest() {}
     assert_eq!(fns.len(), 1);
     assert!(fns[0].qualified_name.contains("HandleRequest"));
     assert!(fns[0].qualified_name.contains("handler.go"));
+}
+
+#[test]
+fn test_go_calls_inside_func_literals_belong_to_the_enclosing_function() {
+    let source = r#"package main
+
+func run(items []string) {
+	go func() {
+		work()
+	}()
+	each(items, func(s string) {
+		handle(s)
+	})
+}
+"#;
+    let result = GoExtractor.extract_artifact("main.go", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let run = result.nodes.iter().find(|n| n.name == "run").expect("run");
+    let calls: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls && r.from_node_id == run.id)
+        .map(|r| r.reference_name.as_str())
+        .collect();
+    assert_eq!(calls, ["work", "each", "handle"]);
+}
+
+#[test]
+fn test_go_package_var_initializers_own_their_calls() {
+    let source = r#"package main
+
+var registry = buildRegistry()
+
+var (
+	cache = newCache(8)
+)
+
+func run() {
+	work()
+}
+"#;
+    let result = GoExtractor.extract_artifact("main.go", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    assert_eq!(
+        calls_by_owner(&result),
+        [
+            ("static", "registry", 2, vec!["buildRegistry"]),
+            ("static", "cache", 5, vec!["newCache"]),
+            ("function", "run", 8, vec!["work"]),
+        ]
+    );
 }
