@@ -425,25 +425,33 @@ mod tests {
     #[test]
     fn an_absolute_windows_path_is_spelled_with_its_extended_length_prefix() {
         let staging = r"D:\a\_temp\tmp\.tmpTPA5kk\profile\projects\proj_8d6c098d2dd75ba9\code-index-v1\bc92ebba09df969fbaddcbda144ce85df1aee980d85ab9e9111ef8bd13ed757c\code-text-artifact-staging-v1\.text-artifact-55d951cf30e3b0e5f75b4162f14663864eb036b71a246d78de9d41f645f91bf7.staging.initializing";
-        let extended = extended_length_path(Path::new(staging));
-        assert_eq!(extended, PathBuf::from(format!(r"\\?\{staging}")));
-        assert_eq!(plain_host_path(&extended), PathBuf::from(staging));
-        assert_eq!(
-            extended_length_path(Path::new(r"\\server\share\graph.db")),
-            PathBuf::from(r"\\?\UNC\server\share\graph.db")
-        );
-        for unchanged in [
-            r"\\?\D:\store\graph.db",
-            r"\\?\UNC\server\share\graph.db",
-            r"\\.\pipe\tracedecay",
-            r"relative\graph.db",
-            "/home/user/.tracedecay/graph.db",
-        ] {
+        let extended_staging = format!(r"\\?\{staging}");
+        let spellings: [(&str, &str); 7] = [
+            (staging, &extended_staging),
+            (r"\\server\share\graph.db", r"\\?\UNC\server\share\graph.db"),
+            (r"\\?\D:\store\graph.db", r"\\?\D:\store\graph.db"),
+            (
+                r"\\?\UNC\server\share\graph.db",
+                r"\\?\UNC\server\share\graph.db",
+            ),
+            (r"\\.\pipe\tracedecay", r"\\.\pipe\tracedecay"),
+            (r"relative\graph.db", r"relative\graph.db"),
+            (
+                "/home/user/.tracedecay/graph.db",
+                "/home/user/.tracedecay/graph.db",
+            ),
+        ];
+        for (input, expected) in spellings {
             assert_eq!(
-                extended_length_path(Path::new(unchanged)),
-                PathBuf::from(unchanged)
+                extended_length_path(Path::new(input)),
+                PathBuf::from(expected),
+                "{input}"
             );
         }
+        assert_eq!(
+            plain_host_path(Path::new(&extended_staging)),
+            PathBuf::from(staging)
+        );
     }
 
     /// Unix `SQLite` refuses a full name of 512 bytes or more with a bare
