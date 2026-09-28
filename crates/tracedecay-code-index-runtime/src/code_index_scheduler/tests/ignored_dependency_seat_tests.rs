@@ -1,0 +1,197 @@
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
+
+use tempfile::TempDir;
+use tracedecay_application::code_index::{
+    CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionRequestV1,
+};
+use tracedecay_contracts::clock::now_micros;
+use tracedecay_contracts::{
+    CallableCodeOperationKind, CancellationContext, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, RequestContext, RequestId, ResolvedScope, callable_code_operation,
+};
+use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+
+use super::{GitFixture, test_project_id, write};
+use crate::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use crate::project_reads::project_code_index_ignored_dependency_admission_port;
+
+fn request_context(scope: ResolvedScope, suffix: &str, budget: Duration) -> RequestContext {
+    let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
+    let grant = CapabilityGrantSnapshot::new(
+        tracedecay_contracts::CapabilityGrantId::new(format!("grant.pre-seat.{suffix}"))
+            .expect("grant id"),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("grant digest"),
+        ActorId::new("actor.pre-seat.issuer").expect("issuer"),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        scope.clone(),
+        BTreeSet::from([operation.capability_id().clone()]),
+        BTreeSet::from([operation.use_case_id().clone()]),
+        DisclosureClass::Evidence,
+    )
+    .expect("grant");
+    let budget = i64::try_from(budget.as_micros()).expect("budget micros");
+    RequestContext::new(
+        ActorId::new("actor.pre-seat.requester").expect("actor"),
+        scope,
+        grant,
+        RequestId::new(format!("request.pre-seat.{suffix}")).expect("request id"),
+        Deadline::new(UtcMicros(now_micros().0 + budget)).expect("deadline"),
+        CancellationContext::active(format!("cancel.pre-seat.{suffix}")).expect("cancellation"),
+    )
+    .expect("request context")
+}
+
+/// A first publication serves from its text owner before the worker's graph
+/// tail seats the decoded generation. Admission in that window waits on the
+/// seat within its budget: an expired budget is a typed timeout, never an
+/// unavailable scheduler, and the seat lets the retry admit the dependency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
+    let fixture = GitFixture::new(&[
+        (".gitignore", "node_modules/\n"),
+        (
+            "src/app.ts",
+            "import type { PublicWidget } from \"pkg\";\nexport const anchor = 1;\n",
+        ),
+    ]);
+    write(
+        fixture.path(),
+        "node_modules/pkg/index.d.ts",
+        "export interface PublicWidget { value: string }\n",
+    );
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let (swap_entered, release_swap) = registry.pause_next_serving_swap(canonical_root);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    tokio::time::timeout(Duration::from_secs(10), swap_entered)
+        .await
+        .expect("publication did not reach its serving swap")
+        .expect("serving swap gate stays armed");
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none(),
+        "the decoded generation is not seated yet"
+    );
+
+    let scheduler = registry
+        .scheduler_for_root(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let published = tokio::task::spawn_blocking(move || {
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest_complete()
+    })
+    .await
+    .expect("read the published generation")
+    .expect("published generation");
+    let generation = published.generation();
+    let source_generation = generation.manifest().generation_id.clone();
+    let import = generation
+        .imports()
+        .iter()
+        .find(|import| import.module_specifier == "pkg")
+        .expect("verified package import")
+        .clone();
+    let snapshot = generation.snapshot();
+    let scope = ResolvedScope::new(
+        generation.manifest().project_id.clone(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let port = project_code_index_ignored_dependency_admission_port(
+        registry.clone(),
+        fixture.path().to_path_buf(),
+        scope.clone(),
+        true,
+    );
+
+    let held = request_context(scope.clone(), "held", Duration::from_millis(300));
+    let refused = port
+        .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
+            &held,
+            &source_generation,
+            std::slice::from_ref(&import),
+        ))
+        .await
+        .expect_err("the seat is held past the request budget");
+    assert_eq!(
+        refused,
+        CodeIndexIgnoredDependencyAdmissionErrorV1::TimedOut
+    );
+
+    let retry_port = Arc::clone(&port);
+    let retry_scope = scope.clone();
+    let retry_source = source_generation.clone();
+    let retry_import = import.clone();
+    let retry = tokio::spawn(async move {
+        let context = request_context(retry_scope, "retry", Duration::from_secs(30));
+        retry_port
+            .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
+                &context,
+                &retry_source,
+                std::slice::from_ref(&retry_import),
+            ))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !retry.is_finished(),
+        "admission inside its budget waits for the held seat instead of refusing"
+    );
+    release_swap.send(()).expect("release serving swap");
+    let admitted = retry
+        .await
+        .expect("retry task joins")
+        .expect("the seated generation admits the dependency");
+    assert_ne!(admitted, source_generation);
+
+    let serving = registry
+        .latest_complete_serving_for_test(fixture.path())
+        .await
+        .expect("admission seats its generation");
+    assert_eq!(serving.generation().manifest().generation_id, admitted);
+    assert_eq!(
+        serving
+            .generation()
+            .ignored_source_admissions()
+            .iter()
+            .map(|admission| admission.logical_path.as_str())
+            .collect::<Vec<_>>(),
+        ["node_modules/pkg/index.d.ts"]
+    );
+    let dependency_symbols = serving
+        .lexical()
+        .iter()
+        .filter(|chunk| {
+            chunk
+                .sanitized_text
+                .as_str()
+                .contains("interface PublicWidget")
+        })
+        .map(|chunk| chunk.anchor.symbol_occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        dependency_symbols.len(),
+        1,
+        "the dependency declaration is served once: {dependency_symbols:?}"
+    );
+    registry.shutdown().await;
+}
