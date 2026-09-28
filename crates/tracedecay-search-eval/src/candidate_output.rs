@@ -1205,15 +1205,11 @@ fn publish_corpus_with_scale(
     copies: usize,
     admitted_scope: AdmittedCorpusScopeFn,
 ) -> Result<PublishedCorpus, CandidateOutputError> {
-    let expected_chunks = match copies {
-        1 => workload.execution_contract.exact_eligible_chunks_current,
-        10 => workload.execution_contract.exact_eligible_chunks_10x,
-        _ => {
-            return Err(CandidateOutputError::Contract(
-                "evaluation corpus scale must be current or exact 10x".to_owned(),
-            ));
-        }
-    };
+    if !matches!(copies, 1 | 10) {
+        return Err(CandidateOutputError::Contract(
+            "evaluation corpus scale must be current or exact 10x".to_owned(),
+        ));
+    }
     let corpus_digest = compute_corpus_digest(repo_root, workload)?;
     let scope_keys = workload
         .queries
@@ -1222,9 +1218,9 @@ fn publish_corpus_with_scale(
         .collect::<BTreeSet<_>>();
     let mut scopes = BTreeMap::new();
     let mut occurrence_map = BTreeMap::new();
-    // Chunk and admitted-chunk counts per corpus file. Chunking is file-local,
-    // so a file several scope sets admit is counted once.
-    let mut file_chunks: BTreeMap<FileOccurrenceId, (u64, u64)> = BTreeMap::new();
+    // Admitted-chunk counts per corpus file. Chunking is file-local, so a file
+    // several scope sets admit is counted once.
+    let mut file_chunks: BTreeMap<FileOccurrenceId, u64> = BTreeMap::new();
     for scope_key in scope_keys {
         let documents = workload
             .corpus
@@ -1237,21 +1233,14 @@ fn publish_corpus_with_scale(
             scopes.insert(scope_key, None);
             continue;
         };
-        let mut scope_file_chunks: BTreeMap<FileOccurrenceId, (u64, u64)> = BTreeMap::new();
-        for chunk in generation.chunks().chunks() {
-            scope_file_chunks
-                .entry(chunk.anchor.file_occurrence_id.clone())
-                .or_default()
-                .0 += 1;
-        }
+        let mut scope_file_chunks: BTreeMap<FileOccurrenceId, u64> = BTreeMap::new();
         let admitted = generation
             .admitted_chunks()
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
         for chunk in admitted.iter() {
-            scope_file_chunks
+            *scope_file_chunks
                 .entry(chunk.chunk().anchor.file_occurrence_id.clone())
-                .or_default()
-                .1 += 1;
+                .or_default() += 1;
         }
         drop(admitted);
         for (file, counts) in scope_file_chunks {
@@ -1299,12 +1288,6 @@ fn publish_corpus_with_scale(
             )?),
         );
     }
-    let observed_chunks: u64 = file_chunks.values().map(|(chunks, _)| chunks).sum();
-    if observed_chunks != expected_chunks {
-        return Err(CandidateOutputError::Contract(format!(
-            "eligible chunk count mismatch for {copies}x corpus: declared {expected_chunks}, observed {observed_chunks}"
-        )));
-    }
     Ok(PublishedCorpus {
         scopes,
         occurrence_map,
@@ -1313,7 +1296,7 @@ fn publish_corpus_with_scale(
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         corpus: workload.corpus.clone(),
         corpus_digest,
-        eligible_chunks: file_chunks.values().map(|(_, admitted)| admitted).sum(),
+        eligible_chunks: file_chunks.values().sum(),
         admitted_scope,
     })
 }
@@ -2125,6 +2108,33 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    /// The evaluator measures the chunks production emits for the corpus, so
+    /// an extractor revision reaches the evaluation without a workload edit.
+    /// `extractor.rust.v14` turned item-position macro invocations into
+    /// symbols; the three in `session.rs` must be served as such.
+    #[test]
+    fn published_corpus_serves_the_symbols_production_extracts() {
+        let fixture = packaged_fixture();
+        let published = publish_corpus(fixture.root(), &workload(), fixture_admitted_scope)
+            .expect("publish corpus");
+
+        let macro_symbols = published
+            .occurrence_map
+            .iter()
+            .filter(|(key, _)| key.starts_with("code-symbol:"))
+            .flat_map(|(_, entry)| &entry.display_anchors)
+            .filter(|anchor| anchor.starts_with("crates/") && anchor.ends_with('!'))
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            macro_symbols,
+            BTreeSet::from([
+                "crates/tracedecay-domain/src/session.rs::nonzero_numeric_value!",
+                "crates/tracedecay-domain/src/session.rs::session_string_id!",
+            ])
+        );
     }
 
     #[test]

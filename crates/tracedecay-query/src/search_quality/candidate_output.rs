@@ -114,8 +114,6 @@ pub enum NeedProvenanceKindV1 {
 pub struct EvaluationExecutionContractV1 {
     pub exact_file_count: u64,
     pub exact_corpus_bytes: u64,
-    pub exact_eligible_chunks_current: u64,
-    pub exact_eligible_chunks_10x: u64,
     pub exact_query_count: u64,
     pub fusion_revision: String,
     pub cache_state: String,
@@ -648,16 +646,6 @@ pub fn validate_workload_for_tuning(
     if contract.exact_file_count != workload.corpus.len() as u64
         || contract.exact_query_count != workload.queries.len() as u64
         || contract.exact_corpus_bytes == 0
-        || contract.exact_eligible_chunks_current == 0
-        || contract.exact_eligible_chunks_10x
-            != contract
-                .exact_eligible_chunks_current
-                .checked_mul(10)
-                .ok_or_else(|| {
-                    CandidateOutputError::Contract(
-                        "evaluation current chunk count overflows 10x".to_owned(),
-                    )
-                })?
         || contract.fusion_revision != PRODUCTION_BOUNDARY
         || contract.cache_state != EVALUATION_CACHE_STATE
         || contract.concurrency.query_workers != 1
