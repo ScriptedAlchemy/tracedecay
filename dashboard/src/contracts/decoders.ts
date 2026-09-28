@@ -7068,11 +7068,11 @@ export const ObservabilityHorizonV1Schema: z.ZodObject<{
 The session identity is provider-native evidence. The physical file identity
 is represented separately by [`ObservationSourceGenerationV1`]. */
 export const ObservationSourceIdentityV1Schema: z.ZodObject<{
-  provider: z.ZodOptional<z.ZodType<ProviderId, z.ZodTypeDef, unknown>>;
+  provider: z.ZodType<ProviderId, z.ZodTypeDef, unknown>;
   session_id: z.ZodType<SessionId, z.ZodTypeDef, unknown>;
   source_key: z.ZodOptional<z.ZodType<SessionId | null, z.ZodTypeDef, unknown>>;
 }, "strict"> = z.object({
-  provider: z.lazy(() => ProviderIdSchema).optional(),
+  provider: z.lazy(() => ProviderIdSchema),
   session_id: z.lazy(() => SessionIdSchema),
   source_key: z.union([z.lazy(() => SessionIdSchema), z.null()]).optional(),
 }).strict();

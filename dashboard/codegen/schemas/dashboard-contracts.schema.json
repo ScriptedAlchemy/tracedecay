@@ -19849,6 +19849,7 @@
         }
       },
       "required": [
+        "provider",
         "session_id"
       ],
       "type": "object"
