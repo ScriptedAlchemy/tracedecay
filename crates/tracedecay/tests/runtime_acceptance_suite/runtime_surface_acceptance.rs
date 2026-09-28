@@ -874,6 +874,7 @@ fn normalize_application_envelope(value: &mut Value) {
                 "expires_at",
                 "observed_at",
                 "elapsed_micros",
+                "wall_micros",
             ] {
                 fields.remove(volatile);
             }

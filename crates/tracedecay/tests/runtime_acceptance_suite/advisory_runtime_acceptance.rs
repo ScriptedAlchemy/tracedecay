@@ -557,7 +557,7 @@ fn github_context(scope: &FeedbackScopeV1, project_id: ProjectId) -> RequestCont
 
 #[tokio::test]
 async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access() {
-    let (_environment, project) = common::IsolatedHome::new();
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     let source = "pub fn reviewed() {}\npub fn batched() {}\n";
     std::fs::write(project.join("src/lib.rs"), source).unwrap();
@@ -586,7 +586,9 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
         .expect("read fixture head");
     assert!(output.status.success());
     let head = CommitId::new(String::from_utf8(output.stdout).unwrap().trim()).unwrap();
-    let graph = TraceDecay::init(&project).await.unwrap();
+    let graph = TraceDecay::init_with_options(&project, environment.open_options())
+        .await
+        .unwrap();
     let database = graph.db().clone();
     let scope = FeedbackScopeV1 {
         project_id: ProjectId::new("project.github.body").unwrap(),
@@ -1616,7 +1618,7 @@ fn recorded_peer_observation(session: &SessionId, ordinal: u64) -> CanonicalObse
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
-    let (_environment, project) = common::IsolatedHome::new();
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
@@ -1654,7 +1656,9 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     assert!(head.status.success());
     let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
 
-    let graph = TraceDecay::init(&project).await.expect("canonical graph");
+    let graph = TraceDecay::init_with_options(&project, environment.open_options())
+        .await
+        .expect("canonical graph");
     let database = graph.db().clone();
 
     let resolved = ResolvedScope::new(

@@ -12,8 +12,17 @@ use std::time::{Duration, Instant};
 use crate::common::{canonical_existing_path, tracedecay_command_with_home};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{FilesLayoutV1, FilesResultV1, IndexedFileV1};
 use tracedecay_daemon_identity::authority::DaemonAuthority;
-use tracedecay_daemon_protocol::{DaemonAuthPreface, DaemonEndpoint};
+use tracedecay_daemon_protocol::{
+    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonAuthPreface, DaemonEndpoint,
+    DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationRequest,
+    DaemonInvocationResponse,
+};
+use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(5);
 const CHILD_TIMEOUT: Duration = Duration::from_secs(8);
@@ -80,7 +89,7 @@ fn init_project(home: &Path, project: &Path) {
     crate::common::stop_managed_daemon(home);
 }
 
-fn tool_command(home: &Path, project: &Path, socket: &Path, query: &str) -> Command {
+fn tool_command(home: &Path, project: &Path, socket: &Path, pattern: &str) -> Command {
     let mut command = tracedecay_command_with_home(home);
     command
         .current_dir(project)
@@ -89,37 +98,91 @@ fn tool_command(home: &Path, project: &Path, socket: &Path, query: &str) -> Comm
             "tool",
             "--project",
             project.to_string_lossy().as_ref(),
-            "search",
-            "--query",
-            query,
+            "files",
+            "--pattern",
+            pattern,
+            "--format",
+            "json",
             "--json",
         ]);
     command
 }
 
-fn response_bytes(request: &Value, text: &str) -> Vec<u8> {
-    let mut bytes = serde_json::to_vec(&json!({
-        "jsonrpc": "2.0",
-        "id": request["id"].clone(),
-        "result": {
-            "content": [{
-                "type": "text",
-                "text": text,
-            }],
+fn files_result(paths: impl IntoIterator<Item = String>) -> FilesResultV1 {
+    let files = paths
+        .into_iter()
+        .map(|path| IndexedFileV1 {
+            path,
+            symbols: 1,
+            bytes: 20,
+        })
+        .collect::<Vec<_>>();
+    FilesResultV1 {
+        count: files.len(),
+        layout: FilesLayoutV1::Flat,
+        files,
+    }
+}
+
+fn files_response(request: &DaemonInvocationRequest, result: FilesResultV1) -> Vec<u8> {
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.transport").expect("project id"),
+        RepositoryId::new("repository.transport").expect("repository id"),
+        WorktreeId::new("worktree.transport").expect("worktree id"),
+        None,
+    )
+    .expect("transport scope");
+    let response = DaemonInvocationResponse {
+        protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+        revision: DAEMON_INVOCATION_REVISION,
+        request_id: request.request_id.clone(),
+        outcome: DaemonInvocationOutcome::GraphTool {
+            scope,
+            completion: GraphToolCompletionV1 {
+                result: GraphToolResultV1::Files(result),
+                touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
+                cost: None,
+            },
         },
-    }))
-    .expect("encode response");
+    };
+    let mut bytes = serde_json::to_vec(&response).expect("encode canonical response");
     bytes.push(b'\n');
     bytes
+}
+
+fn response_bytes(request: &DaemonInvocationRequest, text: &str) -> Vec<u8> {
+    files_response(request, files_result([text.to_owned()]))
+}
+
+fn output_payload(result: &ChildResult) -> Value {
+    let envelope = serde_json::from_slice(&result.output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "invalid CLI JSON ({error}); stderr: {}",
+            String::from_utf8_lossy(&result.output.stderr)
+        )
+    });
+    tracedecay::daemon::tool_json_payload(&envelope, "transport fixture")
+        .expect("tool JSON payload")
+}
+
+fn assert_problem(result: &ChildResult, kind: &str) {
+    assert!(!result.killed_by_harness, "CLI failed to settle");
+    assert!(!result.output.status.success(), "problem must fail the CLI");
+    let envelope: Value =
+        serde_json::from_slice(&result.output.stdout).expect("typed problem JSON");
+    assert_eq!(envelope["isError"], true, "{envelope}");
+    assert_eq!(envelope["problem"]["kind"], kind, "{envelope}");
 }
 
 fn spawn_scripted_daemon<F>(
     socket: PathBuf,
     connections: usize,
     script: F,
-) -> (mpsc::Receiver<Value>, JoinHandle<()>)
+) -> (mpsc::Receiver<()>, JoinHandle<()>)
 where
-    F: Fn(UnixStream, Value) + Send + Sync + 'static,
+    F: Fn(UnixStream, DaemonInvocationRequest) + Send + Sync + 'static,
 {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
@@ -164,18 +227,22 @@ where
                     );
                     let mut handshake = String::new();
                     reader.read_line(&mut handshake).expect("read handshake");
-                    serde_json::from_str::<Value>(handshake.trim()).expect("decode handshake");
+                    serde_json::from_str::<DaemonHandshake>(handshake.trim())
+                        .expect("decode handshake");
                     let mut request = String::new();
                     reader.read_line(&mut request).expect("read request");
-                    let request: Value =
-                        serde_json::from_str(request.trim()).expect("decode request");
-                    assert_eq!(request["method"], "tools/call");
-                    let tool_name = request["params"]["name"].as_str().unwrap_or("");
-                    assert!(
-                        tool_name == "tracedecay_search" || tool_name == "tracedecay_retrieve",
-                        "unexpected scripted daemon tool {tool_name}"
-                    );
-                    request_tx.send(request.clone()).expect("publish request");
+                    let request: DaemonInvocationRequest =
+                        serde_json::from_str(request.trim()).expect("decode canonical request");
+                    assert_eq!(request.protocol, DAEMON_INVOCATION_PROTOCOL);
+                    assert_eq!(request.revision, DAEMON_INVOCATION_REVISION);
+                    assert!(matches!(
+                        &request.payload,
+                        DaemonInvocationPayload::GraphTool {
+                            surface_operation: ApplicationSurfaceOperation::Files,
+                            ..
+                        }
+                    ));
+                    request_tx.send(()).expect("publish request receipt");
                     let script = Arc::clone(&script);
                     workers.push(std::thread::spawn(move || script(stream, request)));
                 }
@@ -235,127 +302,169 @@ fn generic_tool_accepts_slow_byte_stream() {
 }
 
 #[test]
-fn generic_tool_rejects_truncated_frame_without_output() {
+fn generic_tool_rejects_truncated_frame_as_typed_failure() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, _request| {
+    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
+        let bytes = response_bytes(&request, "partial-must-not-escape");
         stream
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":")
+            .write_all(&bytes[..bytes.len() / 2])
             .expect("write truncated response");
     });
     let result = run_command_with_timeout(
         tool_command(&home, &project, &socket, "truncated"),
         CHILD_TIMEOUT,
     );
-    server.join().expect("join fake daemon");
-    assert!(!result.killed_by_harness, "truncated response hung");
-    assert!(!result.output.status.success());
-    assert!(result.output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&result.output.stderr).to_lowercase();
-    assert!(stderr.contains("json") || stderr.contains("eof") || stderr.contains("decode"));
+    server.join().expect("join scripted daemon");
+    assert_problem(&result, "unavailable");
+    let envelope: Value = serde_json::from_slice(&result.output.stdout).expect("problem envelope");
+    assert_eq!(
+        envelope["problem"]["diagnostic"]["code"],
+        "transport_unavailable"
+    );
+    assert!(!String::from_utf8_lossy(&result.output.stdout).contains("partial-must-not-escape"));
 }
 
-#[test]
-fn generic_tool_rejects_semantic_truncation_envelope_without_output() {
-    let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
-        let envelope = json!({
-            "truncated": true,
-            "original_chars": 16000,
-            "preview_chars": 2,
-            "preview": "{}",
-        });
-        let mut bytes = serde_json::to_vec(&json!({
-            "jsonrpc": "2.0",
-            "id": request["id"].clone(),
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": envelope.to_string(),
-                }],
-            },
-        }))
-        .expect("encode truncation envelope");
-        bytes.push(b'\n');
-        stream.write_all(&bytes).expect("write truncation envelope");
-    });
-    let result = run_command_with_timeout(
-        tool_command(&home, &project, &socket, "envelope"),
-        CHILD_TIMEOUT,
-    );
-    server.join().expect("join fake daemon");
-    assert!(!result.killed_by_harness, "truncation envelope hung");
-    assert!(!result.output.status.success());
-    assert!(result.output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&result.output.stderr);
+fn oversized_files() -> FilesResultV1 {
+    let files =
+        files_result((0..1024).map(|index| format!("src/transport_large_result_{index:04}.rs")));
     assert!(
-        stderr.contains("truncated JSON") && stderr.contains("without a retrieval handle"),
-        "unexpected truncation error: {stderr}"
+        serde_json::to_vec(&files).expect("files JSON").len() > tracedecay_mcp::MAX_RESPONSE_CHARS
     );
+    files
 }
 
 #[test]
-fn generic_tool_retrieves_semantic_truncation_envelope() {
+fn generic_tool_reports_unavailable_truncation_storage() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let (requests, server) = spawn_scripted_daemon(socket.clone(), 2, |mut stream, request| {
-        let tool_name = request["params"]["name"].as_str().unwrap_or("");
-        let text = match tool_name {
-            "tracedecay_search" => json!({
-                "truncated": true,
-                "original_chars": 16000,
-                "preview_chars": 2,
-                "preview": "{}",
-                "handle": "tool-trunc-1",
-            })
-            .to_string(),
-            "tracedecay_retrieve" => {
-                assert_eq!(request["params"]["arguments"]["handle"], "tool-trunc-1");
-                json!({
-                    "content": "{\"recovered\":true,\"marker\":\"tool-ok\"}",
-                })
-                .to_string()
-            }
-            other => panic!("unexpected scripted daemon tool {other}"),
-        };
+    let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(
+        &project,
+        &home.join(".tracedecay"),
+    )
+    .expect("resolve fixture layout")
+    .expect("initialized layout");
+    if layout.response_handle_root.exists() {
+        std::fs::remove_dir(&layout.response_handle_root).expect("unused fixture handle cache");
+    }
+    std::fs::write(&layout.response_handle_root, b"cache path is a file")
+        .expect("block handle cache storage");
+    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
         stream
-            .write_all(&response_bytes(&request, &text))
-            .expect("write truncation recovery");
+            .write_all(&files_response(&request, oversized_files()))
+            .expect("write oversized result");
     });
     let result = run_command_with_timeout(
-        tool_command(&home, &project, &socket, "envelope"),
+        tool_command(&home, &project, &socket, "large"),
         CHILD_TIMEOUT,
     );
-    server.join().expect("join fake daemon");
-    assert!(!result.killed_by_harness, "truncation retrieve hung");
+    server.join().expect("join scripted daemon");
+    assert!(!result.killed_by_harness, "oversized response hung");
     assert!(
         result.output.status.success(),
-        "handle-bearing truncation must recover: {}",
+        "{}",
         String::from_utf8_lossy(&result.output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&result.output.stdout);
+    let payload = output_payload(&result);
+    assert_eq!(payload["truncated"], true, "{payload}");
+    assert_eq!(payload["handle_available"], false, "{payload}");
     assert!(
-        stdout.contains("tool-ok") && !stdout.contains("truncated"),
-        "expected recovered payload, got:\n{stdout}"
+        payload.get("handle").is_none(),
+        "unwritten content must not receive a handle"
     );
-    let seen: Vec<String> = requests
-        .try_iter()
-        .map(|request| request["params"]["name"].as_str().unwrap_or("").to_string())
-        .collect();
     assert_eq!(
-        seen,
-        vec![
-            "tracedecay_search".to_string(),
-            "tracedecay_retrieve".to_string()
-        ]
+        payload["handle_status"]["reason_code"],
+        "handle_store_failed"
+    );
+    assert_eq!(payload["handle_status"]["retryable"], true);
+    assert!(
+        payload["handle_status"]["retry_instruction"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert!(
+        payload["preview_chars"].as_u64().unwrap() < payload["original_chars"].as_u64().unwrap()
     );
 }
 
-/// The request deadline rides to the daemon, which enforces it; the client
-/// reads for a bounded response grace beyond that deadline and never discards
-/// an envelope it actually received. A reply arriving after the caller's
-/// deadline but within the grace is therefore the authoritative outcome, not
-/// an "outcome may be unknown" abort.
 #[test]
-fn generic_tool_preserves_late_reply_within_response_grace() {
+fn generic_tool_retrieves_oversized_typed_result() {
+    let (_home, _project, _socket_dir, home, project, socket) = fixture();
+    let expected = serde_json::to_value(oversized_files()).expect("expected file listing");
+    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
+        stream
+            .write_all(&files_response(&request, oversized_files()))
+            .expect("write oversized result");
+    });
+    let result = run_command_with_timeout(
+        tool_command(&home, &project, &socket, "large"),
+        CHILD_TIMEOUT,
+    );
+    server.join().expect("join scripted daemon");
+    assert!(!result.killed_by_harness, "oversized response hung");
+    assert!(
+        result.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    let preview = output_payload(&result);
+    assert_eq!(preview["truncated"], true, "{preview}");
+    let handle = preview["handle"].as_str().expect("stored response handle");
+    assert_eq!(preview["retrieve_tool"], "tracedecay_retrieve");
+
+    // The CLI renderer wrote the real enrolled project's cache. Recover its
+    // pages through the shipped daemon's retrieve owner, not scripted pages.
+    let _daemon = common::spawn_tracedecay_daemon(&home);
+    let mut content = String::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let arguments = json!({ "handle": handle, "offset": offset, "format": "json" });
+        let mut command = tracedecay_command_with_home(&home);
+        command.current_dir(&project).args([
+            "tool",
+            "--project",
+            project.to_str().expect("project path"),
+            "retrieve",
+            "--args",
+            &arguments.to_string(),
+            "--json",
+        ]);
+        let retrieved = run_command_with_timeout(command, CHILD_TIMEOUT);
+        assert!(!retrieved.killed_by_harness, "retrieval hung");
+        assert!(
+            retrieved.output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&retrieved.output.stderr)
+        );
+        let page = output_payload(&retrieved);
+        pages += 1;
+        assert_eq!(page["handle"], handle);
+        assert_eq!(page["offset"], offset);
+        content.push_str(page["content"].as_str().expect("retained page content"));
+        if page["has_more"] == false {
+            assert!(page["next_offset"].is_null());
+            assert_eq!(
+                page["total_chars"].as_u64(),
+                Some(content.chars().count() as u64)
+            );
+            break;
+        }
+        assert_eq!(page["has_more"], true);
+        let next = page["next_offset"].as_u64().expect("next retained offset");
+        assert!(next > offset, "retrieval must advance");
+        offset = next;
+    }
+    assert!(
+        pages > 1,
+        "the oversized result must require multiple bounded pages"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&content).expect("complete retained JSON"),
+        expected
+    );
+}
+
+#[test]
+fn generic_read_only_tool_times_out_without_late_success() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
     let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
         std::thread::sleep(Duration::from_secs(1));
@@ -364,20 +473,13 @@ fn generic_tool_preserves_late_reply_within_response_grace() {
     let mut command = tool_command(&home, &project, &socket, "never");
     command.env("TRACEDECAY_TOOL_DEADLINE_MS", "200");
     let result = run_command_with_timeout(command, CHILD_TIMEOUT);
-    server.join().expect("join fake daemon");
-    assert!(!result.killed_by_harness, "late reply was not read");
-    assert!(
-        result.output.status.success(),
-        "received envelope must be honoured, not discarded: {}",
-        String::from_utf8_lossy(&result.output.stderr)
-    );
+    server.join().expect("join scripted daemon");
+    // Read-only invocations cancel at their deadline; only authoritative
+    // effects retain the response-grace settlement policy.
+    assert_problem(&result, "timed_out");
     assert!(result.elapsed >= Duration::from_millis(200));
     assert!(result.elapsed < Duration::from_secs(5));
-    let stdout = String::from_utf8_lossy(&result.output.stdout);
-    assert!(
-        stdout.contains("too-late"),
-        "late payload must be printed: {stdout}"
-    );
+    assert!(!String::from_utf8_lossy(&result.output.stdout).contains("too-late"));
 }
 
 #[test]
@@ -405,9 +507,10 @@ fn generic_tool_handles_concurrent_requests_without_crosstalk() {
     let (_requests, server) =
         spawn_scripted_daemon(socket.clone(), 2, move |mut stream, request| {
             server_barrier.wait();
-            let query = request["params"]["arguments"]["query"]
-                .as_str()
-                .expect("query argument");
+            let DaemonInvocationPayload::GraphTool { arguments, .. } = &request.payload else {
+                panic!("expected graph tool request");
+            };
+            let query = arguments["pattern"].as_str().expect("pattern argument");
             stream
                 .write_all(&response_bytes(&request, query))
                 .expect("write concurrent response");
