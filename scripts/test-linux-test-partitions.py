@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,6 +60,11 @@ def metadata() -> dict:
         ]
     }
 
+LINUX_GROUPS = [
+    {"name": "root", "timeout_minutes": 105},
+    {"name": "store", "timeout_minutes": 30},
+]
+
 MACOS_GROUPS = [
     {"name": "root", "timeout_minutes": 90, "budget_basis": "root-lib 60 + root-suites 45, x4/3"},
     {"name": "store", "timeout_minutes": 40},
@@ -66,7 +73,7 @@ MACOS_GROUPS = [
 def manifest(
     partitions: list[dict], not_run: dict | None = None, macos_groups: list[dict] | None = MACOS_GROUPS
 ) -> dict:
-    document: dict = {"partitions": partitions}
+    document: dict = {"partitions": partitions, "linux_groups": LINUX_GROUPS}
     if not_run is not None:
         document["not_run"] = not_run
     if macos_groups is not None:
@@ -79,6 +86,7 @@ COMPLETE = [
         "timeout_minutes": 60,
         "windows_timeout_minutes": 150,
         "macos_group": "root",
+        "linux_group": "root",
         "packages": ["root"],
         "targets": ["lib"],
         "features": ["test-helpers"],
@@ -88,6 +96,7 @@ COMPLETE = [
         "timeout_minutes": 45,
         "windows_timeout_minutes": 110,
         "macos_group": "root",
+        "linux_group": "root",
         "packages": ["root", "cli"],
         "targets": ["test:session_suite", "test:graph_suite", "bins", "test:cli_suite"],
         "features": ["root/test-helpers"],
@@ -97,6 +106,7 @@ COMPLETE = [
         "timeout_minutes": 30,
         "windows_timeout_minutes": 75,
         "macos_group": "store",
+        "linux_group": "store",
         "packages": ["store"],
         "features": ["store/test-helpers"],
     },
@@ -119,7 +129,11 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual(lines[4], "macOS root: root-lib, root-suites")
         self.assertEqual(lines[5], "macOS store: store")
         self.assertEqual(lines[6], "3 partitions: each in exactly one of 2 macOS groups")
-        self.assertEqual(len(lines), 7)
+        self.assertEqual(lines[7:], [
+            "Linux root: root-lib, root-suites",
+            "Linux store: store",
+            "3 partitions: each in exactly one of 2 Linux groups",
+        ])
 
     def test_new_test_target_without_a_partition_fails(self) -> None:
         # A new crate (or a new suite in an existing crate) appears in cargo
@@ -230,7 +244,7 @@ class CoverageTest(unittest.TestCase):
         # The partitions of a group run in manifest order; the matrix entry
         # carries them as the space-separated list the job loops over.
         self.assertEqual(
-            self.script.macos_matrix(manifest(COMPLETE)),
+            self.script.group_matrix(manifest(COMPLETE), "macos"),
             {
                 "include": [
                     {"group": "root", "timeout": 90, "partitions": "root-lib root-suites"},
@@ -239,29 +253,44 @@ class CoverageTest(unittest.TestCase):
             },
         )
 
-    def test_matrices_carry_each_host_budget(self) -> None:
-        # Linux and Windows run the same partitions under separately measured
-        # budgets, so the two matrices differ only in the timeout they carry.
+    def test_linux_groups_and_windows_partitions_carry_each_host_budget(self) -> None:
         self.assertEqual(
-            self.script.matrix(manifest(COMPLETE)),
-            {
-                "include": [
-                    {"partition": "root-lib", "timeout": 60},
-                    {"partition": "root-suites", "timeout": 45},
-                    {"partition": "store", "timeout": 30},
-                ]
-            },
+            self.script.group_matrix(manifest(COMPLETE), "linux"),
+            {"include": [
+                {"group": "root", "timeout": 105, "partitions": "root-lib root-suites"},
+                {"group": "store", "timeout": 30, "partitions": "store"},
+            ]},
         )
         self.assertEqual(
             self.script.matrix(manifest(COMPLETE), "windows_timeout_minutes"),
-            {
-                "include": [
-                    {"partition": "root-lib", "timeout": 150},
-                    {"partition": "root-suites", "timeout": 110},
-                    {"partition": "store", "timeout": 75},
-                ]
-            },
+            {"include": [
+                {"partition": "root-lib", "timeout": 150},
+                {"partition": "root-suites", "timeout": 110},
+                {"partition": "store", "timeout": 75},
+            ]},
         )
+
+    def test_linux_group_validation(self) -> None:
+        for declarations, error in (
+            (None, "has no linux_groups"),
+            ([*LINUX_GROUPS, LINUX_GROUPS[0]], "Linux group names repeat"),
+            ([*LINUX_GROUPS, {"name": "idle", "timeout_minutes": 1}], "runs no partition"),
+            ([{**LINUX_GROUPS[0], "timeout_minutes": 0}, LINUX_GROUPS[1]], "positive timeout"),
+            ([{**LINUX_GROUPS[0], "timeout_minutes": True}, LINUX_GROUPS[1]], "positive timeout"),
+            ([{**LINUX_GROUPS[0], "name": "../outside"}, LINUX_GROUPS[1]], "needs a name"),
+        ):
+            with self.subTest(declarations=declarations):
+                document = {**manifest(COMPLETE), "linux_groups": declarations}
+                with self.assertRaisesRegex(self.script.PartitionError, error):
+                    self.script.groups(document, "linux")
+        for replacement, error in ((None, "has no 'linux_group'"), ("unknown", "which is not listed")):
+            partitions = [dict(p) for p in COMPLETE]
+            if replacement is None:
+                del partitions[0]["linux_group"]
+            else:
+                partitions[0]["linux_group"] = replacement
+            with self.assertRaisesRegex(self.script.PartitionError, error):
+                self.script.groups(manifest(partitions), "linux")
 
     def test_partition_without_a_macos_group_fails(self) -> None:
         # A new partition that no macOS job runs is the macOS analogue of a
@@ -294,25 +323,25 @@ class CoverageTest(unittest.TestCase):
             {**COMPLETE[0], "name": f"part-{index}", "macos_group": f"group-{index}"} for index in range(cap + 1)
         ]
         with self.assertRaises(self.script.PartitionError) as caught:
-            self.script.macos_groups(manifest(partitions, NOT_RUN, groups))
+            self.script.groups(manifest(partitions, NOT_RUN, groups), "macos")
         self.assertIn(f"{cap + 1} macOS groups exceed the {cap} concurrent macOS jobs", str(caught.exception))
         self.assertEqual(
-            list(self.script.macos_groups(manifest(partitions[:cap], NOT_RUN, groups[:cap]))),
+            list(self.script.groups(manifest(partitions[:cap], NOT_RUN, groups[:cap]), "macos")),
             [f"group-{index}" for index in range(cap)],
         )
 
     def test_macos_group_validation(self) -> None:
         with self.assertRaises(self.script.PartitionError) as caught:
-            self.script.macos_groups(manifest(COMPLETE, NOT_RUN, None))
+            self.script.groups(manifest(COMPLETE, NOT_RUN, None), "macos")
         self.assertIn("has no macos_groups", str(caught.exception))
         with self.assertRaises(self.script.PartitionError) as caught:
-            self.script.macos_groups(manifest(COMPLETE, NOT_RUN, [MACOS_GROUPS[0], {**MACOS_GROUPS[1], "name": "root"}]))
+            self.script.groups(manifest(COMPLETE, NOT_RUN, [MACOS_GROUPS[0], {**MACOS_GROUPS[1], "name": "root"}]), "macos")
         self.assertIn("macOS group names repeat: 'root'", str(caught.exception))
         with self.assertRaises(self.script.PartitionError) as caught:
-            self.script.macos_groups(manifest(COMPLETE, NOT_RUN, [MACOS_GROUPS[0], {"name": "store"}]))
+            self.script.groups(manifest(COMPLETE, NOT_RUN, [MACOS_GROUPS[0], {"name": "store"}]), "macos")
         self.assertIn("macOS group 'store' needs a positive timeout", str(caught.exception))
         with self.assertRaises(self.script.PartitionError) as caught:
-            self.script.macos_groups(manifest(COMPLETE, NOT_RUN, [MACOS_GROUPS[0], {"timeout_minutes": 40}]))
+            self.script.groups(manifest(COMPLETE, NOT_RUN, [MACOS_GROUPS[0], {"timeout_minutes": 40}]), "macos")
         self.assertIn("every macOS group needs a name", str(caught.exception))
 
     def test_manifest_validation(self) -> None:
@@ -361,8 +390,6 @@ class CoverageTest(unittest.TestCase):
             )
             with self.assertRaises(self.script.PartitionError):
                 self.script.load_manifest(path)
-            # The manifest is rejected before any command runs when a group
-            # has no partition, so `matrix` cannot emit a job for it either.
             path.write_text(
                 json.dumps(manifest(COMPLETE[:2], NOT_RUN)), encoding="utf-8"
             )
@@ -371,12 +398,130 @@ class CoverageTest(unittest.TestCase):
             self.assertIn("macOS group 'store' runs no partition", str(caught.exception))
 
 class CommandLineTest(unittest.TestCase):
+    def test_linux_matrix_on_the_command_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partitions.json"
+            path.write_text(json.dumps(manifest(COMPLETE)), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--manifest", str(path), "linux-matrix"],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(json.loads(result.stdout), {"include": [
+                {"group": "root", "timeout": 105, "partitions": "root-lib root-suites"},
+                {"group": "store", "timeout": 30, "partitions": "store"},
+            ]})
+
+    def test_group_runs_exact_commands_and_preserves_failures_and_reports(self) -> None:
+        expected = [
+            ["exec", "--", "cargo", "build", "--locked", "--profile", "perf",
+             "-p", "root", "--lib", "--example", "fixture", "--features", "test-helpers"],
+            ["exec", "--", "cargo", "nextest", "run", "--profile", "ci", "--cargo-profile", "perf", "--locked",
+             "-p", "root", "--lib", "--features", "test-helpers", "--no-tests=fail"],
+            ["exec", "--", "cargo", "build", "--locked", "--profile", "perf",
+             "-p", "root", "-p", "cli", "--test", "session_suite", "--test", "graph_suite", "--bins",
+             "--test", "cli_suite", "--bins", "--example", "fixture", "--features", "root/test-helpers"],
+            ["exec", "--", "cargo", "nextest", "run", "--profile", "ci", "--cargo-profile", "perf", "--locked",
+             "-p", "root", "-p", "cli", "--test", "session_suite", "--test", "graph_suite", "--bins",
+             "--test", "cli_suite", "--features", "root/test-helpers", "--no-tests=fail"],
+        ]
+        for mode in ("success", "no-build", "build-failure", "test-failure", "missing-report", "report-move-failure"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                script = root / "scripts/linux-test-partitions.py"
+                shutil.copyfile(SCRIPT_PATH, script)
+                partitions = [dict(p) for p in COMPLETE]
+                if mode != "no-build":
+                    partitions[0]["executables"] = ["example:fixture"]
+                partitions[1]["executables"] = ["bins", "example:fixture"]
+                manifest_path = root / "partitions.json"
+                manifest_path.write_text(json.dumps(manifest(partitions, NOT_RUN)), encoding="utf-8")
+                metadata_path = root / "metadata.json"
+                metadata_path.write_text(json.dumps(metadata()), encoding="utf-8")
+                commands = root / "commands.jsonl"
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                hauler = bin_dir / "hauler"
+                hauler.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[:3] == ["exec", "--", "cargo"], args
+with Path("commands.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\\n")
+os.execvp("cargo", args[2:])
+''', encoding="utf-8")
+                cargo = bin_dir / "cargo"
+                cargo.write_text(f"#!{sys.executable}\n" + '''import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+first = "--lib" in args
+mode = os.environ["PARTITION_TEST_MODE"]
+if args[0] == "build":
+    sys.exit(42 if first and mode == "build-failure" else 0)
+assert args[:2] == ["nextest", "run"], args
+if not (first and mode == "missing-report"):
+    report = Path("target/nextest/ci/junit.xml")
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text('<testsuite name="' + ("lib" if first else "suites") + '"/>')
+if first and mode == "report-move-failure":
+    Path("target/nextest/linux/root-lib.xml").mkdir()
+sys.exit(101 if first and mode == "test-failure" else 0)
+''', encoding="utf-8")
+                for executable in (hauler, cargo):
+                    executable.chmod(0o755)
+                source = root / "target/nextest/ci/junit.xml"
+                source.parent.mkdir(parents=True)
+                source.write_text("stale source", encoding="utf-8")
+                output = root / "target/nextest/linux"
+                output.mkdir()
+                (output / "root-lib.xml").write_text("stale result", encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, str(script), "--manifest", str(manifest_path), "--metadata", str(metadata_path),
+                     "run-linux-group", "root"],
+                    cwd=root, capture_output=True, text=True,
+                    env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"], "PARTITION_TEST_MODE": mode},
+                )
+                self.assertEqual(result.returncode, 0 if mode in ("success", "no-build") else 1, result.stdout + result.stderr)
+                actual = [json.loads(line) for line in commands.read_text().splitlines()]
+                expected_commands = expected
+                if mode == "build-failure":
+                    expected_commands = expected[:1] + expected[2:]
+                elif mode == "no-build":
+                    expected_commands = expected[1:]
+                self.assertEqual(actual, expected_commands)
+                self.assertEqual((output / "root-suites.xml").read_text(), '<testsuite name="suites"/>')
+                self.assertFalse(source.exists())
+                timings = json.loads((output / "timings.json").read_text())
+                self.assertEqual(timings["group"], "root")
+                first, second = timings["partitions"]
+                self.assertEqual([first["partition"], second["partition"]], ["root-lib", "root-suites"])
+                self.assertEqual(second["test"]["exit_code"], 0)
+                self.assertGreater(second["test"]["seconds"], 0)
+                self.assertIsNone(second["error"])
+                if mode == "no-build":
+                    self.assertIsNone(first["build"])
+                if mode == "build-failure":
+                    self.assertEqual(first["build"]["exit_code"], 42)
+                    self.assertIsNone(first["test"])
+                    self.assertFalse((output / "root-lib.xml").exists())
+                elif mode == "missing-report":
+                    self.assertEqual(first["test"]["exit_code"], 0)
+                    self.assertIn("without its JUnit report", first["error"])
+                    self.assertFalse((output / "root-lib.xml").exists())
+                elif mode == "report-move-failure":
+                    self.assertEqual(first["test"]["exit_code"], 0)
+                    self.assertIsNotNone(first["error"])
+                    self.assertIsNone(first["report"])
+                else:
+                    self.assertEqual(first["test"]["exit_code"], 101 if mode == "test-failure" else 0)
+                    self.assertEqual((output / "root-lib.xml").read_text(), '<testsuite name="lib"/>')
+
     def test_check_fails_closed_on_the_command_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             metadata_path = Path(directory) / "metadata.json"
             metadata_path.write_text(json.dumps(metadata()), encoding="utf-8")
             manifest_path = Path(directory) / "partitions.json"
-            manifest_path.write_text(json.dumps(manifest(COMPLETE[:2], NOT_RUN, MACOS_GROUPS[:1])), encoding="utf-8")
+            manifest_path.write_text(json.dumps({**manifest(COMPLETE[:2], NOT_RUN, MACOS_GROUPS[:1]), "linux_groups": LINUX_GROUPS[:1]}), encoding="utf-8")
             result = subprocess.run(
                 [sys.executable, str(SCRIPT_PATH), "--manifest", str(manifest_path), "--metadata", str(metadata_path), "check"],
                 capture_output=True,
