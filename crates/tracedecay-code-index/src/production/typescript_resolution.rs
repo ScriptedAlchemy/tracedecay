@@ -762,14 +762,14 @@ pub(super) enum ModuleTargetV1 {
 
 /// `(parent directory, file name)` of a project-relative path; the root's
 /// parent is `""`.
-fn split_parent(path: &str) -> (&str, &str) {
+pub(super) fn split_parent(path: &str) -> (&str, &str) {
     path.rsplit_once('/').unwrap_or(("", path))
 }
 
 /// `base/relative` with `.` and `..` segments folded; a path that would climb
 /// above the project root stays clamped at the root, so it can never name a
 /// file outside the indexed set.
-fn join_normalized(base: &str, relative: &str) -> String {
+pub(super) fn join_normalized(base: &str, relative: &str) -> String {
     let mut segments: Vec<&str> = base.split('/').filter(|part| !part.is_empty()).collect();
     for part in relative.split('/') {
         match part {

@@ -8,6 +8,7 @@ use crate::code_index::{
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphProjectionError,
 };
+use tracedecay_contracts::ApplicationProblemDetailV1;
 use tracedecay_contracts::retrieval::{
     PrimitiveFailure, PrimitiveFailureKind, SymbolGraphPortContext, SymbolGraphScope,
 };
@@ -216,6 +217,18 @@ fn admission_failure(error: CodeIndexIgnoredDependencyAdmissionErrorV1) -> Primi
             "application.symbol-graph.ignored-dependency-generation-stale",
             "ignored dependency indexing rejected a stale source generation",
         ),
+        CodeIndexIgnoredDependencyAdmissionErrorV1::Parked(parked) => {
+            let detail = ApplicationProblemDetailV1::Parked {
+                cause: parked.reason,
+                remedy: parked.remediation,
+                retries_on_wake: parked.retries_on_wake,
+            };
+            PrimitiveFailure {
+                kind: PrimitiveFailureKind::Unavailable,
+                code: detail.code().to_owned(),
+                message: detail.message(),
+            }
+        }
     }
 }
 

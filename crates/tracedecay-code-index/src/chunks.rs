@@ -2351,7 +2351,9 @@ fn resolve_file_references(
 /// `None` when the reference can never bind cross-file: blocklisted names,
 /// relation kinds outside the canonical graph contract, and references whose
 /// enclosing symbol is not uniquely identified. Rust receiver calls remain as
-/// limitation evidence; a dotted name never grants edge authority.
+/// limitation evidence; Python, Go, Java, and Ruby qualified calls remain for
+/// import-module binding at sealing; a dotted name never grants edge
+/// authority by itself.
 fn cross_file_reference_candidate(
     source: &str,
     offsets: &[u64],
@@ -2366,16 +2368,24 @@ fn cross_file_reference_candidate(
         && rust
         && reference.reference_name.contains('.');
     let typescript = typescript_family_path(&reference.file_path);
-    let explicitly_imported =
-        typescript && imported_locals.contains(reference.reference_name.as_str());
+    let module_import = module_import_language_path(&reference.file_path);
+    let explicitly_imported = (typescript || module_import)
+        && imported_locals.contains(reference.reference_name.as_str());
     // `ns.f()` through an imported module namespace binds at sealing, where
     // the namespace's module is known.
     let imported_member_call = typescript
         && reference.reference_kind == EdgeKind::Calls
         && typescript_member_call_path(&reference.reference_name)
             .is_some_and(|(head, _)| imported_locals.contains(head));
+    // A qualified call in an import-module language binds at sealing
+    // through the file's imports, its package, or its loaded files; one the
+    // seal cannot bind remains a disclosed caller gap.
+    let module_member_call = module_import
+        && reference.reference_kind == EdgeKind::Calls
+        && reference.reference_name.contains('.');
     if !receiver_call
         && !imported_member_call
+        && !module_member_call
         && (reference.reference_name.contains('.')
             || (!explicitly_imported
                 && cross_file_reference_name_is_blocklisted(
@@ -2418,9 +2428,7 @@ pub(crate) fn typescript_member_call_path(reference_name: &str) -> Option<(&str,
 /// Whether a path is a TypeScript-family source the TypeScript extractor
 /// produced import bindings for.
 pub(crate) fn typescript_family_path(path: &str) -> bool {
-    path.rsplit('.').next().is_some_and(|extension| {
-        matches!(extension, "ts" | "tsx" | "js" | "jsx" | "astro" | "svelte")
-    })
+    path_has_extension(path, &["ts", "tsx", "js", "jsx", "astro", "svelte"])
 }
 
 /// The structural compatibility matrix between a reference's edge kind and a
@@ -2438,6 +2446,18 @@ fn reference_target_kind_is_compatible(reference_kind: EdgeKind, target_kind: &s
         // abstention names a plausible endpoint rather than a name collision.
         None => relation_target_kind_is_compatible(RelationEdgeKindV1::Implements, target_kind),
     }
+}
+
+/// Whether a path is a Python, Go, Java, or Ruby source, whose calls bind
+/// through its imports, package, or loaded files at sealing.
+pub(crate) fn module_import_language_path(path: &str) -> bool {
+    path_has_extension(path, &["py", "go", "java", "rb"])
+}
+
+fn path_has_extension(path: &str, extensions: &[&str]) -> bool {
+    path.rsplit('.')
+        .next()
+        .is_some_and(|extension| extensions.contains(&extension))
 }
 
 /// Languages whose files import through TypeScript/JavaScript module syntax.

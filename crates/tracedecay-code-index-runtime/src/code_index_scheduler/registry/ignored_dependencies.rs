@@ -11,7 +11,9 @@ use std::time::Duration;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 use tracedecay_domain::canonical_sha256;
 
-use super::{CodeIndexSchedulerRegistryV1, PendingWakeV1, ServingGenerationSlot};
+use super::{
+    CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1, PendingWakeV1, ServingGenerationSlot,
+};
 use crate::code_index_scheduler::graph_activation::CodeGraphActivationAuthorityV1;
 use crate::code_index_scheduler::{
     CodeGraphReplayBindingV1, CodeIndexCadenceTriggerV1, CodeIndexIgnoredDependencyIndexOutcomeV1,
@@ -437,17 +439,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.pending_wake),
             )
         };
-        // A ready generation may serve from its text owner with no decoded
-        // seat; the whole decode runs only on demand. Admission builds on the
-        // decoded generation, so a refusal for an empty seat demands it and
-        // the caller's retry finds it seated.
-        if graph_activation_enabled
-            && serving_generation
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none()
-        {
-            self.request_complete_generation(&project_root).await;
+        if graph_activation_enabled {
+            self.await_decoded_seat(&project_root, control.as_ref())
+                .await?;
         }
         let (flight, owns_flight) = {
             let mut active = flights
@@ -496,6 +490,86 @@ impl CodeIndexSchedulerRegistryV1 {
             )
             .await;
         owner.finish(result)
+    }
+
+    /// Admission builds on the decoded generation, but a ready generation
+    /// serves from its text owner before the worker's graph tail seats it (a
+    /// first publication), or with no seat at all until one is demanded.
+    /// Demand the seat and wait for it on the owner's signals, within the
+    /// request's budget: an unexpired request never refuses for a seat that
+    /// is still being installed, and an expired one reports its deadline.
+    ///
+    /// A worker parked on a failure installs no seat, so the park is the
+    /// answer. A park the worker re-checks on every wake answers only once a
+    /// pass after this demand has observed it again (each observation
+    /// rewrites it); any other park answers once the worker is back at a
+    /// wait, since only changed input or an operator remedy lifts it.
+    async fn await_decoded_seat(
+        &self,
+        project_root: &Path,
+        control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
+        let Some(activity) = self.subscribe_owner_activity(project_root).await else {
+            return Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
+        };
+        let (serving_generation, convergence_park, shutting_down, pending_wake, wake) = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(project_root) else {
+                return Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
+            };
+            (
+                Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.convergence_park),
+                Arc::clone(&worktree.shutting_down),
+                Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.wake),
+            )
+        };
+        let seated = || {
+            serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        };
+        let park = || {
+            convergence_park
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        if seated() {
+            return Ok(());
+        }
+        let park_at_demand = park();
+        self.request_complete_generation(project_root).await;
+        // The demand flag flips once per mount, so this demand posts its own
+        // wake: a park the worker re-checks answers only after that re-check.
+        Self::note_wake(
+            &pending_wake,
+            &wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
+        loop {
+            if seated() {
+                return Ok(());
+            }
+            if let Some(parked) = park()
+                && activity.pass_finished()
+                && (!parked.retries_on_wake || park_at_demand.as_ref() != Some(&parked))
+            {
+                return Err(CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(parked).into());
+            }
+            refuse_if_interrupted(control, &shutting_down)?;
+            tokio::select! {
+                changed = signals.changed() => {
+                    if changed.is_err() {
+                        return Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
+                    }
+                }
+                () = tokio::time::sleep(Duration::from_millis(5)) => {}
+            }
+        }
     }
 
     /// The owning flight's full admission lifetime: gate waits, the blocking
