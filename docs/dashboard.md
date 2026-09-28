@@ -27,6 +27,14 @@ The dashboard binds to loopback and is intended for the local operator. It
 supports keyboard navigation, screen readers, responsive layouts, reduced
 motion, bounded graph rendering, and a non-graph form for selected evidence.
 
+Loopback is reachable by every account on the machine, so each dashboard
+listener mints a random access token and prints a launch URL of the form
+`http://127.0.0.1:PORT/?token=…`. Opening it redirects to the tokenless path
+and sets an `HttpOnly`, `SameSite=Strict` session cookie. Scripts send the
+token as the Basic-auth password for user `tracedecay`. A request without the
+token gets `401 dashboard_request_unauthenticated`; a request whose `Host` or
+`Origin` does not name the bound listener gets `403`.
+
 ## Code graph plugin API
 
 The legacy `/legacy` frontend's Code Graph tab reads a project-local, bounded
@@ -79,7 +87,7 @@ defaults:
 
 | Variable | Effect |
 |---|---|
-| `TRACEDECAY_DASHBOARD_URL` | Uses the specified existing dashboard server instead of spawning one. |
+| `TRACEDECAY_DASHBOARD_URL` | Uses the specified existing dashboard server instead of spawning one; pass its launch URL so the wrapper can present the access token. |
 | `TRACEDECAY_BIN` | Selects the `tracedecay` executable used when the wrapper starts the dashboard. |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Selects the project root passed to the dashboard; when unset, the wrapper uses the Hermes process working directory. |
 

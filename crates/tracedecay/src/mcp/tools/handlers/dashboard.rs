@@ -563,7 +563,7 @@ async fn take_finished_dashboard_for(project_root: &Path) -> Option<RunningDashb
 }
 
 async fn join_dashboard(dashboard: RunningDashboard, exceeded_deadline: bool) -> Result<()> {
-    let url = dashboard.url;
+    let url = format!("http://{}/", dashboard.addr);
     match dashboard.task.await {
         Ok(Ok(())) if !exceeded_deadline => Ok(()),
         Ok(Ok(())) => Err(TraceDecayError::Config {
@@ -780,7 +780,7 @@ pub(super) async fn compute_dashboard(
                 let manager = get_manager().lock().await;
                 manager
                     .get(&project_root)
-                    .map(|dashboard| dashboard.url.clone())
+                    .map(|dashboard| format!("http://{}/", dashboard.addr))
             };
             let Some(previous_url) = previous_url else {
                 return Ok(DashboardResultV1::NotRunning);
@@ -1035,8 +1035,9 @@ pub(super) async fn compute_dashboard(
             )
             .await?;
             let (listener, addr) = bind_dashboard(&host, port).await?;
-            let app = tracedecay_dashboard_api::with_dashboard_http_admission(app, addr);
-            let url = format!("http://{addr}/");
+            let access = tracedecay_dashboard_api::DashboardAccessToken::mint()?;
+            let url = access.launch_url(addr);
+            let app = tracedecay_dashboard_api::with_dashboard_http_admission(app, addr, access);
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
             let completed = Arc::new(tokio::sync::Semaphore::new(0));

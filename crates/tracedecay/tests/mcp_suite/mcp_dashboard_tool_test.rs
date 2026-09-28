@@ -96,28 +96,67 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
     let payload: Value = serde_json::from_str(content_text).expect("dashboard payload");
     let port = payload["port"].as_u64().expect("bound port");
     assert_ne!(port, 0, "an ephemeral request reports the port it bound");
+    let launch_url = payload["url"].as_str().expect("dashboard url").to_owned();
+    let token = launch_url
+        .strip_prefix(&format!("http://127.0.0.1:{port}/?token="))
+        .unwrap_or_else(|| panic!("the returned URL is the listener's launch URL: {launch_url}"));
+    assert!(
+        token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+        "the launch token is 32 random bytes in hex: {token}"
+    );
     assert_eq!(
         payload,
         json!({
             "status": "started",
-            "url": format!("http://127.0.0.1:{port}/"),
+            "url": launch_url,
             "host": "127.0.0.1",
             "port": port,
         })
     );
-    let url = payload["url"].as_str().expect("dashboard url");
-    let url = if url.ends_with('/') {
-        url.to_string()
-    } else {
-        format!("{}/", url)
-    };
 
-    // Live probe: the returned URL must serve /api/capabilities
-    let agent = http_agent();
-    let cap_url = format!("{}api/capabilities", url);
+    // Any local account can reach the loopback port; without the token the
+    // dashboard must refuse reads and mutations alike.
+    let anonymous = http_agent();
+    let origin = format!("http://127.0.0.1:{port}");
+    let mut refused = anonymous
+        .get(&format!("{origin}/api/capabilities"))
+        .call()
+        .expect("unauthenticated capabilities response");
+    assert_eq!(refused.status().as_u16(), 401);
+    let refusal: Value =
+        serde_json::from_str(&refused.body_mut().read_to_string().unwrap()).unwrap();
+    assert_eq!(refusal["error"], json!("dashboard_request_unauthenticated"));
+    let mutation = anonymous
+        .post(&format!("{origin}/api/automation/scheduler/pause"))
+        .send_json(json!({}))
+        .expect("unauthenticated mutation response");
+    assert_eq!(mutation.status().as_u16(), 401);
+    let forged = anonymous
+        .get(&format!("{origin}/?token={}", "0".repeat(64)))
+        .call()
+        .expect("forged launch response");
+    assert_eq!(forged.status().as_u16(), 401);
+
+    // A browser opening the launch URL is redirected to the tokenless path
+    // with a session cookie, and that cookie alone admits later requests.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .timeout_global(Some(Duration::from_secs(4)))
+        .build()
+        .into();
+    let launched = agent.get(&launch_url).call().expect("launch URL response");
+    assert_eq!(launched.status().as_u16(), 303);
+    assert_eq!(launched.headers()["location"], "/");
+    let session_cookie = format!("tracedecay_dashboard_{port}={token}");
+    assert_eq!(
+        launched.headers()["set-cookie"],
+        format!("{session_cookie}; Path=/; HttpOnly; SameSite=Strict").as_str()
+    );
+    let cap_url = format!("{origin}/api/capabilities");
     // Give the background server a moment to accept (rarely needed but robust)
     for _ in 0..40 {
-        if let Ok(mut resp) = agent.get(&cap_url).call()
+        if let Ok(mut resp) = agent.get(&cap_url).header("Cookie", &session_cookie).call()
             && resp.status().as_u16() == 200
         {
             let raw = resp.body_mut().read_to_string().unwrap_or_default();
@@ -136,10 +175,7 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!(
-        "dashboard at {} did not serve /api/capabilities in time",
-        url
-    );
+    panic!("dashboard at {origin} did not serve /api/capabilities in time");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
