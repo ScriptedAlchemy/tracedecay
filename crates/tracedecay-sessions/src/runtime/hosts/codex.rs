@@ -86,7 +86,7 @@ use records::{
 use crate::runtime::jsonl_observation_admission::{
     SharedJsonlPathPin, install_shared_jsonl_preparation_authority,
     namespace_replacement_message_ids, pin_shared_jsonl_paths, preflight_and_parse_new,
-    reserve_shared_jsonl_bytes, shared_jsonl_preparation_capacity,
+    reserve_shared_jsonl_bytes,
 };
 use crate::runtime::shared::{
     ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptScopeMatcher,
@@ -687,14 +687,12 @@ impl CodexDiscoveryHub {
                 } => (state, frontier, Some(generation), Some(source_key)),
             };
             let shared = replay_generation.is_none();
-            let bounds = if shared {
-                TranscriptDiscoveryBounds {
-                    max_files: bounds.max_files.min(shared_jsonl_preparation_capacity()),
-                    ..bounds
-                }
-            } else {
-                bounds
-            };
+            // Page preparation capacity bounds concurrent JSONL reservations
+            // and prefetch workers. It must not shrink this retained scan.
+            // Clamping `max_files` to that width spends the structural budget
+            // on directory entries, so a large Codex profile cannot emit any
+            // rollout until the dated tree has been re-walked in capacity-sized
+            // slices.
             let result = source.discover_transcript_paths_with_state(bounds, base, &mut discovery);
             let mut inner = self.inner.lock().map_err(|_| {
                 TranscriptIngestError::InvalidCodexDiscoveryFrontier {
