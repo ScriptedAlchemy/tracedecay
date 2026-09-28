@@ -458,3 +458,118 @@ fn a_callers_cursor_pages_only_the_node_and_operation_it_was_minted_for() {
         "{first_names:?} / {second_names:?}"
     );
 }
+
+fn search_args(query: &str, cursor: Option<&str>) -> Value {
+    let mut args = json!({"query": query, "limit": 2, "format": "json"});
+    if let Some(cursor) = cursor {
+        args["cursor"] = json!(cursor);
+    }
+    args
+}
+
+fn search_names(body: &Value) -> Vec<String> {
+    body["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search page has no results: {body}"))
+        .iter()
+        .map(|row| row["display"]["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_search_cursor_replayed_with_another_query_or_malformed_is_refused() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    // One ledger function per file, so the per-file diversity cap keeps all
+    // of them in the ranked set a page walks.
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    for name in ["ledger_open", "ledger_close", "ledger_post", "ledger_void"] {
+        std::fs::write(
+            project.join(format!("src/{name}.rs")),
+            format!("pub fn {name}() {{}}\n"),
+        )
+        .unwrap();
+    }
+    committed_git_project(&project, "pub fn unrelated() {}\n");
+    initialize_tracedecay_cli_project(&home, &project);
+    node_id(&home, &project, "ledger_open");
+
+    let started = Instant::now();
+    let (first, cursor) = loop {
+        let (ok, body) = tool(
+            &home,
+            &project,
+            "tracedecay_search",
+            &search_args("ledger", None),
+        );
+        if ok && let Some(cursor) = body["next_cursor"].as_str() {
+            break (body.clone(), cursor.to_owned());
+        }
+        assert!(
+            started.elapsed() < INDEX_READY_TIMEOUT,
+            "search never paged: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    };
+
+    let changed_query = run_tool(
+        &home,
+        &project,
+        "tracedecay_search",
+        &search_args("ledger_open", Some(&cursor)),
+    );
+    let refusal = refusal_of("tracedecay_search", &changed_query);
+    assert_eq!(refusal["kind"], "invalid_request", "{refusal}");
+    assert_eq!(refusal["code"], "cursor.parameter_changed", "{refusal}");
+    assert_eq!(
+        refusal["message"],
+        "The cursor was issued for a request with a different `query`. Repeat the request \
+         with the parameters that returned the cursor, or restart without it.",
+        "{refusal}"
+    );
+    assert_eq!(
+        refusal["legal_actions"],
+        json!(["correct_request", "restart_without_cursor"]),
+        "{refusal}"
+    );
+
+    for malformed in ["not-a-cursor", ""] {
+        let run = run_tool(
+            &home,
+            &project,
+            "tracedecay_search",
+            &search_args("ledger", Some(malformed)),
+        );
+        let refusal = refusal_of("tracedecay_search", &run);
+        assert_eq!(
+            refusal["kind"], "invalid_request",
+            "{malformed:?}: {refusal}"
+        );
+        assert_eq!(
+            refusal["code"], "cursor.invalid",
+            "{malformed:?}: {refusal}"
+        );
+        assert_eq!(
+            refusal["message"], "The cursor was not issued by this operation. Restart without it.",
+            "{malformed:?}: {refusal}"
+        );
+    }
+
+    let (ok, second) = tool(
+        &home,
+        &project,
+        "tracedecay_search",
+        &search_args("ledger", Some(&cursor)),
+    );
+    assert!(ok, "{second}");
+    let (first_names, second_names) = (search_names(&first), search_names(&second));
+    assert_eq!((first_names.len(), second_names.len()), (2, 2));
+    assert!(
+        second_names
+            .iter()
+            .all(|name| name.starts_with("ledger_") && !first_names.contains(name)),
+        "page two repeated page one: {first_names:?} / {second_names:?}"
+    );
+}
