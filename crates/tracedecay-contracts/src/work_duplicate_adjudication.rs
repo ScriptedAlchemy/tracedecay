@@ -30,6 +30,8 @@ pub enum WorkDuplicateAdjudicationStorageErrorV1 {
     RevisionConflict,
     #[error("duplicate Work adjudication command identity conflicts")]
     IdempotencyConflict,
+    #[error("duplicate Work adjudication evidence is not the owner's current evidence")]
+    EvidenceStale,
     #[error("duplicate Work adjudication authority is unavailable")]
     Unavailable,
 }
@@ -132,6 +134,10 @@ pub struct WorkDuplicateAdjudicationWriteV1 {
     pub actor_id: ActorId,
     pub command: WorkDuplicateAdjudicationCommandV1,
     pub canonical_input_digest: ManifestDigest,
+    /// Work and topology generations the owner observed at admission. A new
+    /// receipt must cite exactly this evidence; an exact replay of an already
+    /// committed command is exempt because its evidence was checked then.
+    pub current_evidence: WorkDuplicateAdjudicationEvidenceV1,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -196,6 +202,7 @@ where
         &self,
         context: &RequestContext,
         command: WorkDuplicateAdjudicationCommandV1,
+        current_evidence: WorkDuplicateAdjudicationEvidenceV1,
     ) -> Result<WorkDuplicateAdjudicationAppendOutcomeV1, ApplicationProblem> {
         ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
         let authority = work_authority(context)?;
@@ -211,6 +218,7 @@ where
                     actor_id: context.actor().clone(),
                     command,
                     canonical_input_digest,
+                    current_evidence,
                 },
             )
             .map_err(storage_problem)?;
@@ -420,6 +428,12 @@ fn storage_problem(error: WorkDuplicateAdjudicationStorageErrorV1) -> Applicatio
                 "application.work.duplicate-adjudication.idempotency-conflict",
                 "The duplicate Work adjudication command identity was already used with different input.",
             )
+        }
+        WorkDuplicateAdjudicationStorageErrorV1::EvidenceStale => {
+            ApplicationProblem::stale(SafeDiagnostic {
+                code: "application.work.duplicate-adjudication.evidence-stale".to_owned(),
+                message: "The duplicate Work adjudication cites evidence that is not the current Work and topology generation; prepare it again.".to_owned(),
+            })
         }
         WorkDuplicateAdjudicationStorageErrorV1::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic {

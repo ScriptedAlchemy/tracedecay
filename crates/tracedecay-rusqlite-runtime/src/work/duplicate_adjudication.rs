@@ -56,6 +56,10 @@ impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
                 Err(StorageError::IdempotencyConflict)
             };
         }
+        if write.command.evidence != write.current_evidence {
+            let _ = transaction.rollback();
+            return Err(StorageError::EvidenceStale);
+        }
 
         require_attempt(&transaction, authority, &write.command.first_attempt)?;
         require_attempt(&transaction, authority, &write.command.second_attempt)?;
