@@ -68,6 +68,7 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::tool_errors::project_route_problem;
 use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
 use tracedecay_mcp::tools::response_trailers::{
     CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, REQUEST_COST_TRAILER_PREFIX,
@@ -144,7 +145,16 @@ pub(crate) async fn run(
     name: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
-    run_inner(profile, project, name, args).await
+    let json_requested = args.iter().any(|arg| arg == "--json");
+    let tool_name = name.as_deref().map(canonical_tool_name);
+    let result = run_inner(profile, project, name, args).await;
+    if json_requested
+        && let (Err(error), Some(tool_name)) = (&result, tool_name.as_deref())
+        && let Some(problem) = project_route_problem(tool_name, error)
+    {
+        println!("{}", serde_json::json!({ "problem": problem }));
+    }
+    result
 }
 
 fn run_inner(
@@ -237,11 +247,8 @@ fn run_inner(
                 .await;
             }
             let (request, requested_format) =
-                cli_surface_invocation(tool_name, tool_args, raw_json).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: error.to_string(),
-                    }
-                })?;
+                cli_surface_invocation(tool_name, tool_args, raw_json)
+                    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             return dispatch_cli_application_surface(
                 profile,
                 operation,
@@ -281,11 +288,13 @@ fn run_inner(
             let suggestion = nearest_tool_name(&canonical, &defs)
                 .map(|name| format!(" Did you mean '{name}'?"))
                 .unwrap_or_default();
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::project_route(
+                "unknown_tool",
+                false,
+                format!(
                     "unknown tool: '{raw_name}'.{suggestion} Run `tracedecay tool` to list available tools."
                 ),
-            });
+            ));
         };
 
         let parsed = parse_invocation(def, &args)?;
@@ -368,11 +377,8 @@ fn run_inner(
             && RetainedSurfaceOperation::from_application(operation).is_none()
         {
             let (request, requested_format) =
-                cli_surface_invocation(&def.name, tool_args, raw_json).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: error.to_string(),
-                    }
-                })?;
+                cli_surface_invocation(&def.name, tool_args, raw_json)
+                    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             return dispatch_cli_application_surface(
                 profile,
                 operation,
@@ -423,11 +429,8 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
     let (request, requested_format) =
-        cli_surface_invocation(operation.mcp_tool_name(), tool_args, raw_json).map_err(
-            |error| TraceDecayError::Config {
-                message: error.to_string(),
-            },
-        )?;
+        cli_surface_invocation(operation.mcp_tool_name(), tool_args, raw_json)
+            .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     dispatch_cli_application_surface(
         profile,
         operation,
@@ -519,9 +522,7 @@ fn dispatch_cli_application_surface_inner(
                     )
                     .await;
                 }
-                return Err(TraceDecayError::Config {
-                    message: error.to_string(),
-                });
+                return Err(error.into_trace_decay_error());
             }
         };
         let handshake = tracedecay::daemon::handshake_for_current_client(
@@ -541,11 +542,8 @@ fn dispatch_cli_application_surface_inner(
         let result = loop {
             let request = match next_request.take() {
                 Some(request) => request,
-                None => parse_application_surface_request(operation, tool_args.clone()).map_err(
-                    |error| TraceDecayError::Config {
-                        message: error.to_string(),
-                    },
-                )?,
+                None => parse_application_surface_request(operation, tool_args.clone())
+                    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?,
             };
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -573,18 +571,7 @@ fn dispatch_cli_application_surface_inner(
                 Some(&client),
             )
             .await
-            .map_err(|error| match error {
-                // The same typed connect failure the compatibility tool path
-                // returns: one restart grace, then fail fast, never another
-                // dispatch attempt against a dead socket.
-                ApplicationSurfaceAdapterError::DaemonUnreachable {
-                    reason_code,
-                    detail,
-                } => TraceDecayError::project_route(reason_code, true, detail),
-                error => TraceDecayError::Config {
-                    message: error.to_string(),
-                },
-            })?;
+            .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) else {
                 break result;
             };

@@ -5,6 +5,7 @@ use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
+use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_project::project::TraceDecay;
@@ -206,14 +207,8 @@ fn dispatch_application_surface_tools_inner<'a>(
             arguments.remove("project_selector");
         }
         let normalized_args =
-            match tracedecay_daemon_protocol::adapt_application_tool_request(tool_name, args) {
-                Ok(args) => args,
-                Err(error) => {
-                    return Err(TraceDecayError::Config {
-                        message: error.to_string(),
-                    });
-                }
-            };
+            tracedecay_daemon_protocol::adapt_application_tool_request(tool_name, args)
+                .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
         application_surface::handle_application_surface(
             cg,
             operation,

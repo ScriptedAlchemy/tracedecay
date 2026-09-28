@@ -97,9 +97,7 @@ pub fn tool_json(response_handle_root: Option<&Path>, args: &Value, value: &Valu
 
 /// The single rejection every dispatch family returns for a name it does not own.
 pub fn unknown_tool_error(tool_name: &str) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("unknown tool: {tool_name}"),
-    }
+    TraceDecayError::project_route("unknown_tool", false, format!("unknown tool: {tool_name}"))
 }
 
 /// Rejects tool arguments that are not a JSON object.

@@ -179,6 +179,7 @@ use tracedecay_mcp::tools::binding::{
     mcp_dispatch_contract, tool_accepts_registered_project_selector,
     tool_dispatches_registered_project_reader,
 };
+use tracedecay_mcp::tools::dispatch::McpDispatchMetadataError;
 use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
 use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::storage::registered_project_id;
@@ -187,8 +188,11 @@ fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
     if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
         return Ok(());
     }
-    let contract = mcp_dispatch_contract(tool_name).map_err(|error| TraceDecayError::Config {
-        message: error.to_string(),
+    let contract = mcp_dispatch_contract(tool_name).map_err(|error| match error {
+        McpDispatchMetadataError::MissingContract(_) => unknown_tool_error(tool_name),
+        error => TraceDecayError::Config {
+            message: error.to_string(),
+        },
     })?;
     if let tracedecay_tool_catalog::McpDispatchAvailability::Unavailable { reason, retryable } =
         contract.availability()

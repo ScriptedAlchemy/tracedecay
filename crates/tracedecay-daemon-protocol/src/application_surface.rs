@@ -57,6 +57,7 @@ use crate::output_format::{RequestedOutputFormat, requested_output_format};
 use crate::surface::GitReadSurfaceRequest;
 use tracedecay_contracts::context_scout::ContextScoutSurfaceRequestV1;
 use tracedecay_contracts::retained_surfaces::{RetainedSurfaceOperation, RetainedSurfaceRequestV1};
+use tracedecay_domain::errors::TraceDecayError;
 
 #[derive(Debug, Error)]
 pub enum ApplicationSurfaceAdapterError {
@@ -91,6 +92,29 @@ impl ApplicationSurfaceAdapterError {
         Self::InvalidSurfaceRequest {
             detail: detail.to_string(),
         }
+    }
+
+    /// The typed reason code every transport reports for this failure, so a
+    /// caller branches on the same unavailable, denied, or invalid state
+    /// whether it called through MCP or `tracedecay tool`.
+    pub fn into_trace_decay_error(self) -> TraceDecayError {
+        let (reason_code, retryable) = match &self {
+            Self::DaemonUnavailable => ("application_surface_unavailable", true),
+            Self::DaemonUnreachable { reason_code, .. } => {
+                return TraceDecayError::project_route(reason_code.clone(), true, self.to_string());
+            }
+            Self::UnknownOrNotAuthorized => {
+                ("application_surface_not_found_or_not_authorized", false)
+            }
+            Self::InvalidRequestHandle | Self::InvalidSurfaceRequest { .. } => {
+                ("application_surface_invalid_request", false)
+            }
+            Self::Catalog(_)
+            | Self::Contract(_)
+            | Self::Identifier(_)
+            | Self::CatalogValidation(_) => ("application_surface_catalog_invalid", false),
+        };
+        TraceDecayError::project_route(reason_code, retryable, self.to_string())
     }
 }
 

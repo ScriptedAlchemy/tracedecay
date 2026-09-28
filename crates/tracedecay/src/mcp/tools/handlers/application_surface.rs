@@ -8,7 +8,8 @@ use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
-    ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationToolRequest,
+    parse_application_surface_request,
 };
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -114,11 +115,7 @@ pub(super) async fn handle_application_surface(
                 &error,
             )
             .await;
-            return Err(TraceDecayError::project_route(
-                "application_surface_invalid_request",
-                false,
-                error.to_string(),
-            ));
+            return Err(error.into_trace_decay_error());
         }
     };
     let controls = complete_protocol_controls(
@@ -159,36 +156,8 @@ pub(super) async fn handle_application_surface(
             .await
         }
     }
-    .map_err(application_surface_dispatch_error)?;
+    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     render_application_surface_result(Some(&cg.store_layout().response_handle_root), &result)
-}
-
-/// Map surface-resolution failures to typed reason codes so MCP clients see
-/// truthful unavailable/denied states instead of an untyped internal error.
-fn application_surface_dispatch_error(
-    error: tracedecay_daemon_protocol::ApplicationSurfaceAdapterError,
-) -> TraceDecayError {
-    use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError as AdapterError;
-    let (reason_code, retryable) = match &error {
-        AdapterError::DaemonUnavailable => ("application_surface_unavailable", true),
-        // Keep the transport's own reason code (`daemon_connect_down` /
-        // `daemon_connect_saturated`) so every dispatch surface names the
-        // dead-daemon state identically.
-        AdapterError::DaemonUnreachable { reason_code, .. } => {
-            return TraceDecayError::project_route(reason_code.clone(), true, error.to_string());
-        }
-        AdapterError::UnknownOrNotAuthorized => {
-            ("application_surface_not_found_or_not_authorized", false)
-        }
-        AdapterError::InvalidRequestHandle | AdapterError::InvalidSurfaceRequest { .. } => {
-            ("application_surface_invalid_request", false)
-        }
-        AdapterError::Catalog(_)
-        | AdapterError::Contract(_)
-        | AdapterError::Identifier(_)
-        | AdapterError::CatalogValidation(_) => ("application_surface_catalog_invalid", false),
-    };
-    TraceDecayError::project_route(reason_code, retryable, error.to_string())
 }
 
 /// Render one settled application-surface call as its tool result. MCP and
@@ -392,7 +361,7 @@ pub async fn execute_retained_surface_tool(
         cancellation,
         requested_format,
     )
-    .map_err(application_surface_dispatch_error)?;
+    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     dispatched.invocation.invocation.scope = target;
     let binding_id = dispatched.invocation.binding_id.clone();
     let result_contract =
@@ -425,13 +394,11 @@ pub async fn execute_retained_surface_tool(
         .await
         {
             Ok(result) => result.result,
-            Err(
-                tracedecay_daemon_protocol::ApplicationSurfaceAdapterError::DaemonUnreachable {
-                    reason_code,
-                    detail,
-                },
-            ) => Err(unavailable(reason_code, detail)?),
-            Err(error) => return Err(application_surface_dispatch_error(error)),
+            Err(ApplicationSurfaceAdapterError::DaemonUnreachable {
+                reason_code,
+                detail,
+            }) => Err(unavailable(reason_code, detail)?),
+            Err(error) => return Err(error.into_trace_decay_error()),
         },
     };
     Ok(RetainedSurfaceExecution {
@@ -466,16 +433,8 @@ pub async fn execute_graph_tool_surface(
     let profile_owner_request = args
         .as_object()
         .is_some_and(|arguments| operation.is_profile_owner_request(arguments));
-    let request = parse_application_surface_request(operation, args).map_err(|error| {
-        TraceDecayError::Config {
-            message: match error {
-                tracedecay_daemon_protocol::ApplicationSurfaceAdapterError::InvalidSurfaceRequest {
-                    detail,
-                } => detail,
-                error => error.to_string(),
-            },
-        }
-    })?;
+    let request = parse_application_surface_request(operation, args)
+        .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     let request_id = match protocol_request_id {
         Some(request_id) => request_id,
         None => self::request_id()?,
@@ -502,7 +461,7 @@ pub async fn execute_graph_tool_surface(
         cancellation,
         RequestedOutputFormat::Json,
     )
-    .map_err(application_surface_dispatch_error)?;
+    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     // A request that names no project, only the profile, is the daemon's
     // profile owner's whatever project this caller's executor serves.
     if profile_owner_request {
@@ -513,7 +472,7 @@ pub async fn execute_graph_tool_surface(
         operation, dispatched, executor,
     )
     .await
-    .map_err(application_surface_dispatch_error)?
+    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?
     .result;
     settle_graph_tool_result(operation, binding_id, result)
 }

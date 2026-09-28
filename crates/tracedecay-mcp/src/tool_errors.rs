@@ -162,9 +162,10 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         "tool_dispatch_shutdown"
         | "mcp_dispatch_effect_journey_unverified"
         | "application_surface_unavailable" => Some("unavailable"),
-        "application_surface_invalid_request" | "project_required" | "project_not_enrolled" => {
-            Some("invalid_request")
-        }
+        "application_surface_invalid_request"
+        | "project_required"
+        | "project_not_enrolled"
+        | "unknown_tool" => Some("invalid_request"),
         "application_surface_not_found_or_not_authorized" => Some("denied"),
         _ => None,
     }
