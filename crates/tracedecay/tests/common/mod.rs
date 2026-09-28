@@ -6,10 +6,8 @@ pub mod mcp_response;
 pub mod repository_layout;
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
+use std::fs;
 use std::io::Read;
-#[cfg(not(windows))]
-use std::io::Write;
 use std::net::TcpListener;
 #[cfg(not(unix))]
 use std::net::TcpStream;
@@ -24,8 +22,6 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-#[cfg(not(windows))]
-use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay_project::project::TraceDecayOpenOptions;
@@ -34,6 +30,8 @@ use tracedecay_runtime_core::config::{GLOBAL_DB_PATH_ENV, ProfileRoot, USER_DATA
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
+#[cfg(not(windows))]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -413,39 +411,13 @@ pub fn install_fake_codex_launcher(script: &Path, bin: &Path) {
          SCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
          exec python3 \"$SCRIPT_DIR/{script_name}\" \"$@\"\n"
     );
-    write_executable_atomically(bin, launcher.as_bytes()).unwrap_or_else(|err| {
+    write_executable_script(bin, launcher).unwrap_or_else(|err| {
         panic!(
             "failed to install fake codex launcher {} for {}: {err}",
             bin.display(),
             script.display()
         )
     });
-}
-
-#[cfg(not(windows))]
-fn write_executable_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = NamedTempFile::new_in(parent)?;
-    tmp.write_all(contents)?;
-    make_executable_file(tmp.as_file())?;
-    tmp.as_file_mut().sync_all()?;
-    tmp.persist(path).map_err(|err| err.error)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn make_executable_file(file: &File) -> std::io::Result<()> {
-    let mut permissions = file.metadata()?.permissions();
-    permissions.set_mode(0o755);
-    file.set_permissions(permissions)
-}
-
-#[cfg(not(unix))]
-fn make_executable_file(_file: &File) -> std::io::Result<()> {
-    Ok(())
 }
 
 pub fn windows_python_launcher(script_name: &str) -> String {

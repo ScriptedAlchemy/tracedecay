@@ -1229,27 +1229,6 @@ mod tests {
     // assertion setup; production upgrade code above is kept panic-free.
     use super::*;
 
-    /// Writes an executable script without this process ever holding it open
-    /// for writing. Linux refuses `execve` with `ETXTBSY` while any process
-    /// holds the file writable, and a sibling test thread that forks while a
-    /// write descriptor is open carries a copy into its child until that child
-    /// execs. The single-threaded `sh` that writes it here has no sibling to
-    /// fork, and has exited before the script runs.
-    #[cfg(unix)]
-    fn write_executable_script(path: &Path, contents: &str) {
-        let status = Command::new("/bin/sh")
-            .args([
-                "-c",
-                r#"printf '%s' "$1" > "$2" && chmod 755 "$2""#,
-                "sh",
-                contents,
-            ])
-            .arg(path)
-            .status()
-            .unwrap();
-        assert!(status.success(), "writing {}: {status}", path.display());
-    }
-
     #[test]
     fn checksum_manifest_selects_the_exact_release_asset() {
         let digest = "a".repeat(64);
@@ -1319,11 +1298,11 @@ mod tests {
             UpgradeOutcome, VersionProbeError, finish_versioned_upgrade, installed_binary_version,
             installed_binary_version_within,
         };
-        use super::write_executable_script;
+        use tracedecay_runtime_core::test_executable::write_executable_script;
 
         fn script(dir: &Path, body: &str) -> PathBuf {
             let path = dir.join("tracedecay");
-            write_executable_script(&path, &format!("#!/bin/sh\n{body}\n"));
+            write_executable_script(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
             path
         }
 
@@ -1597,7 +1576,7 @@ mod tests {
         use std::path::PathBuf;
 
         use super::super::{ManagerCommand, PackageManager, UpgradeOutcome, run_delegated_upgrade};
-        use super::write_executable_script;
+        use tracedecay_runtime_core::test_executable::write_executable_script;
 
         fn sh(script: &str) -> ManagerCommand {
             ManagerCommand::new("sh", &["-c", script])
@@ -1609,8 +1588,9 @@ mod tests {
             let path = dir.join("tracedecay");
             write_executable_script(
                 &path,
-                &format!("#!/bin/sh\nprintf 'tracedecay %s\\n' '{version}'\n"),
-            );
+                format!("#!/bin/sh\nprintf 'tracedecay %s\\n' '{version}'\n"),
+            )
+            .unwrap();
             path
         }
 

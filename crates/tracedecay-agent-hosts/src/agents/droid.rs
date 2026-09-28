@@ -510,6 +510,8 @@ fn server_args_are_current(server: &serde_json::Map<String, Value>) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     fn write_config(home: &Path, config: Value) {
         std::fs::create_dir_all(droid_config_dir(home)).unwrap();
@@ -818,15 +820,11 @@ mod tests {
     /// absolute tool paths.
     #[cfg(unix)]
     fn fake_droid_cli(bin: &Path, log: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n{body}\n",
             log = log.display(),
         );
-        std::fs::write(bin, script).unwrap();
-        let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(bin, permissions).unwrap();
+        write_executable_script(bin, script).unwrap();
     }
 
     #[cfg(unix)]

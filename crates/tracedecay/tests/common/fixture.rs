@@ -51,6 +51,8 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::IsolatedHome;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 // ---------------------------------------------------------------------------
 // Profile: one isolated home, one profile, N projects
@@ -857,8 +859,6 @@ pub enum TypeScriptFixtureCompiler {
 /// producer must run exactly that binary from the project root.
 #[cfg(unix)]
 pub fn write_typescript_diagnostics_fixture(project: &Path, compiler: TypeScriptFixtureCompiler) {
-    use std::os::unix::fs::PermissionsExt;
-
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("package.json"),
@@ -895,7 +895,7 @@ pub fn write_typescript_diagnostics_fixture(project: &Path, compiler: TypeScript
     } else {
         String::new()
     };
-    fs::write(
+    write_executable_script(
         &tsc,
         format!(
             "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"$*\" >> \"{}\"\n{hold}cat <<'TSC_REPORT'\n{}TSC_REPORT\nexit 2\n",
@@ -904,7 +904,6 @@ pub fn write_typescript_diagnostics_fixture(project: &Path, compiler: TypeScript
         ),
     )
     .unwrap();
-    fs::set_permissions(&tsc, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// The build-info file a logged fixture-compiler invocation names when it is
@@ -947,8 +946,6 @@ pub fn write_typescript_monorepo_diagnostics_fixture(
     project: &Path,
     compiler: TypeScriptFixtureCompiler,
 ) {
-    use std::os::unix::fs::PermissionsExt;
-
     let files = [
         (
             "package.json",
@@ -1005,7 +1002,7 @@ pub fn write_typescript_monorepo_diagnostics_fixture(
     let bin = project.join("node_modules/.bin");
     fs::create_dir_all(&bin).unwrap();
     let tsc = bin.join("tsc");
-    fs::write(
+    write_executable_script(
         &tsc,
         format!(
             "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"$*\" >> \"{}\"\ncase \"$2\" in\n  */packages/app/tsconfig.json)\n    echo \"{TYPESCRIPT_MONOREPO_APP_FILE}(3,14): error TS4023: Exported variable 'value' has or is using name 'Hidden' from external module \\\"./dep\\\" but cannot be named.\"\n    exit 2 ;;\nesac\nexit 0\n",
@@ -1013,5 +1010,4 @@ pub fn write_typescript_monorepo_diagnostics_fixture(
         ),
     )
     .unwrap();
-    fs::set_permissions(&tsc, fs::Permissions::from_mode(0o755)).unwrap();
 }
