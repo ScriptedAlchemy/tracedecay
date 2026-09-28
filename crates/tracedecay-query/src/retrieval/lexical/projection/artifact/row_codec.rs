@@ -30,11 +30,15 @@ const ROW_BLOCK_DEFLATE: u8 = 23;
 /// Uncompressed scoring preface ahead of the deflated row payload. Lexical
 /// ranking reads field lengths from this preface and inflates a block only
 /// for phrase or proximity text and for the capped winners.
+///
+/// On disk the payload is `tag 24`, a little-endian `u32` preface length,
+/// that many preface bytes, then the deflated block (whose own encoding
+/// starts with tag 23). `decode_row_block` rejects a payload that starts
+/// with the deflate tag. A copied parent payload must keep this prefix;
+/// `encode_row_blocks` is the writer for a block that changes.
 const ROW_BLOCK_PREFACE_TAG: u8 = 24;
 const ROW_BLOCK_PREFACE_MAX_BYTES: usize = 16 * 1024;
-const ROW_BLOCK_PREFACE_PREFIX_BYTES: usize = 5 + ROW_BLOCK_PREFACE_MAX_BYTES;
-/// Blocks fetched together so a document-ordered scan seeks once per window.
-const ROW_BLOCK_PREFACE_WINDOW: usize = 16;
+pub(super) const ROW_BLOCK_PREFACE_PREFIX_BYTES: usize = 5 + ROW_BLOCK_PREFACE_MAX_BYTES;
 const BLOCK_CHUNK_DIGEST: u8 = 1;
 const BLOCK_CHUNK_LITERAL: u8 = 2;
 /// A row's text is stored raw, or as the length of the prefix it shares
@@ -713,6 +717,12 @@ pub(super) fn symbol_id_from_key(
 }
 
 /// One row as a page hands it to [`encode_row_blocks`].
+///
+/// `field_lengths` and `trimmed_normalized_len` are written into the
+/// uncompressed preface. They are not recovered from `row`. A rewrite of a
+/// stored block, including a block copied from a parent artifact, passes the
+/// lengths `decode_artifact_row` reports and the trimmed length of that
+/// row's normalized text.
 pub(super) struct BlockRowV1<'a> {
     pub(super) document_id: i64,
     pub(super) chunk_id: &'a str,
@@ -1222,26 +1232,98 @@ fn decode_field_lengths(
 /// The one block holding a document: the greatest block key at or below it.
 pub(super) const ROW_BLOCK_BY_DOCUMENT_SQL: &str = "SELECT first_document, payload FROM row_blocks WHERE first_document <= ?1 ORDER BY first_document DESC LIMIT 1";
 
-const ROW_BLOCK_PREFACE_SQL: &str = "SELECT first_document, substr(payload, 1, ?2) FROM row_blocks WHERE first_document <= ?1 ORDER BY first_document DESC LIMIT 1";
+/// Every block's scoring preface, in document order. One scan replaces the
+/// per-query window that re-decoded the corpus for each common-term walk.
+pub(super) const ROW_BLOCK_PREFACE_SCAN_SQL: &str =
+    "SELECT first_document, substr(payload, 1, ?1) FROM row_blocks ORDER BY first_document";
 
-const ROW_BLOCK_PREFACE_FOLLOW_SQL: &str = "SELECT first_document, substr(payload, 1, ?2) FROM row_blocks WHERE first_document > ?1 ORDER BY first_document LIMIT ?3";
+/// Field lengths for every document, loaded once per reader. Document ids
+/// are ascending and may contain gaps; lookup is a binary search.
+pub(super) struct ScoringPrefaceIndexV1 {
+    rows: Vec<ScoringPrefaceRowV1>,
+}
 
-/// Rows by document over an open artifact connection. Callers visit
-/// documents in ascending order, so one inflated block and one preface
-/// window serve the documents they contain. Scoring reads the preface;
-/// inflation is reserved for text matches and materialized winners.
+impl ScoringPrefaceIndexV1 {
+    pub(super) fn empty() -> &'static Self {
+        static EMPTY: ScoringPrefaceIndexV1 = ScoringPrefaceIndexV1 { rows: Vec::new() };
+        &EMPTY
+    }
+
+    #[cfg(feature = "hotpath")]
+    pub(super) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(super) fn get(&self, document: u32) -> Option<&ScoringPrefaceRowV1> {
+        let index = self
+            .rows
+            .binary_search_by_key(&document, |row| row.document_id)
+            .ok()?;
+        Some(&self.rows[index])
+    }
+
+    fn push(&mut self, row: ScoringPrefaceRowV1) -> Result<(), CodeLexicalArtifactErrorV1> {
+        if self
+            .rows
+            .last()
+            .is_some_and(|previous| previous.document_id >= row.document_id)
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact scoring prefaces are not strictly ascending".to_owned(),
+            ));
+        }
+        self.rows.push(row);
+        Ok(())
+    }
+}
+
+pub(super) fn load_scoring_preface_index(
+    connection: &Connection,
+    mut on_block: impl FnMut() -> Result<(), CodeLexicalArtifactErrorV1>,
+) -> Result<ScoringPrefaceIndexV1, CodeLexicalArtifactErrorV1> {
+    let prefix = i64::try_from(ROW_BLOCK_PREFACE_PREFIX_BYTES)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    let mut statement = connection
+        .prepare_cached(ROW_BLOCK_PREFACE_SCAN_SQL)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+    let mut scanned = statement
+        .query(params![prefix])
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+    let mut index = ScoringPrefaceIndexV1 { rows: Vec::new() };
+    while let Some(row) = scanned
+        .next()
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
+    {
+        on_block()?;
+        let first_document: i64 = row
+            .get(0)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        let stored: Vec<u8> = row
+            .get(1)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        for preface in preface_rows_from_stored_prefix(first_document, &stored)? {
+            index.push(preface)?;
+        }
+    }
+    drop(scanned);
+    Ok(index)
+}
+
+/// Rows by document over an open artifact connection. Scoring reads the
+/// reader-owned preface index. Inflation is reserved for phrase or proximity
+/// text and for the capped winners.
 pub(super) struct RowBlocksV1<'a> {
     connection: &'a Connection,
     block: RefCell<Option<RowBlockV1>>,
-    preface: RefCell<Option<Vec<ScoringPrefaceRowV1>>>,
+    prefaces: &'a ScoringPrefaceIndexV1,
 }
 
 impl<'a> RowBlocksV1<'a> {
-    pub(super) fn new(connection: &'a Connection) -> Self {
+    pub(super) fn new(connection: &'a Connection, prefaces: &'a ScoringPrefaceIndexV1) -> Self {
         Self {
             connection,
             block: RefCell::new(None),
-            preface: RefCell::new(None),
+            prefaces,
         }
     }
 
@@ -1249,63 +1331,10 @@ impl<'a> RowBlocksV1<'a> {
         &self,
         document: u32,
     ) -> Result<ScoringPrefaceRowV1, CodeLexicalArtifactErrorV1> {
-        if let Some(row) = self.cached_preface(document) {
-            return Ok(row);
-        }
-        self.load_preface_window(document)?;
-        self.cached_preface(document)
+        self.prefaces
+            .get(document)
+            .cloned()
             .ok_or_else(missing_document_row)
-    }
-
-    fn cached_preface(&self, document: u32) -> Option<ScoringPrefaceRowV1> {
-        let preface = self.preface.borrow();
-        let rows = preface.as_ref()?;
-        let index = rows
-            .binary_search_by_key(&document, |row| row.document_id)
-            .ok()?;
-        Some(rows[index].clone())
-    }
-
-    fn load_preface_window(&self, document: u32) -> Result<(), CodeLexicalArtifactErrorV1> {
-        let prefix = i64::try_from(ROW_BLOCK_PREFACE_PREFIX_BYTES)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        let mut statement = self
-            .connection
-            .prepare_cached(ROW_BLOCK_PREFACE_SQL)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-        let anchor: Option<(i64, Vec<u8>)> = statement
-            .query_row(params![i64::from(document), prefix], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .optional()
-            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-        let (first_document, bytes) = anchor.ok_or_else(missing_document_row)?;
-        drop(statement);
-        let mut rows = preface_rows_from_stored_prefix(first_document, &bytes)?;
-        let follow_limit = i64::try_from(ROW_BLOCK_PREFACE_WINDOW.saturating_sub(1))
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        let mut follow = self
-            .connection
-            .prepare_cached(ROW_BLOCK_PREFACE_FOLLOW_SQL)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-        let mut following = follow
-            .query(params![first_document, prefix, follow_limit])
-            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-        while let Some(row) = following
-            .next()
-            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
-        {
-            let first: i64 = row
-                .get(0)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-            let stored: Vec<u8> = row
-                .get(1)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-            rows.extend(preface_rows_from_stored_prefix(first, &stored)?);
-        }
-        drop(following);
-        *self.preface.borrow_mut() = Some(rows);
-        Ok(())
     }
 
     pub(super) fn row(&self, document: u32) -> Result<StoredRowV1, CodeLexicalArtifactErrorV1> {
