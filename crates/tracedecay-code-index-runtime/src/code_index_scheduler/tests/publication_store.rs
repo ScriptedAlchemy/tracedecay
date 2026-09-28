@@ -44,8 +44,8 @@ use crate::{
         UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
     },
     code_index_scheduler::{
-        CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
-        scoped_code_index_store_root,
+        CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+        SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     },
 };
 
@@ -611,13 +611,15 @@ fn generation_decode_shares_store_and_refuses_exclusive_writer_contention() {
 
     let publication = open_cold(store.path(), fixture.path());
     let exclusive = acquire_code_generation_store_lock(store.path()).expect("exclusive hold");
+    let refusal = CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(
+        publication
+            .load_active_shared()
+            .expect_err("an exclusive writer refuses the shared decode"),
+    ));
     assert!(
-        matches!(
-            publication.load_active_shared(),
-            Err(CodeIndexPublicationStoreErrorV1::Unavailable(message))
-                if message.contains("contended")
-        ),
-        "an unscoped generation decode must fail retryably instead of blocking indefinitely"
+        refusal.is_transient_capacity_failure() && !refusal.reproduces_on_unchanged_input(),
+        "a decode refused by a held store writer must be retried by the worker, not parked \
+         as a failure the unchanged input reproduces: {refusal}"
     );
     drop(exclusive);
     assert!(
