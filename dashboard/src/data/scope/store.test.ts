@@ -263,6 +263,10 @@ describe('readOnlyScopeRefusal', () => {
     ['undefined', undefined],
   ])('rejects %s', (_name, body) => {
     expect(readOnlyScopeRefusal(body)).toBeNull();
+    expect(readOnlyScopeRefusal(wireTrue)).toEqual({
+      projectId: 'proj_b',
+      detail: 'project-scoped dashboard APIs are read-only for non-active projects',
+    });
   });
 });
 
@@ -318,8 +322,15 @@ describe('requestScopeKey', () => {
 describe('scopedQueryKey', () => {
   it('keeps project-gateway reads isolated by their selected project', () => {
     const key = ['brain', 'graph-overview'];
-    expect(
-      scopedQueryKey(project('proj_a', 'active'), key, '/api/plugins/graph/overview'),
-    ).not.toEqual(scopedQueryKey(project('proj_b', 'selected'), key, '/api/plugins/graph/overview'));
+    expect(scopedQueryKey(project('proj_a', 'active'), key, '/api/plugins/graph/overview')).toEqual([
+      'brain',
+      'graph-overview',
+      'project:proj_a',
+    ]);
+    expect(scopedQueryKey(project('proj_b', 'selected'), key, '/api/plugins/graph/overview')).toEqual([
+      'brain',
+      'graph-overview',
+      'project:proj_b',
+    ]);
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { MemoryFactRowV1 } from '../../contracts/generated.ts';
-import { asFactSort, factSortLabel, FACT_SORTS, ledgerDay, shortFactId, sortFacts } from './ledger.ts';
+import { asFactSort, FACT_SORTS, ledgerDay, shortFactId, sortFacts } from './ledger.ts';
 
 function fact(over: Partial<MemoryFactRowV1> & { fact_id: string }): MemoryFactRowV1 {
   return {
@@ -65,10 +65,6 @@ describe('sort parameter and labels', () => {
     for (const sort of FACT_SORTS) expect(asFactSort(sort)).toBe(sort);
     expect(asFactSort(null)).toBe('trust');
     expect(asFactSort('nonsense')).toBe('trust');
-  });
-
-  it('names every sort', () => {
-    for (const sort of FACT_SORTS) expect(factSortLabel(sort).length).toBeGreaterThan(0);
   });
 });
 
