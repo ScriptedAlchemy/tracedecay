@@ -74,7 +74,7 @@ impl AgentIntegration for CopilotIntegration {
         false
     }
 
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
+    fn require_host(&self, _home: &Path) -> Result<()> {
         require_copilot_cli().map(drop)
     }
 

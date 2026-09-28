@@ -218,10 +218,6 @@ impl AgentIntegration for VibeIntegration {
         deactivate_components(components, &config, &prompt)
     }
 
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
-    }
-
     fn export_managed_skills(
         &self,
         home: &Path,

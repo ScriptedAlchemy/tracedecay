@@ -29,10 +29,11 @@ pub(crate) enum HostBundleCliOperation {
 
 /// Exit status of a lifecycle pass in which no host failed but at least one
 /// waits on an interactive operator step (`EX_TEMPFAIL`: act, then rerun).
+/// A host that is not installed or not signed in is never such a step.
 pub(crate) const PENDING_OPERATOR_ACTION_EXIT_CODE: i32 = 75;
 
 /// One host's typed result in a lifecycle pass.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HostLifecycleResult {
     /// The component set committed and the host registration is current.
     Applied,
@@ -42,40 +43,29 @@ pub(crate) enum HostLifecycleResult {
         command: String,
         remediation: String,
     },
-    /// A tracked host whose CLI is not installed. Nothing was attempted: the
-    /// operator either installs the CLI or stops tracking the host.
-    PendingHostCli { detail: String },
-    /// `uninstall` of a tracked host whose CLI is not installed: the profile
-    /// stops tracking it, and the host-owned registration stays for the host
-    /// to remove.
-    Untracked { detail: String },
+    /// `uninstall` of a tracked host that is absent: the profile stops
+    /// tracking it, and the host-owned registration stays for the host to
+    /// remove.
+    Untracked {
+        absence: tracedecay_domain::errors::HostAbsence,
+        detail: String,
+    },
     /// Nothing was attempted for this host.
     Skipped {
         reason: HostSkipReason,
         detail: String,
     },
     /// The lifecycle was refused or attempted and failed.
-    Failed {
-        cause: HostFailureCause,
-        detail: String,
-    },
+    Failed { detail: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostSkipReason {
-    /// The host CLI is not installed and TraceDecay only detected leftover
-    /// config for it, so the host is not in use on this machine.
-    HostCliNotInstalled,
+    /// The host is not installed or not signed in on this machine; tracked,
+    /// named, or merely detected alike, that is informational.
+    Absent(tracedecay_domain::errors::HostAbsence),
     /// The host has no component set for this request.
     NotApplicable,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HostFailureCause {
-    /// An explicitly requested, untracked host whose CLI is not installed.
-    HostCliNotInstalled,
-    /// The lifecycle ran and failed.
-    LifecycleFailed,
 }
 
 /// How a lifecycle pass ended when no host failed.
@@ -95,30 +85,33 @@ impl HostLifecycleCompletion {
 }
 
 /// Why one host's lifecycle did not complete, kept typed until the pass
-/// knows whether the host was tracked or merely detected.
+/// settles it.
 #[derive(Debug)]
 pub(crate) enum HostLifecycleError {
-    HostCliNotInstalled(tracedecay_domain::errors::TraceDecayError),
+    Absent {
+        absence: tracedecay_domain::errors::HostAbsence,
+        detail: String,
+    },
     Failed(tracedecay_domain::errors::TraceDecayError),
 }
 
 impl std::fmt::Display for HostLifecycleError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::HostCliNotInstalled(error) | Self::Failed(error) => error.fmt(formatter),
+            Self::Absent { detail, .. } => detail.fmt(formatter),
+            Self::Failed(error) => error.fmt(formatter),
         }
     }
 }
 
 impl From<tracedecay_domain::errors::TraceDecayError> for HostLifecycleError {
     fn from(error: tracedecay_domain::errors::TraceDecayError) -> Self {
-        if matches!(
-            error,
-            tracedecay_domain::errors::TraceDecayError::HostCliUnavailable { .. }
-        ) {
-            Self::HostCliNotInstalled(error)
-        } else {
-            Self::Failed(error)
+        match error.host_absence() {
+            Some(absence) => Self::Absent {
+                absence,
+                detail: error.to_string(),
+            },
+            None => Self::Failed(error),
         }
     }
 }
@@ -127,65 +120,32 @@ fn host_lifecycle_error(
     agent_id: &str,
     error: tracedecay_agent_hosts::agents::host_bundle::HostBundleError,
 ) -> HostLifecycleError {
-    let cli_missing = matches!(
-        error,
-        tracedecay_agent_hosts::agents::host_bundle::HostBundleError::HostCliUnavailable { .. }
-    );
-    let error = host_bundle_error_for_agent(agent_id, error);
-    if cli_missing {
-        HostLifecycleError::HostCliNotInstalled(error)
-    } else {
-        HostLifecycleError::Failed(error)
+    match error {
+        tracedecay_agent_hosts::agents::host_bundle::HostBundleError::HostAbsent {
+            absence,
+            detail,
+            ..
+        } => HostLifecycleError::Absent { absence, detail },
+        error => HostLifecycleError::Failed(host_bundle_error_for_agent(agent_id, error)),
     }
 }
 
-/// How a host entered a lifecycle pass, which decides what a missing host
-/// CLI means for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HostSelection {
-    /// The profile tracks the host.
-    Tracked,
-    /// Named on the command line, not tracked.
-    Named,
-    /// Only leftover TraceDecay config was detected.
-    Detected,
-}
-
-impl HostSelection {
-    fn of(agent_id: &str, tracked: &[String], explicitly_scoped: bool) -> Self {
-        if tracked.iter().any(|id| id == agent_id) {
-            Self::Tracked
-        } else if explicitly_scoped {
-            Self::Named
-        } else {
-            Self::Detected
-        }
-    }
-}
-
-/// A missing host CLI skips a merely detected host, waits on the operator
-/// for a tracked one, and fails an untracked host the command named.
+/// An absent host is skipped, except that a full `uninstall` of a tracked
+/// host stops tracking it: that uninstall must not need the absent host.
 fn settle_host_lifecycle(
     result: std::result::Result<HostLifecycleResult, HostLifecycleError>,
-    selection: HostSelection,
+    untracks_absent_host: bool,
 ) -> HostLifecycleResult {
     match result {
         Ok(result) => result,
-        Err(HostLifecycleError::HostCliNotInstalled(error)) => match selection {
-            HostSelection::Detected => HostLifecycleResult::Skipped {
-                reason: HostSkipReason::HostCliNotInstalled,
-                detail: error.to_string(),
-            },
-            HostSelection::Tracked => HostLifecycleResult::PendingHostCli {
-                detail: error.to_string(),
-            },
-            HostSelection::Named => HostLifecycleResult::Failed {
-                cause: HostFailureCause::HostCliNotInstalled,
-                detail: error.to_string(),
-            },
+        Err(HostLifecycleError::Absent { absence, detail }) if untracks_absent_host => {
+            HostLifecycleResult::Untracked { absence, detail }
+        }
+        Err(HostLifecycleError::Absent { absence, detail }) => HostLifecycleResult::Skipped {
+            reason: HostSkipReason::Absent(absence),
+            detail,
         },
         Err(HostLifecycleError::Failed(error)) => HostLifecycleResult::Failed {
-            cause: HostFailureCause::LifecycleFailed,
             detail: error.to_string(),
         },
     }
@@ -238,38 +198,25 @@ impl HostLifecycleSummary {
                 command,
                 remediation,
             } => format!("pending operator action: `{command}`\n      {remediation}"),
-            HostLifecycleResult::PendingHostCli { detail } => format!(
-                "pending operator action: {}\n      {detail}",
-                tracedecay_agent_hosts::agents::tracked_host_cli_missing_action(agent_id)
-            ),
-            HostLifecycleResult::Untracked { detail } => format!(
-                "{}; the host CLI is not installed, so its host-owned registration was left \
-                 in place ({detail})",
+            HostLifecycleResult::Untracked { absence, detail } => format!(
+                "{}; the host is {}, so its host-owned registration was left in place \
+                 ({detail})",
                 if self.dry_run {
                     "would stop tracking"
                 } else {
                     "no longer tracked"
-                }
+                },
+                absence.reason()
             ),
             HostLifecycleResult::Skipped {
-                reason: HostSkipReason::HostCliNotInstalled,
+                reason: HostSkipReason::Absent(absence),
                 detail,
-            } => format!(
-                "skipped, host CLI not installed; only leftover TraceDecay config was detected \
-                 ({detail})"
-            ),
+            } => format!("skipped, {} ({detail})", absence.reason()),
             HostLifecycleResult::Skipped {
                 reason: HostSkipReason::NotApplicable,
                 detail,
             } => format!("skipped, not applicable: {detail}"),
-            HostLifecycleResult::Failed {
-                cause: HostFailureCause::HostCliNotInstalled,
-                detail,
-            } => format!("failed, host CLI not installed: {detail}"),
-            HostLifecycleResult::Failed {
-                cause: HostFailureCause::LifecycleFailed,
-                detail,
-            } => format!("failed: {detail}"),
+            HostLifecycleResult::Failed { detail } => format!("failed: {detail}"),
         }
     }
 
@@ -298,13 +245,11 @@ impl HostLifecycleSummary {
                 ),
             });
         }
-        if self.hosts.iter().any(|(_, result)| {
-            matches!(
-                result,
-                HostLifecycleResult::PendingOperatorAction { .. }
-                    | HostLifecycleResult::PendingHostCli { .. }
-            )
-        }) {
+        if self
+            .hosts
+            .iter()
+            .any(|(_, result)| matches!(result, HostLifecycleResult::PendingOperatorAction { .. }))
+        {
             Ok(HostLifecycleCompletion::PendingOperatorAction)
         } else {
             Ok(HostLifecycleCompletion::Complete)
@@ -465,20 +410,12 @@ pub(crate) async fn handle_host_lifecycle_command(
                 result = Err(error.into());
             }
         }
-        let result = match settle_host_lifecycle(
+        let result = settle_host_lifecycle(
             result,
-            HostSelection::of(agent_id, &tracked_before_pass, explicitly_scoped),
-        ) {
-            // The pending step names this very uninstall as the way to stop
-            // tracking, so it must not need the missing CLI.
-            HostLifecycleResult::PendingHostCli { detail }
-                if operation == HostBundleCliOperation::Uninstall
-                    && options.component.is_none() =>
-            {
-                HostLifecycleResult::Untracked { detail }
-            }
-            result => result,
-        };
+            operation == HostBundleCliOperation::Uninstall
+                && options.component.is_none()
+                && tracked_before_pass.iter().any(|id| id == agent_id),
+        );
         let applied = matches!(result, HostLifecycleResult::Applied);
         let converged = applied
             || matches!(
@@ -608,6 +545,11 @@ fn run_host_component_lifecycle(
     lifecycle_root: &Path,
     context: &ComponentSetApplyContext,
 ) -> std::result::Result<HostLifecycleResult, HostLifecycleError> {
+    // Uninstall must still stop tracking an absent host, so only the
+    // operations that write a host require it first.
+    if operation != HostBundleCliOperation::Uninstall {
+        tracedecay_agent_hosts::agents::get_integration(agent_id)?.require_host(home)?;
+    }
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
@@ -1275,18 +1217,6 @@ fn host_bundle_error_for_agent(
                 .to_string(),
         };
     }
-    if matches!(
-        &error,
-        tracedecay_agent_hosts::agents::host_bundle::HostBundleError::HostCliUnavailable { .. }
-    ) && agent_id == "codex"
-    {
-        return tracedecay_domain::errors::TraceDecayError::Config {
-            message: "Codex activates plugins through its native cache, which TraceDecay drives \
-                      with `codex plugin add tracedecay@personal` after deploying the source \
-                      package. Install the `codex` CLI or add it to PATH, then retry."
-                .to_string(),
-        };
-    }
     host_bundle_error(error)
 }
 
@@ -1308,7 +1238,6 @@ pub(crate) fn install_requested_git_hook(
 pub(crate) async fn reinstall_agent_integrations_under_lease(
     profile: &ProfileRoot,
     agent_ids: &[String],
-    tracked: &[String],
     home: &Path,
     tracedecay_bin: &str,
     lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
@@ -1317,7 +1246,6 @@ pub(crate) async fn reinstall_agent_integrations_under_lease(
     reinstall_agent_integrations_with_persisted_dashboard_policies(
         profile,
         agent_ids,
-        tracked,
         home,
         tracedecay_bin,
     )
@@ -1325,12 +1253,10 @@ pub(crate) async fn reinstall_agent_integrations_under_lease(
 }
 
 /// The tracked-agent repair pass `reinstall` runs, one typed result per
-/// agent so maintenance can continue past a failing host. `tracked` names
-/// the hosts the profile config tracks; any other id was only detected.
+/// agent so maintenance can continue past a failing host.
 async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
     profile: &ProfileRoot,
     agent_ids: &[String],
-    tracked: &[String],
     home: &Path,
     tracedecay_bin: &str,
 ) -> tracedecay_domain::errors::Result<HostLifecycleSummary> {
@@ -1364,10 +1290,7 @@ async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
             &lifecycle_root,
             &context,
         );
-        summary.record(
-            id,
-            settle_host_lifecycle(result, HostSelection::of(id, tracked, false)),
-        );
+        summary.record(id, settle_host_lifecycle(result, false));
     }
     Ok(summary)
 }
@@ -1382,7 +1305,7 @@ mod tests {
 
     use super::{
         CatalogHostComponentRegistrationAuthority, ComponentSetApplyContext,
-        HostBundleCliOperation, HostLifecycleResult, HostSelection, apply_canonical_component_set,
+        HostBundleCliOperation, HostLifecycleResult, apply_canonical_component_set,
         broker_codex_daemon_automation_project, canonical_host_component_set,
         canonical_host_component_set_with_tracedecay_bin, component_is_not_applicable,
         component_mutation_still_requires_yes, component_set_request,
@@ -1462,10 +1385,10 @@ mod tests {
         ) {
             Ok(HostLifecycleResult::Applied) => Ok(()),
             Ok(other) => panic!("{agent_id} did not apply its component set: {other:?}"),
-            Err(
-                super::HostLifecycleError::HostCliNotInstalled(error)
-                | super::HostLifecycleError::Failed(error),
-            ) => Err(error),
+            Err(super::HostLifecycleError::Failed(error)) => Err(error),
+            Err(super::HostLifecycleError::Absent { detail, .. }) => {
+                Err(tracedecay_domain::errors::TraceDecayError::Config { message: detail })
+            }
         }
     }
 
@@ -1478,55 +1401,53 @@ mod tests {
     }
 
     #[test]
-    fn missing_host_cli_skips_detected_waits_on_tracked_and_fails_named() {
-        let tracked = ["kiro".to_string()];
+    fn an_absent_host_is_skipped_and_only_a_full_tracked_uninstall_untracks_it() {
+        let signed_out = || -> super::HostLifecycleError {
+            tracedecay_domain::errors::TraceDecayError::HostCliNotSignedIn {
+                program: "kiro-cli".to_string(),
+                login: "kiro-cli login".to_string(),
+            }
+            .into()
+        };
         assert_eq!(
-            HostSelection::of("kiro", &tracked, false),
-            HostSelection::Tracked
-        );
-        assert_eq!(
-            HostSelection::of("kiro", &tracked, true),
-            HostSelection::Tracked
-        );
-        assert_eq!(HostSelection::of("kiro", &[], true), HostSelection::Named);
-        assert_eq!(
-            HostSelection::of("kiro", &[], false),
-            HostSelection::Detected
-        );
-
-        assert!(matches!(
-            super::settle_host_lifecycle(Err(cli_missing()), HostSelection::Detected),
+            super::settle_host_lifecycle(Err(cli_missing()), false),
             HostLifecycleResult::Skipped {
-                reason: super::HostSkipReason::HostCliNotInstalled,
-                ..
+                reason: super::HostSkipReason::Absent(
+                    tracedecay_domain::errors::HostAbsence::NotInstalled
+                ),
+                detail: "host CLI `kiro-cli` is unavailable for kiro MCP registry lifecycle; \
+                         install it or add it to PATH and retry"
+                    .to_string(),
             }
-        ));
-        assert!(matches!(
-            super::settle_host_lifecycle(Err(cli_missing()), HostSelection::Tracked),
-            HostLifecycleResult::PendingHostCli { .. }
-        ));
-        assert!(matches!(
-            super::settle_host_lifecycle(Err(cli_missing()), HostSelection::Named),
-            HostLifecycleResult::Failed {
-                cause: super::HostFailureCause::HostCliNotInstalled,
-                ..
+        );
+        assert_eq!(
+            super::settle_host_lifecycle(Err(signed_out()), false),
+            HostLifecycleResult::Skipped {
+                reason: super::HostSkipReason::Absent(
+                    tracedecay_domain::errors::HostAbsence::NotSignedIn
+                ),
+                detail: "host CLI `kiro-cli` is not signed in; run `kiro-cli login` to use it"
+                    .to_string(),
             }
-        ));
+        );
+        assert_eq!(
+            super::settle_host_lifecycle(Err(signed_out()), true),
+            HostLifecycleResult::Untracked {
+                absence: tracedecay_domain::errors::HostAbsence::NotSignedIn,
+                detail: "host CLI `kiro-cli` is not signed in; run `kiro-cli login` to use it"
+                    .to_string(),
+            }
+        );
         let attempted = || tracedecay_domain::errors::TraceDecayError::Config {
             message: "verify failed".to_string(),
         };
-        for selection in [
-            HostSelection::Tracked,
-            HostSelection::Named,
-            HostSelection::Detected,
-        ] {
-            assert!(matches!(
-                super::settle_host_lifecycle(Err(attempted().into()), selection),
+        for untracks in [false, true] {
+            assert_eq!(
+                super::settle_host_lifecycle(Err(attempted().into()), untracks),
                 HostLifecycleResult::Failed {
-                    cause: super::HostFailureCause::LifecycleFailed,
-                    ..
+                    detail: "config error: verify failed".to_string(),
                 }
-            ));
+            );
         }
     }
 
@@ -1537,7 +1458,6 @@ mod tests {
             remediation: "open Kimi Code".to_string(),
         };
         let failed = || HostLifecycleResult::Failed {
-            cause: super::HostFailureCause::LifecycleFailed,
             detail: "verify failed".to_string(),
         };
 
@@ -1545,7 +1465,7 @@ mod tests {
         summary.record("cline", HostLifecycleResult::Applied);
         summary.record(
             "kiro",
-            super::settle_host_lifecycle(Err(cli_missing()), HostSelection::Detected),
+            super::settle_host_lifecycle(Err(cli_missing()), false),
         );
         assert_eq!(
             summary.finish().unwrap(),
@@ -1953,6 +1873,15 @@ mod tests {
         dir: &std::path::Path,
     ) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
         super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "codex");
+        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
+    }
+
+    /// Kimi Code on host program `PATH`. TraceDecay only resolves `kimi`,
+    /// which makes Kimi Code installed; it never runs it.
+    fn install_fake_kimi_cli(
+        dir: &std::path::Path,
+    ) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
+        super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "kimi");
         tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
     }
 
@@ -3254,6 +3183,8 @@ mod tests {
         };
 
         let home = tempfile::tempdir().unwrap();
+        let kimi_dir = tempfile::tempdir().unwrap();
+        let _path = install_fake_kimi_cli(kimi_dir.path());
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let code_home = home.path().join(".kimi-code");
         let installed_path = code_home.join("plugins/installed.json");
@@ -3264,7 +3195,6 @@ mod tests {
 
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
             profile,
-            &["kimi".to_string()],
             &["kimi".to_string()],
             home.path(),
             "new-tracedecay",
@@ -3305,13 +3235,14 @@ mod tests {
         };
 
         let home = tempfile::tempdir().unwrap();
+        let kimi_dir = tempfile::tempdir().unwrap();
+        let _path = install_fake_kimi_cli(kimi_dir.path());
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let code_home = home.path().join(".kimi-code");
         let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string());
         let deferred = reinstall_agent_integrations_with_persisted_dashboard_policies(
             profile,
-            &["kimi".to_string()],
             &["kimi".to_string()],
             home.path(),
             &tracedecay_bin,
@@ -3353,7 +3284,6 @@ mod tests {
 
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
             profile,
-            &["kimi".to_string()],
             &["kimi".to_string()],
             home.path(),
             &tracedecay_bin,
@@ -3410,7 +3340,6 @@ mod tests {
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
             profile,
             &["codex".to_string()],
-            &["codex".to_string()],
             home.path(),
             &tracedecay_bin,
         )
@@ -3443,7 +3372,6 @@ mod tests {
         let stale = reinstall_agent_integrations_with_persisted_dashboard_policies(
             profile,
             &["codex".to_string()],
-            &["codex".to_string()],
             home.path(),
             &tracedecay_bin,
         )
@@ -3465,7 +3393,6 @@ mod tests {
         .unwrap();
         let recovered = reinstall_agent_integrations_with_persisted_dashboard_policies(
             profile,
-            &["codex".to_string()],
             &["codex".to_string()],
             home.path(),
             &tracedecay_bin,

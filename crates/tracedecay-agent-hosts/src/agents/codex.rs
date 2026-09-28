@@ -166,7 +166,7 @@ impl AgentIntegration for CodexIntegration {
         ])
     }
 
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
+    fn require_host(&self, _home: &Path) -> Result<()> {
         mcp_registry::require_codex_cli().map(drop)
     }
 

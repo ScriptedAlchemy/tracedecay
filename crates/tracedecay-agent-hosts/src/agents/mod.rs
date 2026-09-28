@@ -346,19 +346,14 @@ pub trait AgentIntegration {
     /// Verify installation health (replaces agent-specific doctor checks).
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext);
 
-    /// Whether Doctor must report this supported host's absence even when it
-    /// has no configuration directory yet. Most optional hosts stay quiet
-    /// until their own registration exists; hosts with a documented deferred
-    /// or native-only lifecycle opt in so Doctor does not turn their absence
-    /// into an empty success.
-    fn reports_absence_to_doctor(&self) -> bool {
-        false
-    }
-
-    /// Resolve the host's own lifecycle CLI when its lifecycle is driven
-    /// through one, failing with `HostCliUnavailable` when it is not on
-    /// `PATH`. Hosts TraceDecay configures without a host CLI need none.
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
+    /// Require the host itself on this machine: the one presence check
+    /// every lifecycle and Doctor apply before touching a host. A host whose
+    /// own CLI is not on `PATH` fails with `HostCliUnavailable`, and one whose
+    /// CLI refuses until the operator signs in with `HostCliNotSignedIn`;
+    /// both classify through `TraceDecayError::host_absence` as an
+    /// informational skip. Hosts TraceDecay configures without a host CLI
+    /// need none.
+    fn require_host(&self, _home: &Path) -> Result<()> {
         Ok(())
     }
 
@@ -781,15 +776,6 @@ pub fn inspect_receipt_backed_host_components(
     )
 }
 
-/// The operator step for a tracked host whose lifecycle CLI is not installed,
-/// worded once for the lifecycle summaries and Doctor.
-pub fn tracked_host_cli_missing_action(agent_id: &str) -> String {
-    format!(
-        "install the {agent_id} CLI, or run `tracedecay uninstall --agent {agent_id}` to stop \
-         tracking it"
-    )
-}
-
 // ---------------------------------------------------------------------------
 // DoctorCounters
 // ---------------------------------------------------------------------------
@@ -822,6 +808,10 @@ impl DoctorCounters {
     pub fn pending(&mut self, msg: &str) {
         eprintln!("  \x1b[33m…\x1b[0m {msg}");
         self.pending_actions += 1;
+    }
+    /// A host that is not installed or not signed in; counted nowhere.
+    pub fn skipped(&self, msg: &str) {
+        eprintln!("  - {msg}");
     }
     pub fn info(&self, msg: &str) {
         eprintln!("    {msg}");

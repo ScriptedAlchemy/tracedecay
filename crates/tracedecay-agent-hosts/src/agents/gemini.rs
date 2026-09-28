@@ -123,7 +123,7 @@ impl AgentIntegration for GeminiIntegration {
         }
     }
 
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
+    fn require_host(&self, _home: &Path) -> Result<()> {
         require_gemini_cli().map(drop)
     }
 
@@ -376,19 +376,10 @@ fn report_manifest_server(dc: &mut DoctorCounters, manifest: &serde_json::Value,
 }
 
 /// Ask Gemini CLI itself. This is the only check that can report *Gemini's*
-/// view of its extensions; when its binary is absent the doctor says the state
-/// was not observed rather than inferring adoption from TraceDecay's own
-/// staged files.
+/// view of its extensions.
 fn doctor_check_host_reported_extensions(dc: &mut DoctorCounters, home: &Path) {
     let outcome = match host_reported_extensions(home) {
-        Ok(Some(outcome)) => outcome,
-        Ok(None) => {
-            dc.info(
-                "`gemini` is not on PATH, could not ask Gemini CLI which extensions it has \
-                 (the extension lifecycle requires that binary)",
-            );
-            return;
-        }
+        Ok(outcome) => outcome,
         Err(error) => {
             dc.fail(&format!(
                 "could not inspect Gemini CLI extension state: {error}"

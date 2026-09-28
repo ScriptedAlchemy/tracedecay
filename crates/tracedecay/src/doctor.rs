@@ -101,8 +101,8 @@ pub struct AdmittedDoctorNetworkProbes {
 pub enum DoctorCompletion {
     Healthy,
     /// The operator owes a step Doctor named: the reset of a store the daemon
-    /// serves in its typed reset-required state, a host's interactive
-    /// activation, or a tracked host's missing CLI.
+    /// serves in its typed reset-required state, or a host's interactive
+    /// activation.
     PendingOperatorAction,
 }
 
@@ -186,40 +186,12 @@ pub async fn run_doctor(
     check_user_config(&mut dc, profile.data_dir(), upload_enabled.as_ref());
     check_external_tools(&mut dc);
 
-    if let Some(home) = profile.home() {
-        // Host integration health is read-only: every `healthcheck` only reads
-        // the host's own on-disk registration and reports findings. Doctor
-        // never repairs them, remediation stays with `tracedecay install`.
-        let hctx = HealthcheckContext {
-            home: home.to_path_buf(),
-            profile: profile.clone(),
-            project_path: project_path.clone(),
-        };
-        for agent in agents::all_integrations() {
-            if should_run_host_healthcheck(agent.as_ref(), home, profile) {
-                agent.healthcheck_with_daemon_status(
-                    &mut dc,
-                    &hctx,
-                    daemon_status.as_ref().ok().and_then(Option::as_ref),
-                );
-            } else if let Some(surface) = agent.detected_host_surface(home, profile) {
-                // The host itself is on this machine but carries no tracedecay
-                // integration. Silence here read as "nothing to say", which
-                // hid exactly the hosts an operator most likely wants wired
-                // up, warn uniformly, like the deferred-lifecycle hosts do.
-                eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
-                dc.warn(&format!(
-                    "{} detected ({}) but tracedecay is not integrated, run `tracedecay install --agent {}`",
-                    agent.name(),
-                    surface.display(),
-                    agent.id()
-                ));
-            }
-        }
-    } else {
-        dc.fail("Could not determine home directory");
-    }
-    check_tracked_host_clis(&mut dc, profile.data_dir());
+    check_host_integrations(
+        &mut dc,
+        profile,
+        &project_path,
+        daemon_status.as_ref().ok().and_then(Option::as_ref),
+    );
 
     check_network(&mut dc, upload_enabled.as_ref(), network);
     print_summary(&dc);
@@ -323,14 +295,6 @@ fn render_schema_convergences(
         }
     }
     Ok(())
-}
-
-fn should_run_host_healthcheck(
-    agent: &dyn agents::AgentIntegration,
-    home: &Path,
-    profile: &tracedecay_runtime_core::config::ProfileRoot,
-) -> bool {
-    agent.reports_absence_to_doctor() || agent.has_tracedecay(home, profile)
 }
 
 fn render_canonical_doctor_report(
@@ -1170,37 +1134,81 @@ fn check_user_config(
     }
 }
 
-/// A tracked host whose lifecycle CLI is not installed waits on the operator,
-/// as `update-plugin` reports it: install the CLI or stop tracking the host.
-fn check_tracked_host_clis(dc: &mut DoctorCounters, profile_root: &Path) {
-    eprintln!("\n\x1b[1mTracked host CLIs\x1b[0m");
-    let config = match tracedecay_session_memory::user_config::UserConfig::load_strict(profile_root)
-    {
-        Ok(config) => config,
+/// Reports every host TraceDecay tracks or finds integrated. A host that is
+/// not installed or not signed in is one skipped line, counted nowhere.
+fn check_host_integrations(
+    dc: &mut DoctorCounters,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    project_path: &Path,
+    daemon_status: Option<&serde_json::Value>,
+) {
+    let Some(home) = profile.home() else {
+        dc.fail("Could not determine home directory");
+        return;
+    };
+    // Host integration health is read-only: every `healthcheck` only reads
+    // the host's own on-disk registration and reports findings. Doctor
+    // never repairs them, remediation stays with `tracedecay install`.
+    let hctx = HealthcheckContext {
+        home: home.to_path_buf(),
+        profile: profile.clone(),
+        project_path: project_path.to_path_buf(),
+    };
+    let tracked = tracked_hosts(dc, profile.data_dir());
+    for agent in agents::all_integrations() {
+        let integrated = agent.has_tracedecay(home, profile);
+        if !integrated && !tracked.iter().any(|id| id == agent.id()) {
+            if let Some(surface) = agent.detected_host_surface(home, profile) {
+                // The host itself is on this machine but carries no
+                // tracedecay integration, which an operator most likely
+                // wants wired up.
+                eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+                dc.warn(&format!(
+                    "{} detected ({}) but tracedecay is not integrated, run `tracedecay install --agent {}`",
+                    agent.name(),
+                    surface.display(),
+                    agent.id()
+                ));
+            }
+            continue;
+        }
+        let absence = match agent.require_host(home) {
+            Ok(()) if integrated || agent.is_detected(home) => None,
+            Ok(()) => Some((
+                tracedecay_domain::errors::HostAbsence::NotInstalled,
+                format!("{} is not detected under {}", agent.name(), home.display()),
+            )),
+            Err(error) => match error.host_absence() {
+                Some(absence) => Some((absence, error.to_string())),
+                None => {
+                    eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+                    dc.fail(&format!("{}: host CLI is unusable: {error}", agent.id()));
+                    continue;
+                }
+            },
+        };
+        match absence {
+            None => agent.healthcheck_with_daemon_status(dc, &hctx, daemon_status),
+            Some((absence, detail)) => {
+                eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+                dc.skipped(&format!(
+                    "{}: skipped, {} ({detail})",
+                    agent.id(),
+                    absence.reason()
+                ));
+            }
+        }
+    }
+}
+
+/// The hosts the profile tracks; an unreadable profile config is a warning,
+/// with no host treated as tracked.
+fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
+    match tracedecay_session_memory::user_config::UserConfig::load_strict(profile_root) {
+        Ok(config) => config.installed_agents,
         Err(error) => {
             dc.warn(&format!("Tracked hosts are unknown: {error}"));
-            return;
-        }
-    };
-    for agent_id in &config.installed_agents {
-        let agent = match agents::get_integration(agent_id) {
-            Ok(agent) => agent,
-            Err(error) => {
-                dc.warn(&format!(
-                    "{agent_id}: tracked but not a supported host ({error})"
-                ));
-                continue;
-            }
-        };
-        match agent.require_lifecycle_host_cli() {
-            Ok(()) => {}
-            Err(error @ tracedecay_domain::errors::TraceDecayError::HostCliUnavailable { .. }) => {
-                dc.pending(&format!(
-                    "{agent_id}: pending operator action: {} ({error})",
-                    agents::tracked_host_cli_missing_action(agent_id)
-                ));
-            }
-            Err(error) => dc.fail(&format!("{agent_id}: host CLI is unusable: {error}")),
+            Vec::new()
         }
     }
 }

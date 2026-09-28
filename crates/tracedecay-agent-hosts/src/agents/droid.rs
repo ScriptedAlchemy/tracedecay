@@ -245,7 +245,7 @@ impl AgentIntegration for DroidIntegration {
         false
     }
 
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
+    fn require_host(&self, _home: &Path) -> Result<()> {
         require_droid_cli().map(drop)
     }
 
