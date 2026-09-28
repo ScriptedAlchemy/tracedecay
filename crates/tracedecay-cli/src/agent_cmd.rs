@@ -1859,7 +1859,8 @@ mod tests {
         super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "kiro-cli");
     }
 
-    /// Install a compiled `codex` fixture on `PATH` for Core lifecycle tests.
+    /// Install a compiled host CLI fixture (`codex`, `kimi`) on `PATH` for Core
+    /// lifecycle tests.
     ///
     /// Core activation drives Codex's own `codex plugin add`
     /// (`plugin_registry::require_codex_plugin_cli`), which is a *requirement*,
@@ -1869,19 +1870,11 @@ mod tests {
     /// host CLI the same way the Kiro tests supply theirs. Only host program
     /// resolution sees the fixture directory; the process `PATH` is untouched,
     /// so `which_tracedecay` and sibling tests keep the ambient environment.
-    fn install_fake_codex_cli(
+    fn install_fake_host_cli(
         dir: &std::path::Path,
+        program: &str,
     ) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
-        super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "codex");
-        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
-    }
-
-    /// Kimi Code on host program `PATH`. TraceDecay only resolves `kimi`,
-    /// which makes Kimi Code installed; it never runs it.
-    fn install_fake_kimi_cli(
-        dir: &std::path::Path,
-    ) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
-        super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "kimi");
+        super::host_cli_fixture::install_compiled_host_cli_fixture(dir, program);
         tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
     }
 
@@ -2746,7 +2739,7 @@ mod tests {
         // requirement of that path. Supply the host CLI rather than depending
         // on whatever the machine happens to have installed.
         let codex_cli_dir = tempfile::tempdir().unwrap();
-        let _codex_path = install_fake_codex_cli(codex_cli_dir.path());
+        let _codex_path = install_fake_host_cli(codex_cli_dir.path(), "codex");
         let home = host_cli_tempdir();
         // Same filesystem as `home`: the receipt transaction backs up a
         // staged artifact by renaming it into `lifecycle`, and rename cannot
@@ -3184,7 +3177,7 @@ mod tests {
 
         let home = tempfile::tempdir().unwrap();
         let kimi_dir = tempfile::tempdir().unwrap();
-        let _path = install_fake_kimi_cli(kimi_dir.path());
+        let _path = install_fake_host_cli(kimi_dir.path(), "kimi");
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let code_home = home.path().join(".kimi-code");
         let installed_path = code_home.join("plugins/installed.json");
@@ -3236,7 +3229,7 @@ mod tests {
 
         let home = tempfile::tempdir().unwrap();
         let kimi_dir = tempfile::tempdir().unwrap();
-        let _path = install_fake_kimi_cli(kimi_dir.path());
+        let _path = install_fake_host_cli(kimi_dir.path(), "kimi");
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let code_home = home.path().join(".kimi-code");
         let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay()
@@ -3319,7 +3312,7 @@ mod tests {
         // `codex plugin add`, so the host CLI is a precondition of the
         // behaviour under test, not an ambient machine detail.
         let codex_cli_dir = tempfile::tempdir().unwrap();
-        let _codex_path = install_fake_codex_cli(codex_cli_dir.path());
+        let _codex_path = install_fake_host_cli(codex_cli_dir.path(), "codex");
         let home = host_cli_tempdir();
         // Keep the lifecycle root on the same filesystem as `home`: receipt
         // transactions back up staged artifacts with an atomic rename.
