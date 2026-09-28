@@ -4,9 +4,9 @@ use tracedecay_domain::{FactAssertionId, FactEventId, FactId, UtcMicros};
 
 pub use crate::memory::{
     FactCommitOwnerV1, FactIdentitySourceResultV1, FactPayloadAccessV1, FactProjectionV1,
-    FactRetrievalTelemetryDegradationV1, FactRetrievalTelemetryV1, FactSearchCursorV1,
-    FactSearchGraphCoverageV1, FactSearchGraphDegradationV1, FactSearchHitV1, FactSearchScoresV1,
-    FactStatusV1, FactTelemetryV1, FactV1,
+    FactRetrievalTelemetryDegradationV1, FactRetrievalTelemetryV1, FactSearchGraphCoverageV1,
+    FactSearchGraphDegradationV1, FactSearchHitV1, FactSearchScoresV1, FactStatusV1,
+    FactTelemetryV1, FactV1,
 };
 use crate::retained_surfaces::FactFeedbackActionV1;
 
@@ -35,7 +35,8 @@ macro_rules! fact_search_result {
         pub struct $name {
             pub owner: FactCommitOwnerV1,
             pub hits: Vec<FactSearchHitV1>,
-            pub next_after: Option<FactSearchCursorV1>,
+            /// Opaque continuation, bound to this operation and request.
+            pub next_after: Option<String>,
             pub graph_coverage: FactSearchGraphCoverageV1,
         }
     };
@@ -53,7 +54,8 @@ fact_search_result!(FactStoreReasonResultV1);
 pub struct FactStoreSearchResultV1 {
     pub owner: FactCommitOwnerV1,
     pub hits: Vec<FactSearchHitV1>,
-    pub next_after: Option<FactSearchCursorV1>,
+    /// Opaque continuation, bound to this operation and request.
+    pub next_after: Option<String>,
     pub graph_coverage: FactSearchGraphCoverageV1,
     pub retrieval_telemetry: FactRetrievalTelemetryV1,
 }
@@ -184,7 +186,8 @@ pub enum FactStoreSupersedeResultV1 {
 pub struct FactStoreListResultV1 {
     pub owner: FactCommitOwnerV1,
     pub facts: Vec<FactProjectionV1>,
-    pub next_after_fact_id: Option<FactId>,
+    /// Opaque continuation, bound to this operation and request.
+    pub next_after: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]

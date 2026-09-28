@@ -130,7 +130,9 @@ decay = 1, usage_boost = 1.5`).
 
 Hits are ordered by score descending, tie-broken by `updated_at` then fact id
 (`rank_and_seek`), with a resumable cursor
-(`ProjectMemoryFactSearchCursorV1`) for pagination. Each hit also carries a
+(`ProjectMemoryFactSearchCursorV1`) for pagination; callers see it only as an
+opaque `next_after` bound to the operation and every result-shaping request
+parameter, and a replay with any of them changed is refused. Each hit also carries a
 human-readable `why` string with every raw component
 (`fts=…, coverage=…, jaccard=…, holographic=…, trust=…, temporal_decay=…,
 retrieval_count=…`).
