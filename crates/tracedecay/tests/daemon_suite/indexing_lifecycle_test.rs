@@ -123,10 +123,13 @@ async fn wait_for_overflow_cadence_receipt(log_path: &Path) {
     .unwrap_or_else(|_| panic!("overflow omitted its terminal cadence receipt; log={last}"));
 }
 
+/// The batch must keep its refresh in flight across the two in-flight
+/// receipts and the SIGTERM (tens of milliseconds), and the restarted daemon
+/// must rebuild all of it inside one `RECEIPT_TIMEOUT` ready wait.
 fn write_cancellation_batch(project: &Path, scratch: &Path) {
     let batch = scratch.join("cancelled_batch_staging");
     fs::create_dir_all(&batch).expect("cancellation batch directory");
-    for file_index in 0..768_u32 {
+    for file_index in 0..96_u32 {
         let mut source = String::new();
         for symbol_index in 0..128_u32 {
             writeln!(
