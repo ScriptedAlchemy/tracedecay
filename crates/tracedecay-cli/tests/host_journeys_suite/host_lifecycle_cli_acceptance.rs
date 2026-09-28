@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
@@ -12,6 +12,7 @@ use tracedecay_agent_hosts::agents::host_bundle::{
 };
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
 use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
+use tracedecay_runtime_core::test_executable::link_or_copy_executable;
 
 use crate::isolated_profile::{apply_isolated_profile_env, hermetic_path};
 
@@ -230,17 +231,7 @@ impl IsolatedCli {
         } else {
             "tracedecay"
         });
-        if fs::hard_link(env!("CARGO_BIN_EXE_tracedecay"), &shim).is_err() {
-            fs::copy(env!("CARGO_BIN_EXE_tracedecay"), &shim).unwrap();
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = fs::metadata(&shim).unwrap().permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&shim, permissions).unwrap();
-        }
+        link_or_copy_executable(Path::new(env!("CARGO_BIN_EXE_tracedecay")), &shim).unwrap();
         Self {
             home,
             project,

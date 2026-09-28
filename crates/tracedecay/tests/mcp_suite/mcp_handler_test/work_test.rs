@@ -15,6 +15,7 @@ use tracedecay_domain::{
     WorkFilesystemPolicy, WorkOrdinalBandV1, WorkProviderBackendV1, WorkRouteCandidateV1,
     WorkRouteExecutionProfileV1, WorkSandboxPolicy,
 };
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 async fn call_envelope(server: &tracedecay::mcp::McpServer, tool: &str, arguments: Value) -> Value {
     let result = handle_real_server_tool_call(server, tool, arguments).await;
@@ -47,18 +48,8 @@ async fn configure_attempt_provider(production: &ProductionCompositionFixture) {
         .parent()
         .expect("production fixture isolation root");
     let executable_path = isolation_root.join("work-attempt-provider");
-    std::fs::write(&executable_path, executable_bytes).expect("write Work provider executable");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = std::fs::metadata(&executable_path)
-            .expect("Work provider executable metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&executable_path, permissions)
-            .expect("Work provider executable permissions");
-    }
+    write_executable_script(&executable_path, executable_bytes)
+        .expect("write Work provider executable");
     let executable_path = executable_path
         .canonicalize()
         .expect("canonical Work provider executable");

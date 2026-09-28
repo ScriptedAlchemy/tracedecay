@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use super::IsolatedCli;
 use super::sweep_outcomes::complete_kimi_plugins_install;
 use crate::isolated_profile::hermetic_path;
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 const PENDING_OPERATOR_ACTION_EXIT: i32 = 75;
 const TOKEN: &str = "fake-kimi-server-token";
@@ -117,15 +118,12 @@ impl FakeKimi {
     /// Put the fake `kimi` first on the isolated `PATH`, with its interpreter
     /// named absolutely so the fake needs nothing else from `PATH`.
     fn install(cli: &IsolatedCli) -> Self {
-        use std::os::unix::fs::PermissionsExt;
-
         let python = std::env::split_paths(&hermetic_path::<&Path>(&[]))
             .map(|dir| dir.join("python3"))
             .find(|candidate| candidate.is_file())
             .expect("python3 in a system dir for the fake Kimi Code server");
         let kimi = cli.bin_dir.join("kimi");
-        fs::write(&kimi, format!("#!{}\n{FAKE_KIMI}", python.display())).unwrap();
-        fs::set_permissions(&kimi, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&kimi, format!("#!{}\n{FAKE_KIMI}", python.display())).unwrap();
         let code_home = cli.home.path().join(".kimi-code");
         fs::create_dir_all(code_home.join("fake-kimi")).unwrap();
         fs::write(code_home.join("server.token"), format!("{TOKEN}\n")).unwrap();
