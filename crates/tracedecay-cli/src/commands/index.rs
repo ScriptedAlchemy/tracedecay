@@ -62,8 +62,6 @@ pub(crate) async fn handle_no_command(
 pub(crate) async fn handle_init(
     profile: &ProfileRoot,
     path: Option<String>,
-    skip_folders: Vec<String>,
-    include_folders: Vec<String>,
     adopt_project: Option<String>,
     fresh: bool,
     assume_yes: bool,
@@ -87,15 +85,9 @@ pub(crate) async fn handle_init(
     let daemon_available = init_daemon_available(profile);
 
     let project_path_for_remedy = project_path.clone();
-    handle_init_with_daemon_availability(
-        project_path,
-        skip_folders,
-        include_folders,
-        handshake,
-        daemon_available,
-    )
-    .await
-    .map_err(|error| annotate_reset_required_init_error(error, &project_path_for_remedy))
+    handle_init_with_daemon_availability(project_path, handshake, daemon_available)
+        .await
+        .map_err(|error| annotate_reset_required_init_error(error, &project_path_for_remedy))
 }
 
 /// Whether a daemon is accepting connections for this profile.
@@ -176,13 +168,11 @@ fn annotate_reset_required_init_error(
 
 async fn handle_init_with_daemon_availability(
     project_path: PathBuf,
-    skip_folders: Vec<String>,
-    include_folders: Vec<String>,
     handshake: tracedecay_daemon_protocol::DaemonHandshake,
     daemon_available: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     if daemon_available {
-        return brokered_init(&project_path, &skip_folders, &include_folders, &handshake).await;
+        return brokered_init(&project_path, &handshake).await;
     }
     Err(tracedecay_domain::errors::TraceDecayError::project_route(
         "code_index_scheduler_unavailable",
@@ -193,15 +183,8 @@ async fn handle_init_with_daemon_availability(
 
 async fn brokered_init(
     project_path: &Path,
-    skip_folders: &[String],
-    include_folders: &[String],
     handshake: &tracedecay_daemon_protocol::DaemonHandshake,
 ) -> tracedecay_domain::errors::Result<()> {
-    reject_brokered_folder_options(
-        skip_folders,
-        include_folders,
-        "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first",
-    )?;
     // Init deliberately triggers a cold project open behind this single
     // status call. The default warming-retry grace is far tighter than a cold
     // open can take on a debug build or slow shared runner, which surfaced as
@@ -249,19 +232,6 @@ async fn brokered_init(
         ),
     }
     Ok(())
-}
-
-fn reject_brokered_folder_options(
-    skip_folders: &[String],
-    include_folders: &[String],
-    message: &'static str,
-) -> tracedecay_domain::errors::Result<()> {
-    if skip_folders.is_empty() && include_folders.is_empty() {
-        return Ok(());
-    }
-    Err(tracedecay_domain::errors::TraceDecayError::Config {
-        message: message.to_owned(),
-    })
 }
 
 /// Asks the project's owner for the operator's code-index reconcile.
@@ -399,15 +369,9 @@ mod init_bootstrap_tests {
         std::fs::create_dir_all(&project).unwrap();
         let handshake = test_handshake(&project, &profile);
 
-        let error = handle_init_with_daemon_availability(
-            project.clone(),
-            Vec::new(),
-            Vec::new(),
-            handshake,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let error = handle_init_with_daemon_availability(project.clone(), handshake, false)
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 error.project_route_context(),
@@ -467,36 +431,6 @@ mod init_bootstrap_tests {
                  Retries on wake: false",
                 "x".repeat(600)
             )
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn brokered_init_retains_folder_option_error_before_sending_request() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let project = temp.path().join("project");
-        let profile = temp.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        let handshake = test_handshake(&project, &profile);
-
-        let error = handle_init_with_daemon_availability(
-            project,
-            vec!["generated".to_string()],
-            Vec::new(),
-            handshake,
-            true,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("brokered init does not yet support --skip-folders/--include-folders"),
-            "unexpected brokered-init error: {error}"
-        );
-        assert!(
-            !profile.exists(),
-            "brokered rejection must not open a local store"
         );
     }
 
@@ -577,16 +511,8 @@ mod init_bootstrap_tests {
 pub(crate) async fn handle_sync(
     profile: &ProfileRoot,
     path: Option<String>,
-    skip_folders: Vec<String>,
-    include_folders: Vec<String>,
-    doctor: bool,
     verbose: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    reject_brokered_folder_options(
-        &skip_folders,
-        &include_folders,
-        "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first",
-    )?;
     let resolved = super::scope::resolve_project_scope(
         profile,
         tracedecay_configuration::resolve_path_with_discovery(profile, path),
@@ -607,9 +533,6 @@ pub(crate) async fn handle_sync(
             "code indexing does not apply to {}",
             resolved.project_path.display()
         ),
-    }
-    if doctor {
-        tracedecay::doctor::run_doctor(profile, crate::cloud::doctor_network_probes()).await?;
     }
     Ok(())
 }

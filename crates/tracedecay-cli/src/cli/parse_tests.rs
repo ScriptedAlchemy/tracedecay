@@ -1,4 +1,4 @@
-use super::{Cli, Commands, DaemonAction, RemoteAction};
+use super::{Cli, Commands, DaemonAction, ProfileStorageAction, RemoteAction};
 use clap::{Parser, error::ErrorKind};
 
 #[test]
@@ -177,29 +177,65 @@ fn init_accepts_short_and_long_path_flag_like_dashboard_does() {
 }
 
 #[test]
-fn init_folder_flags_collect_multiple_values_until_the_next_flag() {
-    let init = Cli::try_parse_from([
-        "tracedecay",
-        "init",
-        "/tmp/project",
-        "--skip-folder",
-        "vendor",
-        "dist",
-        "--include-folder",
-        "dist/generated",
-    ])
-    .expect("init skip/include folders should parse");
+fn brokered_index_commands_refuse_flags_the_daemon_never_honors_at_parse_time() {
+    for argv in [
+        &["tracedecay", "init", "--skip-folder", "vendor"][..],
+        &["tracedecay", "init", "--include-folder", "dist/generated"][..],
+        &["tracedecay", "sync", "--skip-folder", "vendor"][..],
+        &["tracedecay", "sync", "--include-folder", "dist/generated"][..],
+        &["tracedecay", "sync", "--doctor"][..],
+    ] {
+        let error = match Cli::try_parse_from(argv) {
+            Ok(_) => panic!("{argv:?} must be a usage error"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{argv:?}");
+        assert_eq!(error.exit_code(), 2, "{argv:?}");
+    }
     assert!(matches!(
-        init.command,
-        Some(Commands::Init {
-            path,
-            skip_folders,
-            include_folders,
-            ..
-        }) if path.as_deref() == Some("/tmp/project")
-            && skip_folders == ["vendor", "dist"]
-            && include_folders == ["dist/generated"]
+        Cli::try_parse_from(["tracedecay", "sync", "/tmp/project", "--verbose"])
+            .expect("sync PATH --verbose parses")
+            .command,
+        Some(Commands::Sync { path, verbose: true, .. }) if path.as_deref() == Some("/tmp/project")
     ));
+}
+
+#[test]
+fn reset_project_store_requires_one_project_selector_at_parse_time() {
+    let missing = match Cli::try_parse_from(["tracedecay", "storage", "reset-project-store"]) {
+        Ok(_) => panic!("reset-project-store without a selector must be a usage error"),
+        Err(error) => error,
+    };
+    assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
+    assert_eq!(missing.exit_code(), 2);
+    for (flag, value, expected) in [
+        (
+            "--project-root",
+            "/tmp/project",
+            (Some("/tmp/project"), None),
+        ),
+        (
+            "--project-id",
+            "proj_0123456789abcdef",
+            (None, Some("proj_0123456789abcdef")),
+        ),
+    ] {
+        let parsed =
+            Cli::try_parse_from(["tracedecay", "storage", "reset-project-store", flag, value])
+                .expect("one selector parses")
+                .command;
+        let Some(Commands::Storage {
+            action:
+                ProfileStorageAction::ResetProjectStore {
+                    project_root,
+                    project_id,
+                },
+        }) = parsed
+        else {
+            panic!("{flag} must parse as reset-project-store");
+        };
+        assert_eq!((project_root.as_deref(), project_id.as_deref()), expected);
+    }
 }
 
 #[test]
