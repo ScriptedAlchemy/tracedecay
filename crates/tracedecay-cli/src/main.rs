@@ -1096,8 +1096,7 @@ impl CommandFamily {
             Commands::CurrentCounter { .. }
             | Commands::ResetCounter { .. }
             | Commands::DisableUploadCounter
-            | Commands::EnableUploadCounter
-            | Commands::Gitignore { .. } => Self::Configuration,
+            | Commands::EnableUploadCounter => Self::Configuration,
             Commands::Doctor
             | Commands::Cost { .. }
             | Commands::Bench { .. }
@@ -1891,9 +1890,6 @@ async fn dispatch_configuration_command(
         Commands::EnableUploadCounter => {
             commands::handle_upload_counter(profile, true).await?;
         }
-        Commands::Gitignore { path, action } => {
-            commands::handle_gitignore(profile, path, action).await?;
-        }
         _ => unreachable!("non-configuration command passed to configuration dispatcher"),
     }
     Ok(())
@@ -2058,7 +2054,6 @@ impl CommandStartupPolicy {
                     },
             }
             | Commands::Channel { channel: None }
-            | Commands::Gitignore { action: None, .. }
             | Commands::Automation {
                 action:
                     AutomationAction::Config {

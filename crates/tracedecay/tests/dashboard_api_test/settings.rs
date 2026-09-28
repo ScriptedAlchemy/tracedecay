@@ -27,7 +27,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(settings_envelope["coverage"]["completeness"], "complete");
         let settings = settings_envelope["payload"].clone();
 
-        assert_eq!(settings["project"]["config"]["git_ignore"], true);
+        assert!(
+            settings["project"]["config"].get("git_ignore").is_none(),
+            "the retired gitignore toggle must not be offered: {settings}"
+        );
         assert_eq!(settings["project"]["config"]["extract_docstrings"], true);
         assert_eq!(settings["project"]["config"]["track_call_sites"], true);
         assert_eq!(settings["project"]["config"]["max_file_size"], 1_048_576);

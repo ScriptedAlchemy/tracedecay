@@ -45,6 +45,7 @@ mod branch_publication_tests;
 mod cancellation_tests;
 mod deferred_mount_tests;
 mod ignored_dependency_seat_tests;
+mod index_path_policy_tests;
 mod noop_reconcile_tests;
 mod publication_store;
 mod reconcile;
@@ -1537,6 +1538,7 @@ fn scheduler_with_policy(
         store_root,
         bytes,
         policy,
+        crate::config::registry_default_index_path_policy(),
     )
     .expect("open worktree scheduler with policy")
 }

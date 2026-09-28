@@ -20,6 +20,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) project_root: PathBuf,
     pub(super) store_root: PathBuf,
     pub(super) native_graph_activation: bool,
+    pub(super) index_paths: tracedecay_domain::IndexPathPolicyV1,
     pub(super) scope: tracedecay_contracts::ResolvedScope,
     pub(super) route_registered: Arc<AtomicBool>,
     pub(super) cancellation: CancellationToken,
@@ -40,6 +41,7 @@ pub(super) fn code_index_activation_mount(
         project_root,
         store_root,
         native_graph_activation,
+        index_paths,
         scope,
         route_registered,
         cancellation,
@@ -52,6 +54,7 @@ pub(super) fn code_index_activation_mount(
         let project_root = project_root.clone();
         let store_root = store_root.clone();
         let native_graph_activation = native_graph_activation;
+        let index_paths = index_paths.clone();
         let scope = scope.clone();
         let route_registered = Arc::clone(&route_registered);
         let cancellation = cancellation.clone();
@@ -74,6 +77,7 @@ pub(super) fn code_index_activation_mount(
                     &project_root,
                     store_root,
                     native_graph_activation,
+                    index_paths,
                     graph_runtime,
                     graph_publication_database,
                 );

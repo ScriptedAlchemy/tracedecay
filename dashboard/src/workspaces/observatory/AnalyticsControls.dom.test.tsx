@@ -203,7 +203,6 @@ function settingsPayload() {
       config: {
         exclude: [],
         extract_docstrings: true,
-        git_ignore: true,
         context_scout: false,
         include: [],
         max_file_size: 1_048_576,

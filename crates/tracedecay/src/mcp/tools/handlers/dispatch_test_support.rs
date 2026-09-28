@@ -239,6 +239,7 @@ fn verified_graph_options_with_freshness<'a>(
                 cg.db().clone(),
                 cg.is_read_only(),
                 project_id.as_str().to_owned(),
+                tracedecay_code_index_runtime::registry_default_index_path_policy(),
             )),
         ),
     );

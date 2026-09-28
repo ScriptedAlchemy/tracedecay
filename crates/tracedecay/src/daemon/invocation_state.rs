@@ -352,6 +352,7 @@ impl DaemonInvocationState {
         Arc::clone(&self.work_federated_query_authority)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "daemon.invocation_state.code_index_mount", future = true)]
     pub(super) async fn mount_code_index(
         &self,
@@ -359,6 +360,7 @@ impl DaemonInvocationState {
         project_root: &Path,
         store_root: PathBuf,
         native_graph_activation: bool,
+        index_paths: tracedecay_domain::IndexPathPolicyV1,
         graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Result<()> {
@@ -391,6 +393,7 @@ impl DaemonInvocationState {
                 code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                     native_graph_activation,
                 ),
+                index_paths,
             )
             .await
             .map_err(|error| {

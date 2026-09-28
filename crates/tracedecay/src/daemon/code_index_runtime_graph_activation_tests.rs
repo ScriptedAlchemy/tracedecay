@@ -232,6 +232,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
             graph_runtime.code_graph_seat_port(),
             read_only_project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            tracedecay_code_index_runtime::registry_default_index_path_policy(),
         )
         .await
         .expect("mount retained generation");
@@ -531,6 +532,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
             graph_runtime.code_graph_seat_port(),
             Arc::clone(&project_database),
             CodeGraphActivationPolicyV1::Enabled,
+            tracedecay_code_index_runtime::registry_default_index_path_policy(),
         )
         .await
         .expect("mount persistent generation A");
@@ -907,6 +909,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            tracedecay_code_index_runtime::registry_default_index_path_policy(),
         )
         .await
         .expect("mount persistent graph generation");
@@ -1370,6 +1373,7 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            tracedecay_code_index_runtime::registry_default_index_path_policy(),
         )
         .await
         .expect("mount restarted retained generation");
@@ -1544,6 +1548,7 @@ async fn first_index_serves_graph_reads_without_decoding_the_generation() {
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            tracedecay_code_index_runtime::registry_default_index_path_policy(),
         )
         .await
         .expect("mount first index");

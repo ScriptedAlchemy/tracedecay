@@ -47,9 +47,14 @@ pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executa
 /// no registered owner anymore. `semantic.runtime.v1` shipped through
 /// v0.1.0-beta.37 and left with the dense retrieval runtime;
 /// `sync.orphan_db_gc_days.v1` shipped through v0.1.0-beta.50 and left with
-/// the orphan branch-database sweep.
-pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] =
-    &["semantic.runtime.v1", "sync.orphan_db_gc_days.v1"];
+/// the orphan branch-database sweep; `index.git_ignore.v1` shipped through
+/// v0.1.0-beta.50 and left because the code index is defined by Git's view
+/// of the worktree, which always honors `.gitignore`.
+pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &[
+    "index.git_ignore.v1",
+    "semantic.runtime.v1",
+    "sync.orphan_db_gc_days.v1",
+];
 
 /// Canonical user-profile settings.
 pub const USER_UPLOAD_ENABLED_SETTING_KEY: &str = "user.upload_enabled.v1";
@@ -64,7 +69,6 @@ pub const INDEX_INCLUDE_SETTING_KEY: &str = "index.include.v1";
 pub const INDEX_MAX_FILE_SIZE_SETTING_KEY: &str = "index.max_file_size.v1";
 pub const INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY: &str = "index.extract_docstrings.v1";
 pub const INDEX_TRACK_CALL_SITES_SETTING_KEY: &str = "index.track_call_sites.v1";
-pub const INDEX_GIT_IGNORE_SETTING_KEY: &str = "index.git_ignore.v1";
 pub const INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY: &str = "index.native_graph_activation.v1";
 pub const DIAGNOSTICS_PREWARM_SETTING_KEY: &str = "diagnostics.prewarm.v1";
 pub const SYNC_AUTO_WATCH_SETTING_KEY: &str = "sync.auto_watch.v1";
@@ -109,7 +113,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     INDEX_MAX_FILE_SIZE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    INDEX_GIT_IGNORE_SETTING_KEY,
     INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     DIAGNOSTICS_PREWARM_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY,

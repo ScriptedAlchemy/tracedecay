@@ -98,7 +98,6 @@ const BINDINGS: Readonly<Record<string, SettingsBinding>> = {
     field: 'track_call_sites',
     input: 'boolean',
   },
-  'project.config.git_ignore': { scope: 'project', field: 'git_ignore', input: 'boolean' },
   'project.config.context_scout': { scope: 'project', field: 'context_scout', input: 'boolean' },
   'project.config.telemetry.timings': {
     scope: 'project',
@@ -344,7 +343,6 @@ function withProjectField(
       return typeof value === 'string' ? { ...values, [field]: value } : values;
     case 'extract_docstrings':
     case 'track_call_sites':
-    case 'git_ignore':
     case 'context_scout':
     case 'telemetry_timings':
     case 'auto_track_pr_branches':

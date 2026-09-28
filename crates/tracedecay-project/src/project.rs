@@ -113,6 +113,7 @@ impl TraceDecay {
             self.db.clone(),
             self.read_only,
             self.store_layout.identity.project_id.clone()?,
+            self.config.index_paths.clone(),
         ))
     }
 

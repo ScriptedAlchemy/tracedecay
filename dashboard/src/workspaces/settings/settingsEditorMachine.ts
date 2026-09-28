@@ -717,7 +717,6 @@ function sameProjectValues(
     left.max_file_size === right.max_file_size &&
     left.extract_docstrings === right.extract_docstrings &&
     left.track_call_sites === right.track_call_sites &&
-    left.git_ignore === right.git_ignore &&
     left.context_scout === right.context_scout &&
     left.telemetry_timings === right.telemetry_timings &&
     left.auto_track_pr_branches === right.auto_track_pr_branches &&

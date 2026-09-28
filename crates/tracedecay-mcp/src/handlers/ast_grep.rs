@@ -13,6 +13,7 @@ use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1}
 use tracedecay_contracts::retrieval::{
     AstGrepSearchMatchV1, AstGrepSearchResultV1, AstGrepSearchSurfaceRequestV1,
 };
+use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_domain::errors::Result;
 
 use crate::ToolResult;
@@ -30,6 +31,7 @@ const DEFAULT_MAX_RESULTS: usize = 50;
 #[hotpath::measure(future = true, label = "mcp.search.ast_grep.total")]
 pub async fn compute_ast_grep_search(
     project_root: &Path,
+    path_policy: &IndexPathPolicyV1,
     args: Value,
     scope_prefix: Option<&str>,
     deadline: Option<tracedecay_contracts::Deadline>,
@@ -47,6 +49,7 @@ pub async fn compute_ast_grep_search(
     let project_root_buf = project_root.to_path_buf();
     let query = request.pattern.clone();
     let scope_prefix = scope_prefix.map(str::to_owned);
+    let path_policy = path_policy.clone();
     let search: AstGrepSearchResult = hotpath::future!(
         run_bounded_search(
             "tracedecay_ast_grep_search",
@@ -61,6 +64,7 @@ pub async fn compute_ast_grep_search(
                     path_glob.as_deref(),
                     max_results,
                     scope_prefix.as_deref(),
+                    &path_policy,
                     || {
                         cancelled.load(std::sync::atomic::Ordering::Acquire)
                             || transport_cancellation
@@ -165,6 +169,7 @@ mod tests {
 
         let result = compute_ast_grep_search(
             temp.path(),
+            &IndexPathPolicyV1::new(Vec::new(), Vec::new()).expect("empty policy"),
             serde_json::json!({"pattern": "target($A)", "lang": "rust", "max_results": 10}),
             None,
             None,

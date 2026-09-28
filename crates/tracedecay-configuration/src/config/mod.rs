@@ -16,11 +16,10 @@ pub use tracedecay_global_db::configuration::{registry, resolver};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
-    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
@@ -34,6 +33,7 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{IndexPathPolicyV1, ProjectId};
 use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
@@ -42,16 +42,13 @@ use model::{RetentionConfig, SyncConfig, TelemetryConfig};
 /// Settings decoded from one resolved configuration snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTraceDecayConfig {
-    /// Glob patterns for paths to index despite the default hidden-directory,
-    /// generated-directory, and gitignore filters.
-    pub include: Vec<String>,
-    /// Glob patterns for files to exclude during indexing.
-    pub exclude: Vec<String>,
+    /// `index.exclude.v1` and `index.include.v1`, compiled once: the path
+    /// policy the code index, its freshness proof, and source walks share.
+    pub index_paths: IndexPathPolicyV1,
     /// Maximum file size in bytes; larger files are skipped.
     pub max_file_size: u64,
     pub extract_docstrings: bool,
     pub track_call_sites: bool,
-    pub git_ignore: bool,
     /// A cold `tracedecay_diagnostics` call prewarms in the background instead
     /// of blocking on the dependency build.
     pub diagnostics_prewarm: bool,
@@ -257,12 +254,14 @@ fn runtime_config_from_snapshot(
         config_error(format!("invalid resolved configuration snapshot: {error}"))
     })?;
     Ok(RuntimeTraceDecayConfig {
-        include: required_string_list(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
-        exclude: required_string_list(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
+        index_paths: IndexPathPolicyV1::new(
+            required_string_list(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
+            required_string_list(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
+        )
+        .map_err(|error| config_error(format!("resolved index path policy is invalid: {error}")))?,
         max_file_size: required_unsigned(snapshot, INDEX_MAX_FILE_SIZE_SETTING_KEY)?,
         extract_docstrings: required_bool(snapshot, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY)?,
         track_call_sites: required_bool(snapshot, INDEX_TRACK_CALL_SITES_SETTING_KEY)?,
-        git_ignore: required_bool(snapshot, INDEX_GIT_IGNORE_SETTING_KEY)?,
         diagnostics_prewarm: required_bool(snapshot, DIAGNOSTICS_PREWARM_SETTING_KEY)?,
         native_graph_activation: required_bool(
             snapshot,

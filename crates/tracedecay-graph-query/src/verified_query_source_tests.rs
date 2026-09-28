@@ -118,6 +118,8 @@ async fn resolve_rejects_absolute_path_under_another_project_root() {
             db,
             true,
             "project.verified-query-source.a".to_owned(),
+            tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new())
+                .expect("index path policy"),
         ));
     let error = query
         .resolve_indexed_source_file(project_b.join("src/secret.rs").to_str().expect("utf8"))
@@ -147,6 +149,8 @@ async fn open_denies_cross_project_source_at_bind() {
         db,
         true,
         "project.verified-query-source-other".to_owned(),
+        tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new())
+            .expect("index path policy"),
     );
     let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("deadline");
     let cancellation =

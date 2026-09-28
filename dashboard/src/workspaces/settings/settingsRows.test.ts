@@ -159,7 +159,7 @@ describe('write bindings', () => {
 
   it('states the apply requirement only where the product documents it', () => {
     expect(applyRequirement(bindingFor('user.code_index_workers')!)).toMatchObject({ kind: 'restart' });
-    expect(applyRequirement(bindingFor('project.config.git_ignore')!)).toEqual({
+    expect(applyRequirement(bindingFor('project.config.track_call_sites')!)).toEqual({
       kind: 'reported_on_apply',
     });
     expect(applyRequirement(bindingFor('user.upload_enabled')!)).toEqual({
@@ -195,7 +195,7 @@ describe('draft field access', () => {
   });
 
   it('ignores a value of the wrong shape rather than corrupting the draft', () => {
-    const boolean = bindingFor('project.config.git_ignore')!;
+    const boolean = bindingFor('project.config.track_call_sites')!;
     expect(withFieldValue(draft, boolean, 'yes')).toEqual(draft);
     const workers = bindingFor('user.code_index_workers')!;
     expect(withFieldValue(draft, workers, { mode: 'exact' })).toEqual(draft);

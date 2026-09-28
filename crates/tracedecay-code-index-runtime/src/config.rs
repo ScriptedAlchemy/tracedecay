@@ -1,23 +1,39 @@
 //! Configuration surfaces this crate needs without depending on the root
 //! `crate::config` module (another effort is splitting that module).
 //!
-//! Path primitives and generated-segment classification already live in
-//! runtime-core / domain. The watcher-only sync knobs are constructor-injected
-//! as [`crate::ports::GitWatchSyncConfigV1`].
+//! Path primitives already live in runtime-core / domain. The watcher-only
+//! sync knobs are constructor-injected as [`crate::ports::GitWatchSyncConfigV1`],
+//! and the index path policy as a mount argument.
 
-pub use tracedecay_domain::source_path_policy::is_generated_dir_segment;
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_domain::IndexPathPolicyV1;
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_domain::configuration::{
+    ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY, SettingKey,
+};
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
 #[cfg(test)]
 pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_runtime_core::config::is_ambient_project_root;
 
-/// Path-level generated/vendored check used by the scheduler snapshot filter.
-///
-/// Mirrors the root helper: a minified-asset suffix or any generated directory
-/// segment. Kept here so the scheduler does not import root config.
-pub fn is_generated_path_segment(path: &str) -> bool {
-    has_minified_suffix(path) || path.split('/').any(is_generated_dir_segment)
-}
-
-fn has_minified_suffix(path: &str) -> bool {
-    path.rfind(".min.").is_some_and(|idx| idx + 5 < path.len())
+/// The `index.exclude.v1` / `index.include.v1` policy a fresh profile
+/// resolves, read from the registry's own defaults, for standalone owners
+/// that no project configuration mounts.
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::expect_used, clippy::panic)] // fixture gate: an invalid core registry is a build bug
+pub fn registry_default_index_path_policy() -> IndexPathPolicyV1 {
+    let registry = ConfigurationRegistry::core().expect("core configuration registry");
+    let default = |key: &str| {
+        let key = SettingKey::new(key).expect("index path setting key");
+        match &registry.definition(&key).expect("registered").default_value {
+            ConfigurationValueV1::StringList(patterns) => patterns.clone(),
+            other => panic!("{key} default is not a string list: {other:?}"),
+        }
+    };
+    IndexPathPolicyV1::new(
+        default(INDEX_EXCLUDE_SETTING_KEY),
+        default(INDEX_INCLUDE_SETTING_KEY),
+    )
+    .expect("registry default index path patterns compile")
 }

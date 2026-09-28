@@ -159,9 +159,9 @@ pub enum Commands {
         path: Option<String>,
         /// Project path, as an explicit flag. Equivalent to the positional
         /// PATH argument above; accepted for consistency with `-p`/`--path`
-        /// on other project-scoped commands (e.g. `dashboard`, `gitignore`,
-        /// `bench`). Conflicts with the positional PATH, pass one or the
-        /// other, not both.
+        /// on other project-scoped commands (e.g. `dashboard`, `bench`).
+        /// Conflicts with the positional PATH, pass one or the other, not
+        /// both.
         #[arg(
             short = 'p',
             long = "path",
@@ -556,19 +556,6 @@ pub enum Commands {
         after_help = ENABLE_UPLOAD_COUNTER_AFTER_HELP
     )]
     EnableUploadCounter,
-    /// Show or change whether .gitignore rules are respected during indexing
-    #[command(
-        name = "gitignore",
-        long_about = GITIGNORE_LONG_ABOUT,
-        after_help = GITIGNORE_AFTER_HELP
-    )]
-    Gitignore {
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-        /// "on" to enable, "off" to disable, omit to show current setting
-        action: Option<String>,
-    },
     /// Check tracedecay installation, configuration, and agent integration
     #[command(long_about = DOCTOR_LONG_ABOUT, after_help = DOCTOR_AFTER_HELP)]
     Doctor,

@@ -16,12 +16,13 @@ use tracedecay_code_index::production::{
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
-use tracedecay_domain::ProjectId;
+use tracedecay_domain::{IndexPathPolicyV1, ProjectId};
 
 use super::super::{
-    CodeIndexCadenceTriggerV1, CodeIndexNoopEvidenceV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1,
-    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, RetainedTextGenerationRestoreV1,
+    CodeIndexCadenceTriggerV1, CodeIndexHintPolicyV1, CodeIndexNoopEvidenceV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
+    DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
+    RetainedTextGenerationRestoreV1,
     graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1},
     now_micros,
     reconcile_panic_guard::{
@@ -156,6 +157,7 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_runtime: Arc<dyn crate::code_graph_seat::CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
         graph_activation_policy: CodeGraphActivationPolicyV1,
+        path_policy: IndexPathPolicyV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
             project_id,
@@ -166,6 +168,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 project_database,
                 policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
             },
+            path_policy,
         )
         .await
     }
@@ -185,6 +188,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeGraphActivationAuthorityV1::Memory {
                 policy: Arc::new(AtomicBool::new(true)),
             },
+            crate::config::registry_default_index_path_policy(),
         )
         .await
     }
@@ -204,6 +208,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeGraphActivationAuthorityV1::Memory {
                 policy: Arc::new(AtomicBool::new(policy.is_enabled())),
             },
+            crate::config::registry_default_index_path_policy(),
         )
         .await
     }
@@ -337,6 +342,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         store_root: PathBuf,
         graph_activation: CodeGraphActivationAuthorityV1,
+        path_policy: IndexPathPolicyV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = canonical_existing_identity(project_root)?;
         #[cfg(test)]
@@ -385,14 +391,17 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_resident_owners = Arc::clone(&self.resident_owners);
         let progress_daemon_incarnation = self.progress_daemon_incarnation;
         let progress_producer_incarnation = self.mint_progress_producer_incarnation()?;
+        let mounted_path_policy = path_policy.clone();
         let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             Self::pause_cold_mount_open_for_test(&open_project_root);
-            let opened = CodeIndexWorktreeSchedulerV1::open(
+            let opened = CodeIndexWorktreeSchedulerV1::open_with_policy(
                 open_project_id,
                 &open_project_root,
                 scoped_store_root,
                 open_byte_pool,
+                CodeIndexHintPolicyV1::default(),
+                path_policy,
             );
             #[cfg(test)]
             Self::finish_cold_mount_open_for_test(&open_project_root);
@@ -3124,6 +3133,7 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree_id,
             query_authority: None,
             scheduler,
+            path_policy: mounted_path_policy,
             build_publication_lock,
             historical_generation_owner,
             serving_generation,

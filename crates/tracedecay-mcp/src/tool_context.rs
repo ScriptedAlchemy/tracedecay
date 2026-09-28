@@ -36,6 +36,7 @@ use tracedecay_contracts::code_index_freshness::{
 };
 use tracedecay_contracts::{CancellationSignal, Deadline, ResolvedScope};
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
+use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::VerifiedGraphQuery;
@@ -512,6 +513,20 @@ impl<'a> McpToolContext<'a> {
     #[must_use]
     pub fn configuration_runtime(&self) -> &'a ProjectConfigurationRuntime {
         self.project.configuration_runtime()
+    }
+
+    /// The project's committed `index.exclude.v1` / `index.include.v1`
+    /// policy, which source walks share with the code index.
+    pub async fn index_path_policy(&self) -> Result<IndexPathPolicyV1> {
+        let configuration = self
+            .configuration_runtime()
+            .client()
+            .current()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("configuration authority unavailable: {error}"),
+            })?;
+        Ok(configuration.config().index_paths.clone())
     }
 
     #[must_use]

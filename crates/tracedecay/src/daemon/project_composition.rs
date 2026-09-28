@@ -857,6 +857,7 @@ impl ProjectOpenInputs<'_> {
             project_root: self.canonical_project_path.to_path_buf(),
             store_root: code_index_store_root.clone(),
             native_graph_activation: runtime_configuration.config().native_graph_activation,
+            index_paths: runtime_configuration.config().index_paths.clone(),
             scope: code_index.scope.clone(),
             route_registered: Arc::clone(&route_registered),
             cancellation: route_cancellation.clone(),

@@ -8,6 +8,7 @@ description = "Pure domain contracts for TraceDecay V2"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
+globset = "0.4"
 hotpath.workspace = true
 schemars.workspace = true
 serde = { version = "1", features = ["derive"] }

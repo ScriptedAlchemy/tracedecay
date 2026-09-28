@@ -35,7 +35,8 @@ scheduler, and without one it refuses with \
 with `tracedecay daemon install-service` (or `tracedecay daemon start`) and \
 confirm with `tracedecay daemon status`. Storage is daemon-owned. Run once \
 per repository; afterwards `tracedecay sync` keeps the index fresh \
-incrementally. Respects .gitignore by default (see `tracedecay gitignore`).";
+incrementally. Indexes what Git sees (tracked files and untracked files \
+.gitignore does not ignore) minus the project's `index.exclude.v1` patterns.";
 
 pub(crate) const INIT_AFTER_HELP: &str = "\
 Examples:
@@ -47,8 +48,8 @@ Examples:
   tracedecay init /new/path --fresh              Mint a new identity, never adopt
 
 Related: tracedecay daemon (the daemon init requires), tracedecay sync
-(incremental refresh), tracedecay status, tracedecay gitignore,
-tracedecay wipe (delete local stores).";
+(incremental refresh), tracedecay status, tracedecay wipe (delete local \
+stores).";
 
 pub(crate) const SYNC_LONG_ABOUT: &str = "\
 Asks the daemon to reconcile the project's code index and returns once the \
@@ -429,19 +430,6 @@ Examples:
   tracedecay enable-upload-counter               Resume contributing counts
 
 Related: tracedecay disable-upload-counter, tracedecay gain.";
-
-pub(crate) const GITIGNORE_LONG_ABOUT: &str = "\
-Shows or toggles whether indexing respects .gitignore rules for this project. \
-Turning it off indexes ignored folders too (generated code, vendored deps); \
-re-run `tracedecay sync` afterwards so the change takes effect.";
-
-pub(crate) const GITIGNORE_AFTER_HELP: &str = "\
-Examples:
-  tracedecay gitignore                           Show the current setting
-  tracedecay gitignore off                       Index ignored files too
-  tracedecay gitignore on                        Respect .gitignore again
-
-Related: tracedecay sync (apply the change).";
 
 pub(crate) const DOCTOR_LONG_ABOUT: &str = "\
 Checks the binary, PATH, daemon service, project index, and every agent \

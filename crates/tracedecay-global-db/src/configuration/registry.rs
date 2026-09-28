@@ -3,32 +3,32 @@
 use std::collections::BTreeMap;
 
 use thiserror::Error;
-use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
     AnalyzerSettingsV1, CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     CodeIndexWorkerSelectionV1, ConfigurationValueKindV1, ConfigurationValueV1,
     ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, LcmSummarizerExecutablesV1,
-    PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY,
-    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
-    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-    SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
-    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
-    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
-    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
-    SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
-    USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
-    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
+    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    LcmSummarizerExecutablesV1, PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+    SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1, SettingKey, SettingScopeV1,
+    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1,
+    safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
+use tracedecay_domain::{DomainError, validate_index_path_patterns};
 
 /// Canonical default for configured-tier proximity warnings.
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
@@ -58,6 +58,12 @@ pub enum ConfigurationRegistryError {
         minimum: u64,
         maximum: u64,
         actual: u64,
+    },
+    #[error("setting {key} pattern '{pattern}' is invalid: {message}")]
+    InvalidPathPattern {
+        key: SettingKey,
+        pattern: String,
+        message: String,
     },
     #[error("setting {key} cannot be written in layer {layer:?}")]
     InvalidLayer {
@@ -283,6 +289,20 @@ impl ConfigurationRegistry {
                 });
             }
         }
+        if let ConfigurationValueV1::StringList(patterns) = value
+            && matches!(
+                key.as_str(),
+                INDEX_EXCLUDE_SETTING_KEY | INDEX_INCLUDE_SETTING_KEY
+            )
+        {
+            validate_index_path_patterns(patterns).map_err(|error| {
+                ConfigurationRegistryError::InvalidPathPattern {
+                    key: key.clone(),
+                    pattern: error.pattern,
+                    message: error.message,
+                }
+            })?;
+        }
         if matches!(
             key.as_str(),
             USER_WATCHER_DEBOUNCE_MS_SETTING_KEY | USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY
@@ -409,7 +429,6 @@ struct ProjectDefaults {
     max_file_size: u64,
     extract_docstrings: bool,
     track_call_sites: bool,
-    git_ignore: bool,
     diagnostics_prewarm: bool,
     native_graph_activation: bool,
     telemetry_timings: bool,
@@ -477,7 +496,6 @@ impl Default for ProjectDefaults {
             max_file_size: 1_048_576,
             extract_docstrings: true,
             track_call_sites: true,
-            git_ignore: true,
             diagnostics_prewarm: false,
             native_graph_activation: true,
             telemetry_timings: true,
@@ -520,12 +538,6 @@ fn register_project_settings(
         (
             INDEX_TRACK_CALL_SITES_SETTING_KEY,
             ConfigurationValueV1::Boolean(defaults.track_call_sites),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            INDEX_GIT_IGNORE_SETTING_KEY,
-            ConfigurationValueV1::Boolean(defaults.git_ignore),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),

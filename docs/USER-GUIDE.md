@@ -150,13 +150,35 @@ untouched. Run `tracedecay sync`, then re-check `tracedecay status`; do not use
 `storage reset-project-store`, which is reserved for a reported schema reset
 requirement.
 
-### Default Skips
+### What gets indexed
 
-TraceDecay respects `.gitignore` by default and skips common generated, vendored, and cache directories such as `node_modules`, `vendor`, `dist`, `build`, `coverage`, `.next`, `.turbo`, `.cache`, virtualenvs, and `__pycache__`.
+The code index is Git's view of the worktree: tracked files and untracked
+files that `.gitignore` does not ignore. Ignored files are never indexed.
+From that set, the project's `index.exclude.v1` patterns remove paths, and
+`index.include.v1` patterns re-admit paths the exclude list would remove.
+The shipped exclude list skips generated, vendored, and cache directories
+such as `node_modules`, `vendor`, `dist`, `build`, `target`, `coverage`,
+`.next`, `.turbo`, `.cache`, virtualenvs, and `__pycache__`, plus minified
+`*.min.*` assets and a top-level `bin/`.
 
-Indexing covers tracked files and untracked files that `.gitignore` does not
-ignore, minus those generated directories. There is no per-run folder
-exclusion; `init` and `sync` take no folder flags.
+A pattern is a glob over the project-relative path: `*` and `?` stay inside
+one path segment, `**` spans segments, and a pattern that names a directory
+covers everything under it (`docs` and `docs/**` are equivalent). `grep`,
+`ast_grep_search`, and `unmounted_files` walk the same filtered file set.
+
+Both settings are project-scoped and apply when the daemon restarts; the next
+generation then adds or drops exactly the matching files. Change them from the
+dashboard Settings page or with `tracedecay_configuration_set` (value kind
+`string_list`), for example to also skip a fixtures tree:
+
+```bash
+tracedecay tool configuration_set --args '{"layer":{"kind":"project","project_id":"<id>"},"key":"index.exclude.v1","value":{"kind":"string_list","value":["vendor/**","**/node_modules/**","generated-fixtures/**"]},"expected_revision":"<revision>","idempotency_key":"<key>"}'
+```
+
+The value replaces the whole list, so start from the current effective value
+(`tracedecay tool configuration_get --args '{"key":"index.exclude.v1"}'`). A
+malformed pattern is refused before anything is written. There is no per-run
+folder exclusion; `init` and `sync` take no folder flags.
 
 ### Seeing what changed
 
@@ -189,15 +211,7 @@ code-index reconciliation queued via daemon for /path/to/repo
 The request only queues the reconcile; follow its progress with
 `tracedecay status`.
 
-### Respecting .gitignore
-
-By default, tracedecay respects your `.gitignore` rules and skips ignored files during indexing. You can check the current setting or toggle it:
-
-```bash
-tracedecay gitignore              # show current setting
-tracedecay gitignore on           # enable (default)
-tracedecay gitignore off          # disable, index everything
-```
+### Nothing to add to .gitignore
 
 TraceDecay never creates files inside your repository's working tree, so
 `init` leaves `git status` untouched and nothing needs a `.gitignore` entry:
@@ -1188,7 +1202,8 @@ Some symbols aren't showing up.
   warming/refresh-required state. Request an explicit administrative refresh
   only when the daemon reports it is needed.
 - Check that the language is supported (see the tiers above)
-- Verify the file isn't being skipped by `.gitignore` (`tracedecay gitignore` to check)
+- Verify the file is in Git's view of the worktree (not ignored by `.gitignore`)
+  and not matched by `index.exclude.v1` (see [What gets indexed](#what-gets-indexed))
 
 ### Indexing is slow on first run
 

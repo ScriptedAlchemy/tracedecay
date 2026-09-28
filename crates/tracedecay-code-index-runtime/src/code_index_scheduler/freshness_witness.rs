@@ -31,8 +31,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
-    ContentDigest, LanguageId, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
-    validate_code_logical_path,
+    ContentDigest, IndexPathPolicyV1, LanguageId, SanitizedCodeSnapshotV1,
+    SnapshotFileDispositionV1, validate_code_logical_path,
 };
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
@@ -40,7 +40,6 @@ use super::{CodeIndexSchedulerErrorV1, classification, ignored_dependencies, pri
 use crate::code_index::chunks::content_digest;
 use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use crate::code_index::parallelism;
-use crate::config::is_generated_path_segment;
 
 const FRESHNESS_WITNESS_FILE_NAME: &str = "freshness_witness.v1";
 
@@ -478,13 +477,23 @@ pub struct SourceSweepStatsV1 {
 /// files and directories and reads no bytes. It is a cache of the content
 /// proof, not a second authority: every entry was derived from the bytes on
 /// disk, and a disagreeing key falls back to re-deriving them.
-#[derive(Default)]
 pub struct SourceSweepCacheV1 {
+    /// The path policy capture seals under; an excluded candidate is not a
+    /// source the manifest has to carry.
+    path_policy: IndexPathPolicyV1,
     contents: HashMap<String, (StatKeyV1, CandidateContentV1)>,
     roster: Option<CachedCandidateRosterV1>,
 }
 
 impl SourceSweepCacheV1 {
+    pub fn new(path_policy: IndexPathPolicyV1) -> Self {
+        Self {
+            path_policy,
+            contents: HashMap::new(),
+            roster: None,
+        }
+    }
+
     /// Whether the bytes on disk still carry exactly the manifest's content
     /// identities: every present manifest file is still a candidate, and
     /// every candidate's canonical digest equals its manifest entry (or the
@@ -539,7 +548,7 @@ impl SourceSweepCacheV1 {
             .filter(|candidate| {
                 validate_code_logical_path(&candidate.logical_path).is_ok()
                     && (candidate.explicitly_admitted
-                        || !is_generated_path_segment(&candidate.logical_path))
+                        || !self.path_policy.excludes(&candidate.logical_path))
             })
             .collect::<Vec<_>>();
         let present = stat_concurrently(&eligible, |candidate| {

@@ -31,7 +31,7 @@ use unsafe_patterns::compute_unsafe_patterns;
 use crate::handlers::graph::{graph_tool_completion, user_line};
 use crate::handlers::support::{decode_primitive_request, unknown_tool_error};
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
-use crate::{is_ident_byte, line_number_at};
+use crate::{McpToolContext, is_ident_byte, line_number_at};
 use crate::{require_positive_limit, unique_file_paths};
 
 use std::collections::{HashMap, HashSet};
@@ -51,7 +51,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 /// Computes one structural-analysis report over the `health_read` verified
 /// graph opened through `open`.
 pub async fn compute_analysis_report(
-    project_root: &Path,
+    ctx: &McpToolContext<'_>,
     open: &VerifiedGraphOpen<'_>,
     operation: ApplicationSurfaceOperation,
     args: Value,
@@ -60,8 +60,10 @@ pub async fn compute_analysis_report(
     // The one analysis report that opens no graph query: its whole finding is
     // that the graph and the compiler disagree, so taking the graph's file set
     // as input would answer the question with the very source under suspicion.
+    let project_root = ctx.project_root();
     if operation == ApplicationSurfaceOperation::UnmountedFiles {
-        return compute_unmounted_files(project_root, args, scope_prefix).await;
+        let path_policy = ctx.index_path_policy().await?;
+        return compute_unmounted_files(project_root, &path_policy, args, scope_prefix).await;
     }
     let graph = open(read("health_read")?).await?;
     match operation {

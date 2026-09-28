@@ -361,6 +361,7 @@ export function GenerationAnchor() { return 1; }
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            tracedecay_code_index_runtime::registry_default_index_path_policy(),
         )
         .await
         .expect("mount persistent graph-backed scheduler");
