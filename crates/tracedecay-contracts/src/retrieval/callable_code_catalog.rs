@@ -17,6 +17,7 @@ use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 use crate::surface_contracts::{
     CodeCalleesSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
     CodeNavigationSurfaceRequest, CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest,
@@ -105,6 +106,12 @@ pub fn callable_code_handler_descriptors()
 /// advertised on transport surfaces.
 pub fn callable_code_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
+    callable_code_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn callable_code_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(CALLABLE_CODE_OPERATION_COUNT);
     let mut bindings = Vec::with_capacity(27);
     for kind in CallableCodeOperationKind::ALL
@@ -151,8 +158,7 @@ pub fn callable_code_catalog_contribution()
         capabilities,
         bindings,
     ))?;
-    let schemas = callable_code_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(contribution, materialize, callable_code_executable_schemas)
 }
 
 /// Rust-owned request/result schema bodies for every advertised callable-code

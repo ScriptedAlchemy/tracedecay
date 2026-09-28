@@ -9,6 +9,7 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalWorkflowEvidenceKindV1,
     ObservationScopeV1,
 };
+use tracedecay_store::ParseOffset;
 
 use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
 use crate::observation::ObservationCancellation;
@@ -112,10 +113,7 @@ async fn steady_state_restart_keeps_high_water_without_per_row_durability_reads(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        coverage.file_id,
-        crate::runtime::source::HostProviderCoverage::Complete as u64
-    );
+    assert_eq!(coverage.file_id, 1);
     assert_eq!(coverage.byte_offset, 0);
     let reads_after_first_sweep = admission.session_message_read_count();
 
@@ -844,11 +842,98 @@ async fn oversized_opencode_database_admits_its_project_session() {
         "oversized OpenCode database must admit ses_large; admitted={admitted} coverage_file_id={} deferred_units={} messages_upserted={}",
         coverage.file_id, coverage.byte_offset, outcome.stats.messages_upserted
     );
-    assert_eq!(
-        crate::runtime::source::HostProviderCoverage::from_file_id(coverage.file_id),
-        Some(crate::runtime::source::HostProviderCoverage::Complete)
-    );
+    assert_eq!(coverage.file_id, 1);
     assert_eq!(coverage.byte_offset, 0);
+}
+
+#[tokio::test]
+async fn appended_opencode_messages_are_admitted_without_repeating_earlier_ones() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project.clone());
+    let admission = MemoryHostAdmission::default();
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let before = admission.observations().len();
+    assert!(
+        admission.observations().iter().any(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("secret-ses_project")
+        }),
+        "the original project session must be admitted before the append"
+    );
+
+    let writer = Connection::open(&database).unwrap();
+    for (id, text) in [
+        ("msg_appended_a", "appended-only-a"),
+        ("msg_appended_b", "appended-only-b"),
+    ] {
+        writer
+            .execute(
+                "INSERT INTO message(id, session_id, time_created, data)
+                 VALUES (?1, 'ses_project', 5, ?2)",
+                rusqlite::params![
+                    id,
+                    json!({"role": "user", "time": {"created": 5}}).to_string()
+                ],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data)
+                 VALUES (?1, ?2, 'ses_project', ?3)",
+                rusqlite::params![
+                    format!("part_{id}"),
+                    id,
+                    json!({"type": "text", "text": text}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(writer);
+
+    let appended = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let observations = admission.observations();
+    assert!(observations.iter().any(|stored| {
+        stored
+            .observation()
+            .payload()
+            .to_string()
+            .contains("secret-ses_project")
+    }));
+    assert!(observations.iter().any(|stored| {
+        stored
+            .observation()
+            .payload()
+            .to_string()
+            .contains("appended-only-a")
+    }));
+    assert!(observations.iter().any(|stored| {
+        stored
+            .observation()
+            .payload()
+            .to_string()
+            .contains("appended-only-b")
+    }));
+    assert_eq!(observations.len(), before + 2);
+    assert_eq!(appended.stats.messages_upserted, 2);
 }
 
 #[tokio::test]
@@ -859,6 +944,19 @@ async fn missing_opencode_database_names_its_coverage_reason() {
         temp.path().join("project"),
     );
     let admission = MemoryHostAdmission::default();
+    // Unreleased packed shape: state 3 with the missing-database reason in bits 8+.
+    admission
+        .advance_parse_offset(
+            &ObservationScopeV1::Profile,
+            "host-coverage://opencode/v1",
+            ParseOffset {
+                byte_offset: 1,
+                mtime: 1,
+                file_id: 259,
+            },
+        )
+        .await
+        .unwrap();
 
     capture_opencode_observations(
         &admission,
@@ -875,14 +973,7 @@ async fn missing_opencode_database_names_its_coverage_reason() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        crate::runtime::source::HostProviderCoverage::from_file_id(coverage.file_id),
-        Some(crate::runtime::source::HostProviderCoverage::Unavailable)
-    );
-    assert_eq!(
-        crate::runtime::source::HostProviderCoverage::coverage_reason_name(coverage.file_id),
-        Some("database_missing")
-    );
+    assert_eq!(coverage.file_id, 4);
 }
 
 #[tokio::test]

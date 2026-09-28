@@ -368,6 +368,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coverage_status_names_refusals_and_skips_packed_reason_codes() {
+        let profile = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .unwrap();
+        // 259 is the unreleased packed shape: state 3 with reason 1 in bits 8+.
+        for (provider, file_id) in [("claude", 3), ("kimi", 7), ("opencode", 259), ("pi", 4)] {
+            database
+                .set_parse_offset(
+                    &format!("host-coverage://{provider}/v1"),
+                    ParseOffset {
+                        byte_offset: 1,
+                        mtime: 1,
+                        file_id,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let health = database
+            .session_ingest_health_for_provider(None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&health.provider_coverage).unwrap(),
+            serde_json::json!([
+                {"provider": "claude", "state": "unavailable", "deferred_units": 1},
+                {
+                    "provider": "kimi",
+                    "state": "unavailable",
+                    "deferred_units": 1,
+                    "reason": "source_identity_unavailable",
+                },
+                {
+                    "provider": "pi",
+                    "state": "unavailable",
+                    "deferred_units": 1,
+                    "reason": "database_missing",
+                },
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn interleaved_session_activity_reads_use_covering_index() {
         let profile = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())

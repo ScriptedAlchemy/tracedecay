@@ -1494,6 +1494,18 @@ impl PartitionedLexicalFileSourceV1 {
         self.descriptors.len()
     }
 
+    /// Keep file segments whose occurrence is in `keep`, preserving order.
+    ///
+    /// Callers use this to feed a successor text build only the files that
+    /// are not already durable in the parent artifact.
+    pub(super) fn retain_occurrences(
+        &mut self,
+        keep: &std::collections::BTreeSet<tracedecay_domain::FileOccurrenceId>,
+    ) {
+        self.descriptors
+            .retain(|descriptor| keep.contains(&descriptor.file_occurrence_id));
+    }
+
     /// Every input the content of the pages this source emits depends on
     /// apart from the generation's route identity: each file segment in
     /// order (its key, occurrence, content address, and symbol identities).
