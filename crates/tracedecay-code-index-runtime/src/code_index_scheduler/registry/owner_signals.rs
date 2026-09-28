@@ -417,13 +417,20 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         }
         // The graph seats before the retained text owners reopen their query
-        // owners, and search serves only from those.
+        // owners, and project open installs the query authority after that
+        // seat; search serves only once both are in place.
         let mut reconcile_requested = false;
         loop {
             if self
                 .latest_text_serving_freshness_for_scope(scope)
                 .await
                 .is_some()
+                && (self.query_authority_for_scope(scope).await.is_some()
+                    || matches!(
+                        self.mount_query_authority_from_project_peer(project_root, scope)
+                            .await,
+                        Ok(true)
+                    ))
             {
                 return CodeIndexRetainedSeatWaitV1::Seated;
             }
