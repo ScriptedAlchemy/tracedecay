@@ -39,9 +39,15 @@ fn source_pagination_never_exposes_a_numeric_continuation() {
         remaining_sources: 3,
     };
 
-    let wire = serde_json::to_value(pagination).expect("pagination wire");
-    assert!(
-        wire.get("source_offset").is_none() && wire.get("next_source_offset").is_none(),
-        "numeric cursor state must remain private; continuation is only next_cursor: {wire}"
+    assert_eq!(
+        serde_json::to_value(pagination).expect("pagination wire"),
+        serde_json::json!({
+            "source_limit": 3,
+            "returned_sources": 3,
+            "total_sources": 8,
+            "has_more": true,
+            "remaining_sources": 3,
+        }),
+        "numeric cursor state must remain private; continuation is only next_cursor"
     );
 }

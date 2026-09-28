@@ -1629,8 +1629,17 @@ mod tests {
     #[test]
     fn wide_word_repetitions_compile_within_the_default_program_limit() {
         let upstream = r"pypi-AgEIcHlwaS5vcmc[\w-]{50,1000}";
-        assert!(Regex::new(upstream).is_err());
-        assert!(Regex::new(&re2_compatible_regex(upstream)).is_ok());
+        assert!(matches!(
+            Regex::new(upstream),
+            Err(regex::Error::CompiledTooBig(_))
+        ));
+        let translated = Regex::new(&re2_compatible_regex(upstream)).unwrap();
+        let token = format!("pypi-AgEIcHlwaS5vcmc{}", "a-".repeat(30));
+        assert_eq!(
+            translated.find(&token).map(|found| found.as_str()),
+            Some(token.as_str())
+        );
+        assert_eq!(translated.find("pypi-AgEIcHlwaS5vcmcshort"), None);
     }
 
     /// Upstream keywords are a precondition, not a hint. `sourcegraph-access-token`
@@ -1661,15 +1670,13 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
         let sourcegraph = rule(&compiled, "sourcegraph-access-token");
 
-        assert!(
-            sourcegraph
-                .ranges("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
-                .is_empty()
+        assert_eq!(
+            sourcegraph.ranges("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"),
+            Vec::<Range<usize>>::new()
         );
-        assert!(
-            !sourcegraph
-                .ranges("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
-                .is_empty()
+        assert_eq!(
+            sourcegraph.ranges("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"),
+            vec![18..58]
         );
     }
 

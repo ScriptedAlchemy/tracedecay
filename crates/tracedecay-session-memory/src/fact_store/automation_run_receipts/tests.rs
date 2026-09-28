@@ -497,13 +497,22 @@ async fn zero_receipt_is_proven_for_an_exact_foreign_run_owner_and_project() {
     let (_directory, database) = database("proven-empty-isolation").await;
     let store = DatabaseFactStore::new(&database);
     let committed_run = RunId::new("run.committed").expect("committed run identity");
-    seed_automatic_receipt(
+    let committed = seed_automatic_receipt(
         &store,
         FactOwnerV1::Profile,
         &committed_run,
         "automatic.apply.committed",
     )
     .await;
+    let exact = store
+        .project_memory_automation_run_receipts(
+            FactOwnerV1::Profile,
+            committed_run.clone(),
+            &read_control(),
+        )
+        .await
+        .expect("read exact committed run");
+    assert_eq!(exact.automatic_fact_receipts(), [committed]);
 
     let foreign_run = store
         .project_memory_automation_run_receipts(

@@ -641,10 +641,32 @@ mod tests {
 
     #[test]
     fn identifiers_reject_empty_or_noncanonical_values() {
-        assert!(ProfileId::new(" profile.primary").is_err());
-        assert!(SessionStoreId::new("store\nprimary").is_err());
-        assert!(SessionRootId::new("root.primary ").is_err());
-        assert!(BranchId::new("branch\0main").is_err());
+        assert_eq!(
+            ProfileId::new(" profile.primary"),
+            Err(RequestContextError::NonCanonicalIdentifier("ProfileId"))
+        );
+        assert_eq!(
+            SessionStoreId::new("store\nprimary"),
+            Err(RequestContextError::NonCanonicalIdentifier(
+                "SessionStoreId"
+            ))
+        );
+        assert_eq!(
+            SessionRootId::new("root.primary "),
+            Err(RequestContextError::NonCanonicalIdentifier("SessionRootId"))
+        );
+        assert_eq!(
+            BranchId::new("branch\0main"),
+            Err(RequestContextError::NonCanonicalIdentifier("BranchId"))
+        );
+        assert_eq!(
+            ProfileId::new(""),
+            Err(RequestContextError::NonCanonicalIdentifier("ProfileId"))
+        );
+        assert_eq!(
+            ProfileId::new("profile.primary").unwrap().as_str(),
+            "profile.primary"
+        );
     }
 
     fn grant_for(
@@ -707,10 +729,22 @@ mod tests {
             SessionRootId::new("root.profile.primary").unwrap(),
         );
 
-        assert_ne!(
-            profile.session_request_scope().unwrap(),
-            project_identity().session_request_scope().unwrap()
+        let profile_scope = profile.session_request_scope().unwrap();
+        assert_eq!(
+            (
+                profile_scope.project_id.as_str(),
+                profile_scope.repository_id.as_str(),
+                profile_scope.worktree_id.as_str(),
+            ),
+            (
+                "tracedecay.profile-session.profile.primary",
+                "tracedecay.profile-session.store.profile.primary",
+                "tracedecay.profile-session.root.profile.primary",
+            )
         );
+        let project_scope = project_identity().session_request_scope().unwrap();
+        assert_eq!(project_scope.project_id.as_str(), "project.tracedecay");
+        assert_ne!(profile_scope, project_scope);
     }
 
     #[test]
