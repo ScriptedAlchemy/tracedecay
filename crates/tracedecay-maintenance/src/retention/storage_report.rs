@@ -263,31 +263,24 @@ impl StorageReport {
             };
         }
 
-        let mut excluded_families = Vec::new();
+        // Store rows size every file under `projects/<id>/`, but profile-level
+        // files beside `global.db` (the profile session store, spools, daemon
+        // state) are only sized by the full census, so this total is a floor.
+        let mut excluded_families =
+            vec!["profile-level files outside global.db and projects/".to_owned()];
         if self.coverage.state == StorageReportCoverageState::Partial {
             excluded_families.push("registered stores beyond this page".to_owned());
         }
-        // Sealed generation files live outside the graph database family, and
-        // only their superseded portion is sized here; the active generation is
-        // not. Naming the gap keeps the total from posing as the profile size.
-        if !self.code_generation_retention.is_empty() {
-            excluded_families.push("code-index generation files".to_owned());
+        let unreadable_store_entries = self.stores.iter().fold(0usize, |total, store| {
+            total.saturating_add(store.unavailable_entry_count)
+        });
+        if unreadable_store_entries > 0 {
+            excluded_families.push(format!(
+                "{unreadable_store_entries} unreadable entries under registered stores"
+            ));
         }
-        if self
-            .code_generation_retention_availability
-            .iter()
-            .any(|entry| entry.state == StorageReportAvailabilityState::Unavailable)
-        {
-            excluded_families.push("code-index scopes that could not be read".to_owned());
-        }
-
-        let state = if excluded_families.is_empty() {
-            ProfileTotalCoverageStateV1::Complete
-        } else {
-            ProfileTotalCoverageStateV1::Partial
-        };
         ProfileTotalSizeV1 {
-            state,
+            state: ProfileTotalCoverageStateV1::Partial,
             accounted_bytes,
             registered_store_bytes,
             global_db_bytes: self.global_db_bytes,
@@ -1056,6 +1049,11 @@ fn walk_regular_files(root: &Path, visit: &mut dyn FnMut(&Path, u64)) -> usize {
                 unavailable_entry_count = unavailable_entry_count.saturating_add(1);
                 continue;
             };
+            // A socket (the running daemon's endpoint) holds no bytes.
+            #[cfg(unix)]
+            if std::os::unix::fs::FileTypeExt::is_socket(&file_type) {
+                continue;
+            }
             if file_type.is_dir() {
                 pending.push(entry.path());
             } else if file_type.is_file() {
@@ -1077,7 +1075,7 @@ fn walk_regular_files(root: &Path, visit: &mut dyn FnMut(&Path, u64)) -> usize {
 /// Failures remain visible as a partial lower bound instead of a successful
 /// zero-size family.
 #[hotpath::measure(label = "maintenance.storage_report.scan_profile_size")]
-pub(crate) fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
+pub fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
     let mut total_bytes = 0u64;
     let unavailable_entry_count = walk_regular_files(profile_root, &mut |_, bytes| {
         total_bytes = total_bytes.saturating_add(bytes);
@@ -1149,27 +1147,24 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_code_index_scope_is_named_rather_than_silently_dropped() {
+    fn unreadable_store_entries_are_named_rather_than_silently_dropped() {
+        let mut unreadable = store("alpha", 400);
+        unreadable.unavailable_entry_count = 2;
         let report = StorageReport {
-            stores: vec![store("alpha", 400)],
-            code_generation_retention_availability: vec![
-                CodeGenerationRetentionAvailabilityEntry {
-                    project_id: "alpha".to_owned(),
-                    store_root: "/profile/projects/alpha/code-index-v1/ab".to_owned(),
-                    state: StorageReportAvailabilityState::Unavailable,
-                    reason: Some("generation_digest_scan_budget_exceeded".to_owned()),
-                },
-            ],
+            stores: vec![unreadable],
+            global_db_bytes: 100,
             ..StorageReport::default()
         };
 
         let total = report.profile_total_size();
         assert_eq!(total.state, ProfileTotalCoverageStateV1::Partial);
-        assert!(
-            total
-                .excluded_families
-                .iter()
-                .any(|family| family.contains("could not be read"))
+        assert_eq!(total.accounted_bytes, 500);
+        assert_eq!(
+            total.excluded_families,
+            vec![
+                "profile-level files outside global.db and projects/".to_owned(),
+                "2 unreadable entries under registered stores".to_owned(),
+            ]
         );
     }
 
@@ -1915,6 +1910,33 @@ mod tests {
                 .reason
                 .as_deref(),
             Some(RETENTION_PROTECTION_UNRESOLVED)
+        );
+    }
+
+    /// The daemon's socket lives in the profile it serves; it holds no bytes
+    /// and must not turn a readable census into a partial one.
+    #[cfg(unix)]
+    #[test]
+    fn full_profile_census_is_complete_beside_a_live_daemon_socket() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(profile_root.join("projects/proj_a")).unwrap();
+        std::fs::write(profile_root.join("global.db"), vec![0u8; 300]).unwrap();
+        std::fs::write(
+            profile_root.join("projects/proj_a/tracedecay.db"),
+            vec![0u8; 700],
+        )
+        .unwrap();
+        let _socket =
+            std::os::unix::net::UnixListener::bind(profile_root.join("daemon.sock")).unwrap();
+
+        assert_eq!(
+            scan_full_profile_size(&profile_root),
+            FullProfileSizeV1 {
+                state: ProfileTotalCoverageStateV1::Complete,
+                total_bytes: 1_000,
+                unavailable_entry_count: 0,
+            }
         );
     }
 
