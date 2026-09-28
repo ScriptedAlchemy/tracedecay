@@ -9,14 +9,15 @@ permissions:
   actions: write
   pull-requests: read
 
-# Share CI's PR key so closing cancels its run before cleanup gets a runner.
+# A late close event must not cancel a reopened PR before its state is checked.
 concurrency:
-  group: ci-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: pr-hygiene-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   cache-cleanup:
-    name: Delete closed PR caches
+    name: Cancel closed PR runs and delete their caches
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -25,7 +26,7 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       CLOSED_AT: ${{ github.event.pull_request.closed_at }}
     steps:
-      - name: Delete caches owned by the closed pull request
+      - name: Clean up the same closed pull request
         run: |
           set -euo pipefail
           require_same_closure() {
@@ -38,6 +39,30 @@ jobs:
           }
           require_same_closure
           failed=0
+          runs=$(
+            for state in queued in_progress waiting pending requested; do
+              gh api --paginate -X GET "repos/$REPO/actions/workflows/ci.yml/runs" \
+                -f event=pull_request -f per_page=100 -f status="$state" \
+                --jq ".workflow_runs[] | select(.display_title == \"CI for PR #$PR_NUMBER\" and .created_at < \"$CLOSED_AT\") | .id" || exit 1
+            done
+          )
+          runs=$(sort -u <<<"$runs")
+          for run in $runs; do
+            require_same_closure
+            current=$(gh api "repos/$REPO/actions/runs/$run")
+            # A rerun keeps its original creation time. Exclude later attempts.
+            if ! jq -e --arg closed "$CLOSED_AT" \
+              '.status != "completed" and (.run_started_at | type) == "string" and .run_started_at < $closed' <<<"$current" >/dev/null; then
+              continue
+            fi
+            if ! gh api -X POST "repos/$REPO/actions/runs/$run/cancel" >/dev/null; then
+              status=$(gh api "repos/$REPO/actions/runs/$run" --jq .status)
+              [[ $status == completed ]] || failed=1
+            fi
+            # Cache post steps can still write after cancellation is requested.
+            gh run watch "$run" --repo "$REPO" --interval 3 >/dev/null
+          done
+          [[ $failed == 0 ]] || exit 1
           merge_ref="refs/pull/$PR_NUMBER/merge"
           caches=$(gh api --paginate "repos/$REPO/actions/caches?ref=$merge_ref&per_page=100" --jq '.actions_caches[].id')
           deleted=0
