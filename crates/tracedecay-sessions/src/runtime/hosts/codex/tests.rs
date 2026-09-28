@@ -2818,7 +2818,9 @@ mod recent_first_discovery_tests {
         std::fs::create_dir_all(&project).unwrap();
         let backlog = 9_000usize;
         for index in 0..backlog {
-            write_dated_rollout(home, ("2025", "06", "15"), &format!("old-{index:05}"));
+            let month = format!("{:02}", 6 + index / 3_000);
+            let day = format!("{:02}", 1 + (index / 100) % 30);
+            write_dated_rollout(home, ("2025", &month, &day), &format!("old-{index:05}"));
         }
         let newest = write_project_rollout(home, &project, "newest");
 
