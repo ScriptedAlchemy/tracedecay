@@ -36,7 +36,7 @@ pub use manifest::{
 };
 pub use receipt::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleInstallReceiptV1, HostBundleReceiptArtifactV1,
-    HostComponentSetReceiptV1,
+    HostComponentSetReceiptV1, HostConfigCreationV1,
 };
 
 /// Builds a [`HostBundleError::StorageFailure`] tagged with the `file:line` of

@@ -255,9 +255,7 @@ fn add_registration(config: &Path, existing: &str, binary: &str) -> Result<TextF
         "env": {},
         "transport": "stdio",
     });
-    Ok(TextFileMutation::Write(
-        JsonConfigDialect::Json.render_edit(config, existing, &settings)?,
-    ))
+    JsonConfigDialect::Json.mutation(config, existing, settings)
 }
 
 fn install_mcp_if_selected(components: &[HostComponentV1], ctx: &InstallContext) -> Result<()> {
@@ -291,15 +289,7 @@ fn remove_registration(config: &Path, existing: &str) -> Result<TextFileMutation
     if servers.remove("tracedecay").is_none() {
         return Ok(TextFileMutation::Unchanged);
     }
-    if servers.is_empty() {
-        root.remove("mcpServers");
-    }
-    if root.is_empty() {
-        return Ok(TextFileMutation::Remove);
-    }
-    Ok(TextFileMutation::Write(
-        JsonConfigDialect::Json.render_edit(config, existing, &settings)?,
-    ))
+    JsonConfigDialect::Json.mutation(config, existing, settings)
 }
 
 fn uninstall_mcp_if_selected(components: &[HostComponentV1], home: &Path) -> Result<()> {
@@ -390,12 +380,18 @@ mod tests {
         let components = [HostComponentV1::ContextMcp];
         let install = install_context(home.path(), "/tmp/tracedecay");
 
-        AntigravityIntegration
-            .activate_deployed_host_component_registration(&components, &install)
-            .unwrap();
-        AntigravityIntegration
-            .deactivate_deployed_host_component_registration(&components, &install)
-            .unwrap();
+        crate::agents::recorded_install_then_uninstall(
+            home.path(),
+            || {
+                AntigravityIntegration
+                    .activate_deployed_host_component_registration(&components, &install)
+            },
+            || {
+                assert!(mcp_config_path(home.path()).is_file());
+                AntigravityIntegration
+                    .deactivate_deployed_host_component_registration(&components, &install)
+            },
+        );
 
         assert!(!mcp_config_path(home.path()).exists());
         assert!(!cli_plugin_path(home.path()).exists());

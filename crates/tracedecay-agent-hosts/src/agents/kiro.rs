@@ -29,8 +29,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpUninstallPolicy, install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay,
-    safe_write_json_file, uninstall_mcp_server_entry,
+    install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay, safe_write_json_file,
+    uninstall_mcp_server_entry,
 };
 
 pub struct KiroIntegration;
@@ -709,15 +709,7 @@ missing decision or an external or destructive action outside that authority.",
 // ---------------------------------------------------------------------------
 
 fn uninstall_mcp_server(path: &Path) -> Result<()> {
-    uninstall_mcp_server_entry(
-        path,
-        "mcpServers",
-        JsonConfigDialect::Json,
-        McpUninstallPolicy {
-            prune_empty_root: true,
-            remove_empty_file: true,
-        },
-    )
+    uninstall_mcp_server_entry(path, "mcpServers", JsonConfigDialect::Json)
 }
 
 /// Remove every tracedecay-owned steering block.

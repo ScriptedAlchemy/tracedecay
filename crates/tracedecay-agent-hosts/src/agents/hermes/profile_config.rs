@@ -11,7 +11,10 @@ use std::str::FromStr;
 
 use yaml_edit::{Document, Mapping, Sequence, YamlNode};
 
-use crate::agents::safe_write_bytes_file;
+use crate::agents::{
+    lifecycle_created_container, lifecycle_created_file, note_created_container,
+    safe_remove_host_file, safe_write_bytes_file,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,14 +114,18 @@ pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
             });
         }
     };
-    let updated = enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
-        message: format!(
-            "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
-            config_path.display()
-        ),
-    })?;
+    let (updated, created) =
+        enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
+            message: format!(
+                "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
+                config_path.display()
+            ),
+        })?;
     if updated != existing {
         write_config_file(config_path, &updated)?;
+    }
+    for pointer in created {
+        note_created_container(config_path, pointer);
     }
     Ok(true)
 }
@@ -127,12 +134,14 @@ pub(super) fn disable_plugin(config_path: &Path) -> Result<()> {
     let Ok(existing) = std::fs::read_to_string(config_path) else {
         return Ok(());
     };
-    let updated = disable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
-        message: format!(
-            "{message} in {}; leaving Hermes plugin files in place",
-            config_path.display()
-        ),
-    })?;
+    let created = |pointer: &str| lifecycle_created_container(config_path, pointer);
+    let updated =
+        disable_plugin_config(&existing, &created).map_err(|message| TraceDecayError::Config {
+            message: format!(
+                "{message} in {}; leaving Hermes plugin files in place",
+                config_path.display()
+            ),
+        })?;
     if updated != existing {
         write_config_file(config_path, &updated)?;
     }
@@ -155,21 +164,55 @@ const CONTEXT_ERR: &str = "unsupported Hermes context config";
 // anchors, aliases, flow collections and line endings byte-for-byte intact for
 // structure the installer does not own.
 
-fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
+/// The containers enabling TraceDecay may add to a profile, as JSON pointers
+/// into the YAML document.
+const OWNED_CONTAINERS: [&str; 4] = ["/plugins", "/plugins/enabled", "/memory", "/context"];
+
+/// The enabled config and the [`OWNED_CONTAINERS`] enabling added to it.
+fn enable_plugin_config(
+    existing: &str,
+) -> std::result::Result<(String, Vec<&'static str>), String> {
     let line_ending = LineEnding::detect(existing);
     let normalized = line_ending.normalize(existing);
+    let before = owned_containers_present(&normalized)?;
     let updated = enable_normalized(&normalized)?;
-    Ok(line_ending.restore(updated))
+    let created = owned_containers_present(&updated)?
+        .into_iter()
+        .filter(|pointer| !before.contains(pointer))
+        .collect();
+    Ok((line_ending.restore(updated), created))
 }
 
-fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> {
+/// Disable TraceDecay, collapsing an owned container once empty only when
+/// `created` says enabling added it.
+fn disable_plugin_config(
+    existing: &str,
+    created: &dyn Fn(&str) -> bool,
+) -> std::result::Result<String, String> {
     if existing.trim().is_empty() {
         return Ok(existing.to_string());
     }
     let line_ending = LineEnding::detect(existing);
     let normalized = line_ending.normalize(existing);
-    let updated = disable_normalized(&normalized)?;
+    let updated = disable_normalized(&normalized, created)?;
     Ok(line_ending.restore(updated))
+}
+
+fn owned_containers_present(text: &str) -> std::result::Result<Vec<&'static str>, String> {
+    let document = parse_profile(text)?;
+    let root = document
+        .as_mapping()
+        .ok_or_else(|| "unsupported Hermes config; expected a top-level mapping".to_string())?;
+    Ok(OWNED_CONTAINERS
+        .into_iter()
+        .filter(|pointer| match *pointer {
+            "/plugins/enabled" => root
+                .get("plugins")
+                .and_then(|plugins| plugins.as_mapping().cloned())
+                .is_some_and(|plugins| plugins.get("enabled").is_some()),
+            pointer => root.get(&pointer[1..]).is_some(),
+        })
+        .collect())
 }
 
 fn enable_normalized(existing: &str) -> std::result::Result<String, String> {
@@ -196,10 +239,29 @@ fn enable_normalized(existing: &str) -> std::result::Result<String, String> {
     Ok(text)
 }
 
-fn disable_normalized(existing: &str) -> std::result::Result<String, String> {
-    let text = remove_seq_item(existing, &["plugins", "enabled"], "tracedecay")?;
-    let text = disable_scalar(&text, "context", "engine")?;
-    let text = disable_scalar(&text, "memory", "provider")?;
+fn disable_normalized(
+    existing: &str,
+    created: &dyn Fn(&str) -> bool,
+) -> std::result::Result<String, String> {
+    let mut text = remove_seq_item(existing, &["plugins", "enabled"], "tracedecay")?;
+    if created("/plugins/enabled") {
+        let document = parse_profile(&text)?;
+        if let Some(plugins) = document
+            .as_mapping()
+            .and_then(|root| root.get("plugins"))
+            .and_then(|plugins| plugins.as_mapping().cloned())
+        {
+            text = collapse_if_empty(&text, &plugins, "enabled")?;
+        }
+    }
+    if created("/plugins") {
+        let document = parse_profile(&text)?;
+        if let Some(root) = document.as_mapping() {
+            text = collapse_if_empty(&text, &root, "plugins")?;
+        }
+    }
+    let text = disable_scalar(&text, "context", "engine", created("/context"))?;
+    let text = disable_scalar(&text, "memory", "provider", created("/memory"))?;
     Ok(text)
 }
 
@@ -550,7 +612,12 @@ fn expand_over_flow_separator(text: &str, start: usize, mut end: usize) -> (usiz
     (start, end)
 }
 
-fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result<String, String> {
+fn disable_scalar(
+    text: &str,
+    container: &str,
+    key: &str,
+    collapse: bool,
+) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
     let root = document
         .as_mapping()
@@ -565,6 +632,9 @@ fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result
         return Ok(text.to_string());
     }
     let after = remove_map_entry(text, &mapping, key)?;
+    if !collapse {
+        return Ok(after);
+    }
 
     let document = parse_profile(&after)?;
     let root = document
@@ -658,6 +728,11 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
     if current.as_deref() == Some(contents) {
         return Ok(());
     }
+    if contents.trim().is_empty() && lifecycle_created_file(path) {
+        return safe_remove_host_file(path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", path.display()),
+        });
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
             message: format!("failed to create {}: {error}", parent.display()),
@@ -739,8 +814,8 @@ mod tests {
 
     fn mutate(case: &CorpusCase) -> String {
         match case.mutation {
-            Mutation::Enable => enable_plugin_config(case.input).unwrap(),
-            Mutation::Disable => disable_plugin_config(case.input).unwrap(),
+            Mutation::Enable => enable_plugin_config(case.input).unwrap().0,
+            Mutation::Disable => disable_plugin_config(case.input, &|_| false).unwrap(),
         }
     }
 
@@ -926,12 +1001,28 @@ mod tests {
         }
     }
 
+    /// Disabling removes exactly the blocks enabling appended: a `plugins:`
+    /// block it added goes, one the operator had stays, and so does an empty
+    /// `memory:` mapping the operator already had.
     #[test]
     fn enable_then_disable_restores_existing_config_bytes() {
-        let original = "theme: dark\nplugins:\n  enabled:\n    - foreign\n";
-        let enabled = enable_plugin_config(original).unwrap();
+        for (original, appended) in [
+            (
+                "theme: dark\nplugins:\n  enabled:\n    - foreign\n",
+                &["/memory", "/context"][..],
+            ),
+            (
+                "model: x\nmemory: {}\n",
+                &["/plugins", "/plugins/enabled", "/context"][..],
+            ),
+        ] {
+            let (enabled, created) = enable_plugin_config(original).unwrap();
+            assert_eq!(created, appended);
+            assert!(enabled.contains("- tracedecay"), "{enabled}");
 
-        assert_eq!(disable_plugin_config(&enabled).unwrap(), original);
+            let created = |pointer: &str| created.contains(&pointer);
+            assert_eq!(disable_plugin_config(&enabled, &created).unwrap(), original);
+        }
     }
 
     #[test]
@@ -943,7 +1034,7 @@ mod tests {
         );
 
         assert_eq!(
-            disable_plugin_config(input).unwrap(),
+            disable_plugin_config(input, &|_| true).unwrap(),
             "user_setting: keep\n"
         );
     }
@@ -959,7 +1050,7 @@ mod tests {
         );
 
         assert_eq!(
-            disable_plugin_config(input).unwrap(),
+            disable_plugin_config(input, &|_| true).unwrap(),
             "\n\nuser_setting: keep\n"
         );
     }
@@ -971,8 +1062,11 @@ mod tests {
         let original = "theme: dark\nplugins:\n  enabled:\n    - other\n";
         std::fs::write(&config, original).unwrap();
 
-        enable_plugin(&config).unwrap();
-        disable_plugin(&config).unwrap();
+        let mut facts = Vec::new();
+        crate::agents::recorded_lifecycle(dir.path(), &mut facts, false, || enable_plugin(&config))
+            .unwrap();
+        crate::agents::recorded_lifecycle(dir.path(), &mut facts, true, || disable_plugin(&config))
+            .unwrap();
 
         assert_eq!(read(&config), original);
         let entries: Vec<_> = std::fs::read_dir(dir.path())
