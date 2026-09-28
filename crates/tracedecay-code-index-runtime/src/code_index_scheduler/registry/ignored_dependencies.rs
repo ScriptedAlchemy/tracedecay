@@ -12,7 +12,8 @@ use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexPr
 use tracedecay_domain::canonical_sha256;
 
 use super::{
-    CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1, PendingWakeV1, ServingGenerationSlot,
+    CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1, PendingWakeV1,
+    ServingGenerationSlot,
 };
 use crate::code_index_scheduler::graph_activation::CodeGraphActivationAuthorityV1;
 use crate::code_index_scheduler::{
@@ -447,6 +448,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 &serving_generation,
                 control.as_ref(),
                 &shutting_down,
+                &pending_wake,
+                &wake,
             )
             .await?;
         }
@@ -504,13 +507,18 @@ impl CodeIndexSchedulerRegistryV1 {
     /// first publication), or with no seat at all until one is demanded.
     /// Demand the seat and wait for it on the owner's signals, within the
     /// request's budget: an unexpired request never refuses for a seat that
-    /// is still being installed, and an expired one reports its deadline.
+    /// is still being installed, and an expired one reports its deadline. A
+    /// worker that took its turn after this demand and parked again without
+    /// seating (a restored roster it refused, say) has no seat coming, so
+    /// validation reports that state instead.
     async fn await_decoded_seat(
         &self,
         project_root: &Path,
         serving_generation: &ServingGenerationSlot,
         control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
         shutting_down: &AtomicBool,
+        pending_wake: &PendingWakeV1,
+        wake: &tokio::sync::Notify,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
         let seated = || {
             serving_generation
@@ -522,9 +530,27 @@ impl CodeIndexSchedulerRegistryV1 {
         if seated() {
             return Ok(());
         }
+        let Some(mut activity) = self.subscribe_owner_activity(project_root).await else {
+            return Ok(());
+        };
         self.request_complete_generation(project_root).await;
+        // The demand flag is set once per mount, so this demand posts its own
+        // wake: a parked worker must take a turn before its park means "no
+        // seat is coming". Any phase change after this point is that turn.
+        Self::note_wake(
+            pending_wake,
+            wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
+        activity.worker_phase.borrow_and_update();
         loop {
             if seated() {
+                return Ok(());
+            }
+            if activity.worker_phase.has_changed().unwrap_or(true)
+                && activity.worker_phase() == CodeIndexWorkerPhaseV1::Parked
+                && !activity.passes().running()
+            {
                 return Ok(());
             }
             refuse_if_interrupted(control, shutting_down)?;
