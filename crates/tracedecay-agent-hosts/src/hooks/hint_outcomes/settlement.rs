@@ -241,7 +241,7 @@ pub async fn settle_project_hint_outcomes(
 ) -> HintOutcomeSettlement {
     let Some(analytics) = analytics else {
         return HintOutcomeSettlement::Unavailable {
-            reason: "accounting_authority_unavailable",
+            reason: "analytics_authority_unavailable",
         };
     };
     let Some(sessions) = sessions else {

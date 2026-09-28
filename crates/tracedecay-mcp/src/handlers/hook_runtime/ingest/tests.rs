@@ -198,7 +198,6 @@ async fn transcript_admission_rejects_unknown_provider_without_echoing_hook_payl
         },
         None,
         None,
-        None,
         SessionAuthorities::default(),
     )
     .await
@@ -225,7 +224,6 @@ async fn supported_transcript_admission_requires_its_authority_without_echoing_p
             messages: None,
             max_new_bytes: None,
         },
-        None,
         None,
         None,
         SessionAuthorities::default(),

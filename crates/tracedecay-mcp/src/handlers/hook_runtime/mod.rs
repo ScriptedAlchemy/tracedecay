@@ -69,8 +69,8 @@ fn requires_projectless_routing(action: &str) -> tracedecay_domain::errors::Trac
 pub async fn compute_hook_runtime(
     cg: &TraceDecay,
     request: HookRuntimeSurfaceRequestV1,
+    profile_root: Option<&Path>,
     global_db: Option<&RegisteredGlobalDb>,
-    accounting_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<HookRuntimeResultV1> {
     use HookRuntimeSurfaceRequestV1 as Request;
@@ -112,9 +112,8 @@ pub async fn compute_hook_runtime(
                 Box::pin(ingest_transcript(
                     Some(cg),
                     &request,
-                    None,
+                    profile_root,
                     global_db,
-                    accounting_db,
                     session_authorities,
                 ))
                 .await?,
@@ -189,7 +188,6 @@ pub async fn compute_projectless_hook_runtime(
                     &request,
                     Some(profile_root),
                     Some(global_db),
-                    None,
                     session_authorities,
                 )
                 .await?,

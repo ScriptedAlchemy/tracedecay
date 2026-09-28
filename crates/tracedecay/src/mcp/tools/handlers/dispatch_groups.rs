@@ -749,8 +749,8 @@ async fn compute_owner_side_effect(
             hook_runtime::compute_hook_runtime(
                 cg,
                 hook_runtime::decode_hook_runtime_request(&args)?,
+                options.profile.map(ProfileRoot::data_dir),
                 options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
-                options.accounting_db,
                 options.session_authorities.clone(),
             )
             .await?,
