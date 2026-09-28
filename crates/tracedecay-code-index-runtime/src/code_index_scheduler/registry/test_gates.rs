@@ -2,9 +2,10 @@
 //! at a chosen step.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -700,5 +701,293 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub async fn retiring_owner_count(&self) -> usize {
         self.retiring.lock().await.len()
+    }
+}
+
+/// Holds the publication's text projection after its build reservation opens,
+/// with a resident buffer the projection task owns until the test releases it.
+#[cfg(test)]
+struct PublishedTextOverlapHoldV1 {
+    entered: tokio::sync::oneshot::Sender<()>,
+    allocate: tokio::sync::oneshot::Receiver<()>,
+    held: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+    hold_bytes: usize,
+}
+
+#[cfg(test)]
+fn published_text_overlap_hold() -> &'static Mutex<BTreeMap<PathBuf, PublishedTextOverlapHoldV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, PublishedTextOverlapHoldV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Two-phase hold around the sealed graph growth sampler: the sample phase
+/// opens after the sampler starts, and the recorded phase opens after the
+/// growth has been stored.
+#[cfg(test)]
+struct GraphGrowthWindowGateV1 {
+    sampled: Option<tokio::sync::oneshot::Sender<()>>,
+    release_sample: Option<tokio::sync::oneshot::Receiver<()>>,
+    recorded: Option<tokio::sync::oneshot::Sender<()>>,
+    release_recorded: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+#[cfg(test)]
+fn graph_growth_window_gate() -> &'static Mutex<BTreeMap<PathBuf, GraphGrowthWindowGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, GraphGrowthWindowGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn graph_measurement_publish_gate() -> &'static Mutex<BTreeSet<PathBuf>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeSet<PathBuf>>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+impl CodeIndexSchedulerRegistryV1 {
+    /// Hold the next publication text projection after it opens its build
+    /// reservation. The projection allocates `hold_bytes` of resident memory
+    /// only once `allocate` is sent, which the caller does after the graph
+    /// growth sampler has started, and drops it when `release` is sent.
+    #[cfg(test)]
+    pub fn pause_published_text_overlap_hold(
+        &self,
+        project_root: PathBuf,
+        hold_bytes: usize,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (allocate_sender, allocate) = tokio::sync::oneshot::channel();
+        let (held, held_observed) = tokio::sync::oneshot::channel();
+        let (release_sender, release) = tokio::sync::oneshot::channel();
+        let mut gates = published_text_overlap_hold()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gates
+                .insert(
+                    project_root,
+                    PublishedTextOverlapHoldV1 {
+                        entered,
+                        allocate,
+                        held,
+                        release,
+                        hold_bytes,
+                    },
+                )
+                .is_none(),
+            "one published text overlap hold per worktree"
+        );
+        (
+            entered_observed,
+            allocate_sender,
+            held_observed,
+            release_sender,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_published_text_overlap_hold(
+        project_root: &Path,
+        text: &super::super::LatestCodeTextGenerationV1,
+    ) {
+        let gate = published_text_overlap_hold()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
+        let Some(gate) = gate else {
+            return;
+        };
+        let _ = gate.entered.send(());
+        let _ = gate.allocate.await;
+        let reservation = (gate.hold_bytes > 0).then(|| {
+            let bytes = u64::try_from(gate.hold_bytes).expect("lexical hold fits u64");
+            text.reserve_lexical_build_growth_for_test(bytes)
+                .expect("lexical overlap reservation")
+        });
+        let hold = vec![1_u8; gate.hold_bytes];
+        let _ = gate.held.send(());
+        let _ = gate.release.await;
+        drop(hold);
+        drop(reservation);
+    }
+
+    /// Hold the next sealed-graph growth window: `sampled` resolves after the
+    /// resident sampler starts, and `recorded` resolves after that growth is
+    /// stored. Releasing each sender lets the worker continue.
+    #[cfg(test)]
+    pub fn pause_graph_growth_window(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (sampled, sampled_observed) = tokio::sync::oneshot::channel();
+        let (release_sample_sender, release_sample) = tokio::sync::oneshot::channel();
+        let (recorded, recorded_observed) = tokio::sync::oneshot::channel();
+        let (release_recorded_sender, release_recorded) = tokio::sync::oneshot::channel();
+        let mut gates = graph_growth_window_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gates
+                .insert(
+                    project_root,
+                    GraphGrowthWindowGateV1 {
+                        sampled: Some(sampled),
+                        release_sample: Some(release_sample),
+                        recorded: Some(recorded),
+                        release_recorded: Some(release_recorded),
+                    },
+                )
+                .is_none(),
+            "one graph growth window per worktree"
+        );
+        (
+            sampled_observed,
+            release_sample_sender,
+            recorded_observed,
+            release_recorded_sender,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_graph_growth_sample(project_root: &Path) {
+        let (sampled, release_sample) = {
+            let mut gates = graph_growth_window_gate()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(gate) = gates.get_mut(project_root) else {
+                return;
+            };
+            (gate.sampled.take(), gate.release_sample.take())
+        };
+        if let Some(sampled) = sampled {
+            let _ = sampled.send(());
+        }
+        if let Some(release_sample) = release_sample {
+            let _ = release_sample.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_graph_growth_recorded(project_root: &Path) {
+        let gate = graph_growth_window_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
+        let Some(gate) = gate else {
+            return;
+        };
+        if let Some(recorded) = gate.recorded {
+            let _ = recorded.send(());
+        }
+        if let Some(release_recorded) = gate.release_recorded {
+            let _ = release_recorded.await;
+        }
+    }
+
+    /// The next memory-authority graph publish for `project_root` runs the
+    /// sealed row build inside the growth window and is recorded as published.
+    #[cfg(test)]
+    pub fn arm_graph_measurement_publish(&self, project_root: PathBuf) {
+        let mut gates = graph_measurement_publish_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gates.insert(project_root),
+            "one graph measurement publish per worktree"
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn take_graph_measurement_publish(project_root: &Path) -> bool {
+        graph_measurement_publish_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root)
+    }
+
+    /// Build the sealed generation's code-graph rows the way publication does,
+    /// from the on-disk segments, and drop them. The caller is inside the
+    /// graph growth sampler window.
+    #[cfg(test)]
+    pub(super) fn build_overlapping_sealed_graph(
+        scheduler: &Arc<Mutex<super::super::reconcile::CodeIndexWorktreeSchedulerV1>>,
+        generation_id: &tracedecay_domain::CodeGenerationId,
+    ) -> Result<(), String> {
+        let binding = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .code_graph_replay_binding(generation_id)
+            .map_err(|error| error.to_string())?;
+        let digest = tracedecay_domain::sha256_hex_suffix(binding.sealed_state_digest.as_str())
+            .ok_or_else(|| "sealed replay digest is not sha256".to_owned())?;
+        let sealed_manifest = std::fs::read(
+            binding
+                .generations_root
+                .join(format!("generation-{digest}.json")),
+        )
+        .map_err(|error| error.to_string())?;
+        let segments_root =
+            tracedecay_code_index_retention::code_index_generations::code_generation_segments_root(
+                binding
+                    .generations_root
+                    .parent()
+                    .ok_or_else(|| "generation root has no store root".to_owned())?,
+            );
+        let source =
+            crate::code_index::production::SealedGenerationFileWindowsV1::open(&sealed_manifest)
+                .map_err(|error| error.to_string())?;
+        let projector_revision = tracedecay_graph_db::GraphProjectorRevision::try_from(
+            crate::code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+        )
+        .map_err(|error| error.to_string())?;
+        let projection = crate::code_index::graph_projection::code_graph_projection_identity(
+            tracedecay_graph_db::GraphNamespace::new("code-graph")
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let scratch = tempfile::TempDir::new().map_err(|error| error.to_string())?;
+        let spilled = crate::code_index::graph_projection::build_sealed_code_graph_rows(
+            projection.clone(),
+            &source,
+            &mut |request, buffer| {
+                let crate::code_index::production::SealedGenerationSegmentReadV1::Whole {
+                    digest,
+                    ..
+                } = request
+                else {
+                    panic!("overlapping graph measurement reads whole file segments");
+                };
+                let segment_digest =
+                    tracedecay_domain::sha256_hex_suffix(digest.as_str()).expect("segment digest");
+                *buffer =
+                    std::fs::read(segments_root.join(format!("segment-{segment_digest}.json")))
+                        .expect("sealed segment");
+                Ok(())
+            },
+            &projector_revision,
+            tracedecay_graph_db::GraphGenerationRowSpill::create(
+                scratch.path().join("rows"),
+                projection,
+            )
+            .map_err(|error| error.to_string())?,
+            &|| Ok(()),
+        )
+        .map_err(|error| error.to_string())?;
+        let _manifest = spilled
+            .materialize(&|| Ok(()))
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 }

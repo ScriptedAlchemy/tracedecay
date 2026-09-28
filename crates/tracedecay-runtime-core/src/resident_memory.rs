@@ -1125,6 +1125,18 @@ struct ReclaimerEntryV1 {
     callback: Arc<ResidentMemoryReclaimerV1>,
 }
 
+/// Reservation growth of selected components while one pass is measured.
+///
+/// The baseline is the charge already reserved when the window opens, so a
+/// build that was admitted earlier is not subtracted again. Growth is the
+/// high water of new charge, including a component that reserves and releases
+/// before the window closes.
+struct ForeignChargeGrowthV1 {
+    components: Vec<ResidentMemoryComponentIdV1>,
+    baseline_bytes: u64,
+    growth_bytes: u64,
+}
+
 #[derive(Default)]
 struct ResidentMemoryStateV1 {
     used_bytes: u64,
@@ -1132,6 +1144,86 @@ struct ResidentMemoryStateV1 {
     process_shared_charges: BTreeMap<ResidentMemoryComponentIdV1, u64>,
     reclaimers: BTreeMap<(u32, u64), Arc<ResidentMemoryReclaimerV1>>,
     next_reclaimer_sequence: u64,
+    foreign_growth: Option<ForeignChargeGrowthV1>,
+}
+
+fn selected_charge_bytes(
+    state: &ResidentMemoryStateV1,
+    components: &[ResidentMemoryComponentIdV1],
+) -> u64 {
+    state
+        .charges
+        .iter()
+        .filter(|(key, _)| components.contains(&key.component))
+        .map(|(_, bytes)| *bytes)
+        .fold(0, u64::saturating_add)
+}
+
+fn note_foreign_growth(state: &mut ResidentMemoryStateV1) {
+    let Some(window) = state.foreign_growth.as_ref() else {
+        return;
+    };
+    let components = window.components.clone();
+    let baseline_bytes = window.baseline_bytes;
+    let growth = selected_charge_bytes(state, &components).saturating_sub(baseline_bytes);
+    if let Some(window) = state.foreign_growth.as_mut()
+        && growth > window.growth_bytes
+    {
+        window.growth_bytes = growth;
+    }
+}
+
+/// Process resident growth of one pass, minus reservation growth of the
+/// components the caller named as someone else's accounted share.
+pub struct AttributedResidentGrowthV1 {
+    start_bytes: u64,
+    stop: Arc<AtomicBool>,
+    sampler: Arc<ProcessResidentSamplerV1>,
+    peak: Option<std::thread::JoinHandle<u64>>,
+    memory: Arc<ProcessResidentMemoryV1>,
+    settled: bool,
+}
+
+impl AttributedResidentGrowthV1 {
+    /// Stops sampling and returns this pass's resident rise after the named
+    /// components' reservation growth. `None` if the sampler thread panicked.
+    pub fn finish(mut self) -> Option<u64> {
+        let rss_growth = self.stop_and_read_peak()?;
+        let foreign_growth = self.take_foreign_growth();
+        self.settled = true;
+        Some(rss_growth.saturating_sub(foreign_growth))
+    }
+
+    fn stop_and_read_peak(&mut self) -> Option<u64> {
+        self.stop.store(true, Ordering::Release);
+        let handle = self.peak.take()?;
+        handle.thread().unpark();
+        let peak = handle.join().ok()?;
+        let last = (self.sampler)().map_or(peak, |sample| sample.unreclaimable_bytes);
+        Some(peak.max(last).saturating_sub(self.start_bytes))
+    }
+
+    fn take_foreign_growth(&self) -> u64 {
+        self.memory
+            .lock_state()
+            .foreign_growth
+            .take()
+            .map_or(0, |window| window.growth_bytes)
+    }
+}
+
+impl Drop for AttributedResidentGrowthV1 {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.peak.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+        self.memory.lock_state().foreign_growth = None;
+    }
 }
 
 /// The single process ceiling. Callers share one pointer-identical `Arc`.
@@ -1182,6 +1274,67 @@ impl ProcessResidentMemoryV1 {
     #[must_use]
     pub fn pressure(&self) -> &Arc<ResidentMemoryPressureV1> {
         &self.pressure
+    }
+
+    /// Measure one pass's resident rise, then subtract reservation growth of
+    /// `foreign_components` during the pass. A component already reserved when
+    /// the window opens stays in the baseline; one that reserves while the
+    /// window is open, including after the sampler has started, is foreign
+    /// growth. `Ok(None)` where the process cannot be read.
+    pub fn start_attributed_growth(
+        self: &Arc<Self>,
+        foreign_components: &[ResidentMemoryComponentIdV1],
+    ) -> std::io::Result<Option<AttributedResidentGrowthV1>> {
+        let Some(start) = (self.pressure.sampler)() else {
+            return Ok(None);
+        };
+        {
+            let mut state = self.lock_state();
+            if state.foreign_growth.is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "a resident growth window is already open",
+                ));
+            }
+            let baseline_bytes = selected_charge_bytes(&state, foreign_components);
+            state.foreign_growth = Some(ForeignChargeGrowthV1 {
+                components: foreign_components.to_vec(),
+                baseline_bytes,
+                growth_bytes: 0,
+            });
+        }
+        let start_bytes = start.unreclaimable_bytes;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let sampler = Arc::clone(&self.pressure.sampler);
+        let thread_sampler = Arc::clone(&sampler);
+        let peak = std::thread::Builder::new()
+            .name("resident-peak".to_owned())
+            .spawn(move || {
+                let mut peak = start_bytes;
+                while !stopped.load(Ordering::Acquire) {
+                    if let Some(sample) = thread_sampler() {
+                        peak = peak.max(sample.unreclaimable_bytes);
+                    }
+                    std::thread::park_timeout(std::time::Duration::from_millis(20));
+                }
+                peak
+            });
+        let peak = match peak {
+            Ok(peak) => peak,
+            Err(error) => {
+                self.lock_state().foreign_growth = None;
+                return Err(error);
+            }
+        };
+        Ok(Some(AttributedResidentGrowthV1 {
+            start_bytes,
+            stop,
+            sampler,
+            peak: Some(peak),
+            memory: Arc::clone(self),
+            settled: false,
+        }))
     }
 
     #[hotpath::measure(label = "runtime_core.resident.reserve")]
@@ -1303,6 +1456,7 @@ impl ProcessResidentMemoryV1 {
         }
         state.used_bytes = next_used;
         *state.charges.entry(key.clone()).or_default() += requested_bytes.get();
+        note_foreign_growth(&mut state);
         hotpath::gauge!("runtime_core.resident.reservations").inc(1.0);
         hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         Some(ResidentMemoryReservationV1 {
@@ -1414,6 +1568,7 @@ impl ProcessResidentMemoryV1 {
                 state.charges.remove(key);
             }
         }
+        note_foreign_growth(&mut state);
         Ok(())
     }
 
@@ -1465,6 +1620,7 @@ impl ProcessResidentMemoryV1 {
             to.component = to_component;
             *state.charges.entry(to).or_default() += measured_bytes;
         }
+        note_foreign_growth(&mut state);
         Ok(())
     }
 
@@ -1482,6 +1638,7 @@ impl ProcessResidentMemoryV1 {
                 state.charges.remove(key);
             }
         }
+        note_foreign_growth(&mut state);
     }
 
     fn shrink_process_shared(

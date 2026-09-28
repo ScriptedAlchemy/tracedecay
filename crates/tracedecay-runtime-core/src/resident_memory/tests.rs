@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::fs;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
@@ -452,6 +453,50 @@ fn key(
         generation_id: CodeGenerationId::new(generation).expect("valid generation id"),
         component: ResidentMemoryComponentIdV1::new(component).expect("valid component id"),
     }
+}
+
+#[test]
+fn attributed_growth_subtracts_reservation_growth_that_starts_during_the_window() {
+    let observed = Arc::new(AtomicU64::new(1_000));
+    let read = Arc::clone(&observed);
+    let limit = bytes(10_000);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            let resident = read.load(Ordering::Relaxed);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: resident,
+                unreclaimable_bytes: resident,
+            })
+        }),
+    ));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let lexical = key(
+        "project-a",
+        "worktree-a",
+        "generation-a",
+        "code-text-artifact-build",
+    );
+    let other = key("project-a", "worktree-a", "generation-a", "graph-build");
+    let _already = memory
+        .reserve(lexical.clone(), bytes(500))
+        .expect("lexical reservation before the window");
+    let window = memory
+        .start_attributed_growth(&[lexical.component])
+        .expect("start growth window")
+        .expect("sampler is installed");
+    let _started = memory
+        .reserve(lexical.clone(), bytes(300))
+        .expect("lexical reservation during the window");
+    let _graph = memory
+        .reserve(other, bytes(80))
+        .expect("graph reservation during the window");
+    observed.store(1_000 + 380, Ordering::Relaxed);
+    let growth = window.finish().expect("attributed growth");
+    assert_eq!(
+        growth, 80,
+        "reservation already held stays in the baseline, and only the lexical reservation that started in the window is removed from the rise"
+    );
 }
 
 #[test]

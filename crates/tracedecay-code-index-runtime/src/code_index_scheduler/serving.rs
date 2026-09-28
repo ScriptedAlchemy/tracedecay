@@ -92,6 +92,10 @@ use super::{
 
 /// Page bounds for streaming one sealed generation into the durable lexical
 /// text artifact. One page is one bounded unit of background build progress.
+pub(crate) const CODE_TEXT_ARTIFACT_BUILD_RESIDENT_COMPONENT_V1: &str = "code-text-artifact-build";
+pub(crate) const CODE_TEXT_ARTIFACT_READER_RESIDENT_COMPONENT_V1: &str =
+    "code-text-artifact-reader";
+
 pub(super) const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = RETRIEVAL_CANDIDATE_BATCH_SIZE;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
 const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
@@ -889,8 +893,9 @@ fn reader_charge_from_held_reservation(
             held.reserved_bytes()
         )));
     }
-    let component = ResidentMemoryComponentIdV1::new("code-text-artifact-reader")
-        .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    let component =
+        ResidentMemoryComponentIdV1::new(CODE_TEXT_ARTIFACT_READER_RESIDENT_COMPONENT_V1)
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
     held.transfer_component(component, reader_budget)
         .map_err(|error| {
             RetrievalPortError::Contract(format!(
@@ -1174,6 +1179,32 @@ impl DaemonCodeTextArtifactStoreV1 {
     ) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
         self.reserve_resident_memory_up_to(generation_id, component, bytes, bytes)
             .map(|(reservation, _)| reservation)
+    }
+
+    /// Account additional lexical-build reservation on this store's authority.
+    /// Tests use it to put a known lexical share inside a graph growth window.
+    #[cfg(test)]
+    pub(super) fn reserve_build_growth_for_test(
+        &self,
+        generation_id: &CodeGenerationId,
+        bytes: u64,
+    ) -> Result<ResidentMemoryReservationV1, String> {
+        let bytes = std::num::NonZeroU64::new(bytes)
+            .ok_or_else(|| "lexical build growth reservation must be nonzero".to_owned())?;
+        let component =
+            ResidentMemoryComponentIdV1::new(CODE_TEXT_ARTIFACT_BUILD_RESIDENT_COMPONENT_V1)
+                .map_err(|error| error.to_string())?;
+        self.resident_memory
+            .reserve(
+                ResidentMemoryKeyV1 {
+                    project_id: self.project_id.clone(),
+                    worktree_id: self.worktree_id.clone(),
+                    generation_id: generation_id.clone(),
+                    component,
+                },
+                bytes,
+            )
+            .map_err(|error| error.to_string())
     }
 
     /// Measure headroom and size the build: `(observed, unmodeled live,
@@ -1823,6 +1854,17 @@ impl LatestCodeTextGenerationV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Reserve additional lexical-build bytes on the authority this owner uses,
+    /// so a graph growth window can subtract them.
+    #[cfg(test)]
+    pub(super) fn reserve_lexical_build_growth_for_test(
+        &self,
+        bytes: u64,
+    ) -> Result<ResidentMemoryReservationV1, String> {
+        self.text_artifact_store
+            .reserve_build_growth_for_test(&self.metadata().manifest().generation_id, bytes)
     }
 
     pub fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
@@ -2702,7 +2744,7 @@ impl LatestCodeTextGenerationV1 {
         let store = &self.text_artifact_store;
         let reader_reservation = store.reserve_resident_memory(
             generation_id,
-            "code-text-artifact-reader",
+            CODE_TEXT_ARTIFACT_READER_RESIDENT_COMPONENT_V1,
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         )?;
         let path = code_text_artifact_path(store.store_root(), &descriptor)
@@ -2759,7 +2801,7 @@ impl LatestCodeTextGenerationV1 {
         let sealed_identity = store.sealed_identity(generation_id)?;
         let reader_reservation = store.reserve_resident_memory(
             generation_id,
-            "code-text-artifact-reader",
+            CODE_TEXT_ARTIFACT_READER_RESIDENT_COMPONENT_V1,
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         )?;
         let source = self.take_preopened_source_or_open(&sealed_identity, control)?;
@@ -2865,7 +2907,7 @@ impl LatestCodeTextGenerationV1 {
         // and release that graph.
         let (build_reservation, build_memory_budget) = store.reserve_resident_memory_up_to(
             &generation_id,
-            "code-text-artifact-build",
+            CODE_TEXT_ARTIFACT_BUILD_RESIDENT_COMPONENT_V1,
             preferred_build_memory_budget,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )?;

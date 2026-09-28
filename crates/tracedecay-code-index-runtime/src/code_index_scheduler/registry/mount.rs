@@ -44,6 +44,7 @@ use super::{
     retained_noop_requires_follow_up_wake,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::resident_memory::AttributedResidentGrowthV1;
 
 /// What the worker does with a reconcile pass that found the durable
 /// publication corrupt.
@@ -1803,6 +1804,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         // needs no second build: only the decode is demanded.
                         if let Some(text) = graph_text.as_ref().filter(|_| !graph_already_serves) {
                             let generation_id = text.metadata().manifest().generation_id.clone();
+                            let built_generation_id = generation_id.clone();
                             let binding_scheduler = Arc::clone(&worker_scheduler);
                             let shutting_down = Arc::clone(&worker_shutting_down);
                             let binding_passes = Arc::clone(&worker_reconcile_in_progress);
@@ -1825,7 +1827,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                         DaemonCodeIndexPublicationStoreV1::admit_sealed_graph_build,
                                     )
                                     .transpose();
-                                Ok::<_, CodeIndexSchedulerErrorV1>((binding, admission))
+                                Ok::<_, CodeIndexSchedulerErrorV1>((binding, admission, decoder))
                             })
                             .await;
                             match admitted_binding {
@@ -1834,14 +1836,39 @@ impl CodeIndexSchedulerRegistryV1 {
                                     Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
                                         detail,
                                     )),
+                                    _,
                                 ))) => graph_publish_refusal = Some(detail),
-                                Ok(Ok((_, Err(error)))) => tracing::warn!(
+                                Ok(Ok((_, Err(error), _))) => tracing::warn!(
                                     event = "code_index_graph_publish_admission_failed",
                                     error = %error,
                                     "sealed graph build admission failed; activation publishes \
                                      the graph after the serving decode"
                                 ),
-                                Ok(Ok((replay_binding, Ok(reservation)))) => {
+                                Ok(Ok((replay_binding, Ok(reservation), decoder))) => {
+                                    // Whole-process growth also contains a
+                                    // lexical build's reservation. The peak
+                                    // subtracts that accounted share, including
+                                    // a build that reserves after the window
+                                    // opens, and keeps this build's own rise.
+                                    let resident_peak = decoder.as_ref().and_then(|decoder| {
+                                        decoder
+                                            .start_sealed_graph_build_peak()
+                                            .inspect_err(|error| {
+                                                tracing::warn!(
+                                                    event = "code_index_graph_build_peak_unsampled",
+                                                    error = %error,
+                                                    "sealed graph build resident peak sampler \
+                                                     did not start"
+                                                );
+                                            })
+                                            .ok()
+                                            .flatten()
+                                    });
+                                    // The sampler reads the whole process. A test
+                                    // parks here once that window is open so a
+                                    // lexical resident spike lands inside it.
+                                    #[cfg(test)]
+                                    Self::wait_for_graph_growth_sample(&worker_project_root).await;
                                     let published = worker_graph_activation
                                         .publish_sealed_graph(
                                             &worker_project_id,
@@ -1852,7 +1879,40 @@ impl CodeIndexSchedulerRegistryV1 {
                                             Arc::clone(&worker_shutting_down),
                                         )
                                         .await;
+                                    // Unit tests mount a memory authority, which
+                                    // abstains without building. An armed
+                                    // measurement still runs the sealed row build
+                                    // in this window and reports it published, so
+                                    // the recorder sees the same overlap the
+                                    // persistent authority produces.
+                                    #[cfg(test)]
+                                    let published = if matches!(published, Ok(false))
+                                        && Self::take_graph_measurement_publish(
+                                            &worker_project_root,
+                                        ) {
+                                        Self::build_overlapping_sealed_graph(
+                                            &worker_scheduler,
+                                            &built_generation_id,
+                                        )
+                                        .expect("overlapping sealed graph build");
+                                        Ok(true)
+                                    } else {
+                                        published
+                                    };
+                                    let growth =
+                                        resident_peak.and_then(AttributedResidentGrowthV1::finish);
                                     drop(reservation);
+                                    if let (Ok(true), Some(decoder), Some(growth)) =
+                                        (&published, decoder.as_ref(), growth)
+                                    {
+                                        decoder.record_sealed_graph_build_growth(
+                                            &built_generation_id,
+                                            growth,
+                                        );
+                                    }
+                                    #[cfg(test)]
+                                    Self::wait_for_graph_growth_recorded(&worker_project_root)
+                                        .await;
                                     match published {
                                         Ok(published) => graph_head_published = published,
                                         Err(error) if error.is_resident_memory_graph_refusal() => {
