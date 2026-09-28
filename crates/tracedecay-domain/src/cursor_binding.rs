@@ -232,7 +232,7 @@ fn decode_lowercase_hex(encoded: &str) -> Option<Vec<u8>> {
         _ => None,
     };
     let encoded = encoded.as_bytes();
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         return None;
     }
     encoded
