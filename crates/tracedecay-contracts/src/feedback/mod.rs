@@ -15,6 +15,7 @@ mod proximity_read;
 mod read;
 mod service;
 
+pub(crate) use catalog::feedback_surface_catalog_contribution_with;
 pub use catalog::{
     feedback_read_operations, feedback_surface_catalog_contribution,
     feedback_surface_handler_descriptors, feedback_surface_operation,

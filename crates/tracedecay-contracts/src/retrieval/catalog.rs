@@ -99,6 +99,7 @@ use crate::retrieval::{
     HermesSkillBridgeSurfaceRequestV1, SkillListResultV1, SkillListSurfaceRequestV1,
     SkillViewResultV1, SkillViewSurfaceRequestV1,
 };
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 use crate::surface_contracts::{
     CodeCallersSurfaceRequest, CodeImplementationsSurfaceRequest,
     CodeSignatureSearchSurfaceRequest, CodeSymbolSearchSurfaceRequest,
@@ -127,20 +128,35 @@ pub(crate) fn application_profile_ids(
 /// [`crate::application_handler_descriptors`].
 pub fn application_catalog_contributions()
 -> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
+    application_catalog_contributions_materialized(SchemaBodyMaterialization::Materialize)
+}
+
+/// Capability, binding, and schema-reference metadata with no JSON Schema bodies.
+///
+/// CLI and HTTP dispatch resolve from this projection. The bodies stay on
+/// [`application_catalog_contributions`] for SDK generation and MCP discovery.
+pub fn application_binding_contributions()
+-> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
+    application_catalog_contributions_materialized(SchemaBodyMaterialization::Omit)
+}
+
+fn application_catalog_contributions_materialized(
+    materialize: SchemaBodyMaterialization,
+) -> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
     Ok(vec![
-        symbol_search_contribution()?,
-        primitive_read_contribution()?,
-        super::callable_code_catalog_contribution()?,
+        symbol_search_contribution_with(materialize)?,
+        primitive_read_contribution_with(materialize)?,
+        super::callable_code_catalog_contribution_with(materialize)?,
         crate::git::git_index_catalog_contribution()?,
-        crate::git::git_surface_catalog_contribution()?,
-        crate::git::native_integration_surface_catalog_contribution()?,
-        crate::configuration::configuration_surface_catalog_contribution()?,
-        crate::context_scout::context_scout_surface_catalog_contribution()?,
-        crate::feedback::feedback_surface_catalog_contribution()?,
+        crate::git::git_surface_catalog_contribution_with(materialize)?,
+        crate::git::native_integration_surface_catalog_contribution_with(materialize)?,
+        crate::configuration::configuration_surface_catalog_contribution_with(materialize)?,
+        crate::context_scout::context_scout_surface_catalog_contribution_with(materialize)?,
+        crate::feedback::feedback_surface_catalog_contribution_with(materialize)?,
         crate::lsp_context_catalog::lsp_context_catalog_contribution()?,
-        crate::observatory_surface::observatory_read_catalog_contribution()?,
-        crate::retained_surfaces::retained_surface_catalog_contribution()?,
-        crate::source_edit::source_edit_catalog_contribution()?,
+        crate::observatory_surface::observatory_read_catalog_contribution_with(materialize)?,
+        crate::retained_surfaces::retained_surface_catalog_contribution_with(materialize)?,
+        crate::source_edit::source_edit_catalog_contribution_with(materialize)?,
     ])
 }
 
@@ -814,6 +830,12 @@ pub fn primitive_read_handler_descriptors()
 }
 
 pub fn primitive_read_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
+    primitive_read_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn primitive_read_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(PRIMITIVE_READ_SPECS.len());
     let mut bindings = Vec::with_capacity(
         PRIMITIVE_READ_SPECS
@@ -929,8 +951,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
         capabilities,
         bindings,
     ))?;
-    let schemas = primitive_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(contribution, materialize, primitive_executable_schemas)
 }
 
 /// Rust-owned request/result schema bodies for the primitive reads whose wire
@@ -1298,6 +1319,12 @@ pub fn symbol_search_handler_descriptor()
 /// or transport side effect; binding them to the canonical dispatcher stays in
 /// `tracedecay-daemon-service`.
 pub fn symbol_search_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
+    symbol_search_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn symbol_search_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let capability_id = CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?;
     let request_schema = symbol_search_request_schema()?;
     let result_schema = symbol_search_result_schema()?;
@@ -1413,20 +1440,21 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         )
         .with_retrieval_primitives(vec![primitive]),
     )?;
-    let manifest = contribution.capabilities().first().cloned().ok_or(
-        ApplicationContractError::Inconsistent {
-            field: "symbol-search capability",
-        },
-    )?;
-    let schemas = vec![ExecutableSchemaAuthority::for_types_at_paths::<
-        CodeSymbolSearchSurfaceRequest,
-        SymbolGraphPage<SymbolPrimitiveRecord>,
-    >(
-        &manifest,
-        "tracedecay_contracts::surface_contracts::CodeSymbolSearchSurfaceRequest",
-        "tracedecay_contracts::retrieval::SymbolGraphPage<tracedecay_contracts::retrieval::SymbolPrimitiveRecord>",
-    )?];
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(contribution, materialize, |contribution| {
+        let manifest = contribution.capabilities().first().cloned().ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "symbol-search capability",
+            },
+        )?;
+        Ok(vec![ExecutableSchemaAuthority::for_types_at_paths::<
+            CodeSymbolSearchSurfaceRequest,
+            SymbolGraphPage<SymbolPrimitiveRecord>,
+        >(
+            &manifest,
+            "tracedecay_contracts::surface_contracts::CodeSymbolSearchSurfaceRequest",
+            "tracedecay_contracts::retrieval::SymbolGraphPage<tracedecay_contracts::retrieval::SymbolPrimitiveRecord>",
+        )?])
+    })
 }
 
 fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {

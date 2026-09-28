@@ -33,12 +33,7 @@ pub(super) fn complete_protocol_controls(
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
-    complete_protocol_controls_for_tool(
-        operation.mcp_tool_name(),
-        request_id,
-        deadline,
-        cancellation,
-    )
+    complete_protocol_controls_for_tool(operation, request_id, deadline, cancellation)
 }
 
 pub(super) fn complete_retained_protocol_controls(
@@ -53,12 +48,18 @@ pub(super) fn complete_retained_protocol_controls(
 }
 
 fn complete_protocol_controls_for_tool(
-    tool_name: &str,
+    operation: ApplicationSurfaceOperation,
     request_id: &RequestId,
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
-    let ceiling = tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name)
+    // The capability manifest already records this ceiling. The MCP dispatch
+    // catalog copies it after generating every executable schema body, which
+    // a one-shot CLI call does not need in order to clamp its deadline.
+    let ceiling =
+        tracedecay_daemon_service::application_surface::application_operation_deadline_ceiling(
+            operation,
+        )
         .map_err(|error| TraceDecayError::Config {
             message: format!("could not resolve application surface deadline: {error}"),
         })?;

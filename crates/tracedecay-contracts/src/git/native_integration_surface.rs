@@ -53,6 +53,7 @@ use crate::git::worktree::{
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 mod stack_snapshot;
 
 pub use stack_snapshot::{
@@ -698,6 +699,12 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 11] = [
 /// Catalog contribution for the public native-integration journey.
 pub fn native_integration_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
+    native_integration_surface_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn native_integration_surface_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(NATIVE_INTEGRATION_SPECS.len());
     let mut bindings =
         Vec::with_capacity(NATIVE_INTEGRATION_SPECS.len() * NATIVE_INTEGRATION_SURFACES.len());
@@ -721,8 +728,11 @@ pub fn native_integration_surface_catalog_contribution()
         capabilities,
         bindings,
     ))?;
-    let schemas = native_integration_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(
+        contribution,
+        materialize,
+        native_integration_executable_schemas,
+    )
 }
 
 /// Resolve one native-integration wire operation to its canonical application
