@@ -882,11 +882,12 @@ impl CodeLexicalArtifactReaderV1 {
             (cache_budget_bytes - stored_metadata_bytes.len()) / ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
         );
         let mut connections = vec![StdMutex::new(connection)];
+        let sibling_open_path = sqlite_open_path(artifact_path)?;
         for _ in 1..width {
             checkpoint(control)?;
             verify_named_path_identity(artifact_path, artifact_file)?;
             let sibling = Connection::open_with_flags(
-                artifact_path,
+                &sibling_open_path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .map_err(|error| map_reader_open_error(artifact_path, error))?;
