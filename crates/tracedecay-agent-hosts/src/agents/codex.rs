@@ -2026,7 +2026,9 @@ fn remove_codex_marketplace_entry_at(marketplace_path: &Path, label: &str) -> Re
             if plugins.len() == before {
                 return Ok((false, JsonConfigMutation::Unchanged));
             }
-            if codex_marketplace_is_empty_skeleton(&marketplace) {
+            if codex_marketplace_is_empty_skeleton(&marketplace)
+                && super::lifecycle_created_file(marketplace_path)
+            {
                 return Ok((true, JsonConfigMutation::Remove));
             }
             Ok((true, JsonConfigMutation::Write(marketplace)))

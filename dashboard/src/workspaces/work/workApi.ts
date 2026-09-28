@@ -1,5 +1,5 @@
 import type { WireSchema } from '../../data/query/wireSchema.ts';
-import { ResolvedScopeSchema, type ResolvedScope } from '../../contracts/index.ts';
+import { ResolvedScopeSchema, type ResolvedScope } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
 /**

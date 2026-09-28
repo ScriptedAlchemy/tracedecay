@@ -6,7 +6,7 @@ import type {
   WorkAttemptV1,
   WorkRestartReasonV1,
   WorkTerminalEvidenceV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkResult } from './workApi.ts';
 

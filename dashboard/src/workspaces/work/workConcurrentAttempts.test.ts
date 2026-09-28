@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FeedbackProximityEncounterV1Schema } from '../../contracts/index.ts';
+import { FeedbackProximityEncounterV1Schema } from '../../contracts/generated.ts';
 import { joinConcurrentEncounter } from './workConcurrentAttempts.ts';
 
 const scope = {

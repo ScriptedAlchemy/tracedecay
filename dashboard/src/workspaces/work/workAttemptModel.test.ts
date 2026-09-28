@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   WorkAttemptListV1Schema,
   type WorkAttemptListCoverageV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import {
   workAttempt as attempt,
   workAttemptList,

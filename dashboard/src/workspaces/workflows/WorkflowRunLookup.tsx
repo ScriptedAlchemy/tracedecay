@@ -1,5 +1,5 @@
 import { useId, useState, type ReactNode } from 'react';
-import type { WorkflowRunEvent, WorkflowRunProjection } from '../../contracts/index.ts';
+import type { WorkflowRunEvent, WorkflowRunProjection } from '../../contracts/generated.ts';
 import { cn } from '../../ui/cn.ts';
 import { GradeTag } from '../../ui/EvidenceGrade.tsx';
 import { formatMicrosUtcClock } from '../../ui/format.ts';
