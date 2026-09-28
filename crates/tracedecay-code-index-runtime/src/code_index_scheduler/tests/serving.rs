@@ -924,7 +924,7 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
             |row| row.get(0),
         )
         .expect("read sealed revision");
-    assert_eq!(revision, 29);
+    assert_eq!(revision, 30);
     let staging = std::fs::read_dir(code_text_artifact_staging_root(store.path()))
         .expect("artifacts root")
         .map(|entry| entry.expect("artifact entry").file_name())
@@ -2416,7 +2416,10 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
         let super::super::CodeTextProjectionSlotV1::Building(build) = &mut *slot else {
             panic!("partial text build");
         };
-        let progress = build.builder.progress().unwrap();
+        let progress = build
+            .builder
+            .progress(&UninterruptibleCodeIndexControlV1)
+            .unwrap();
         assert!(progress.next_page_ordinal > 0);
         build.builder =
             CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
@@ -2454,7 +2457,13 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
         let super::super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
             panic!("refusal keeps resumable build");
         };
-        assert_eq!(build.builder.progress().unwrap(), before);
+        assert_eq!(
+            build
+                .builder
+                .progress(&UninterruptibleCodeIndexControlV1)
+                .unwrap(),
+            before
+        );
         assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
     }
     assert!(
@@ -2465,7 +2474,13 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
     let super::super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
         panic!("indivisible refusal keeps durable prefix");
     };
-    assert_eq!(build.builder.progress().unwrap(), before);
+    assert_eq!(
+        build
+            .builder
+            .progress(&UninterruptibleCodeIndexControlV1)
+            .unwrap(),
+        before
+    );
     assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
 }
 
@@ -2704,7 +2719,10 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         let super::super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
             panic!("partial build");
         };
-        build.builder.progress().expect("durable progress")
+        build
+            .builder
+            .progress(&UninterruptibleCodeIndexControlV1)
+            .expect("durable progress")
     };
     let dashboard_before = build_progress_snapshot(&scheduler);
     assert_eq!(
@@ -2744,7 +2762,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         };
         build
             .builder
-            .progress()
+            .progress(&UninterruptibleCodeIndexControlV1)
             .expect("durable progress after cancellation")
     };
     assert_eq!(progress_after, progress_before);

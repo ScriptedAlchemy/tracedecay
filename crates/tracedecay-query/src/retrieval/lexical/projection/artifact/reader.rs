@@ -48,7 +48,7 @@ use super::fingerprints::{
 use super::format::{
     ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, PostingListDecoderV1,
     VerifiedCodeLexicalArtifactV1, content_metadata_bytes, decode_document_set,
-    decode_ngram_bitmap, decode_padded_receipt, decode_term_lists, document_set_bytes,
+    decode_ngram_bitmap, decode_padded_receipt_with_control, decode_term_lists, document_set_bytes,
     receipt_artifact_digest, stored_metadata_digest as stored_metadata_digest_of, term_lists_bytes,
     verify_artifact_table_layout,
 };
@@ -474,11 +474,12 @@ impl CodeLexicalArtifactReaderV1 {
                 |row| row.get(0),
             )
             .map_err(sqlite_corrupt)?;
-        let receipt = decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Corrupt(
-                "content-addressed lexical artifact has no finalized receipt".to_owned(),
-            )
-        })?;
+        let receipt =
+            decode_padded_receipt_with_control(&receipt_bytes, control)?.ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "content-addressed lexical artifact has no finalized receipt".to_owned(),
+                )
+            })?;
         if receipt.file_size_bytes() != expected_file_size_bytes {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "embedded receipt disagrees with the durable head file size".to_owned(),
@@ -611,7 +612,7 @@ impl CodeLexicalArtifactReaderV1 {
                     |row| row.get(0),
                 )
                 .map_err(sqlite_corrupt)?;
-            decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
+            decode_padded_receipt_with_control(&receipt_bytes, control)?.ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Corrupt(
                     "content-addressed lexical artifact has no finalized receipt".to_owned(),
                 )
@@ -812,7 +813,7 @@ impl CodeLexicalArtifactReaderV1 {
                     |row| row.get(0),
                 )
                 .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-            decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
+            decode_padded_receipt_with_control(&receipt_bytes, control)?.ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Corrupt(
                     "lexical artifact has no finalized receipt".to_owned(),
                 )

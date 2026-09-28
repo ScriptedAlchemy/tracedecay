@@ -1433,40 +1433,9 @@ pub(super) fn padded_receipt(
     Ok(bytes)
 }
 
-pub(super) fn decode_padded_receipt(
-    bytes: &[u8],
-) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
-    if bytes.len() != RECEIPT_RESERVATION_BYTES {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact receipt reservation has the wrong length".to_owned(),
-        ));
-    }
-    let end = bytes.iter().position(|byte| *byte == 0).ok_or_else(|| {
-        CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact receipt is missing its reserved zero tail".to_owned(),
-        )
-    })?;
-    if bytes[end..].iter().any(|byte| *byte != 0) {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact receipt has nonzero bytes after its canonical payload".to_owned(),
-        ));
-    }
-    if end == 0 {
-        return Ok(None);
-    }
-    let receipt = serde_json::from_slice(&bytes[..end])
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    if padded_receipt(&receipt)? != bytes {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact receipt is not canonically encoded".to_owned(),
-        ));
-    }
-    Ok(Some(receipt))
-}
-
 /// Decode a fixed-size receipt while honoring the caller's canonical work
-/// control. Reopen paths use this version so a corrupt or cold artifact never
-/// turns an expired epoch into an unbounded padding scan.
+/// control. A corrupt or cold artifact must not turn an expired epoch into an
+/// uninterrupted padding scan.
 pub(super) fn decode_padded_receipt_with_control(
     bytes: &[u8],
     control: &dyn CodeIndexExecutionControlV1,
