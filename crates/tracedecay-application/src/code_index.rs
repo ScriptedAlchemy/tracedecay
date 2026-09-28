@@ -263,7 +263,7 @@ mod tests {
         ));
         let reclaimed = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&reclaimed);
-        pressure
+        let _reclaimer = pressure
             .register_pressure_reclaimer(
                 0,
                 Arc::new(move |_| {
