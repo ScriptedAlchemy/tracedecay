@@ -392,17 +392,15 @@ mod tests {
         let components = [HostComponentV1::ContextMcp];
         let install = install_context(home.path(), "/tmp/tracedecay");
 
-        let mut facts = Vec::new();
-        crate::agents::recorded_lifecycle(home.path(), &mut facts, false, || {
-            ZedIntegration.activate_deployed_host_component_registration(&components, &install)
-        })
-        .unwrap();
-        assert!(config.is_file());
-
-        crate::agents::recorded_lifecycle(home.path(), &mut facts, true, || {
-            ZedIntegration.deactivate_deployed_host_component_registration(&components, &install)
-        })
-        .unwrap();
+        crate::agents::recorded_install_then_uninstall(
+            home.path(),
+            || ZedIntegration.activate_deployed_host_component_registration(&components, &install),
+            || {
+                assert!(config.is_file());
+                ZedIntegration
+                    .deactivate_deployed_host_component_registration(&components, &install)
+            },
+        );
 
         assert!(!config.exists());
     }

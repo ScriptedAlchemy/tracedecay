@@ -31,19 +31,19 @@ struct FileCreation {
     containers: BTreeSet<String>,
 }
 
-impl Ledger {
-    fn relative(&self, path: &Path) -> Option<String> {
-        path.strip_prefix(&self.root)
-            .ok()?
-            .components()
-            .map(|component| match component {
-                Component::Normal(name) => name.to_str(),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()
-            .map(|components| components.join("/"))
-            .filter(|relative| !relative.is_empty())
-    }
+/// `path` below `root` as `/`-joined normal UTF-8 components, or `None` when
+/// it is not strictly below `root` in that form.
+pub(crate) fn root_relative_path(root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
+        .filter(|relative| !relative.is_empty())
 }
 
 /// Run one lifecycle operation's host config effects against the creation
@@ -102,11 +102,24 @@ pub(crate) fn recorded_lifecycle<T>(
     output
 }
 
+/// Install, then uninstall, as two recorded lifecycle operations over `root`.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) fn recorded_install_then_uninstall<A, B>(
+    root: &Path,
+    install: impl FnOnce() -> tracedecay_domain::errors::Result<A>,
+    uninstall: impl FnOnce() -> tracedecay_domain::errors::Result<B>,
+) {
+    let mut facts = Vec::new();
+    recorded_lifecycle(root, &mut facts, false, install).unwrap();
+    recorded_lifecycle(root, &mut facts, true, uninstall).unwrap();
+}
+
 fn with_facts<T>(path: &Path, read: impl FnOnce(bool, &mut FileCreation) -> T) -> Option<T> {
     LEDGER.with(|ledger| {
         let mut ledger = ledger.borrow_mut();
         let ledger = ledger.as_mut()?;
-        let relative = ledger.relative(path)?;
+        let relative = root_relative_path(&ledger.root, path)?;
         let removing = ledger.removing;
         Some(read(removing, ledger.files.entry(relative).or_default()))
     })

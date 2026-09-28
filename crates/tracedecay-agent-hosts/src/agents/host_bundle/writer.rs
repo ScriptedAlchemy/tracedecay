@@ -609,15 +609,7 @@ impl HostBundleWriterV1 {
     /// Install-root-relative form of an absolute host path, when it lies
     /// below this writer's root and is a valid install path.
     pub(super) fn root_relative(&self, path: &Path) -> Option<String> {
-        let relative = path.strip_prefix(&self.root_path).ok()?;
-        let components = relative
-            .components()
-            .map(|component| match component {
-                Component::Normal(name) => name.to_str(),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let relative = components.join("/");
+        let relative = crate::agents::root_relative_path(&self.root_path, path)?;
         validate_relative_install_path(Path::new(&relative))
             .is_ok()
             .then_some(relative)

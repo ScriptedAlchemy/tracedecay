@@ -374,28 +374,24 @@ fn run_phase(cli: &IsolatedCli, id: &str, args: &[&str], pending_allowed: bool) 
     );
 }
 
-fn read(home: &Path, relative: &str) -> String {
-    fs::read_to_string(home.join(relative))
-        .unwrap_or_else(|error| panic!("{relative} after install: {error}"))
-}
-
 /// What each install must visibly have done to the surfaces a heuristic
 /// uninstall used to get wrong, so an unchanged tree after uninstall proves an
 /// exact inverse rather than an install that never happened.
 fn assert_install_changed_surface(host: HostKindV1, home: &Path) {
+    let installed = |relative: &str| fs::read_to_string(home.join(relative)).unwrap();
     match host {
         HostKindV1::Devin => assert!(
-            read(home, ".config/devin/mcp_config.json").contains("\"tracedecay\""),
+            installed(".config/devin/mcp_config.json").contains("\"tracedecay\""),
             "devin install did not create its MCP registry"
         ),
-        HostKindV1::Cline => assert!(read(home, ".cline/mcp.json").contains("\"tracedecay\"")),
-        HostKindV1::Kilo => assert!(read(home, ".config/kilo/kilo.jsonc").contains("\"mcp\"")),
-        HostKindV1::Hermes => assert!(read(home, ".hermes/config.yaml").contains("- tracedecay")),
+        HostKindV1::Cline => assert!(installed(".cline/mcp.json").contains("\"tracedecay\"")),
+        HostKindV1::Kilo => assert!(installed(".config/kilo/kilo.jsonc").contains("\"mcp\"")),
+        HostKindV1::Hermes => assert!(installed(".hermes/config.yaml").contains("- tracedecay")),
         HostKindV1::Antigravity => {
-            assert!(read(home, ".gemini/antigravity/mcp_config.json").contains("\"tracedecay\""))
+            assert!(installed(".gemini/antigravity/mcp_config.json").contains("\"tracedecay\""))
         }
         HostKindV1::ClaudeCode => {
-            assert!(read(home, ".claude/settings.json").contains("mcp__plugin_tracedecay_graph__*"))
+            assert!(installed(".claude/settings.json").contains("mcp__plugin_tracedecay_graph__*"))
         }
         _ => {}
     }

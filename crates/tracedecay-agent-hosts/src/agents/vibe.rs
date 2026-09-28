@@ -580,15 +580,14 @@ mod tests {
         let install = install_context(home.path(), "/tmp/tracedecay");
         let components = [HostComponentV1::ContextMcp, HostComponentV1::Core];
 
-        let mut facts = Vec::new();
-        crate::agents::recorded_lifecycle(home.path(), &mut facts, false, || {
-            activate_components(&components, &config, &prompt, &install)
-        })
-        .unwrap();
-        crate::agents::recorded_lifecycle(home.path(), &mut facts, true, || {
-            deactivate_components(&components, &config, &prompt)
-        })
-        .unwrap();
+        crate::agents::recorded_install_then_uninstall(
+            home.path(),
+            || activate_components(&components, &config, &prompt, &install),
+            || {
+                assert!(config.is_file() && prompt.is_file());
+                deactivate_components(&components, &config, &prompt)
+            },
+        );
 
         assert!(!config.exists());
         assert!(!prompt.exists());

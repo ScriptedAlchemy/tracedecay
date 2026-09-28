@@ -1001,30 +1001,28 @@ mod tests {
         }
     }
 
+    /// Disabling removes exactly the blocks enabling appended: a `plugins:`
+    /// block it added goes, one the operator had stays, and so does an empty
+    /// `memory:` mapping the operator already had.
     #[test]
     fn enable_then_disable_restores_existing_config_bytes() {
-        let original = "theme: dark\nplugins:\n  enabled:\n    - foreign\n";
-        let (enabled, created) = enable_plugin_config(original).unwrap();
-        assert_eq!(created, ["/memory", "/context"]);
+        for (original, appended) in [
+            (
+                "theme: dark\nplugins:\n  enabled:\n    - foreign\n",
+                &["/memory", "/context"][..],
+            ),
+            (
+                "model: x\nmemory: {}\n",
+                &["/plugins", "/plugins/enabled", "/context"][..],
+            ),
+        ] {
+            let (enabled, created) = enable_plugin_config(original).unwrap();
+            assert_eq!(created, appended);
+            assert!(enabled.contains("- tracedecay"), "{enabled}");
 
-        let created = |pointer: &str| created.contains(&pointer);
-        assert_eq!(disable_plugin_config(&enabled, &created).unwrap(), original);
-    }
-
-    /// The `plugins:` block enabling appended goes with TraceDecay, while
-    /// an empty `memory:` mapping the operator already had stays.
-    #[test]
-    fn disable_removes_exactly_the_blocks_enable_appended() {
-        let original = "model: x\nmemory: {}\n";
-        let (enabled, created) = enable_plugin_config(original).unwrap();
-        assert_eq!(created, ["/plugins", "/plugins/enabled", "/context"]);
-        assert!(
-            enabled.contains("plugins:\n  enabled:\n    - tracedecay"),
-            "{enabled}"
-        );
-
-        let created = |pointer: &str| created.contains(&pointer);
-        assert_eq!(disable_plugin_config(&enabled, &created).unwrap(), original);
+            let created = |pointer: &str| created.contains(&pointer);
+            assert_eq!(disable_plugin_config(&enabled, &created).unwrap(), original);
+        }
     }
 
     #[test]

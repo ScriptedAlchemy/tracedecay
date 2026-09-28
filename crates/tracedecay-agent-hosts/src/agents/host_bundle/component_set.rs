@@ -239,23 +239,7 @@ impl HostBundleWriterV1 {
             .filter_map(|path| self.root_relative(path))
             .collect::<Vec<_>>();
         let missing_before = self.missing_directories(&ancestor_directories(
-            prepared
-                .iter()
-                .flat_map(|component| {
-                    component
-                        .manifest
-                        .artifacts
-                        .iter()
-                        .map(|artifact| artifact.relative_path.as_str())
-                        .chain(
-                            component
-                                .plan
-                                .mutations
-                                .iter()
-                                .map(|mutation| mutation.relative_path.as_str()),
-                        )
-                })
-                .chain(registration_paths.iter().map(String::as_str)),
+            prepared_artifact_paths(&prepared).chain(registration_paths.iter().map(String::as_str)),
         ));
 
         let mut undo = Vec::new();
@@ -270,15 +254,7 @@ impl HostBundleWriterV1 {
                     }
                 }
             }
-            let previous_receipts = prepared
-                .iter()
-                .filter_map(|component| component.previous_receipt.as_ref());
-            let predates_creation_records = previous_receipts
-                .clone()
-                .any(|receipt| receipt.created_config.is_none());
-            let recorded_config = previous_receipts
-                .flat_map(|receipt| receipt.created_config.iter().flatten().cloned())
-                .collect::<Vec<_>>();
+            let (recorded_config, predates_creation_records) = recorded_creations(&prepared);
             let (applied, created_config) = with_host_config_creations(
                 &self.root_path,
                 &recorded_config,
@@ -297,21 +273,8 @@ impl HostBundleWriterV1 {
                     .flat_map(|receipt| receipt.created_directories.iter().cloned()),
             );
             if predates_creation_records {
-                recorded.extend(tracedecay_namespace_directories(prepared.iter().flat_map(
-                    |component| {
-                        component
-                            .manifest
-                            .artifacts
-                            .iter()
-                            .map(|artifact| artifact.relative_path.as_str())
-                            .chain(
-                                component
-                                    .plan
-                                    .mutations
-                                    .iter()
-                                    .map(|mutation| mutation.relative_path.as_str()),
-                            )
-                    },
+                recorded.extend(tracedecay_namespace_directories(prepared_artifact_paths(
+                    &prepared,
                 )));
             }
             let created_directories = self.prune_created_directories(&recorded)?;
@@ -520,6 +483,43 @@ impl HostBundleWriterV1 {
         }
         self.remove_component_set_receipt(request.operation_id)
     }
+}
+
+/// Every path the set's manifests name or its plans mutate.
+fn prepared_artifact_paths(
+    prepared: &[PreparedHostComponentSetComponentV1],
+) -> impl Iterator<Item = &str> {
+    prepared.iter().flat_map(|component| {
+        component
+            .manifest
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.relative_path.as_str())
+            .chain(
+                component
+                    .plan
+                    .mutations
+                    .iter()
+                    .map(|mutation| mutation.relative_path.as_str()),
+            )
+    })
+}
+
+/// The config creation facts the set's previous receipts recorded, and
+/// whether any of them was written before creation was recorded at all.
+fn recorded_creations(
+    prepared: &[PreparedHostComponentSetComponentV1],
+) -> (Vec<HostConfigCreationV1>, bool) {
+    let previous = prepared
+        .iter()
+        .filter_map(|component| component.previous_receipt.as_ref());
+    let predates_records = previous
+        .clone()
+        .any(|receipt| receipt.created_config.is_none());
+    let recorded = previous
+        .flat_map(|receipt| receipt.created_config.iter().flatten().cloned())
+        .collect();
+    (recorded, predates_records)
 }
 
 fn component_set_receipt_from_prepared(

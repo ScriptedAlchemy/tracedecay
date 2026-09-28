@@ -380,17 +380,18 @@ mod tests {
         let components = [HostComponentV1::ContextMcp];
         let install = install_context(home.path(), "/tmp/tracedecay");
 
-        let mut facts = Vec::new();
-        crate::agents::recorded_lifecycle(home.path(), &mut facts, false, || {
-            AntigravityIntegration
-                .activate_deployed_host_component_registration(&components, &install)
-        })
-        .unwrap();
-        crate::agents::recorded_lifecycle(home.path(), &mut facts, true, || {
-            AntigravityIntegration
-                .deactivate_deployed_host_component_registration(&components, &install)
-        })
-        .unwrap();
+        crate::agents::recorded_install_then_uninstall(
+            home.path(),
+            || {
+                AntigravityIntegration
+                    .activate_deployed_host_component_registration(&components, &install)
+            },
+            || {
+                assert!(mcp_config_path(home.path()).is_file());
+                AntigravityIntegration
+                    .deactivate_deployed_host_component_registration(&components, &install)
+            },
+        );
 
         assert!(!mcp_config_path(home.path()).exists());
         assert!(!cli_plugin_path(home.path()).exists());

@@ -18,12 +18,12 @@ mod json_edit;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(crate) use creation_ledger::recorded_lifecycle;
 pub(crate) use creation_ledger::{
     lifecycle_created_container, lifecycle_created_file, note_created_container, note_created_file,
-    with_host_config_creations,
+    root_relative_path, with_host_config_creations,
 };
+#[cfg(test)]
+pub(crate) use creation_ledger::{recorded_install_then_uninstall, recorded_lifecycle};
 
 /// Load a JSON file, returning an empty object on missing/invalid.
 /// Use this for **read-only** paths (healthcheck, `has_tracedecay`, etc.).
