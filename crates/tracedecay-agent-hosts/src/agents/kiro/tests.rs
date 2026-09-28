@@ -12,6 +12,8 @@
 //! installation rather than merely being spelled correctly.
 
 use super::*;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[test]
 fn every_steering_mutation_branch_requires_a_persisted_write_intent() {
@@ -314,15 +316,11 @@ fn steering_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
 /// then performs `body`.
 #[cfg(unix)]
 fn fake_kiro_cli(bin: &Path, log: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
         log = shell_single_quote(&log.to_string_lossy()),
     );
-    std::fs::write(bin, script).unwrap();
-    let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(bin, permissions).unwrap();
+    write_executable_script(bin, script).unwrap();
 }
 
 /// Body for a fake `kiro-cli` that emulates the registry's own writes, so a

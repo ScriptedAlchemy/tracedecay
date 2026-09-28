@@ -21,6 +21,7 @@ pub use native_integration::{
     NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
     NativeIntegrationStackResolutionRequestV1, NativeIntegrationStatusRequestV1,
 };
+pub(crate) use native_integration_surface::native_integration_surface_catalog_contribution_with;
 pub use native_integration_surface::{
     NATIVE_INTEGRATION_APPLY_OPERATION, NATIVE_INTEGRATION_APPROVE_OPERATION,
     NATIVE_INTEGRATION_CANCEL_OPERATION, NATIVE_INTEGRATION_PREFLIGHT_OPERATION,
@@ -57,6 +58,7 @@ pub use stack_signal_expand::{
     GitHubStackSignalNativePreviewV1, GitHubStackSignalNativeSourceV1,
     GitHubStackSignalNativeTerminalV1,
 };
+pub(crate) use surface_catalog::git_surface_catalog_contribution_with;
 pub use surface_catalog::{
     git_surface_catalog_contribution, git_surface_handler_descriptors, git_surface_operation,
 };

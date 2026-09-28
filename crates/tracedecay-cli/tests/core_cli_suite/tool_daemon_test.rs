@@ -31,6 +31,9 @@ use tracedecay_runtime_core::storage::{
     default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
     profile_sharded_layout,
 };
+#[cfg(target_os = "linux")]
+use tracedecay_runtime_core::test_executable::write_executable_script;
+
 /// Bound for waits that depend on spawning and running the real `tracedecay`
 /// CLI as a child process: connecting to the fake daemon socket and forwarding
 /// the observed request back to the test thread. Under nextest's
@@ -2619,12 +2622,11 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
     let fake_bin = home_path.join("fake-bin");
     std::fs::create_dir_all(&fake_bin).unwrap();
     let systemctl = fake_bin.join("systemctl");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
     )
     .unwrap();
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let output = tracedecay_command_with_home(&home_path)
         .args(["daemon", "status"])

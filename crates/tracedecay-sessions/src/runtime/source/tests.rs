@@ -1047,6 +1047,10 @@ fn cold_full_file_scan_does_not_hash_the_whole_file() {
     let record = b"{\"v\":0}\n";
     let records = 512;
     std::fs::write(&path, record.repeat(records)).unwrap();
+    // A change time still inside the kernel's coarse quantum is not proof the
+    // bytes are stable, so the scan seals a snapshot. This assertion is about
+    // a settled file, whose token already rules that rewrite out.
+    super::jsonl::spin_until_jsonl_change_settled(&path);
 
     let scan = try_stream_new_jsonl_raw_strict_with_resume(
         &path,
@@ -1079,6 +1083,10 @@ fn unchanged_settled_repoll_reads_zero_file_bytes() {
     let path = dir.path().join("warm.jsonl");
     let record = b"{\"v\":0}\n";
     std::fs::write(&path, record.repeat(8)).unwrap();
+    // The proving scan has to observe a settled change time. A cache entry
+    // recorded inside the coarse quantum would authorize a later repoll to
+    // skip bytes a same-length rewrite could still have replaced.
+    super::jsonl::spin_until_jsonl_change_settled(&path);
 
     let first = try_stream_new_jsonl_raw_strict_with_resume(
         &path,

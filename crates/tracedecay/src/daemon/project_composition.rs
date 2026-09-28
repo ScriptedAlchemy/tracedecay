@@ -5,6 +5,8 @@
 //! Unix broker, the portable broker, and the in-process test harness.
 
 use super::*;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::test_support::hold_after_core_publish_for_test;
 use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
 use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
 use tracedecay_code_index_runtime::code_index_scheduler;
@@ -425,29 +427,6 @@ fn log_project_open_phase(
     }
     fields.push(("elapsed_ms", since.elapsed().as_millis().to_string()));
     log_daemon_event("project_open_phase", &fields);
-}
-
-/// Park after core publication when `TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH`
-/// names a file. The core graph-tool owner is already registered and the
-/// route is ready, so a session action can land before the full server
-/// replaces that owner. Removing the file releases the open.
-#[cfg(feature = "test-helpers")]
-async fn hold_after_core_publish_for_test() -> Result<()> {
-    let Some(hold) = std::env::var_os("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH") else {
-        return Ok(());
-    };
-    let hold = PathBuf::from(hold);
-    let entered = PathBuf::from(format!("{}.entered", hold.display()));
-    std::fs::write(&entered, b"core").map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not record core publication for the test hold at {}: {error}",
-            entered.display()
-        ),
-    })?;
-    while hold.exists() {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    Ok(())
 }
 
 /// Outcome of route admission: a published server already answers this route,
@@ -1138,10 +1117,11 @@ impl ProjectOpenInputs<'_> {
             }
         }
         self.log_phase("core_published", None, self.started);
-        // The core is reachable from here. Hold only when a test asks to
-        // observe that window; production open continues straight into the
-        // full server. Boxed so the hold's wait state stays out of this phase.
-        #[cfg(feature = "test-helpers")]
+        // The core is reachable from here. The hold lives in `test_support`,
+        // which a default or `production` build does not compile, so this
+        // open does not read `TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH`.
+        // Boxed so the hold's wait state stays out of this phase.
+        #[cfg(any(test, feature = "test-helpers"))]
         {
             Box::pin(hold_after_core_publish_for_test()).await?;
         }
