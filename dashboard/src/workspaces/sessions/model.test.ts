@@ -163,6 +163,7 @@ describe('relations', () => {
       ],
       edited_files: [{ session_id: 's', provider: 'claude', path: 'a.ts', change_type: null, hunks: null }],
       branch_spans: [],
+      events: [],
       source_statuses: [
         {
           id: 'session_commit',

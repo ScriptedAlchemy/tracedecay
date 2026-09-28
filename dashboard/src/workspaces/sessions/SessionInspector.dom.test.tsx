@@ -384,6 +384,7 @@ function indexPayload(over: Partial<LoomTemporalPayloadV1> = {}): LoomTemporalPa
         event_count: 7,
       },
     ],
+    events: [],
     source_statuses: [
       status('session_commit', 'Session → commit', 'ready', 'git correlation graph'),
       status('session_file', 'Session → edited file', 'partial', 'sessions.metadata_json'),

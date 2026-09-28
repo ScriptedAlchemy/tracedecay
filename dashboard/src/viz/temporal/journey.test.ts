@@ -110,6 +110,7 @@ function temporal(over: Partial<LoomTemporalPayloadV1> = {}): LoomTemporalPayloa
     branch_spans: [],
     commits: [],
     edited_files: [],
+    events: [],
     sessions: [session()],
     source_statuses: [],
     temporal_refresh: {
@@ -397,10 +398,10 @@ describe('projectJourney parentage', () => {
       time: T0 + 60,
       grade: 'inferred',
     });
-    // No parent transcript is loaded, so the fork cannot sit on the parent's
-    // tool call and says so.
+    // No recorded parent tool call carries the id, so the fork cannot sit on
+    // the parent's tool call and says so.
     expect(relation?.basis).toBe(
-      'subagent tree · parent_session_id · parent_tool_use_id toolu_01 · fork placed at the child start: the parent transcript is not loaded',
+      'subagent tree · parent_session_id · parent_tool_use_id toolu_01 · fork placed at the child start: no recorded parent tool call in this read carries toolu_01',
     );
     const child = projection.lanes.find((lane) => lane.id === CHILD);
     expect(child).toMatchObject({ parentId: ROOT, depth: 1, agent: 'explorer' });
@@ -440,7 +441,7 @@ describe('projectJourney parentage', () => {
           toLaneId: CHILD,
           time: T0 + 60,
           grade: 'inferred',
-          basis: 'sessions row · parent_session_id · parent_tool_use_id toolu_09 · fork placed at the child start: the parent transcript is not loaded',
+          basis: 'sessions row · parent_session_id · parent_tool_use_id toolu_09 · fork placed at the child start: no recorded parent tool call in this read carries toolu_09',
         },
       ]);
       expect(projection.lanes.find((lane) => lane.id === CHILD)).toMatchObject({ parentId: ROOT, depth: 1 });
@@ -473,6 +474,69 @@ describe('projectJourney parentage', () => {
       expect(projection.events.find((event) => event.id === `msg:${ROOT}:root:b-task`)).toMatchObject({ kind: 'tool_call', time: T0 + 55 });
     });
 
+    it('forks exactly on a recorded parent tool call without loading the parent transcript', () => {
+      const recorded = {
+        ...rows({ parent_session_id: 'root', parent_tool_use_id: 'toolu_09' }),
+        events: [
+          { provider: 'cursor', session_id: 'root', kind: 'tool_call' as const, message_id: 'root:b-task', ordinal: 3, recorded_at: T0 + 55, label: 'Task', tool_use_id: 'toolu_09' },
+          { provider: 'cursor', session_id: 'other', kind: 'pull_request' as const, message_id: 'other:pr', ordinal: 8, recorded_at: T0 + 90, label: 'https://github.com/acme/app/pull/7' },
+        ],
+      };
+      const projection = projectJourney(sources({ temporal: recorded }));
+      expect(projection.relations.filter((r) => r.kind === 'spawn')).toEqual([
+        {
+          id: `rel:spawn:${CHILD}`,
+          kind: 'spawn',
+          fromLaneId: ROOT,
+          toLaneId: CHILD,
+          time: T0 + 55,
+          grade: 'exact',
+          basis: 'sessions row · parent_session_id · parent_tool_use_id toolu_09 · fork placed on the spawning tool call Task',
+          fromEventId: `msg:${ROOT}:root:b-task`,
+        },
+      ]);
+      expect(projection.events.filter((event) => event.source === 'recorded_event')).toEqual([
+        {
+          id: `msg:${ROOT}:root:b-task`,
+          laneId: ROOT,
+          kind: 'tool_call',
+          time: T0 + 55,
+          sequence: 1,
+          grade: 'exact',
+          source: 'recorded_event',
+          label: 'Task',
+          detail: 'tool use toolu_09',
+          ref: 'root:b-task',
+        },
+        {
+          id: `msg:${laneIdOf('cursor', 'other')}:other:pr`,
+          laneId: laneIdOf('cursor', 'other'),
+          kind: 'pull_request',
+          time: T0 + 90,
+          sequence: 1,
+          grade: 'exact',
+          source: 'recorded_event',
+          label: 'https://github.com/acme/app/pull/7',
+          detail: 'https://github.com/acme/app/pull/7',
+          ref: 'other:pr',
+        },
+      ]);
+
+      // The loaded parent transcript carries the same row; it is drawn once,
+      // from the recorded stream, and the turns around it keep their order.
+      const selectedProjection = projectJourney(
+        sources({
+          temporal: recorded,
+          selected: parentPage([message({ message_id: 'root:b-read', ordinal: 2, tool_name: 'Read', timestamp: null }), taskCall]),
+        }),
+      );
+      const rootEvents = selectedProjection.events.filter((event) => event.laneId === ROOT && event.kind === 'tool_call');
+      expect(rootEvents.map((event) => [event.id, event.source, event.sequence])).toEqual([
+        [`msg:${ROOT}:root:b-task`, 'recorded_event', 1],
+        [`msg:${ROOT}:root:b-read`, 'transcript', 0],
+      ]);
+    });
+
     it('keeps the fork inferred at the child start when no loaded tool call carries the id', () => {
       const projection = projectJourney(
         sources({
@@ -484,7 +548,7 @@ describe('projectJourney parentage', () => {
       expect(fork).toMatchObject({ time: T0 + 60, grade: 'inferred' });
       expect(fork?.fromEventId).toBeUndefined();
       expect(fork?.basis).toBe(
-        'sessions row · parent_session_id · parent_tool_use_id toolu_09 · fork placed at the child start: no loaded parent tool call carries toolu_09',
+        'sessions row · parent_session_id · parent_tool_use_id toolu_09 · fork placed at the child start: no recorded parent tool call in this read carries toolu_09',
       );
       expect(projection.events.find((event) => event.kind === 'spawn')).toMatchObject({ laneId: ROOT, time: T0 + 60, grade: 'inferred' });
 
@@ -995,11 +1059,12 @@ describe('the Loom fixture', () => {
       basis: 'sessions row and subagent tree agree · parent_session_id · parent_tool_use_id toolu_codex_01 · fork placed on the spawning tool call Task',
       fromEventId: `msg:${root}:session.codex.root:0007`,
     });
-    // The grandchild's parent transcript is not the loaded one.
+    // The grandchild's parent recorded its spawning call undated, so only its
+    // own transcript could bind it, and that is not the loaded one.
     expect(forks.get(laneIdOf('codex', 'session.codex.grandchild'))).toMatchObject({
       fromLaneId: child,
       grade: 'inferred',
-      basis: 'sessions row and subagent tree agree · parent_session_id · parent_tool_use_id toolu_codex_02 · fork placed at the child start: the parent transcript is not loaded',
+      basis: 'sessions row and subagent tree agree · parent_session_id · parent_tool_use_id toolu_codex_02 · fork placed at the child start: no recorded parent tool call in this read carries toolu_codex_02',
     });
   });
 
@@ -1015,7 +1080,7 @@ describe('the Loom fixture', () => {
     const inferred = forksWith('cursor', other).find((relation) => relation.fromLaneId === laneIdOf('cursor', other));
     expect([inferred?.grade, inferred?.basis]).toEqual([
       'inferred',
-      'sessions row · parent_session_id · parent_tool_use_id toolu_loom_17 · fork placed at the child start: no loaded parent tool call carries toolu_loom_17',
+      'sessions row · parent_session_id · parent_tool_use_id toolu_loom_17 · fork placed at the child start: no recorded parent tool call in this read carries toolu_loom_17',
     ]);
   });
 });

@@ -3973,16 +3973,100 @@ function loomTemporalPayload(scenario: 'default' | 'dense-fanout' = 'default'): 
     reason,
     unit,
   });
+  // Tool calls and pull-request links at the time their host recorded them,
+  // oldest first as the route serves them. Two tool rows per page carry no
+  // recorded time and are counted, never placed.
+  const events = sessions
+    .slice(0, 12)
+    .flatMap((session, i) => {
+      const start = session.started_at as number;
+      const tools = Array.from({ length: 3 + (i % 4) }, (_, k) => ({
+        provider: session.provider,
+        session_id: session.session_id,
+        kind: 'tool_call',
+        message_id: `${String(session.session_id)}:event:${k}`,
+        ordinal: 2 + k * 3,
+        recorded_at: start + 240 + k * 420,
+        label: pick(LOOM_CHAIN_TOOLS.filter((tool) => tool !== null), i + k),
+        tool_use_id: `toolu_event_${i}_${k}`,
+      }));
+      const pullRequests =
+        i % 4 === 0
+          ? [
+              {
+                provider: session.provider,
+                session_id: session.session_id,
+                kind: 'pull_request',
+                message_id: `${String(session.session_id)}:event:pr`,
+                ordinal: 40,
+                recorded_at: start + 2_400,
+                label: `https://github.com/ScriptedAlchemy/tracedecay/pull/${2_300 + i}`,
+              },
+            ]
+          : [];
+      return [...tools, ...pullRequests];
+    })
+    .sort((a, b) => a.recorded_at - b.recorded_at || a.message_id.localeCompare(b.message_id));
+  const toolEvents = events.filter((event) => event.kind === 'tool_call').length;
+  const pullRequestEvents = events.length - toolEvents;
+  const eventReason = (served: number, eligible: number) =>
+    `${served} of ${eligible} recorded events served at their host-recorded time; ${eligible - served} recorded without a timestamp are not placed; 0 older than the newest 2000 page events are omitted`;
   return {
     available: true,
     sessions,
     commits,
     edited_files: editedFiles,
     branch_spans: branchSpans,
-    // The three source ids, labels, authorities and granularities the route
-    // emits (`loom_api.rs` `ready_git_status` / the `session_file` status), so
-    // a surface that keys on them finds them.
+    events,
+    // The source ids, labels, authorities and granularities the route emits
+    // (`loom_api.rs`), so a surface that keys on them finds them.
     source_statuses: [
+      {
+        id: 'session_tool',
+        label: 'Session → tool call',
+        state: 'partial',
+        granularity: 'recorded tool invocation',
+        authority: 'lcm_raw_messages.tool_names at the host-recorded timestamp',
+        required_authority: null,
+        providers: [...new Set(events.filter((event) => event.kind === 'tool_call').map((event) => String(event.provider)))].sort(),
+        item_count: toolEvents,
+        reason: eventReason(toolEvents, toolEvents + 2),
+        coverage: coverage(toolEvents, toolEvents + 2, 'recorded events', eventReason(toolEvents, toolEvents + 2)),
+      },
+      {
+        id: 'session_pull_request',
+        label: 'Session → pull request',
+        state: 'partial',
+        granularity: 'host-recorded pull-request link',
+        authority: 'lcm_raw_messages kind git_pull_request | pr_link at the host-recorded timestamp',
+        required_authority: null,
+        providers: [...new Set(events.filter((event) => event.kind === 'pull_request').map((event) => String(event.provider)))].sort(),
+        item_count: pullRequestEvents,
+        reason: `only hosts whose transcripts record pull-request links (Claude Code pr-link records, Cursor composer) contribute; a session without one is not proof that no pull request was opened; ${eventReason(pullRequestEvents, pullRequestEvents)}`,
+        coverage: coverage(pullRequestEvents, pullRequestEvents, 'recorded events', eventReason(pullRequestEvents, pullRequestEvents)),
+      },
+      {
+        id: 'session_test',
+        label: 'Session → test run',
+        state: 'unsupported',
+        granularity: 'recorded test outcome',
+        authority: null,
+        required_authority: 'a session-attributed test-run recording authority',
+        providers: [],
+        item_count: null,
+        reason:
+          'host transcripts record a test command only as a tool call with no typed outcome, and daemon-managed test runs are in-memory operations with no session attribution; no recorded test event can be placed on a session',
+        coverage: {
+          completeness: 'unknown',
+          eligible: null,
+          examined: null,
+          matched: null,
+          omitted: null,
+          unit: null,
+          reason:
+            'host transcripts record a test command only as a tool call with no typed outcome, and daemon-managed test runs are in-memory operations with no session attribution; no recorded test event can be placed on a session',
+        },
+      },
       {
         id: 'session_commit',
         label: 'Session ↔ commit',
@@ -4067,6 +4151,7 @@ function loomTemporalPageEnvelope(
       commits: (full['commits'] as Record<string, unknown>[]).filter(onPage),
       edited_files: (full['edited_files'] as Record<string, unknown>[]).filter(onPage),
       branch_spans: (full['branch_spans'] as Record<string, unknown>[]).filter(onPage),
+      events: (full['events'] as Record<string, unknown>[]).filter(onPage),
     },
     'partial',
   );

@@ -16124,6 +16124,64 @@
       ],
       "type": "object"
     },
+    "LoomEventKindV1": {
+      "enum": [
+        "tool_call",
+        "pull_request"
+      ],
+      "type": "string"
+    },
+    "LoomEventV1": {
+      "description": "One event a host transcript recorded for a displayed session.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/LoomEventKindV1"
+        },
+        "label": {
+          "description": "Tool names for a tool call; the recorded link or number for a pull\nrequest. Absent when the row carries neither.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_id": {
+          "description": "The stored message that recorded the event, the id the session's\ntranscript page serves for the same row.",
+          "type": "string"
+        },
+        "ordinal": {
+          "description": "Position in the session's recorded order.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "description": "Epoch seconds the host recorded for the event. A row the host recorded\nwithout one is not served; the source status counts it.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "tool_use_id": {
+          "description": "The host's own identifier of the tool invocation, the value a child\nsession's `parent_tool_use_id` names.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "session_id",
+        "kind",
+        "message_id",
+        "ordinal",
+        "recorded_at"
+      ],
+      "type": "object"
+    },
     "LoomFileSessionProjectionV1": {
       "properties": {
         "authority": {
@@ -16402,6 +16460,13 @@
           },
           "type": "array"
         },
+        "events": {
+          "description": "Recorded tool-call and pull-request events, oldest first.",
+          "items": {
+            "$ref": "#/$defs/LoomEventV1"
+          },
+          "type": "array"
+        },
         "sessions": {
           "items": {
             "$ref": "#/$defs/LoomSessionRowV1"
@@ -16431,6 +16496,7 @@
         "commits",
         "edited_files",
         "branch_spans",
+        "events",
         "temporal_refresh"
       ],
       "type": "object"

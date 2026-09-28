@@ -322,6 +322,7 @@ function indexPayload(url: URL) {
     commits: [],
     edited_files: [],
     branch_spans: [],
+    events: [],
     source_statuses: [],
     temporal_refresh: {
       state: 'ready',
