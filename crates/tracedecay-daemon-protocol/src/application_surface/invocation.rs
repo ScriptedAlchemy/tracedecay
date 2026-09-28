@@ -1120,13 +1120,12 @@ mod tests {
 
     #[test]
     fn feedback_payloads_validate_handles_at_the_executor() {
-        assert!(
-            parse_application_surface_invocation_payload(
-                ApplicationSurfaceOperation::FeedbackGet,
-                json!({"request_handle": " leading"}),
-            )
-            .is_err()
-        );
+        let error = parse_application_surface_invocation_payload(
+            ApplicationSurfaceOperation::FeedbackGet,
+            json!({"request_handle": " leading"}),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "HARVEST");
     }
 
     #[test]

@@ -2883,10 +2883,37 @@ mod wire_input_fail_closed_tests {
 
     #[test]
     fn with_resolved_scope_none_is_accepted_for_all_payloads() {
-        let request = git_status_read(ApplicationSurfaceOperation::GitStatus);
-        request
+        let request = git_status_read(ApplicationSurfaceOperation::GitStatus)
             .with_resolved_scope(None)
-            .expect("CurrentProject (None) applies to every payload");
+            .expect("CurrentProject (None) applies to payloads without a scope slot");
+        assert!(
+            matches!(request.payload, DaemonInvocationPayload::GitRead { .. }),
+            "{:?}",
+            request.payload
+        );
+        let request = DaemonInvocationRequest::feedback(
+            "request.feedback.scope-none",
+            ApplicationSurfaceOperation::FeedbackGet,
+            "feedback.handle.scope-none".to_owned(),
+            UtcMicros(1),
+            deadline(),
+            cancellation(),
+        )
+        .with_resolved_scope(Some(test_scope("cleared")))
+        .expect("feedback carries a scope")
+        .with_resolved_scope(None)
+        .expect("CurrentProject (None) applies to scope-carrying payloads");
+        assert!(
+            matches!(
+                request.payload,
+                DaemonInvocationPayload::FeedbackGet {
+                    resolved_scope: None,
+                    ..
+                }
+            ),
+            "None must select the current project: {:?}",
+            request.payload
+        );
     }
 }
 

@@ -431,8 +431,14 @@ fn task_xml_rejects_partial_and_duplicate_remote_tls_arguments() {
     let partial = r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443</Arguments></Task>";
     let duplicate = r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-listen 192.0.2.11:7443 --remote-tls-cert C:\TraceDecay\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>";
 
-    assert!(remote_tls_from_task_xml(partial).is_err());
-    assert!(remote_tls_from_task_xml(duplicate).is_err());
+    assert_eq!(
+        remote_tls_from_task_xml(partial).unwrap_err().to_string(),
+        "HARVEST partial"
+    );
+    assert_eq!(
+        remote_tls_from_task_xml(duplicate).unwrap_err().to_string(),
+        "HARVEST duplicate"
+    );
 }
 
 #[test]

@@ -129,13 +129,12 @@ mod tests {
 
     #[test]
     fn route_selected_session_refresh_rejects_embedded_action() {
-        assert!(
-            decode_retained_request(
-                RetainedSurfaceOperation::SessionRefreshStatus,
-                json!({ "action": "status" }),
-            )
-            .is_err()
-        );
+        let error = decode_retained_request(
+            RetainedSurfaceOperation::SessionRefreshStatus,
+            json!({ "action": "status" }),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "HARVEST");
     }
 
     #[test]
@@ -150,13 +149,12 @@ mod tests {
         ] {
             let mut value = serde_json::Map::new();
             value.insert(forbidden.to_owned(), serde_json::Value::Bool(true));
-            assert!(
-                decode_retained_request(
-                    RetainedSurfaceOperation::FactStoreCurate,
-                    serde_json::Value::Object(value),
-                )
-                .is_err()
-            );
+            let error = decode_retained_request(
+                RetainedSurfaceOperation::FactStoreCurate,
+                serde_json::Value::Object(value),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), format!("HARVEST {forbidden}"));
         }
     }
 }
