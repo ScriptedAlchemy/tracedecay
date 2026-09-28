@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { WorkGraphReadV1Schema } from '../../contracts/generated.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
 import type { WorkResult } from '../work/workApi.ts';
-import type { WorkGraphReadV1 } from '../../contracts/index.ts';
+import type { WorkGraphReadV1 } from '../../contracts/generated.ts';
 import { AgentHandoffs } from './AgentHandoffs.tsx';
 import { readHandoffFrontier } from './handoff.ts';
 

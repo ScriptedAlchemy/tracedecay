@@ -16,8 +16,8 @@ use tracedecay_domain::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry,
-    load_jsonc_file, uninstall_mcp_server_entry,
+    McpDoctorLabels, doctor_check_mcp_registration, install_mcp_server_entry, load_jsonc_file,
+    uninstall_mcp_server_entry,
 };
 
 pub struct KiloIntegration;
@@ -132,7 +132,6 @@ impl AgentIntegration for KiloIntegration {
                 &kilo_config_path(&ctx.home),
                 "mcp",
                 JsonConfigDialect::Jsonc,
-                McpUninstallPolicy::default(),
             )?;
         }
         Ok(())

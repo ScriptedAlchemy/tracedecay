@@ -2,7 +2,7 @@ import type {
   WorkGraphReadV1,
   WorkGraphVersionEntryV1,
   WorkItemV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkResult } from '../work/workApi.ts';
 

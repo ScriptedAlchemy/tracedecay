@@ -1,4 +1,4 @@
-import type { FeedbackProximityReadResultV1 } from '../../../contracts/index.ts';
+import type { FeedbackProximityReadResultV1 } from '../../../contracts/generated.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Panel } from '../../../ui/instrument.tsx';
 import { ProximityPanel } from '../../../viz/proximity/index.ts';

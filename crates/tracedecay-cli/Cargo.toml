@@ -195,6 +195,13 @@ tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
+# Self-update authenticates a release archive by its GitHub build-provenance
+# attestation against the embedded Sigstore public-good trust root; without
+# `tuf` the root is pinned by this version rather than fetched at runtime.
+sigstore-verify = { version = "0.13", default-features = false }
+# GitHub serves some attestation bundles only through `bundle_url`, as a raw
+# snappy block.
+snap = "1"
 ureq = { version = "3", features = ["json"] }
 url = "2"
 tikv-jemallocator = { version = "0.7.0", optional = true }
@@ -208,6 +215,9 @@ mimalloc = { version = "0.1.52", optional = true, features = ["no_thp"] }
 # consumed by the self-update extraction in src/upgrade.rs.
 [target.'cfg(windows)'.dependencies]
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# sigstore-verify links aws-lc; on x86_64 MSVC it needs NASM unless its
+# prebuilt assembly objects are allowed, and release runners carry no NASM.
+aws-lc-rs = { version = "1.18", features = ["prebuilt-nasm"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

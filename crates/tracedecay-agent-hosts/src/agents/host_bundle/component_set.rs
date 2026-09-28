@@ -22,12 +22,14 @@ use super::planner::{
 };
 use super::writer::{
     ArtifactUndo, HostBundleWriterV1, ancestor_directories, read_regular_nofollow,
+    tracedecay_namespace_directories,
 };
 use super::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleError, HostBundleInstallReceiptV1,
     HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleReceiptArtifactV1,
-    HostBundleVerificationAdapterV1, HostComponentSetReceiptV1,
+    HostBundleVerificationAdapterV1, HostComponentSetReceiptV1, HostConfigCreationV1,
 };
+use crate::agents::with_host_config_creations;
 
 /// Public component-set lifecycle façade over the capability-rooted writer.
 /// It keeps the existing per-component receipt API intact while ensuring the
@@ -237,23 +239,7 @@ impl HostBundleWriterV1 {
             .filter_map(|path| self.root_relative(path))
             .collect::<Vec<_>>();
         let missing_before = self.missing_directories(&ancestor_directories(
-            prepared
-                .iter()
-                .flat_map(|component| {
-                    component
-                        .manifest
-                        .artifacts
-                        .iter()
-                        .map(|artifact| artifact.relative_path.as_str())
-                        .chain(
-                            component
-                                .plan
-                                .mutations
-                                .iter()
-                                .map(|mutation| mutation.relative_path.as_str()),
-                        )
-                })
-                .chain(registration_paths.iter().map(String::as_str)),
+            prepared_artifact_paths(&prepared).chain(registration_paths.iter().map(String::as_str)),
         ));
 
         let mut undo = Vec::new();
@@ -268,7 +254,14 @@ impl HostBundleWriterV1 {
                     }
                 }
             }
-            registration.apply(component_set, request)?;
+            let (recorded_config, predates_creation_records) = recorded_creations(&prepared);
+            let (applied, created_config) = with_host_config_creations(
+                &self.root_path,
+                &recorded_config,
+                request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall,
+                || registration.apply(component_set, request),
+            );
+            applied?;
             self.verify_component_set_artifacts(&prepared)?;
             registration.verify(component_set, request)?;
 
@@ -279,12 +272,18 @@ impl HostBundleWriterV1 {
                     .filter_map(|component| component.previous_receipt.as_ref())
                     .flat_map(|receipt| receipt.created_directories.iter().cloned()),
             );
+            if predates_creation_records {
+                recorded.extend(tracedecay_namespace_directories(prepared_artifact_paths(
+                    &prepared,
+                )));
+            }
             let created_directories = self.prune_created_directories(&recorded)?;
             let receipt = component_set_receipt_from_prepared(
                 &prepared,
                 request,
                 confirmed_preview,
                 &created_directories,
+                created_config,
             )?;
             for component_receipt in &receipt.component_receipts {
                 self.write_receipt(component_receipt)?;
@@ -486,11 +485,49 @@ impl HostBundleWriterV1 {
     }
 }
 
+/// Every path the set's manifests name or its plans mutate.
+fn prepared_artifact_paths(
+    prepared: &[PreparedHostComponentSetComponentV1],
+) -> impl Iterator<Item = &str> {
+    prepared.iter().flat_map(|component| {
+        component
+            .manifest
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.relative_path.as_str())
+            .chain(
+                component
+                    .plan
+                    .mutations
+                    .iter()
+                    .map(|mutation| mutation.relative_path.as_str()),
+            )
+    })
+}
+
+/// The config creation facts the set's previous receipts recorded, and
+/// whether any of them was written before creation was recorded at all.
+fn recorded_creations(
+    prepared: &[PreparedHostComponentSetComponentV1],
+) -> (Vec<HostConfigCreationV1>, bool) {
+    let previous = prepared
+        .iter()
+        .filter_map(|component| component.previous_receipt.as_ref());
+    let predates_records = previous
+        .clone()
+        .any(|receipt| receipt.created_config.is_none());
+    let recorded = previous
+        .flat_map(|receipt| receipt.created_config.iter().flatten().cloned())
+        .collect();
+    (recorded, predates_records)
+}
+
 fn component_set_receipt_from_prepared(
     prepared: &[PreparedHostComponentSetComponentV1],
     request: &HostComponentSetExecutionRequestV1,
     confirmed_preview: Option<&HostComponentSetLifecyclePreviewV1>,
     created_directories: &BTreeSet<String>,
+    created_config: Vec<HostConfigCreationV1>,
 ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
     // Each created directory is recorded once, on the first component with an
     // artifact beneath it; registration-only directories go to the first
@@ -534,10 +571,14 @@ fn component_set_receipt_from_prepared(
                 .iter()
                 .any(|mutation| mutation.action != HostArtifactActionV1::Noop)
         });
+    // Registration effects span the whole set, so their creation facts ride
+    // on the first component like registration-only directories do.
+    let mut created_config = Some(created_config);
     let component_receipts = prepared
         .iter()
         .zip(owned_directories)
         .map(|(component, created_directories)| {
+            let created_config = Some(created_config.take().unwrap_or_default());
             // An unchanged companion, one whose plan writes nothing and whose
             // manifest is byte-identical to its durable receipt, keeps its
             // original operation provenance. "Writes nothing" must be read from
@@ -555,6 +596,7 @@ fn component_set_receipt_from_prepared(
             {
                 return Ok(HostBundleInstallReceiptV1 {
                     created_directories,
+                    created_config,
                     ..previous_receipt.clone()
                 });
             }
@@ -580,6 +622,7 @@ fn component_set_receipt_from_prepared(
                         .collect()
                 },
                 created_directories,
+                created_config,
             })
         })
         .collect::<Result<Vec<_>, HostBundleError>>()?;

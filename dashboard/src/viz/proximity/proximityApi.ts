@@ -3,7 +3,7 @@ import {
   FeedbackProximityReadRequestV1Schema,
   FeedbackProximityReadResultV1Schema,
   type FeedbackProximityReadResultV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import {
   callWork,
