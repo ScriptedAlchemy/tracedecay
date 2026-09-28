@@ -321,7 +321,7 @@ fn same_module_export_clauses_bind_the_forwarded_binding() {
 
     // `relayedMissing` forwards an import of a module that is not indexed:
     // no edge, and the call site stays a disclosed gap.
-    let gaps = generation.unresolved_typescript_import_calls();
+    let gaps = generation.unresolved_import_calls();
     assert!(
         gaps.iter()
             .any(|gap| gap.reference_name == "relayedMissing"),
@@ -496,11 +496,11 @@ fn sealed_replay_recomputes_identical_typescript_edges() {
     let restored = PartitionedSealV1::of(&generation).restored();
     assert_eq!(restored.edges(), generation.edges());
     assert_eq!(
-        restored.unresolved_typescript_import_calls(),
-        generation.unresolved_typescript_import_calls()
+        restored.unresolved_import_calls(),
+        generation.unresolved_import_calls()
     );
     let mut unresolved = generation
-        .unresolved_typescript_import_calls()
+        .unresolved_import_calls()
         .into_iter()
         .map(|reference| reference.reference_name)
         .collect::<Vec<_>>();

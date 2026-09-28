@@ -7,6 +7,9 @@ use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::{docstring_from_hash_comments, local_node_id};
 use crate::complexity::{RUBY_COMPLEXITY, count_complexity};
+use crate::extraction_artifact::{
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportBindingV1, ImportNamespaceV1,
+};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
@@ -77,9 +80,10 @@ impl RubyExtractor {
         source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        let mut imports = Vec::new();
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -113,15 +117,68 @@ impl RubyExtractor {
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit_node(&mut state, child);
+            Self::require_evidence(&mut state, &mut imports, child);
         });
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            ExtractionArtifactV1 {
+                result: Self::build_result(state, start),
+                imports,
+                clone_bodies: Vec::new(),
+                schema_evidence: None,
+            },
             scope,
             metrics,
         )
+    }
+
+    /// Every `require "path"` and `require_relative "path"` with a literal
+    /// path loads that file's constants; `require_relative` is recorded as
+    /// the `./`-relative path it names.
+    fn require_evidence(
+        state: &mut ExtractionState,
+        imports: &mut Vec<ExtractedImportEvidenceV1>,
+        node: TsNode<'_>,
+    ) {
+        if node.kind() == "call"
+            && node.child_by_field_name("receiver").is_none()
+            && let Some(method) = node.child_by_field_name("method")
+            && let relative @ ("require" | "require_relative") = state.node_text(method)
+            && let Some(path) = node
+                .child_by_field_name("arguments")
+                .and_then(|arguments| arguments.named_child(0))
+                .filter(|argument| argument.kind() == "string" && argument.named_child_count() == 1)
+                .and_then(|argument| argument.named_child(0))
+                .filter(|content| content.kind() == "string_content")
+        {
+            let path = state.node_text(path);
+            let module = if relative == "require_relative"
+                && !path.starts_with("./")
+                && !path.starts_with("../")
+            {
+                format!("./{path}")
+            } else {
+                path.to_owned()
+            };
+            match ExtractedImportEvidenceV1::private_binding(
+                &state.file_path,
+                "ruby",
+                &module,
+                ImportBindingV1::SideEffect,
+                ImportNamespaceV1::SideEffect,
+                node,
+            ) {
+                Ok(row) => imports.push(row),
+                Err(error) => state.errors.push(error),
+            }
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            Self::require_evidence(state, imports, child);
+        }
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -698,8 +755,6 @@ impl crate::LanguageExtractor for RubyExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
-            file_path, source, tree, scope,
-        ))
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }
