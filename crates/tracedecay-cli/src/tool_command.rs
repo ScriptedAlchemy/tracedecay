@@ -955,16 +955,13 @@ fn print_cli_application_surface(
     result: ApplicationSurfaceInvocationResult,
     raw_json: bool,
 ) -> Result<()> {
-    let application_problem =
-        result
-            .result
-            .as_ref()
-            .err()
-            .map(|problem| TraceDecayError::ToolRefused {
-                tool: result.operation.mcp_tool_name().to_owned(),
-                code: Some(problem.problem.code.clone()),
-                reason: Some(problem.problem.message.clone()),
-            });
+    let application_problem = result.result.as_ref().err().map(|problem| {
+        TraceDecayError::tool_refused(
+            result.operation.mcp_tool_name(),
+            Some(problem.problem.code.clone()),
+            Some(problem.problem.message.clone()),
+        )
+    });
     let response_handle_root = cli_response_handle_root(profile, project)?;
     let mut rendered = tracedecay::mcp::tools::render_application_surface_result(
         response_handle_root.as_deref(),
@@ -1166,11 +1163,11 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
         };
         if let Some((code, reason)) = refusal {
             std::io::stdout().flush()?;
-            return Err(TraceDecayError::ToolRefused {
-                tool: tool_name.to_owned(),
-                code: Some(code.to_owned()),
-                reason: Some(reason),
-            });
+            return Err(TraceDecayError::tool_refused(
+                tool_name,
+                Some(code.to_owned()),
+                Some(reason),
+            ));
         }
     }
     if result_value.get("isError").and_then(Value::as_bool) != Some(true) {
@@ -1189,11 +1186,11 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
             .and_then(Value::as_str)
             .map(str::to_owned)
     };
-    Err(TraceDecayError::ToolRefused {
-        tool: tool_name.to_owned(),
-        code: problem_text("code"),
-        reason: problem_text("message"),
-    })
+    Err(TraceDecayError::tool_refused(
+        tool_name,
+        problem_text("code"),
+        problem_text("message"),
+    ))
 }
 
 fn print_tool_output(result_value: &Value, raw_json: bool) {

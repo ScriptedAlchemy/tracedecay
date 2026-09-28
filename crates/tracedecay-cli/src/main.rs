@@ -632,8 +632,8 @@ fn main() -> ExitCode {
                 ExitCode::from(tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE)
             } else if matches!(
                 &e,
-                tracedecay_domain::errors::TraceDecayError::ToolRefused { code: Some(code), .. }
-                    if code == tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT
+                tracedecay_domain::errors::TraceDecayError::ToolRefused(refusal)
+                    if refusal.code.as_deref() == Some(tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT)
             ) {
                 ExitCode::from(READINESS_WAIT_TIMED_OUT_EXIT_CODE)
             } else {

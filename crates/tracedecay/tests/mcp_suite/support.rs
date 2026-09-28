@@ -1193,8 +1193,16 @@ pub(crate) fn expect_tool_error<T>(result: tracedecay_domain::errors::Result<T>)
 /// reviewed application schema refuses before dispatch.
 #[cfg(feature = "test-transport")]
 pub(crate) fn application_invalid_request_error(tool: &str, detail: &str) -> Value {
-    let detail =
-        format!("application surface request does not match its reviewed schema: {detail}");
+    application_surface_refusal_error(
+        tool,
+        &format!("application surface request does not match its reviewed schema: {detail}"),
+    )
+}
+
+/// The JSON-RPC `error` for any `application_surface_invalid_request`
+/// refusal, with its whole `detail`.
+#[cfg(feature = "test-transport")]
+pub(crate) fn application_surface_refusal_error(tool: &str, detail: &str) -> Value {
     json!({
         "code": -32602,
         "message": format!(
