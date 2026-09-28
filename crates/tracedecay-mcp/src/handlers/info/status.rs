@@ -16,8 +16,8 @@ use tracedecay_contracts::retrieval::{
     StatusCodeIndexFreshnessV1, StatusGitStalenessUnavailableV1, StatusGitStalenessV1,
     StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1,
     StatusRetrievalServingV1, StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1,
-    StatusServingConditionV1, StatusServingFreshnessV1, StatusSessionGitEvidenceV1,
-    StatusSurfaceRequestV1,
+    StatusServingConditionV1, StatusServingFreshnessV1, StatusSessionGitEvidenceUnavailableV1,
+    StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::ProjectId;
@@ -678,7 +678,7 @@ fn code_index_freshness_projection(
 async fn session_git_evidence(ctx: &McpToolContext<'_>) -> StatusSessionGitEvidenceV1 {
     let Some((lease, _)) = ctx.authorized_project_session_db() else {
         return StatusSessionGitEvidenceV1::Unavailable {
-            reason: "session_store_denied".to_owned(),
+            reason: StatusSessionGitEvidenceUnavailableV1::SessionStoreDenied,
             message: None,
         };
     };
@@ -688,7 +688,7 @@ async fn session_git_evidence(ctx: &McpToolContext<'_>) -> StatusSessionGitEvide
     {
         Ok(health) => session_git_evidence_state(health),
         Err(error) => StatusSessionGitEvidenceV1::Unavailable {
-            reason: "read_failed".to_owned(),
+            reason: StatusSessionGitEvidenceUnavailableV1::ReadFailed,
             message: Some(error.to_string()),
         },
     }

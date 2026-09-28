@@ -150,13 +150,21 @@ pub enum StatusSessionGitEvidenceV1 {
     },
     /// No convergence pass has written evidence for this project yet.
     Unrecorded { backfill_watermark: Option<i64> },
-    /// The evidence could not be read: `session_store_denied` when this
-    /// request holds no project session store, `read_failed` otherwise.
+    /// The evidence could not be read.
     Unavailable {
-        reason: String,
+        reason: StatusSessionGitEvidenceUnavailableV1,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusSessionGitEvidenceUnavailableV1 {
+    /// This request holds no project session store.
+    SessionStoreDenied,
+    /// The session store refused the evidence read.
+    ReadFailed,
 }
 
 /// The daemon's resident memory as one project sees it.
