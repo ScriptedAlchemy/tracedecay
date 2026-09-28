@@ -1795,8 +1795,10 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         },
     ));
     let refuse_once_projecting = Arc::new(AtomicBool::new(true));
+    let sampled_over_limit_while_projecting = Arc::new(AtomicBool::new(false));
     let sampled = Arc::clone(&sample);
     let refuse = Arc::clone(&refuse_once_projecting);
+    let over_limit = Arc::clone(&sampled_over_limit_while_projecting);
     let pressure = Arc::new(
         tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
             std::num::NonZeroU64::new(limit_bytes).expect("nonzero pressure limit"),
@@ -1804,6 +1806,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
                 if refuse.load(Ordering::Acquire)
                     && PUBLICATION_PROJECTION_IN_FLIGHT.load(Ordering::Acquire) != 0
                 {
+                    over_limit.store(true, Ordering::Release);
                     return Some(
                         tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
                             resident_bytes: limit_bytes,
@@ -1831,12 +1834,13 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         .with_resident_memory_pressure(&pressure);
 
     set_sample(&sample, pressure.low_watermark_bytes());
-    let _ = take_publication_projection_overlap_peak();
     let not_cancelled = Arc::new(AtomicBool::new(false));
     let refused = runtime.publish_verified_snapshot(Arc::clone(&not_cancelled));
+    // The projection peak is process-global and other cases reset it; this
+    // cell's own sampler is what saw the crossing.
     assert!(
-        take_publication_projection_overlap_peak() != 0,
-        "the refusal must happen after manifest projection starts"
+        sampled_over_limit_while_projecting.load(Ordering::Acquire),
+        "the refusal must come from a checkpoint sample taken during manifest projection"
     );
     refuse_once_projecting.store(false, Ordering::Release);
     match refused {
