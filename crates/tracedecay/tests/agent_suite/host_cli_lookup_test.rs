@@ -3,7 +3,6 @@
 //! `PATH`, which carries the operator's real host CLIs.
 
 use std::ffi::OsString;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use tracedecay_agent_hosts::agents::host_bundle::{
@@ -14,6 +13,7 @@ use tracedecay_agent_hosts::agents::host_bundle::{
 use tracedecay_agent_hosts::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
 use tracedecay_agent_hosts::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
 use tracedecay_runtime_core::config::{HostProgramSearchPathGuard, ProfileRoot};
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use crate::common::{in_child_test, rerun_test_in_child};
 
@@ -23,7 +23,7 @@ const TRACEDECAY_BIN: &str = "/bin/tracedecay";
 /// A `kiro-cli` that records its arguments to `launches.log` and exits 0.
 fn write_sentinel_kiro_cli(dir: &Path) {
     let path = dir.join("kiro-cli");
-    std::fs::write(
+    write_executable_script(
         &path,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
@@ -31,7 +31,6 @@ fn write_sentinel_kiro_cli(dir: &Path) {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// The canonical Kiro install transaction `tracedecay install --agent kiro`

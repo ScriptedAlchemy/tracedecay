@@ -14,6 +14,8 @@ use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 
 #[cfg(unix)]
@@ -160,7 +162,7 @@ async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effec
     let (home, project) = setup(&tmp);
     let profile = home.join(".tracedecay");
     let codex_bin = tmp.path().join("codex");
-    std::fs::write(
+    write_executable_script(
         &codex_bin,
         r#"#!/bin/sh
 while IFS= read -r line; do
@@ -176,8 +178,6 @@ done
 "#,
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(&codex_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
     let project_id = mark_test_project(&project);
     // The hook resolves the project root through the initialized-store gate,
     // exactly like production installs: `init` creates the project store

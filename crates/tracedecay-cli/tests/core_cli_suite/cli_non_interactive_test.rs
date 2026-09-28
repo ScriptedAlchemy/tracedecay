@@ -23,6 +23,7 @@ use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
     default_profile_project_id, profile_sharded_data_root, write_repository_identity_marker,
 };
+use tracedecay_runtime_core::test_executable::link_or_copy_executable;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 /// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
@@ -115,15 +116,7 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
     } else {
         "tracedecay"
     });
-    if std::fs::hard_link(env!("CARGO_BIN_EXE_tracedecay"), &shim).is_err() {
-        std::fs::copy(env!("CARGO_BIN_EXE_tracedecay"), &shim).unwrap();
-    }
-    #[cfg(unix)]
-    {
-        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim, permissions).unwrap();
-    }
+    link_or_copy_executable(Path::new(env!("CARGO_BIN_EXE_tracedecay")), &shim).unwrap();
     command.env("PATH", hermetic_path(&[bin_dir]));
     shim
 }

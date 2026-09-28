@@ -510,6 +510,12 @@ fn python_hot_walk_owns_only_signature_prefixes() {
 /// size.
 #[test]
 fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
+    // Initial indexing initializes the process-wide clone grammar-kind table.
+    // Keep that fixed cost outside the retained incremental walk's budget.
+    let warmup = PythonExtractor.extract_artifact("warmup.py", "def warmup():\n    return 1\n");
+    assert!(warmup.result.errors.is_empty());
+    assert_eq!(warmup.clone_bodies.len(), 1);
+
     struct Case {
         extractor: &'static dyn LanguageExtractor,
         file_path: &'static str,

@@ -145,6 +145,7 @@ pub use callable_code::{
     MAX_CALLABLE_CODE_QUERY_BYTES, MAX_SOURCE_METADATA_FILES, ModuleApiRequest,
     PhraseSearchRequest, QualifiedNameRequest, SourceMetadataRecord, SourceMetadataRequest,
 };
+pub(crate) use callable_code_catalog::callable_code_catalog_contribution_with;
 pub use callable_code_catalog::{
     callable_code_catalog_contribution, callable_code_handler_descriptors, callable_code_operation,
     callable_code_operations, callable_code_request_schema, callable_code_result_schema,

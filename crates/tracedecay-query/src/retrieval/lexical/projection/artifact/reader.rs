@@ -327,6 +327,23 @@ impl CodeLexicalArtifactRestoreWitnessV1 {
     }
 }
 
+/// One already-opened private artifact file, plus the receipt, projection,
+/// cache budget, and integrity mode used to restore its reader.
+///
+/// `artifact_path` and `artifact_file` are the same no-follow open the
+/// connection was created from. Sibling connections reopen that path only
+/// after the handle still names the same file.
+struct OpenLexicalArtifactConnection<'a> {
+    connection: Connection,
+    artifact_path: &'a Path,
+    artifact_file: &'a File,
+    expected: &'a VerifiedCodeLexicalArtifactV1,
+    authority: &'a super::super::CodeLexicalProjectionMetadataV1,
+    cache_budget_bytes: usize,
+    control: &'a dyn CodeIndexExecutionControlV1,
+    integrity_authority: ReaderIntegrityAuthorityV1,
+}
+
 #[derive(Clone, Copy)]
 enum ReaderIntegrityAuthorityV1 {
     /// The immutable artifact was fully verified before publication. Its
@@ -464,15 +481,16 @@ impl CodeLexicalArtifactReaderV1 {
                 "embedded receipt disagrees with the durable head file size".to_owned(),
             ));
         }
-        let reader = Self::open_connection_with_control(
+        let reader = Self::open_connection_with_control(OpenLexicalArtifactConnection {
             connection,
-            (path, &file),
-            &receipt,
+            artifact_path: path,
+            artifact_file: &file,
+            expected: &receipt,
             authority,
             cache_budget_bytes,
             control,
-            ReaderIntegrityAuthorityV1::ReceiptOnly,
-        )?;
+            integrity_authority: ReaderIntegrityAuthorityV1::ReceiptOnly,
+        })?;
         let verified_state = stable_artifact_file_state(&file)?;
         verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
         verify_stable_artifact_file_state(&file, &verified_state)?;
@@ -612,15 +630,16 @@ impl CodeLexicalArtifactReaderV1 {
         progress(4, TOTAL_RESTORE_CHECKS);
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
-            Self::open_connection_with_control(
+            Self::open_connection_with_control(OpenLexicalArtifactConnection {
                 connection,
-                (path, &file),
-                &receipt,
+                artifact_path: path,
+                artifact_file: &file,
+                expected: &receipt,
                 authority,
-                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                cache_budget_bytes: CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
                 control,
-                ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
-            )
+                integrity_authority: ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
+            })
         )?;
         progress(5, TOTAL_RESTORE_CHECKS);
         verify_stable_artifact_file_state(&file, &opened_state)?;
@@ -667,15 +686,16 @@ impl CodeLexicalArtifactReaderV1 {
         })?;
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
-            Self::open_connection_with_control(
+            Self::open_connection_with_control(OpenLexicalArtifactConnection {
                 connection,
-                (path, &file),
+                artifact_path: path,
+                artifact_file: &file,
                 expected,
                 authority,
                 cache_budget_bytes,
                 control,
-                ReaderIntegrityAuthorityV1::ReceiptOnly,
-            )
+                integrity_authority: ReaderIntegrityAuthorityV1::ReceiptOnly,
+            })
         )?;
         verify_stable_artifact_file_state(&file, &file_state)?;
         verify_named_path_identity(path, &file)?;
@@ -689,13 +709,16 @@ impl CodeLexicalArtifactReaderV1 {
     /// content part, and the reader serves the opener's generation,
     /// repository, freshness, and clone route.
     fn open_connection_with_control(
-        connection: Connection,
-        (artifact_path, artifact_file): (&Path, &File),
-        expected: &VerifiedCodeLexicalArtifactV1,
-        authority: &super::super::CodeLexicalProjectionMetadataV1,
-        cache_budget_bytes: usize,
-        control: &dyn CodeIndexExecutionControlV1,
-        integrity_authority: ReaderIntegrityAuthorityV1,
+        OpenLexicalArtifactConnection {
+            connection,
+            artifact_path,
+            artifact_file,
+            expected,
+            authority,
+            cache_budget_bytes,
+            control,
+            integrity_authority,
+        }: OpenLexicalArtifactConnection<'_>,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         let sealed_file_size_bytes = expected.file_size_bytes();

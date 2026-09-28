@@ -1,18 +1,18 @@
 name: TraceDecay warm CI experiment
-description: Compare three fresh Cargo targets with one warm Hauler lane on a trusted TraceDecay checkout.
+description: Measure two manually trusted PR heads in one hosted worker with a cold comparison and source failure proof.
 inputs:
-  head:
-    description: Commit at the end of the three-commit experiment.
+  plan:
+    description: Immutable admission plan from the trusted planner job.
     required: true
   output:
-    description: Absolute path for the JSON measurement report.
+    description: Absolute output directory for measurements, logs and JUnit.
     required: true
 runs:
   using: composite
   steps:
-    - name: Measure fresh and warm snapshots, then reject changed failing source
+    - name: Measure admitted heads and verify changed source
       shell: bash
       env:
-        SOURCE_HEAD: ${{ inputs.head }}
+        TRIAL_PLAN: ${{ inputs.plan }}
         OUTPUT: ${{ inputs.output }}
-      run: python3 "$GITHUB_ACTION_PATH/warm.py" "$GITHUB_WORKSPACE" --head "$SOURCE_HEAD" --output "$OUTPUT"
+      run: python3 "$GITHUB_ACTION_PATH/warm.py" measure "$GITHUB_WORKSPACE" --output "$OUTPUT"

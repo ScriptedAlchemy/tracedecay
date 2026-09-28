@@ -13,6 +13,8 @@ use std::os::unix::net::UnixListener;
 #[cfg(unix)]
 use tempfile::TempDir;
 use tracedecay_runtime_core::config::ProfileRoot;
+#[cfg(target_os = "linux")]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use super::runner::ServiceRunner;
 use super::{
@@ -105,8 +107,6 @@ struct LeaseHolder {
 #[cfg(target_os = "linux")]
 impl DrainingDaemonFixture {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = TempDir::new().expect("temp dir");
         let config_home = dir.path().join("config");
         let fake_bin = dir.path().join("bin");
@@ -121,7 +121,7 @@ impl DrainingDaemonFixture {
         let systemctl = fake_bin.join("systemctl");
         let log = dir.path().join("systemctl.log");
         let stopped_marker = dir.path().join("systemctl.stopped");
-        std::fs::write(
+        write_executable_script(
             &systemctl,
             super::tests::bake_script_paths(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
@@ -132,8 +132,6 @@ impl DrainingDaemonFixture {
             ),
         )
         .expect("fake systemctl");
-        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-            .expect("systemctl permissions");
         let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
         let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
         std::fs::create_dir_all(service_path.parent().expect("service parent"))

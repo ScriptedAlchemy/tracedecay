@@ -61,6 +61,7 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-configuration = { path = "../tracedecay-configuration", features = ["test-helpers"] }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", features = ["test-helpers"] }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }
