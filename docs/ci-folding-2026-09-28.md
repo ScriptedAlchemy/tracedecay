@@ -92,13 +92,14 @@ additional service needs installing.
 
 Manual dispatch retains the optional OS, host, profiling and full-workspace
 inputs. The trusted close workflow has a separate ordered hygiene group. It
-checks the event's exact closure, cancels only matching PR CI runs that started
-before that closure, waits for them to finish, then rechecks the closure before
-deleting merge-ref caches. A late close event therefore does not enter the
-reopened PR's CI concurrency group. Existing runs without the stable `CI for
-PR #N` title are outside this selector. GitHub offers no atomic
-check-and-cancel operation for a run attempt; cleanup remains guarded best
-effort, and its five-minute job bound can leave caches for later expiry.
+checks the event's exact closure, cancels matching pre-closure CI first attempts
+(including ones still queued) and pre-closure reruns, waits for them to finish,
+then rechecks the closure before deleting merge-ref caches. A late close event
+therefore does not enter the reopened PR's CI concurrency group. Existing runs
+without the stable `CI for PR #N` title are outside this selector. GitHub
+offers no atomic check-and-cancel operation for a run attempt; cleanup
+remains guarded best effort, and its five-minute job bound can leave caches
+for later expiry.
 Manual dispatches remain under the operator's control.
 
 ## What was measured

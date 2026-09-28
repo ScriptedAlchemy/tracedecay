@@ -7,6 +7,7 @@ on:
 # This workflow runs trusted inline API calls only. It never checks out PR code.
 permissions:
   actions: write
+  checks: read
   pull-requests: read
 
 # A late close event must not cancel a reopened PR before its state is checked.
@@ -50,9 +51,10 @@ jobs:
           for run in $runs; do
             require_same_closure
             current=$(gh api "repos/$REPO/actions/runs/$run")
-            # A rerun keeps its original creation time. Exclude later attempts.
+            # A queued first attempt can start after closure; a rerun keeps
+            # the original creation time, so require its own start before closure.
             if ! jq -e --arg closed "$CLOSED_AT" \
-              '.status != "completed" and (.run_started_at | type) == "string" and .run_started_at < $closed' <<<"$current" >/dev/null; then
+              '.status != "completed" and (.run_attempt == 1 or ((.run_started_at | type) == "string" and .run_started_at < $closed))' <<<"$current" >/dev/null; then
               continue
             fi
             if ! gh api -X POST "repos/$REPO/actions/runs/$run/cancel" >/dev/null; then
