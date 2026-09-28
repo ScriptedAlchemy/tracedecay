@@ -96,6 +96,7 @@ fn cached_generation_graph_build_reserves_transient_memory_and_retries_after_rel
             Some(ProcessResidentSampleV1 {
                 resident_bytes: 0,
                 unreclaimable_bytes: 0,
+                cgroup_committed_bytes: None,
             })
         }),
     ));
