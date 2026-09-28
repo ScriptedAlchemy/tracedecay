@@ -7,42 +7,24 @@ use tracedecay_application::code_index::{
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_contracts::clock::now_micros;
 use tracedecay_contracts::{
-    CallableCodeOperationKind, CancellationContext, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, RequestContext, RequestId, ResolvedScope, callable_code_operation,
+    CallableCodeOperationKind, Deadline, RequestContext, ResolvedScope, callable_code_operation,
 };
-use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, UtcMicros};
+use tracedecay_domain::{CodeGenerationId, UtcMicros};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-use super::{GitFixture, test_project_id, wait_for_live_complete_generation, write};
-use crate::code_index_scheduler::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
+use super::{
+    GitFixture, application_context, test_project_id, wait_for_live_complete_generation, write,
+};
+use crate::code_index_scheduler::{
+    CodeIndexIgnoredDependencyRequestV1, CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
+};
 use crate::project_reads::project_code_index_ignored_dependency_admission_port;
 
-fn request_context(scope: ResolvedScope, suffix: &str, budget: Duration) -> RequestContext {
+fn request_context(scope: ResolvedScope, budget: Duration) -> RequestContext {
     let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
-    let grant = CapabilityGrantSnapshot::new(
-        tracedecay_contracts::CapabilityGrantId::new(format!("grant.pre-seat.{suffix}"))
-            .expect("grant id"),
-        1,
-        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("grant digest"),
-        ActorId::new("actor.pre-seat.issuer").expect("issuer"),
-        UtcMicros(1),
-        UtcMicros(i64::MAX),
-        scope.clone(),
-        BTreeSet::from([operation.capability_id().clone()]),
-        BTreeSet::from([operation.use_case_id().clone()]),
-        DisclosureClass::Evidence,
-    )
-    .expect("grant");
     let budget = i64::try_from(budget.as_micros()).expect("budget micros");
-    RequestContext::new(
-        ActorId::new("actor.pre-seat.requester").expect("actor"),
-        scope,
-        grant,
-        RequestId::new(format!("request.pre-seat.{suffix}")).expect("request id"),
-        Deadline::new(UtcMicros(now_micros().0 + budget)).expect("deadline"),
-        CancellationContext::active(format!("cancel.pre-seat.{suffix}")).expect("cancellation"),
-    )
-    .expect("request context")
+    application_context(&operation, scope.repository_id, scope.worktree_id)
+        .with_deadline(Deadline::new(UtcMicros(now_micros().0 + budget)).expect("deadline"))
 }
 
 fn ignored_package_fixture() -> GitFixture {
@@ -61,27 +43,19 @@ fn ignored_package_fixture() -> GitFixture {
     fixture
 }
 
-/// The published generation, its verified `pkg` import, and its scope: what
-/// a graph read that found the import hands to admission.
+/// What a graph read of `published` that found its verified `pkg` import
+/// hands to admission.
 fn admission_inputs(
     published: &LatestCompleteCodeIndexV1,
 ) -> (CodeGenerationId, CodeIndexImportEvidenceV1, ResolvedScope) {
-    let generation = published.generation();
-    let import = generation
-        .imports()
-        .iter()
-        .find(|import| import.module_specifier == "pkg")
-        .expect("verified package import")
-        .clone();
-    let snapshot = generation.snapshot();
-    let scope = ResolvedScope::new(
-        generation.manifest().project_id.clone(),
-        snapshot.repository.clone(),
-        snapshot.worktree.clone().expect("worktree identity"),
-        snapshot.reference.clone(),
+    let mut request =
+        CodeIndexIgnoredDependencyRequestV1::for_verified_import_for_test(published, "pkg")
+            .expect("verified package import");
+    (
+        request.expected_generation,
+        request.verified_imports.remove(0),
+        request.scope,
     )
-    .expect("resolved scope");
-    (generation.manifest().generation_id.clone(), import, scope)
 }
 
 /// A first publication serves from its text owner before the worker's graph
@@ -137,7 +111,7 @@ async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
         true,
     );
 
-    let held = request_context(scope.clone(), "held", Duration::from_millis(300));
+    let held = request_context(scope.clone(), Duration::from_millis(300));
     let refused = port
         .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
             &held,
@@ -156,7 +130,7 @@ async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
     let retry_source = source_generation.clone();
     let retry_import = import.clone();
     let retry = tokio::spawn(async move {
-        let context = request_context(retry_scope, "retry", Duration::from_secs(30));
+        let context = request_context(retry_scope, Duration::from_secs(30));
         retry_port
             .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
                 &context,
@@ -267,7 +241,7 @@ async fn ignored_dependency_admission_answers_a_parked_worktree_with_its_park() 
         scope.clone(),
         true,
     );
-    let context = request_context(scope, "parked", Duration::from_secs(10));
+    let context = request_context(scope, Duration::from_secs(10));
     let refused = port
         .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
             &context,

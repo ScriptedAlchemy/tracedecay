@@ -37,6 +37,36 @@ pub struct CodeIndexIgnoredDependencyRequestV1 {
     pub verified_imports: Vec<CodeIndexImportEvidenceV1>,
 }
 
+impl CodeIndexIgnoredDependencyRequestV1 {
+    /// The request a graph read of `latest` hands to admission when it found
+    /// the parser-verified import of `module`, or `None` without that import.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn for_verified_import_for_test(
+        latest: &LatestCompleteCodeIndexV1,
+        module: &str,
+    ) -> Option<Self> {
+        let generation = latest.generation();
+        let import = generation
+            .imports()
+            .iter()
+            .find(|import| import.module_specifier == module)?
+            .clone();
+        let snapshot = generation.snapshot();
+        let scope = ResolvedScope::new(
+            generation.manifest().project_id.clone(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone()?,
+            snapshot.reference.clone(),
+        )
+        .ok()?;
+        Some(Self {
+            scope,
+            expected_generation: generation.manifest().generation_id.clone(),
+            verified_imports: vec![import],
+        })
+    }
+}
+
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CodeIndexIgnoredDependencyRefusalV1 {
     #[error("the import evidence is not present byte-exactly in the pinned serving generation")]
