@@ -1,8 +1,6 @@
 use std::path::Path;
 use tracedecay_contracts::retrieval::{AdminCliSessionSyncV1, AdminCliSurfaceRequestV1};
-use tracedecay_contracts::session_sync::{
-    SessionSyncCoverageV1, SessionSyncSourceCoverageV1,
-};
+use tracedecay_contracts::session_sync::{SessionSyncCoverageV1, SessionSyncSourceCoverageV1};
 use tracedecay_contracts::{IdempotencyKey, OperationTermination, RequestId};
 use tracedecay_runtime_core::config::ProfileRoot;
 
