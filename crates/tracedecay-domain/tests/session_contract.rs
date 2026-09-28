@@ -1180,23 +1180,33 @@ fn session_wire_records_reject_unknown_fields() {
 }
 
 #[test]
-fn compact_context_temporal_frames_are_required_in_memory_and_default_on_legacy_wire() {
-    let legacy = json!({
+fn compact_context_temporal_frames_are_required_on_the_wire() {
+    let current = json!({
+        "records": [],
+        "omissions": [],
+        "continuation_anchors": [],
+        "coverage": {"visible": 0, "hidden": 0, "unknown": 0, "redacted": 0},
+        "conflicts": [],
+        "lineage": [],
+        "encoded_bytes": 0
+    });
+    let decoded: CompactContextBundleV1 = serde_json::from_value(current.clone()).unwrap();
+    assert_eq!(decoded.coverage, TemporalCoverageCountsV1::default());
+    assert!(decoded.conflicts.is_empty());
+    assert!(decoded.lineage.is_empty());
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), current);
+
+    let omitted = json!({
         "records": [],
         "omissions": [],
         "continuation_anchors": [],
         "encoded_bytes": 0
     });
-    let decoded: CompactContextBundleV1 = serde_json::from_value(legacy).unwrap();
-
-    assert_eq!(decoded.coverage, TemporalCoverageCountsV1::default());
-    assert!(decoded.conflicts.is_empty());
-    assert!(decoded.lineage.is_empty());
-
-    let encoded = serde_json::to_value(decoded).unwrap();
-    assert_eq!(encoded["coverage"]["visible"], 0);
-    assert_eq!(encoded["conflicts"], json!([]));
-    assert_eq!(encoded["lineage"], json!([]));
+    let error = serde_json::from_value::<CompactContextBundleV1>(omitted).unwrap_err();
+    assert!(
+        error.to_string().starts_with("missing field `coverage`"),
+        "{error}"
+    );
 }
 
 #[test]
