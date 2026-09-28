@@ -64,7 +64,7 @@ use super::schema::{
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1, checkpoint,
-    sqlite_corrupt, sqlite_error,
+    sqlite_corrupt, sqlite_error, sqlite_open_path,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::RetrievalExecutionControl;
@@ -467,7 +467,7 @@ impl CodeLexicalArtifactReaderV1 {
         }
         verify_named_path_identity(path, &file)?;
         let connection = Connection::open_with_flags(
-            path,
+            sqlite_open_path(path)?,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|error| map_reader_open_error(path, error))?;
@@ -601,7 +601,7 @@ impl CodeLexicalArtifactReaderV1 {
         progress(2, TOTAL_RESTORE_CHECKS);
         let connection = hotpath::measure_block!("query.artifact.open.sqlite_connect", {
             Connection::open_with_flags(
-                path,
+                sqlite_open_path(path)?,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .map_err(|error| map_reader_open_error(path, error))
@@ -701,7 +701,7 @@ impl CodeLexicalArtifactReaderV1 {
         }
         let connection = hotpath::measure_block!("query.artifact.open.sqlite_connect", {
             Connection::open_with_flags(
-                path,
+                sqlite_open_path(path)?,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .map_err(|error| map_reader_open_error(path, error))
