@@ -150,6 +150,21 @@ pub(crate) fn default_available_socket_path(handshake: &DaemonHandshake) -> Resu
     }
 }
 
+/// Authenticated invocation client for the daemon serving this client: the
+/// socket `TRACEDECAY_DAEMON_SOCKET` names when set, else the profile's own.
+/// An absent socket is the typed daemon-unreachable refusal, as on the
+/// `tools/call` transport.
+pub fn invocation_client_for_current_client(
+    handshake: DaemonHandshake,
+) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
+    let socket_path = default_available_socket_path(&handshake)?;
+    let connection = client_connection(&handshake.client_identity.profile_root, &socket_path)?;
+    Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        connection.into_protocol(),
+        handshake,
+    ))
+}
+
 pub(crate) async fn connect_to_current_daemon_within(
     profile_root: &Path,
     socket_path: &Path,

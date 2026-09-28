@@ -163,14 +163,12 @@ pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
 use serde_json::Value;
 use tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1;
 use tracedecay_contracts::{InvocationTarget, RetainedSurfaceOperation};
-use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use super::LegacyToolCompatibilityOwner;
 use dispatch_groups::dispatch_application_surface_tools;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
-use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
@@ -178,10 +176,8 @@ use tracedecay_mcp::handlers::{SessionAuthorities, unknown_tool_error};
 use tracedecay_mcp::tools::binding::{
     INTERNAL_DAEMON_TOOL_NAMES, McpToolDispatchGroup, dispatch_group_for_tool,
     mcp_dispatch_contract, tool_accepts_registered_project_selector,
-    tool_dispatches_registered_project_reader, tool_requires_canonical_effect_settlement,
+    tool_dispatches_registered_project_reader,
 };
-use tracedecay_mcp::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
-use tracedecay_mcp::tools::response_trailers::append_code_graph_freshness;
 use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
 use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::storage::registered_project_id;
@@ -442,10 +438,6 @@ impl<'a> ToolCallRegistryOptions<'a> {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Tool-call handling is one registry dispatch match onto the owning handler."
-)]
 pub fn handle_tool_call_with_registry_options<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,
@@ -556,84 +548,9 @@ pub fn handle_tool_call_with_registry_options<'a>(
             ))
             .await;
         }
-        // Catalog-declared compatibility operations must resolve the MCP binding
-        // before reaching their retained typed handler. Operations without an
-        // application-catalog contract remain under the explicit root MCP
-        // migration owner until their family receives one.
-        if let Err(error) = resolve_catalog_tool_binding(BindingSurface::Mcp, tool_name) {
-            return Err(TraceDecayError::Config {
-                message: error.to_string(),
-            });
-        }
-        let compatibility_owned =
-            LegacyToolCompatibilityOwner::admits(tool_name).map_err(|error| {
-                TraceDecayError::project_route(
-                    "mcp.catalog_discovery_unavailable",
-                    false,
-                    format!("MCP tool discovery is unavailable: {error}"),
-                )
-            })?;
-        if !compatibility_owned && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
-            return Err(unknown_tool_error(tool_name));
-        }
-        ensure_mcp_dispatch_available(tool_name)?;
-        // The universal ceiling. Every dispatch group below runs inside this one
-        // bound, so a group added later inherits it without opting in and no
-        // handler can be reached unbounded. Per-group wraps (git, memory) stay:
-        // they report a nicer domain-shaped result and a shorter bound, and this
-        // is only the backstop beneath them.
-        let dispatch_budget =
-            tool_dispatch_budget(tool_name, options.application_deadline.as_ref());
-        let Some(dispatch_budget) = dispatch_budget else {
-            // `deadline_remaining` yields `None` only for an already-elapsed
-            // carried deadline, which must be rejected rather than dispatched.
-            return Err(tool_dispatch_deadline_error(
-                tool_name,
-                std::time::Duration::ZERO,
-            ));
-        };
-        let served_code_graph = options.served_code_graph.clone();
-        let dispatched = async {
-            match dispatch_group {
-                // Typed daemon surface tools already returned above, and the daemon
-                // serves the internal branch-add tool before MCP dispatch; reaching
-                // here means the name resolves to no reachable dispatch entry.
-                Some(
-                    McpToolDispatchGroup::ApplicationSurface
-                    | McpToolDispatchGroup::Git
-                    | McpToolDispatchGroup::MultiRoot
-                    | McpToolDispatchGroup::Work
-                    | McpToolDispatchGroup::Workflow,
-                )
-                | None => Err(unknown_tool_error(tool_name)),
-            }
-        };
-        let result = if tool_requires_canonical_effect_settlement(tool_name) {
-            // Canonically settled effects complete their own deadline and
-            // cancellation protocol before this adapter receives a terminal.
-            // Dropping that terminal in the generic transport timeout would
-            // erase an admitted Effect or PartialEffect receipt.
-            dispatched.await
-        } else {
-            match tokio::time::timeout(dispatch_budget, dispatched).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, dispatch_budget)),
-            }
-        };
-        match result {
-            Ok(mut result) => {
-                // The verified-graph open funnel reports a stale serving seat
-                // through the one-shot options slot. The answer is sound for
-                // that generation but may trail the live worktree, so name
-                // whether source movement proved a rebuild or source currency
-                // remains unverified.
-                if let Some(served) = served_code_graph.served() {
-                    append_code_graph_freshness(&mut result, &served);
-                }
-                Ok(result)
-            }
-            Err(error) => Err(error),
-        }
+        // The daemon serves its internal branch-add tool before MCP dispatch;
+        // every other name has returned through its typed owner above.
+        Err(unknown_tool_error(tool_name))
     };
     Box::pin(hotpath::future!(dispatch, label = "mcp.tool_call"))
 }

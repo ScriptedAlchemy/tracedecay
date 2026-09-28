@@ -55,9 +55,7 @@ mod work;
 mod workflow;
 
 use catalog::resolve_application_binding;
-pub use catalog::{
-    application_surface_catalog, application_surface_catalog_ref, resolve_catalog_tool_binding,
-};
+pub use catalog::{application_surface_catalog, application_surface_catalog_ref};
 use configuration_wire::{
     CONFIGURATION_WIRE_OPERATIONS, configuration_binding_has_schema, is_configuration_operation,
 };

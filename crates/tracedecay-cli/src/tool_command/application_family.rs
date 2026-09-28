@@ -1,4 +1,4 @@
-//! `tracedecay tool` for the closed Work and Workflow families.
+//! `tracedecay tool` for the closed Work, Workflow, and multi-root families.
 //!
 //! These tools run through the canonical owner their MCP calls reach, invoked
 //! over the daemon socket instead of through a daemon MCP tool call, so the CLI
@@ -27,7 +27,10 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
-use tracedecay_mcp::tools::binding::{work_operation_for_tool, workflow_operation_for_tool};
+use tracedecay_mcp::tools::binding::{
+    McpToolDispatchGroup, dispatch_group_for_tool, work_operation_for_tool,
+    workflow_operation_for_tool,
+};
 
 use super::{
     OWNER_MOUNT_RESEND_DELAY, cli_request_controls, rendered_tool_output,
@@ -39,6 +42,7 @@ use crate::work_cli::{WorkCliDelivery, work_delivery_is_eligible};
 pub(super) enum FamilyTool {
     Work(WorkOperation),
     Workflow,
+    MultiRoot,
 }
 
 impl FamilyTool {
@@ -46,10 +50,15 @@ impl FamilyTool {
         work_operation_for_tool(tool_name)
             .map(Self::Work)
             .or_else(|| workflow_operation_for_tool(tool_name).map(|_| Self::Workflow))
+            .or_else(|| {
+                (dispatch_group_for_tool(tool_name) == Some(McpToolDispatchGroup::MultiRoot))
+                    .then_some(Self::MultiRoot)
+            })
     }
 }
 
-/// Run one Work or Workflow tool and print the tool result its MCP call returns.
+/// Run one Work, Workflow, or multi-root tool and print the tool result its
+/// MCP call returns.
 #[hotpath::measure(label = "cli.tool.application_family", future = true)]
 pub(super) async fn dispatch_cli_family_tool(
     profile: &ProfileRoot,
@@ -67,7 +76,7 @@ pub(super) async fn dispatch_cli_family_tool(
     let handshake =
         tracedecay::daemon::handshake_for_current_client(profile, project, None, false, false)?;
     let executor = FamilyToolExecutor {
-        client: tracedecay_daemon_identity::invocation_client_for_current(handshake)?,
+        client: tracedecay::daemon::invocation_client_for_current_client(handshake)?,
         tool,
         delivery: Mutex::new(None),
         mounting: Mutex::new(false),
@@ -91,6 +100,17 @@ pub(super) async fn dispatch_cli_family_tool(
             }
             FamilyTool::Workflow => {
                 tracedecay::mcp::tools::execute_workflow_tool_surface(
+                    tool_name,
+                    tool_args.clone(),
+                    Some(&executor),
+                    Some(request_id.clone()),
+                    Some(request_deadline),
+                    Some(cancellation),
+                )
+                .await?
+            }
+            FamilyTool::MultiRoot => {
+                tracedecay_mcp::handle_multi_root(
                     tool_name,
                     tool_args.clone(),
                     Some(&executor),

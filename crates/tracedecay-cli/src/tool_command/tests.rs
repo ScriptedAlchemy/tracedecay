@@ -4,12 +4,17 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, OpaqueCursor, PageRequest, RequestId,
     ResultContractRef, SafeDiagnostic,
 };
-use tracedecay_daemon_protocol::decode_retained_request;
-use tracedecay_daemon_service::application_surface::{
-    parse_http_application_surface_request, resolve_application_surface_dispatch_with_controls,
-    resolve_catalog_tool_binding,
+use tracedecay_daemon_protocol::{
+    BindingResolution, BindingResolver, CatalogBindingResolver, ResolvedBinding,
+    decode_retained_request,
 };
-use tracedecay_tool_catalog::{BindingId, BindingSurface, SchemaId};
+use tracedecay_daemon_service::application_surface::{
+    application_surface_catalog_ref, parse_http_application_surface_request,
+    resolve_application_surface_dispatch_with_controls,
+};
+use tracedecay_tool_catalog::{
+    BindingId, BindingSurface, ProfileId, SchemaId, SurfaceOperationName,
+};
 
 fn defs() -> Vec<ToolDefinition> {
     get_tool_definitions().expect("tool definitions")
@@ -977,39 +982,6 @@ fn join_content_text_empty_when_no_content() {
     assert_eq!(join_content_text(&json!({ "content": [] })), "");
 }
 
-#[test]
-fn reject_tool_result_truncation_detects_content_envelope() {
-    let value = json!({
-        "content": [{
-            "type": "text",
-            "text": "{\"truncated\":true,\"original_chars\":16000,\"preview\":\"{}\",\"handle\":\"h1\"}"
-        }]
-    });
-    let err = reject_tool_result_truncation(&value, "tracedecay_search").unwrap_err();
-    let message = err.to_string();
-    assert!(message.contains("truncated JSON"), "{message}");
-    assert!(message.contains("tracedecay_retrieve"), "{message}");
-    assert!(
-        reject_tool_result_truncation(
-            &json!({ "content": [{ "type": "text", "text": "{\"ok\":true}" }] }),
-            "tracedecay_search"
-        )
-        .is_ok()
-    );
-    assert!(
-        reject_tool_result_truncation(
-            &json!({
-                "content": [{
-                    "type": "text",
-                    "text": "{\"truncated\":true,\"matches\":[]}"
-                }]
-            }),
-            "tracedecay_grep"
-        )
-        .is_ok()
-    );
-}
-
 /// `main` maps `Ok` to exit 0 and any `Err` to a failing `ExitCode`, so the
 /// outcome these assertions inspect *is* the process exit status.
 #[test]
@@ -1368,6 +1340,25 @@ fn session_refresh_equivalent_requests() -> Vec<TransportEquivalentRequest> {
     requests
 }
 
+/// The binding the daemon's composed catalog resolves for `tool_name` on
+/// `surface`, for the default profile at the production protocol revision.
+fn catalog_binding(surface: BindingSurface, tool_name: &str) -> Option<ResolvedBinding> {
+    let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
+        .unwrap_or_else(|| panic!("{tool_name} names no application operation"));
+    CatalogBindingResolver::new(application_surface_catalog_ref().expect("application catalog"))
+        .resolve_binding(
+            surface,
+            &BindingResolution {
+                profile_id: ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
+                    .expect("default profile"),
+                operation: SurfaceOperationName::new(operation.name_for_surface(surface))
+                    .expect("operation name"),
+                protocol_revision: 1,
+                negotiated_features: std::collections::BTreeSet::new(),
+            },
+        )
+}
+
 /// The retained half of the transport equivalence: CLI and MCP normalize
 /// through the shared argument adapter and, like the HTTP body, land on
 /// `decode_request` for the exact operation. All three must decode the same
@@ -1404,8 +1395,7 @@ fn assert_retained_transports_decode_one_canonical_request(
         let request = decode_retained_request(operation, body)
             .unwrap_or_else(|error| panic!("{tool_name} {surface:?} request: {error}"));
         assert_eq!(request.operation(), operation, "{tool_name} {surface:?}");
-        let binding = resolve_catalog_tool_binding(surface, tool_name)
-            .unwrap_or_else(|error| panic!("{tool_name} {surface:?} binding: {error}"))
+        let binding = catalog_binding(surface, tool_name)
             .unwrap_or_else(|| panic!("{tool_name} has no {surface:?} catalog binding"));
         (
             surface,

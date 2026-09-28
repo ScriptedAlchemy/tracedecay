@@ -6,9 +6,9 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::super::get_tool_definitions;
 use super::dispatch_test_support::*;
 use super::*;
+use tracedecay_mcp::get_tool_definitions;
 
 /// Records the daemon operation every multi-root tool routes to, then refuses
 /// it. The refusal is the point: it proves the MCP name reached the closed

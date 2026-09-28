@@ -50,17 +50,9 @@ pub(super) fn resolve_application_binding(
     resolver: &impl BindingResolver,
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
-) -> Option<tracedecay_daemon_protocol::ResolvedBinding> {
-    resolve_named_binding(resolver, surface, operation.name_for_surface(surface))
-}
-
-pub(super) fn resolve_named_binding(
-    resolver: &impl BindingResolver,
-    surface: BindingSurface,
-    operation: &str,
 ) -> Option<ResolvedBinding> {
     let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).ok()?;
-    let operation = SurfaceOperationName::new(operation).ok()?;
+    let operation = SurfaceOperationName::new(operation.name_for_surface(surface)).ok()?;
     resolver.resolve_binding(
         surface,
         &BindingResolution {
@@ -70,22 +62,6 @@ pub(super) fn resolve_named_binding(
             negotiated_features: application_negotiated_features(),
         },
     )
-}
-
-/// Resolves a public tool name through the application catalog for one host surface.
-///
-/// Typed application surfaces continue through [`ApplicationSurfaceOperation`];
-/// compatibility-owned tools use this boundary before entering their retained
-/// execution adapter, so catalog metadata remains the single binding authority.
-#[hotpath::measure(label = "application_surface.catalog_binding")]
-pub fn resolve_catalog_tool_binding(
-    surface: BindingSurface,
-    tool_name: &str,
-) -> Result<Option<ResolvedBinding>, ApplicationSurfaceAdapterError> {
-    let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
-    let catalog = application_surface_catalog_ref()?;
-    let resolver = CatalogBindingResolver::new(catalog);
-    Ok(resolve_named_binding(&resolver, surface, operation))
 }
 
 pub(super) fn application_negotiated_features() -> BTreeSet<FeatureId> {

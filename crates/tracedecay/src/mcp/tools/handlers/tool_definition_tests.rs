@@ -1,8 +1,8 @@
 use serde_json::json;
 use tracedecay_tool_catalog::OperationId;
 
-use super::super::get_tool_definitions;
 use super::*;
+use tracedecay_mcp::get_tool_definitions;
 
 #[test]
 fn retired_simplify_scan_is_absent_from_the_public_catalog() {

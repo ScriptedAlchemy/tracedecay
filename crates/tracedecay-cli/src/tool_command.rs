@@ -46,9 +46,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
-use tokio::time::{Instant, timeout_at};
+use tokio::time::Instant;
 
-use tracedecay::daemon::call_default_tool_awaiting_project_open;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexReadinessWaitOutcomeV1,
@@ -76,7 +75,6 @@ use tracedecay_mcp::{
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::cli::dispatch::resolve_cli_application_surface;
-use crate::commands::{recover_truncated_mcp_result, reject_truncation_envelope};
 
 mod application_family;
 mod args;
@@ -131,30 +129,6 @@ fn tool_deadline_range_error() -> TraceDecayError {
 
 pub(crate) fn tool_command_deadline() -> Result<Duration> {
     tool_request_deadline()
-}
-
-fn tool_timeout_error(tool_name: &str) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
-            "tool request timed out before deadline: {tool_name}; request outcome may be unknown"
-        ),
-    }
-}
-
-fn reject_tool_result_truncation(result_value: &Value, tool_name: &str) -> Result<()> {
-    reject_truncation_envelope(result_value, tool_name)?;
-    let Some(blocks) = result_value.get("content").and_then(Value::as_array) else {
-        return Ok(());
-    };
-    for block in blocks {
-        let Some(text) = block.get("text").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Ok(payload) = serde_json::from_str::<Value>(text) {
-            reject_truncation_envelope(&payload, tool_name)?;
-        }
-    }
-    Ok(())
 }
 
 /// Entry point for `tracedecay tool ...`.
@@ -421,16 +395,9 @@ fn run_inner(
             )
             .await;
         }
-        // Finding `def` in the host-filtered MCP definitions is the retained
-        // compatibility owner's admission authority. This point is reachable
-        // only after every typed branch above rejected the name, so composing
-        // the application catalog again can only return `None`; rebuilding a
-        // second advertised-name set likewise repeats the exact membership
-        // check that selected `def`.
-        let dispatch =
-            DaemonToolDispatch::for_tool(profile, explicit_project, &def.name, &mut tool_args);
-        dispatch_compatibility_tool(profile, dispatch, &def.name, tool_args, raw_json, deadline)
-            .await
+        Err(TraceDecayError::Config {
+            message: format!("{} has no typed CLI route", def.name),
+        })
     })
 }
 
@@ -537,7 +504,7 @@ fn dispatch_cli_application_surface_inner(
                 if let Ok(handshake) =
                     crate::commands::client_handshake(profile, project.as_deref())
                     && let Ok(client) =
-                        tracedecay_daemon_identity::invocation_client_for_current(handshake)
+                        tracedecay::daemon::invocation_client_for_current_client(handshake)
                 {
                     observe_surface_argument_rejection(
                         Some(&client),
@@ -560,7 +527,7 @@ fn dispatch_cli_application_surface_inner(
             false,
             false,
         )?;
-        let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+        let client = tracedecay::daemon::invocation_client_for_current_client(handshake)?;
         // A cold daemon answers the mounting refusal while the project open
         // still warms in the background. The compatibility tool path rides
         // that state out through its project-open retry loop; the typed
@@ -673,7 +640,7 @@ async fn dispatch_cli_retained(
             message: "could not allocate an application surface request id".to_owned(),
         })?;
     let client =
-        tracedecay_daemon_identity::invocation_client_for_current(dispatch.handshake(profile)?)?;
+        tracedecay::daemon::invocation_client_for_current_client(dispatch.handshake(profile)?)?;
     // The mounting refusal precedes admission; re-send it until the deadline.
     let execution = loop {
         let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
@@ -734,7 +701,7 @@ async fn dispatch_cli_source_edit(
         false,
         false,
     )?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    let client = tracedecay::daemon::invocation_client_for_current_client(handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -838,7 +805,7 @@ async fn invoke_cli_graph_tool(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    let client = tracedecay::daemon::invocation_client_for_current_client(handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -900,7 +867,7 @@ async fn dispatch_cli_profile_registry(
             message: "could not allocate an application surface request id".to_owned(),
         })?;
     let client =
-        tracedecay_daemon_identity::invocation_client_for_current(dispatch.handshake(profile)?)?;
+        tracedecay::daemon::invocation_client_for_current_client(dispatch.handshake(profile)?)?;
     let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
     let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
         tracedecay_tool_catalog::BindingSurface::Cli,
@@ -1090,26 +1057,6 @@ impl DaemonToolDispatch {
             self.allow_init,
         )
     }
-
-    /// `deadline` is the caller's request deadline. It is sent to the daemon and
-    /// enforced there; the transport reads for a bounded grace beyond it.
-    #[hotpath::skip]
-    async fn call(
-        &self,
-        profile: &ProfileRoot,
-        tool_name: &str,
-        tool_args: Value,
-        deadline: Instant,
-    ) -> Result<Value> {
-        let handshake = self.handshake(profile)?;
-        // The interactive CLI wants the tool's answer, not the daemon's typed
-        // warming state: ride out a cold project open until the CLI deadline,
-        // the same transport behavior as the typed application-surface path.
-        let result =
-            call_default_tool_awaiting_project_open(&handshake, tool_name, tool_args, deadline)
-                .await?;
-        recover_truncated_mcp_result(&handshake, tool_name, result, Some(deadline)).await
-    }
 }
 
 /// Whether a retained call addresses the authenticated profile's own stores.
@@ -1141,80 +1088,6 @@ fn seed_registry_context_path(tool_args: &mut Value, explicit_project: &Path) {
             Value::String(explicit_project.to_string_lossy().into_owned()),
         );
     }
-}
-
-fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDecayError {
-    if tracedecay::daemon::error_is_read_deadline(&error) {
-        tool_timeout_error(tool_name)
-    } else {
-        error
-    }
-}
-
-/// Compatibility owner for advertised tools that do not yet have a typed
-/// `ApplicationSurfaceRequest`.
-///
-/// Owner: root MCP tool-dispatch migration. The operation has already passed
-/// definition admission and, when declared, catalog binding resolution.
-#[hotpath::measure(label = "cli.tool.compatibility", future = true)]
-async fn dispatch_compatibility_tool(
-    profile: &ProfileRoot,
-    dispatch: DaemonToolDispatch,
-    tool_name: &str,
-    tool_args: Value,
-    raw_json: bool,
-    deadline: Instant,
-) -> Result<()> {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("cli.compatibility_tool.name").set(&tool_name);
-    // `deadline` is the caller's *request* deadline: it now travels to the
-    // daemon, which enforces it. The local wait exists only to bound a dead or
-    // wedged daemon, so it runs on the transport's response bound, that same
-    // deadline plus a bounded grace. Waiting strictly to the request deadline
-    // made every deadline-elapsed typed terminal unobservable through this
-    // transport: the daemon's PartialEffect (committed receipt, Reconcile-only
-    // legal action) or typed timeout envelope arrived moments after the local
-    // abort had already printed "outcome may be unknown", untruthful, since
-    // the outcome was in flight. Never discard an envelope that was received.
-    let response_bound = tracedecay::daemon::daemon_tool_response_bound(deadline)?;
-    let json_output = raw_json || tool_args.get("format").and_then(Value::as_str) == Some("json");
-    let result_value = match timeout_at(
-        response_bound,
-        dispatch.call(profile, tool_name, tool_args, deadline),
-    )
-    .await
-    {
-        Ok(Ok(value)) => value,
-        Ok(Err(error)) => {
-            let error = map_tool_deadline_error(tool_name, error);
-            if json_output {
-                print_project_route_problem(tool_name, &error)?;
-            }
-            return Err(error);
-        }
-        Err(_) => return Err(tool_timeout_error(tool_name)),
-    };
-    reject_tool_result_truncation(&result_value, tool_name)?;
-    print_tool_output(&result_value, raw_json);
-    // The payload above is the tool's answer and callers parse it, so it is
-    // printed byte-for-byte either way; only the process status changes here.
-    // A tool result the daemon classified as an application failure must not
-    // exit 0, that made every script and CI gate shelling out to
-    // `tracedecay tool` silently blind to a failing tool.
-    tool_result_process_outcome(&result_value, tool_name)
-}
-
-/// A JSON request answered by a typed daemon refusal still gets a JSON
-/// document on stdout: `{"problem": …}`, the same problem the MCP error
-/// carries. The error itself goes to stderr and sets the exit status.
-fn print_project_route_problem(tool_name: &str, error: &TraceDecayError) -> Result<()> {
-    let Some(problem) = tracedecay_mcp::tool_errors::project_route_problem(tool_name, error) else {
-        return Ok(());
-    };
-    let mut stdout = std::io::stdout().lock();
-    writeln!(stdout, "{}", serde_json::json!({ "problem": problem }))?;
-    stdout.flush()?;
-    Ok(())
 }
 
 /// The process outcome for a completed MCP tool result: `Ok` (exit 0) for a

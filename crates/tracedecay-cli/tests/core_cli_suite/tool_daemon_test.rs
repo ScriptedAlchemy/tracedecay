@@ -442,10 +442,10 @@ fn daemon_first_init_enrolls_a_clean_profile_from_a_linked_worktree() {
     );
 }
 
-/// Arguments for a tool the CLI still sends to the daemon as an MCP
-/// `tools/call`. The scope set is absent, so the admitted project's
-/// multi-root owner answers its concealed not-found problem.
-const COMPAT_TOOL_PROBE: [&str; 4] = [
+/// Arguments for a daemon-owned multi-root read. The scope set is absent, so
+/// the admitted project's multi-root owner answers its concealed not-found
+/// problem.
+const SCOPE_SET_PROBE: [&str; 4] = [
     "multi_root_scope_set_read",
     "--scope-set-id",
     "scope-set.absent",
@@ -453,8 +453,8 @@ const COMPAT_TOOL_PROBE: [&str; 4] = [
 ];
 
 /// Asserts `output` is the multi-root owner's concealed not-found answer to
-/// [`COMPAT_TOOL_PROBE`], which only an admitted project server gives.
-fn assert_compat_probe_answered(output: &Output, context: &str) {
+/// [`SCOPE_SET_PROBE`], which only an admitted project server gives.
+fn assert_scope_set_probe_answered(output: &Output, context: &str) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let result: Value = serde_json::from_str(stdout.trim())
@@ -473,7 +473,8 @@ fn assert_compat_probe_answered(output: &Output, context: &str) {
     );
 }
 
-/// Sends one MCP tool call through the daemon's project server, then reads
+/// Sends one MCP `tools/call` (`tracedecay status`) through the daemon's
+/// project server, then reads
 /// that server's tool-call counter from its typed status. Until the full
 /// project server takes over from the core, the call and the status can land
 /// on different servers, so the pair is re-sent until the status server has
@@ -484,11 +485,15 @@ fn wait_for_tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
     loop {
         let counted = tracedecay_command_with_home(home)
             .current_dir(project)
-            .args(["tool", "--project", &project_arg])
-            .args(COMPAT_TOOL_PROBE)
+            .args(["status", "--json"])
             .output()
-            .expect("tracedecay tool multi_root_scope_set_read should run");
-        assert_compat_probe_answered(&counted, "the probe must reach the project server");
+            .expect("tracedecay status should run");
+        assert!(
+            counted.status.success(),
+            "the status call must reach the project server\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&counted.stdout),
+            String::from_utf8_lossy(&counted.stderr)
+        );
         let output = tracedecay_command_with_home(home)
             .current_dir(project)
             .args([
@@ -588,119 +593,6 @@ fn wait_for_daemon_socket(socket_path: &Path) {
             )
         },
     );
-}
-
-fn spawn_sentinel_daemon_with_notification(
-    socket_path: PathBuf,
-    expected_tool_name: &'static str,
-    expect_project_path: bool,
-    expect_allow_init: bool,
-    sentinel: &'static str,
-    emit_notification: bool,
-) -> mpsc::Receiver<Value> {
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let (request_tx, request_rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let _ = std::fs::remove_file(&socket_path);
-        let authority = seed_fake_daemon_authority(&socket_path);
-        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
-        listener
-            .set_nonblocking(true)
-            .expect("set listener nonblocking");
-        ready_tx.send(()).expect("notify fake daemon readiness");
-
-        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
-        let (stream, _) = common::poll_until(
-            deadline,
-            Duration::from_millis(10),
-            || match listener.accept() {
-                Ok(accepted) => Some(accepted),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
-                Err(e) => panic!("accept fake daemon client: {e}"),
-            },
-            || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
-        );
-        stream
-            .set_nonblocking(false)
-            .expect("set accepted stream blocking");
-        stream
-            .set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT))
-            .expect("write timeout");
-
-        let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
-        let mut preface = String::new();
-        reader.read_line(&mut preface).expect("read auth preface");
-        assert!(
-            DaemonAuthPreface::from_line(preface.trim())
-                .expect("fake daemon auth preface")
-                .authenticate(authority.auth_token()),
-            "the CLI must present the daemon token"
-        );
-        let mut handshake = String::new();
-        reader
-            .read_line(&mut handshake)
-            .expect("read daemon handshake");
-        let handshake: Value = serde_json::from_str(handshake.trim()).expect("handshake JSON");
-        assert_eq!(handshake["project_path"].is_string(), expect_project_path);
-        assert_eq!(
-            handshake
-                .get("allow_init")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            expect_allow_init
-        );
-
-        let mut request = String::new();
-        reader
-            .read_line(&mut request)
-            .expect("read JSON-RPC request");
-        let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
-        assert_eq!(request["method"], "tools/call");
-        assert_eq!(request["params"]["name"], expected_tool_name);
-        // The one-shot call has no `initialize` session; the daemon serves it
-        // over rmcp only because it carries SEP-2575 per-request context.
-        let meta = &request["params"]["_meta"];
-        assert!(
-            meta["io.modelcontextprotocol/protocolVersion"].is_string()
-                && meta["io.modelcontextprotocol/clientCapabilities"].is_object(),
-            "one-shot tools/call omitted its per-request MCP context: {request}"
-        );
-        request_tx
-            .send(request.clone())
-            .expect("send observed JSON-RPC request");
-
-        let response = json!({
-            "jsonrpc": "2.0",
-            "id": request["id"].clone(),
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": sentinel
-                }]
-            }
-        });
-        let mut writer = stream;
-        if emit_notification {
-            let notification = json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/message",
-                "params": {
-                    "level": "warning",
-                    "data": "daemon notice before response"
-                }
-            });
-            writeln!(writer, "{}", serde_json::to_string(&notification).unwrap())
-                .expect("write fake daemon notification");
-        }
-        writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
-            .expect("write fake daemon response");
-    });
-
-    ready_rx
-        .recv_timeout(LOCAL_READY_TIMEOUT)
-        .expect("fake daemon should become ready");
-    request_rx
 }
 
 /// Enroll a project for the native hook capture contract: an enrollment
@@ -1200,50 +1092,6 @@ fn daemon_socket_is_owner_only() {
     );
 }
 
-#[test]
-fn tool_cli_skips_daemon_notifications_until_matching_response() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
-
-    let sentinel = "daemon response after notification";
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let observed_request = spawn_sentinel_daemon_with_notification(
-        socket_path.clone(),
-        "tracedecay_multi_root_scope_set_read",
-        true,
-        false,
-        sentinel,
-        true,
-    );
-    let project_arg = project_path.to_string_lossy().to_string();
-    let output = tracedecay_command_with_home(&home_path)
-        .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["tool", "--project", &project_arg])
-        .args(COMPAT_TOOL_PROBE)
-        .output()
-        .expect("tracedecay tool should run");
-
-    assert!(
-        output.status.success(),
-        "tool CLI should skip daemon notifications before the response\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains(sentinel),
-        "tool CLI should print daemon response after notification, got:\n{stdout}"
-    );
-    observed_request
-        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
-        .expect("fake daemon should receive tools/call request");
-}
-
 /// A retained store tool travels to the profile's daemon as one typed
 /// invocation: the explicit `--project` rides the handshake with first-touch
 /// init allowed, and the decoded request carries the caller's exact fields.
@@ -1692,11 +1540,11 @@ fn daemon_project_handshake_uses_client_profile_identity() {
             common::daemon_socket_path(&daemon_home_path),
         )
         .args(["tool", "--project", &project_arg])
-        .args(COMPAT_TOOL_PROBE)
+        .args(SCOPE_SET_PROBE)
         .output()
         .expect("tracedecay tool multi_root_scope_set_read should run");
 
-    assert_compat_probe_answered(
+    assert_scope_set_probe_answered(
         &output,
         "daemon should open the client's profile-sharded project",
     );
@@ -1878,10 +1726,10 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args(["tool", "--project", &project_arg])
-        .args(COMPAT_TOOL_PROBE)
+        .args(SCOPE_SET_PROBE)
         .output()
         .expect("client A tool multi_root_scope_set_read should run");
-    assert_compat_probe_answered(
+    assert_scope_set_probe_answered(
         &client_a_output,
         "client A should open its initialized project through the shared daemon",
     );
@@ -1890,7 +1738,7 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
         .current_dir(&project_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args(["tool", "--project", &project_arg])
-        .args(COMPAT_TOOL_PROBE)
+        .args(SCOPE_SET_PROBE)
         .output()
         .expect("client B tool multi_root_scope_set_read should run");
     assert!(
@@ -1899,14 +1747,27 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
         String::from_utf8_lossy(&client_b_output.stdout),
         String::from_utf8_lossy(&client_b_output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&client_b_output.stderr);
-    let expected_project_path = project_path.to_string_lossy();
-    let stderr_lower = stderr.to_lowercase();
+    let stdout = String::from_utf8_lossy(&client_b_output.stdout);
+    let result: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+        panic!("client B refusal is not one JSON result ({error}): {stdout}")
+    });
+    let payload: Value = serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("client B refusal carries no text: {result}")),
+    )
+    .expect("client B refusal payload");
+    let problem = &payload["application"]["problem"];
+    assert_eq!(
+        (&result["isError"], &problem["code"]),
+        (&json!(true), &json!("project_not_enrolled")),
+        "client B's profile has not initialized the project, so the shared daemon must refuse it: {result}"
+    );
     assert!(
-        stderr.contains("project route error (project_not_enrolled)")
-            && stderr_lower.contains("no tracedecay index found")
-            && stderr.contains(expected_project_path.as_ref()),
-        "expected client B to fail because its profile has not initialized the project, got:\n{stderr}"
+        problem["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(project_path.to_string_lossy().as_ref())),
+        "the refusal must name the project client B asked for: {result}"
     );
 }
 
@@ -1921,27 +1782,33 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
 
     let missing_socket = socket_dir.path().join("missing.sock");
     let project_arg = project_path.to_string_lossy().to_string();
-    let output = tracedecay_command_with_home(&home_path)
-        .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
-        .args(["tool", "--project", &project_arg])
-        .args(COMPAT_TOOL_PROBE)
-        .output()
-        .expect("tracedecay tool should run");
+    // Every typed `tracedecay tool` route resolves the same socket: a
+    // daemon-owned multi-root read and an owner-served graph tool alike.
+    let status_probe: [&str; 2] = ["status", "--json"];
+    for probe in [&SCOPE_SET_PROBE[..], &status_probe[..]] {
+        let output = tracedecay_command_with_home(&home_path)
+            .current_dir(&project_path)
+            .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+            .args(["tool", "--project", &project_arg])
+            .args(probe)
+            .output()
+            .expect("tracedecay tool should run");
 
-    // Scripted callers (the Pi extension) branch on this typed status rather
-    // than on the error text.
-    assert_eq!(
-        output.status.code(),
-        Some(i32::from(
-            tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
-        ))
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
-        "expected explicit daemon-unavailable error, got:\n{stderr}"
-    );
+        // Scripted callers (the Pi extension) branch on this typed status
+        // rather than on the error text.
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(
+                tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+            )),
+            "{probe:?}: {output:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
+            "{probe:?}: expected explicit daemon-unavailable error, got:\n{stderr}"
+        );
+    }
 }
 
 #[test]
@@ -2688,8 +2555,7 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
 
 /// A JSON request the daemon refuses because no project is in reach still
 /// prints the typed problem on stdout, and the process exits non-zero, on
-/// the owner-answered route (`search`) and the compatibility route
-/// (`multi_root_scope_set_read`) alike.
+/// the owner-answered `search` and the daemon-owned multi-root read alike.
 #[test]
 fn projectless_json_tool_call_prints_the_typed_refusal() {
     let home = TempDir::new().unwrap();
@@ -2739,22 +2605,35 @@ fn projectless_json_tool_call_prints_the_typed_refusal() {
          inside an initialized project or pass --project <path>"
     );
 
-    let compat = run(&[
+    let multi_root = run(&[
         "multi_root_scope_set_read",
         "--scope-set-id",
         "scope-set.absent",
         "--json",
     ]);
+    let payload: Value = serde_json::from_str(
+        multi_root["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("multi-root refusal carries no text: {multi_root}")),
+    )
+    .expect("multi-root refusal payload");
+    let problem = &payload["application"]["problem"];
     assert_eq!(
-        compat,
-        json!({"problem": {
-            "tool": "tracedecay_multi_root_scope_set_read",
-            "kind": "invalid_request",
-            "code": "project_required",
-            "reason_code": "project_required",
-            "retryable": false,
-            "detail": "tracedecay_multi_root_scope_set_read requires an initialized code \
-                       project; run it inside an initialized project or pass --project <path>",
-        }})
+        (
+            &multi_root["isError"],
+            &problem["kind"],
+            &problem["code"],
+            &problem["message"],
+        ),
+        (
+            &json!(true),
+            &json!("invalid_request"),
+            &json!("project_required"),
+            &json!(
+                "this operation needs a TraceDecay project, and the request named none; run \
+                 it inside an initialized project or pass --project <path>"
+            ),
+        ),
+        "{multi_root}"
     );
 }
