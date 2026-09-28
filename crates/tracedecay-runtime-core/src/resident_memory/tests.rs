@@ -490,6 +490,7 @@ fn additional_reservations_share_identity_but_charge_and_release_independently()
                 Some(ProcessResidentSampleV1 {
                     resident_bytes: 0,
                     unreclaimable_bytes: 0,
+                    swapped_bytes: 0,
                     cgroup_committed_bytes: None,
                 })
             }),
@@ -1136,14 +1137,22 @@ fn allocator_release_runs_the_installed_allocator_release() {
 #[test]
 fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
     let status = "Name:\ttracedecay\nVmHWM:\t 6553600 kB\nVmRSS:\t 3355444 kB\n\
-                  RssAnon:\t 2528172 kB\nRssFile:\t  807272 kB\nRssShmem:\t   20000 kB\n";
+                  RssAnon:\t 2528172 kB\nRssFile:\t  807272 kB\nRssShmem:\t   20000 kB\n\
+                  VmSwap:\t  491520 kB\n";
+    let sample = super::process_resident_sample_from_status_v1(status);
     assert_eq!(
-        super::process_resident_sample_from_status_v1(status),
+        sample,
         Some(super::ProcessResidentSampleV1 {
             resident_bytes: 3_355_444 * 1024,
             unreclaimable_bytes: 2_548_172 * 1024,
+            swapped_bytes: 491_520 * 1024,
             cgroup_committed_bytes: None,
         })
+    );
+    assert_eq!(
+        sample.map(super::ProcessResidentSampleV1::admission_bytes),
+        Some((2_548_172 + 491_520) * 1024),
+        "swapped anonymous pages are the daemon's heap and count toward admission"
     );
     assert_eq!(
         super::process_resident_sample_from_status_v1("VmRSS:\t 1024 kB\n"),
@@ -1173,6 +1182,7 @@ fn cgroup_committed_bytes_refuse_growth_that_unreclaimable_bytes_would_admit() {
         let sample = Arc::new(Mutex::new(super::ProcessResidentSampleV1 {
             resident_bytes: 10,
             unreclaimable_bytes: 10,
+            swapped_bytes: 0,
             cgroup_committed_bytes: committed,
         }));
         let sampled = Arc::clone(&sample);
@@ -1206,5 +1216,71 @@ fn cgroup_committed_bytes_refuse_growth_that_unreclaimable_bytes_would_admit() {
     assert!(
         decide("max\n", 0).is_ok(),
         "an unlimited cgroup does not treat memory.current as a kill line"
+    );
+}
+
+/// A daemon the kernel swaps under its cgroup ceiling has small resident
+/// counters and large live heap. Both the process sample and the cgroup's
+/// committed figure count those pages, so admission is refused.
+#[test]
+fn admission_counts_swapped_anonymous_pages() {
+    let limit_bytes = 100 * 1024 * 1024;
+    let limit = bytes(limit_bytes);
+    let admit = |sample: super::ProcessResidentSampleV1| {
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(move || Some(sample)),
+        ));
+        pressure.sample_and_publish();
+        Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure)).reserve(
+            key(
+                "project-a",
+                "worktree-a",
+                "generation-a",
+                "code-index-worker",
+            ),
+            bytes(32 * 1024 * 1024),
+        )
+    };
+    let resident = 40 * 1024 * 1024;
+    let status = format!(
+        "VmRSS:\t {} kB\nRssAnon:\t {} kB\nRssFile:\t 0 kB\nRssShmem:\t 0 kB\nVmSwap:\t {} kB\n",
+        resident / 1024,
+        resident / 1024,
+        resident / 1024,
+    );
+    let swapped = super::process_resident_sample_from_status_v1(&status).expect("status sample");
+    assert_eq!(
+        admit(swapped).err(),
+        Some(ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
+            observed_bytes: 80 * 1024 * 1024,
+            limit_bytes,
+            high_watermark_bytes: 90 * 1024 * 1024,
+            requested_bytes: 32 * 1024 * 1024,
+            floor_bytes: super::RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
+        })
+    );
+    assert!(
+        admit(super::ProcessResidentSampleV1 {
+            swapped_bytes: 0,
+            ..swapped
+        })
+        .is_ok(),
+        "the same resident set without swap leaves room for the request"
+    );
+
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("0::/trace.slice/daemon.scope\n"),
+        Some(&format!("{limit_bytes}\n")),
+        None,
+    );
+    let cgroup = cgroup_root.join("trace.slice/daemon.scope");
+    fs::write(cgroup.join("memory.current"), format!("{resident}\n")).expect("current");
+    fs::write(cgroup.join("memory.stat"), "inactive_file 0\n").expect("stat");
+    fs::write(cgroup.join("memory.swap.current"), format!("{resident}\n")).expect("swap");
+    assert_eq!(
+        super::cgroup_committed_bytes_v1(&proc_self_cgroup, &cgroup_root),
+        Some(2 * resident),
+        "the cgroup's swapped pages are committed to it"
     );
 }
