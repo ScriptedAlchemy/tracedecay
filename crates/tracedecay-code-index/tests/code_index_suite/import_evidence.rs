@@ -903,6 +903,62 @@ fn ruby_receiver_call_of_the_same_name_is_not_recursion() {
 }
 
 #[test]
+fn rust_calls_inside_macro_arguments_bind_like_calls_outside_them() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.macro.main",
+            "crates/app/src/main.rs",
+            "mod legacy;\nmod math;\nmod util;\n\nfn total() -> i64 { 0 }\n\nfn main() {\n    let store = util::Store;\n    println!(\"{} {}\", math::fact(5), util::normalize(\"x\"));\n    assert_eq!(store.total(), 0);\n}\n",
+        ),
+        (
+            "file.macro.math",
+            "crates/app/src/math.rs",
+            "pub fn fact(n: u64) -> u64 { n }\n",
+        ),
+        (
+            "file.macro.util",
+            "crates/app/src/util.rs",
+            "pub struct Store;\nimpl Store {\n    pub fn total(&self) -> i64 { 0 }\n}\npub fn normalize(s: &str) -> String { s.to_owned() }\n",
+        ),
+        (
+            "file.macro.legacy",
+            "crates/app/src/legacy.rs",
+            "pub fn normalize(s: &str) -> String { s.to_owned() }\n",
+        ),
+    ]);
+    let main = symbol_occurrence(&generation, "crates/app/src/main.rs::main");
+    let calls_from_main = |qualified_name: &str| {
+        let target = symbol_occurrence(&generation, qualified_name);
+        generation.edges().iter().any(|edge| {
+            edge.from_occurrence == main
+                && edge.to_occurrence == target
+                && edge.kind == RelationEdgeKindV1::Calls
+        })
+    };
+
+    assert_resolved_edge(
+        &generation,
+        &main,
+        &symbol_occurrence(&generation, "crates/app/src/math.rs::fact"),
+        RelationEdgeKindV1::Calls,
+    );
+    assert_resolved_edge(
+        &generation,
+        &main,
+        &symbol_occurrence(&generation, "crates/app/src/util.rs::normalize"),
+        RelationEdgeKindV1::Calls,
+    );
+    assert!(
+        !calls_from_main("crates/app/src/legacy.rs::normalize"),
+        "`util::normalize` names its module, not the same-named legacy function"
+    );
+    assert!(
+        !calls_from_main("crates/app/src/main.rs::total"),
+        "`store.total()` is a receiver call, not the same-file `total`"
+    );
+}
+
+#[test]
 fn rust_parent_glob_does_not_override_a_local_type_binding() {
     let generation = published_rust_workspace(&[
         (
