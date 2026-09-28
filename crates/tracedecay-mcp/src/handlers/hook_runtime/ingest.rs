@@ -543,7 +543,6 @@ pub(super) async fn ingest_transcript(
     request: &HookIngestTranscriptRequestV1,
     profile_root: Option<&Path>,
     global_db: Option<&RegisteredGlobalDb>,
-    accounting_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<HookIngestTranscriptResultV1> {
     let cancellation = ObservationCancellation::default();
@@ -682,7 +681,7 @@ pub(super) async fn ingest_transcript(
             }),
             Some(Ok(sources)) => hotpath::future!(
                 tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
-                    accounting_db,
+                    global_db,
                     session_authorities.project.map(std::convert::AsRef::as_ref),
                     sources,
                     cg.project_root(),
