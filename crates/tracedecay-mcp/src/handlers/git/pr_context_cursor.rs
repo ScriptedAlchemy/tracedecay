@@ -182,13 +182,14 @@ pub(super) fn pr_context_request_binding(
 fn pr_context_cursor_refusal(error: &CursorError) -> TraceDecayError {
     let (reason_code, detail) = match error {
         CursorError::Binding(mismatch) => return crate::tool_errors::cursor_refusal(mismatch),
-        CursorError::Malformed | CursorError::Tampered => {
+        CursorError::Malformed => {
             return crate::tool_errors::cursor_refusal(&CursorBindingMismatchV1::Foreign);
         }
         // Authentication and binding failures: the cursor verifies as some
         // other request's, or as nobody's. Either way this request may not
         // continue from it.
-        CursorError::KeyIdMismatch
+        CursorError::Tampered
+        | CursorError::KeyIdMismatch
         | CursorError::KeyVersionMismatch
         | CursorError::UnknownOrExpiredKey
         | CursorError::InvalidKeyMaterial

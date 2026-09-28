@@ -374,13 +374,7 @@ fn a_callers_cursor_pages_only_the_node_and_operation_it_was_minted_for() {
     initialize_tracedecay_cli_project(&home, &project);
     let target_a = node_id(&home, &project, "target_a");
     let target_b = node_id(&home, &project, "target_b");
-    let callers = |node: &str, cursor: Option<&str>| {
-        let mut args = json!({"node_id": node, "maximum_depth": 1});
-        if let Some(cursor) = cursor {
-            args["meta"] = json!({"cursor": cursor});
-        }
-        args
-    };
+    let callers = |node: &str, cursor: Option<&str>| callees_args(node, cursor);
 
     let (ok, first) = tool(
         &home,
@@ -419,7 +413,9 @@ fn a_callers_cursor_pages_only_the_node_and_operation_it_was_minted_for() {
         &home,
         &project,
         "tracedecay_callers",
-        &json!({"node_id": target_a, "maximum_depth": 2, "meta": {"cursor": cursor}}),
+        &json!({"node_id": target_a, "maximum_depth": 2, "meta": {
+            "projection": "evidence", "order": "source_position", "cursor": cursor,
+        }}),
     );
     assert_eq!(
         refusal_of("tracedecay_callers", &deeper)["message"],
