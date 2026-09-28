@@ -12,6 +12,7 @@ pub use application_surface::{
     retained_tool_target, run_retained_surface_tool,
 };
 pub(crate) use dispatch_groups::compute_graph_tool_for_owner;
+pub use support::{registered_project_not_found, registered_project_selector_id};
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

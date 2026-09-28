@@ -1148,6 +1148,23 @@ fn validate_host_bundle_options(
         }
         return Ok(());
     }
+    // `sessions git-sync` takes the global `--dry-run` as its preview; it
+    // needs no confirmation and owns no host component.
+    if matches!(
+        command,
+        Commands::Sessions {
+            action: SessionsAction::GitSync { .. },
+        }
+    ) {
+        if host_bundle.component.is_some() || host_bundle.yes || host_bundle.adopt {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "sessions git-sync accepts --dry-run to preview; --component, --yes, and \
+                          --adopt are only valid with install, update-plugin, reinstall, or uninstall"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    }
     // The scoped storage reset destroys refused store state, so it REQUIRES
     // the same `--yes` confirmation (its handler refuses to run without it).
     // Like `wipe`, it owns no host component and has no preview.
@@ -1234,7 +1251,7 @@ async fn dispatch_command(
         }
         CommandFamily::Diagnostics => dispatch_diagnostics_command(profile, command).await,
         CommandFamily::Knowledge => {
-            dispatch_knowledge_command(profile, command).await?;
+            dispatch_knowledge_command(profile, command, host_bundle.dry_run).await?;
             Ok(CommandOutcome::Success)
         }
     }
@@ -1950,13 +1967,14 @@ async fn dispatch_diagnostics_command(
 async fn dispatch_knowledge_command(
     profile: &ProfileRoot,
     command: Commands,
+    dry_run: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::Git { action } => {
             git_cmd::handle_git_action(profile, action).await?;
         }
         Commands::Sessions { action } => {
-            sessions_cmd::handle_sessions_action(profile, action).await?;
+            sessions_cmd::handle_sessions_action(profile, action, dry_run).await?;
         }
         Commands::Analytics { action } => match action {
             AnalyticsAction::Diagnostics { all, no_sync } => {

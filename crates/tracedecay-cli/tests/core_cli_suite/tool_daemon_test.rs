@@ -308,12 +308,12 @@ fn init_project_with_cli(home: &Path, project: &Path) {
 /// whose subject is one of those authorities need the repository, or they only
 /// ever observe the degraded open.
 fn init_committed_git_project_with_cli(home: &Path, project: &Path) {
+    init_committed_git_project_with_source(home, project, "pub fn answer() -> u32 { 42 }\n");
+}
+
+fn init_committed_git_project_with_source(home: &Path, project: &Path, lib_rs: &str) {
     std::fs::create_dir_all(project.join("src")).unwrap();
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn answer() -> u32 { 42 }\n",
-    )
-    .unwrap();
+    std::fs::write(project.join("src/lib.rs"), lib_rs).unwrap();
     git(project, &["init", "-b", "main"]);
     git(project, &["add", "."]);
     git(
@@ -1176,6 +1176,66 @@ fn live_tool_json(home: &Path, cwd: &Path, tool: &str, args: Value) -> (bool, Va
         None => printed,
     };
     (output.status.success(), body)
+}
+
+/// A graph reader's `project_selector` answers from that exact registered
+/// project, not the project the CLI runs in, and an unknown selector is the
+/// typed not-found refusal with a failing exit.
+#[test]
+fn graph_tool_project_selector_answers_from_the_selected_registered_project() {
+    let home = TempDir::new().unwrap();
+    let active = TempDir::new().unwrap();
+    let other = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let active_path = canonical_existing_path(active.path());
+    let other_path = canonical_existing_path(other.path());
+    init_committed_git_project_with_cli(&home_path, &active_path);
+    init_committed_git_project_with_source(
+        &home_path,
+        &other_path,
+        "pub const OTHER_MARKER: u32 = 7;\n",
+    );
+    let other_id = default_profile_project_id(&other_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let grep = |selector: Option<&str>| {
+        let mut args = json!({ "pattern": "OTHER_MARKER", "fixed_strings": true });
+        if let Some(project_id) = selector {
+            args["project_selector"] = json!({ "project_id": project_id });
+        }
+        live_tool_json(&home_path, &active_path, "grep", args)
+    };
+
+    let (ok, body) = grep(None);
+    assert!(ok, "{body}");
+    assert_eq!(body["match_count"], 0, "{body}");
+
+    let (ok, body) = grep(Some(&other_id));
+    assert!(ok, "{body}");
+    assert_eq!(body["match_count"], 1, "{body}");
+    assert_eq!(body["results"][0]["file"], "src/lib.rs", "{body}");
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&active_path)
+        .args([
+            "tool",
+            "grep",
+            "--args",
+            &json!({
+                "pattern": "OTHER_MARKER",
+                "project_selector": { "project_id": "proj_unregistered" }
+            })
+            .to_string(),
+        ])
+        .output()
+        .expect("tracedecay tool should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(
+            "project route error (project_route_not_found): registered project not found for project_selector.project_id=proj_unregistered"
+        ),
+        "{stderr}"
+    );
 }
 
 /// Retained memory and LCM calls answer through the daemon's typed owner on

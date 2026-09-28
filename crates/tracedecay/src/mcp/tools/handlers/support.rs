@@ -29,6 +29,36 @@ pub(super) async fn registered_project_context(
     args: &Value,
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Result<Option<ProjectRegistryContext>> {
+    let Some(project_id) = registered_project_selector_id(args)? else {
+        return Ok(None);
+    };
+    let db = global_db.ok_or_else(|| {
+        TraceDecayError::project_route(
+            "project_route_not_authorized",
+            false,
+            "client project registry is unavailable for selector resolution",
+        )
+    })?;
+    db.project_registry_context_by_id(project_id)
+        .await?
+        .map(Some)
+        .ok_or_else(|| registered_project_not_found(project_id))
+}
+
+/// The refusal for a `project_selector.project_id` no registered project has.
+pub fn registered_project_not_found(project_id: &str) -> TraceDecayError {
+    TraceDecayError::project_route(
+        "project_route_not_found",
+        false,
+        format!(
+            "registered project not found for project_selector.project_id={project_id}; run tracedecay_project_search"
+        ),
+    )
+}
+
+/// The exact project id a registered-project reader's `project_selector`
+/// names, or `None` when the call carries no selector.
+pub fn registered_project_selector_id(args: &Value) -> Result<Option<&str>> {
     validate_registered_project_selector_aliases(args)?;
     let Some(selector_value) = args.get("project_selector") else {
         return Ok(None);
@@ -51,23 +81,5 @@ pub(super) async fn registered_project_context(
                 "project_selector.project_id must be a non-empty string",
             )
         })?;
-    let db = global_db.ok_or_else(|| {
-        TraceDecayError::project_route(
-            "project_route_not_authorized",
-            false,
-            "client project registry is unavailable for selector resolution",
-        )
-    })?;
-    db.project_registry_context_by_id(project_id)
-        .await?
-        .map(Some)
-        .ok_or_else(|| {
-            TraceDecayError::project_route(
-                "project_route_not_found",
-                false,
-                format!(
-                    "registered project not found for project_selector.project_id={project_id}; run tracedecay_project_search"
-                ),
-            )
-        })
+    Ok(Some(project_id))
 }

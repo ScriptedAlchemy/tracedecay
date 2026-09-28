@@ -154,6 +154,41 @@ fn project_path_flags_resolve_a_relative_path_from_inside_the_project() {
     );
 }
 
+/// `sessions git-sync --dry-run` reaches the daemon's git sync as a preview;
+/// the global `--dry-run` scope check must not refuse it.
+#[test]
+fn sessions_git_sync_dry_run_previews_through_the_daemon() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn synced_marker() {}\n");
+    let dry_run_line = "git-sync (dry-run): no rows were written";
+
+    for (args, previews) in [
+        (&["sessions", "git-sync", "--dry-run"][..], true),
+        (&["sessions", "git-sync"][..], false),
+    ] {
+        let output = tracedecay_command_with_home(&home_path)
+            .current_dir(&project_path)
+            .args(args)
+            .output()
+            .expect("tracedecay sessions git-sync should run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{args:?} should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.starts_with("session git sync completed (session-sync."),
+            "{args:?}\nstdout:\n{stdout}"
+        );
+        assert_eq!(
+            stdout.lines().any(|line| line == dry_run_line),
+            previews,
+            "{args:?}\nstdout:\n{stdout}"
+        );
+    }
+}
+
 #[test]
 fn daemon_tool_search_discloses_configured_alias_recovery() {
     let (_home, _project, home_path, project_path) = setup_daemon_project("pub fn cache() {}\n");
