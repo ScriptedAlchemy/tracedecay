@@ -598,9 +598,16 @@ mod projectless_admission_tests {
         let missing = temp.path().join("never-created").join(".tracedecay");
         let client = DaemonClientIdentity::new(missing.clone(), missing.join("global.db"));
 
+        let Err(error) = admit_projectless_connection(&client, &administration) else {
+            panic!("a profile root that resolves to nothing must stay refused")
+        };
         assert!(
-            admit_projectless_connection(&client, &administration).is_err(),
-            "a profile root that resolves to nothing must stay refused"
+            matches!(
+                &error,
+                TraceDecayError::Config { message }
+                    if message == "projectless connection profile does not match its authenticated identity"
+            ),
+            "unexpected refusal: {error:?}"
         );
     }
 

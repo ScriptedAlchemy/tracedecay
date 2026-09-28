@@ -176,6 +176,10 @@ fn extracts_fenced_json_with_nested_markdown_fence_in_string() {
 
 #[test]
 fn rejects_non_object_and_prefix_text() {
+    assert_eq!(
+        extract_json_object_prefix(r#"{"ok":true}"#).unwrap(),
+        json!({"ok": true})
+    );
     for text in [r#"[{"ok":true}]"#, r#"prefix {"ok":true}"#] {
         assert!(
             extract_json_object_prefix(text).is_err(),

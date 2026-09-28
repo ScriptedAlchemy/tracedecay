@@ -267,15 +267,17 @@ async fn parent_message_linkage_copy_proof_requires_exact_parent_id() {
         source_occurrence_id: first.occurrence_id.clone(),
         parent_message_id: MessageId::new("message.temporal.forged").unwrap(),
     };
-    assert!(
-        store
-            .persist_session_temporal_projection_batch(
-                batch(&session_id, 2, 2, vec![], vec![mismatched], vec![])
-                    .with_checkpoint(1, 2, 2)
-                    .unwrap(),
-            )
-            .await
-            .is_err()
+    let error = store
+        .persist_session_temporal_projection_batch(
+            batch(&session_id, 2, 2, vec![], vec![mismatched], vec![])
+                .with_checkpoint(1, 2, 2)
+                .unwrap(),
+        )
+        .await
+        .expect_err("a forged parent message id must not prove linkage");
+    assert_eq!(
+        error.to_string(),
+        "session-temporal storage operation persist session temporal projection batch failed: copy proof is not supported by retained provider, parent-message, or CopiedFrom anchor evidence"
     );
 
     store
