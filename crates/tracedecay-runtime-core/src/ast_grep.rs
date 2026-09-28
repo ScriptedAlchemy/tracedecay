@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const AST_GREP_BIN_ENV: &str = "TRACEDECAY_AST_GREP_BIN";
+/// Names the ast-grep executable explicitly, ahead of `PATH` lookup.
+pub const AST_GREP_BIN_ENV: &str = "TRACEDECAY_AST_GREP_BIN";
 
 pub fn ast_grep_command() -> Command {
     Command::new(resolve_ast_grep_bin())
