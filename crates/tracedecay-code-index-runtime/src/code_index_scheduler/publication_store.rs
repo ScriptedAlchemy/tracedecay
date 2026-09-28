@@ -156,11 +156,13 @@ impl SharedCodeIndexBytePoolV1 {
 /// every unpinned query and must not be evictable by cursor traffic over
 /// superseded generations.
 pub(super) const DECODED_GENERATION_CACHE_CAPACITY: usize = 4;
-/// The exact detail a `try_acquire_code_generation_store_lock` refusal carries.
+/// The exact detail a contended store-lock refusal carries, exclusive or
+/// shared.
 ///
-/// The store lock is a bounded shared resource: a concurrent publication in
-/// the same store root holds it and releases it on its own. Both the producer
-/// below and
+/// The store lock is a bounded shared resource: a concurrent publication or
+/// retention pass in the same store root holds it and releases it on its own,
+/// and a shared reader is refused only while such a writer holds it. Every
+/// producer of that refusal and
 /// [`CodeIndexSchedulerErrorV1::is_transient_capacity_failure`] read this one
 /// token, so the retry classification cannot drift from the refusal it names.
 pub(super) const CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1: &str =
@@ -1089,7 +1091,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
         try_acquire_code_generation_store_read_lock(store_root)
             .map_err(Self::unavailable)?
-            .ok_or_else(|| Self::unavailable("generation store read lock is contended"))
+            .ok_or_else(|| Self::unavailable(CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1))
     }
 
     /// Only this scope's temporaries: the store lock held by the caller proves
