@@ -26,17 +26,7 @@ impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
         authority: &WorkAuthority,
         write: &WorkDuplicateAdjudicationWriteV1,
     ) -> Result<WorkDuplicateAdjudicationAppendOutcomeV1, StorageError> {
-        if &write.actor_id != authority.actor_id()
-            || write.command.validate().is_err()
-            || write.command.clone().canonicalized() != write.command
-        {
-            return Err(StorageError::NotFoundOrNotAuthorized);
-        }
-        let canonical_input_digest = work_duplicate_adjudication_input_digest(&write.command)
-            .map_err(|_| StorageError::Unavailable)?;
-        if canonical_input_digest != write.canonical_input_digest {
-            return Err(StorageError::IdempotencyConflict);
-        }
+        admit_write(authority, write)?;
         let relation_digest = write
             .command
             .relation_ref(authority)
@@ -173,6 +163,24 @@ impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
         .map_err(|_| StorageError::Unavailable)?;
         current_adjudication(self.handle(), authority, relation_ref.as_str())
     }
+}
+
+fn admit_write(
+    authority: &WorkAuthority,
+    write: &WorkDuplicateAdjudicationWriteV1,
+) -> Result<(), StorageError> {
+    if &write.actor_id != authority.actor_id()
+        || write.command.validate().is_err()
+        || write.command.clone().canonicalized() != write.command
+    {
+        return Err(StorageError::NotFoundOrNotAuthorized);
+    }
+    let canonical_input_digest = work_duplicate_adjudication_input_digest(&write.command)
+        .map_err(|_| StorageError::Unavailable)?;
+    if canonical_input_digest != write.canonical_input_digest {
+        return Err(StorageError::IdempotencyConflict);
+    }
+    Ok(())
 }
 
 fn replay_by_command(
