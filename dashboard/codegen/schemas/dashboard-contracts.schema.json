@@ -17777,6 +17777,17 @@
             "null"
           ]
         },
+        "superseded_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present only when a newer fact replaced this one; such a fact stays\nreadable by id but leaves current list and search reads."
+        },
         "tags": {
           "items": {
             "type": "string"
