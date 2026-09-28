@@ -1137,6 +1137,66 @@ mod goal_event_tests {
         );
     }
 
+    /// An out-of-project rollout inside the day being admitted does not end
+    /// the pass. On a profile that interleaves projects, ending there admits a
+    /// few rollouts per pass and rediscovers the same page each time.
+    #[tokio::test]
+    async fn a_mixed_day_is_admitted_in_one_pass_before_older_days_are_opened() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        for (session_id, cwd) in [
+            ("mixed-a", &project),
+            ("mixed-m", &other),
+            ("mixed-z", &project),
+        ] {
+            write_scoped_rollout(&home, "2026", "08", "29", session_id, cwd, "mixed day");
+        }
+        write_scoped_rollout(&home, "2026", "08", "28", "older-x", &other, "older day");
+
+        let project_id = ProjectId::new("project-mixed-day").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let outcome = with_transcript_source_profile(
+            tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+            ProjectProviderRun {
+                project_root: &project,
+                project_id: &project_id,
+                facade: &admission,
+                scope: &scope,
+                candidate: SessionProvider::Codex,
+                max_new_bytes: u64::MAX,
+                cancellation: &ObservationCancellation::default(),
+                codex_discovery: None,
+            }
+            .run_codex(),
+        )
+        .await;
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            ["mixed-a".to_owned(), "mixed-z".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        let older = crate::runtime::hosts::codex::codex_observation_source_v2("older-x").unwrap();
+        assert!(
+            admission
+                .get_source_cursor(&older, &scope)
+                .await
+                .unwrap()
+                .is_none(),
+            "the older out-of-project day belongs to the next pass"
+        );
+    }
+
     fn write_scoped_rollout(
         home: &std::path::Path,
         year: &str,

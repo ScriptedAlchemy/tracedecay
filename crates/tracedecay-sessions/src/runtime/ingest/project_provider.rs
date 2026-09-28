@@ -8,7 +8,7 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use crate::runtime::shared::TranscriptIngestStats;
+use crate::runtime::shared::{ProjectMembership, TranscriptIngestStats};
 use crate::runtime::source::{
     HostCoverageReason, HostProviderCoverage, TranscriptDiscoveryBounds,
     persist_codex_history_frontier, persist_host_provider_coverage, read_codex_history_frontier,
@@ -262,11 +262,12 @@ impl<'a> ProjectProviderRun<'a> {
         let mut remaining = self.max_new_bytes;
         let mut deferred = discovery.is_truncated();
         let mut frontier_committable = true;
-        // A Codex day directory is one publication window. Out-of-scope
-        // rollouts consume no byte budget, so a newest-first page would
-        // otherwise write a cursor for every older day before the admitted day
-        // is projected into search. Once a day has persisted in-scope frames,
-        // the next day belongs to the next pass.
+        // Out-of-scope rollouts consume no byte budget, so a newest-first page
+        // would otherwise write a cursor for every older out-of-scope day
+        // before the admitted window is projected into search. Once in-scope
+        // frames persisted, a day directory that opens out of scope belongs to
+        // the next pass. In-scope days and mixed days keep the pass going, so
+        // a project whose history is all in scope still commits its frontier.
         let mut persisted_day: Option<&Path> = None;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         for path in &discovery.paths {
@@ -280,7 +281,12 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            if persisted_day.is_some_and(|day| path.parent() != Some(day)) {
+            if persisted_day.is_some_and(|day| path.parent() != Some(day))
+                && run_blocking_transcript_section(|| {
+                    codex::codex_rollout_project_membership(path, self.project_root)
+                        == Some(ProjectMembership::NoMatch)
+                })
+            {
                 deferred = true;
                 frontier_committable = false;
                 break;
