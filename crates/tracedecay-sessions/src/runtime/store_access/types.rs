@@ -32,6 +32,10 @@ pub struct SessionProviderCoverage {
     pub provider: String,
     pub state: SessionProviderCoverageState,
     pub deferred_units: u64,
+    /// Stable refusal name when `state` is unavailable. Absent once a sweep
+    /// can read its source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]

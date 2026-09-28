@@ -771,3 +771,319 @@ async fn durable_sql_frontier_reaches_rows_beyond_a_poisoned_pass_after_restart(
             .contains("fair-restart")
     }));
 }
+
+#[tokio::test]
+async fn oversized_opencode_database_admits_its_project_session() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project.clone());
+    let admission = MemoryHostAdmission::default();
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    let writer = Connection::open(&database).unwrap();
+    writer
+        .execute(
+            "INSERT INTO session(id, directory) VALUES ('ses_large', ?1)",
+            [project.to_string_lossy()],
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO message(id, session_id, time_created, data)
+             VALUES ('msg_large', 'ses_large', 4, ?1)",
+            [json!({"role": "user", "time": {"created": 4}}).to_string()],
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO part(id, message_id, session_id, data)
+             VALUES ('part_large', 'msg_large', 'ses_large', ?1)",
+            [json!({"type": "text", "text": "oversized-db-visible"}).to_string()],
+        )
+        .unwrap();
+    drop(writer);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&database)
+        .unwrap();
+    file.set_len(560 * 1024 * 1024).unwrap();
+    drop(file);
+    assert!(std::fs::metadata(&database).unwrap().len() > 512 * 1024 * 1024);
+
+    let outcome = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let coverage = admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://opencode/v1")
+        .await
+        .unwrap()
+        .unwrap();
+    let admitted = admission.observations().iter().any(|stored| {
+        stored.observation().source().session_id().as_str() == "ses_large"
+            && stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("oversized-db-visible")
+    });
+    assert!(
+        admitted,
+        "oversized OpenCode database must admit ses_large; admitted={admitted} coverage_file_id={} deferred_units={} messages_upserted={}",
+        coverage.file_id, coverage.byte_offset, outcome.stats.messages_upserted
+    );
+    assert_eq!(
+        crate::runtime::source::HostProviderCoverage::from_file_id(coverage.file_id),
+        Some(crate::runtime::source::HostProviderCoverage::Complete)
+    );
+    assert_eq!(coverage.byte_offset, 0);
+}
+
+#[tokio::test]
+async fn missing_opencode_database_names_its_coverage_reason() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = OpenCodeSource::with_database_for_project(
+        temp.path().join("missing-opencode.db"),
+        temp.path().join("project"),
+    );
+    let admission = MemoryHostAdmission::default();
+
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    let coverage = admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://opencode/v1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        crate::runtime::source::HostProviderCoverage::from_file_id(coverage.file_id),
+        Some(crate::runtime::source::HostProviderCoverage::Unavailable)
+    );
+    assert_eq!(
+        crate::runtime::source::HostProviderCoverage::coverage_reason_name(coverage.file_id),
+        Some("database_missing")
+    );
+}
+
+#[tokio::test]
+async fn wal_reuse_updates_existing_parts_without_changing_file_headers() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project);
+    let writer = Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    for index in 0..3 {
+        writer
+            .execute(
+                "INSERT INTO message(id, session_id, time_created, data)
+             VALUES (?1, 'ses_project', 2, ?2)",
+                rusqlite::params![
+                    format!("unchanged-{index}"),
+                    json!({"role": "user"}).to_string()
+                ],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data)
+             VALUES (?1, ?1, 'ses_project', ?2)",
+                rusqlite::params![
+                    format!("unchanged-{index}"),
+                    json!({"type": "text", "text": format!("unchanged sibling {index}")})
+                        .to_string()
+                ],
+            )
+            .unwrap();
+    }
+    let update = |text: &str| {
+        writer
+            .execute(
+                "UPDATE part SET data = ?1 WHERE id = 'part_ses_project'",
+                [json!({"type": "text", "text": text}).to_string()],
+            )
+            .unwrap();
+    };
+    for index in 0..32 {
+        update(&format!("warm-{index}"));
+    }
+    writer
+        .execute_batch("PRAGMA wal_checkpoint(RESTART)")
+        .unwrap();
+    update("first-reused-wal-content");
+    let header = fs::read(&database).unwrap()[..100].to_vec();
+    let wal = database.with_extension("db-wal");
+    let wal_header = fs::read(&wal).unwrap()[..32].to_vec();
+    let wal_len = fs::metadata(&wal).unwrap().len();
+    let admission = MemoryHostAdmission::default();
+    let first = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.stats.messages_upserted, 4);
+    update("second-reused-wal-content");
+    assert_eq!(header, fs::read(&database).unwrap()[..100]);
+    assert_eq!(wal_header, fs::read(&wal).unwrap()[..32]);
+    assert_eq!(wal_len, fs::metadata(&wal).unwrap().len());
+    let updated = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.stats.messages_upserted, 1);
+    assert!(admission.observations().iter().any(|stored| {
+        stored
+            .observation()
+            .payload()
+            .to_string()
+            .contains("second-reused-wal-content")
+    }));
+    let calls_before = admission.capture_call_counts();
+    let unchanged = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unchanged.stats.messages_upserted, 0);
+    let calls_after = admission.capture_call_counts();
+    assert_eq!(calls_after.0 - calls_before.0, 0, "no scalar fallback");
+    assert!(
+        calls_after.1 - calls_before.1 <= 1,
+        "unchanged siblings share one admission window"
+    );
+}
+
+#[tokio::test]
+async fn retained_read_snapshot_keeps_reference_scope_and_payload_together() {
+    use super::{
+        OpenCodePageCursor, OpenCodeScanKind, OpenCodeScanSource, OpenCodeSourceScope,
+        materialize_reference_page, scan_reference_page,
+    };
+    use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+    use crate::runtime::hosts::opencode_snapshot::{OpenedOpenCodeDatabase, open_database};
+    let (_temp, project, database) = fixture();
+    let writer = Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    let budget = HostScanBudget::new(
+        1024 * 1024,
+        100,
+        std::time::Instant::now() + HOST_SCAN_WINDOW,
+        ObservationCancellation::default(),
+    );
+    let (opened, budget) = open_database(database.clone(), budget).await.unwrap();
+    let OpenedOpenCodeDatabase::Ready(reader) = opened else {
+        panic!("read snapshot refused")
+    };
+    let source = OpenCodeScanSource {
+        source_path: database,
+        scope: OpenCodeSourceScope::Project(project),
+    };
+    let (references, budget) = scan_reference_page(
+        reader.reader.connection(),
+        &source,
+        OpenCodeScanKind::Messages,
+        OpenCodePageCursor::default(),
+        budget,
+    )
+    .unwrap();
+    assert_eq!(references.references.len(), 1);
+    // Reuse the selected rowid for another project's payload between the two reads.
+    writer
+        .execute_batch(
+            "BEGIN;
+        DELETE FROM part WHERE session_id = 'ses_project';
+        DELETE FROM message WHERE session_id = 'ses_project';
+        INSERT INTO message(rowid, id, session_id, time_created, data)
+        VALUES (1, 'foreign-replacement', 'ses_other', 2, '{\"role\":\"user\"}');
+        INSERT INTO part(id, message_id, session_id, data)
+        VALUES ('foreign-part', 'foreign-replacement', 'ses_other',
+        '{\"type\":\"text\",\"text\":\"foreign-secret\"}');
+        COMMIT;",
+        )
+        .unwrap();
+    let (page, _) = materialize_reference_page(
+        reader.reader.connection(),
+        &source,
+        references.references,
+        budget,
+    )
+    .unwrap();
+    assert_eq!(page.records.len(), 1);
+    let payload = String::from_utf8(page.records[0].payload.clone()).unwrap();
+    assert!(payload.contains("secret-ses_project"));
+    assert!(!payload.contains("foreign-secret"));
+    assert_eq!(page.records[0].session_id, "ses_project");
+}
+
+#[tokio::test]
+async fn page_snapshot_refuses_a_replaced_database_identity() {
+    use super::{
+        OpenCodePageCursor, OpenCodeScanKind, OpenCodeScanSource, OpenCodeSourceScope,
+        scan_materialized_page,
+    };
+    use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+    use crate::runtime::hosts::opencode_snapshot::{OpenedOpenCodeDatabase, open_database};
+    let (_temp, project, database) = fixture();
+    let (_other_temp, _, replacement) = fixture();
+    let budget = HostScanBudget::new(
+        1024 * 1024,
+        100,
+        std::time::Instant::now() + HOST_SCAN_WINDOW,
+        ObservationCancellation::default(),
+    );
+    let (opened, budget) = open_database(database.clone(), budget).await.unwrap();
+    let OpenedOpenCodeDatabase::Ready(opened) = opened else {
+        panic!("read snapshot refused")
+    };
+    let identity = opened.source_file_identity;
+    drop(opened);
+    fs::remove_file(&database).unwrap();
+    fs::rename(replacement, &database).unwrap();
+    let source = OpenCodeScanSource {
+        source_path: database,
+        scope: OpenCodeSourceScope::Project(project),
+    };
+    assert!(matches!(
+        scan_materialized_page(
+            &source,
+            OpenCodeScanKind::Messages,
+            OpenCodePageCursor::default(),
+            budget,
+            false,
+            identity
+        ),
+        Err(TranscriptIngestError::ScanGenerationChanged { .. })
+    ));
+}

@@ -349,16 +349,19 @@ mod tests {
                     provider: "claude".into(),
                     state: SessionProviderCoverageState::Unavailable,
                     deferred_units: 1,
+                    reason: None,
                 },
                 SessionProviderCoverage {
                     provider: "kimi".into(),
                     state: SessionProviderCoverageState::Complete,
                     deferred_units: 0,
+                    reason: None,
                 },
                 SessionProviderCoverage {
                     provider: "opencode".into(),
                     state: SessionProviderCoverageState::Partial,
                     deferred_units: 3,
+                    reason: None,
                 },
             ]
         );

@@ -1007,6 +1007,7 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         coverage
             .deferred_sessions()
             .max(u64::from(outcome.stats.source_deferred)),
+        None,
     )
     .await?;
     Ok(outcome)
