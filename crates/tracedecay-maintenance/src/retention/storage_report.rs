@@ -40,7 +40,7 @@ use tracedecay_code_index_retention::code_index_generations::{
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME;
 
-use crate::store_maintenance::code_generation_protection;
+use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 
 const GLOBAL_DB_FILENAME: &str = "global.db";
 const PROJECT_CURSOR_PREFIX: &str = "projects:";
@@ -313,6 +313,11 @@ pub struct CodeGenerationRetentionDryRunEntry {
     pub collectable_generation_count: usize,
     pub collectable_generation_bytes: u64,
     pub collectable_generations: Vec<CodeGenerationRetentionGenerationV1>,
+    /// Completed text artifacts no retained generation names, collectable by
+    /// the same pass. An artifact becomes collectable once the generations
+    /// naming it leave the durable index.
+    pub collectable_text_artifact_count: usize,
+    pub collectable_text_artifact_bytes: u64,
     /// Whether every listed generation was proven to match the content digest in
     /// its name. False when the digest scan exceeded its budget and the entry
     /// was produced from metadata alone: the counts and byte totals are exact,
@@ -722,7 +727,7 @@ async fn resolve_retention_protection(
     code_generation_protection(schedulers, global_db, canonical_root)
         .await
         .map(|protection| protection.sources)
-        .map_err(|unavailable| unavailable.reason())
+        .map_err(CodeGenerationProtectionUnavailableV1::reason)
 }
 
 /// Build the same read-only report for one explicitly identified shard without
@@ -884,6 +889,8 @@ fn append_project_report(
         superseded_generation_bytes: plan.superseded_generation_bytes(),
         collectable_generation_count: plan.collectable_generations.len(),
         collectable_generation_bytes: plan.collectable_generation_bytes(),
+        collectable_text_artifact_count: plan.collectable_text_artifact_count(),
+        collectable_text_artifact_bytes: plan.collectable_text_artifact_bytes(),
         collectable_generations: plan.collectable_generations,
         digest_verified: verification == GenerationDigestVerificationV1::Full,
     });
@@ -1836,6 +1843,22 @@ mod tests {
                 &store_root,
                 4,
             );
+        let orphan_text = b"text artifact no retained generation names";
+        let orphan_root =
+            tracedecay_code_index_retention::code_index_generations::code_text_artifacts_root(
+                &store_root,
+            );
+        std::fs::create_dir_all(&orphan_root).unwrap();
+        std::fs::write(
+            orphan_root.join(format!(
+                "text-artifact-{}.bin",
+                tracedecay_domain::canonical_text::encode_lowercase_hex(
+                    &<sha2::Sha256 as sha2::Digest>::digest(orphan_text)
+                )
+            )),
+            orphan_text,
+        )
+        .unwrap();
         let schedulers = crate::store_maintenance::registered_tests::unmounted_scheduler_registry();
 
         let page = build_storage_report_page_from_registered_global_db(
@@ -1875,6 +1898,8 @@ mod tests {
                 .map(|generation| generation.size_bytes)
                 .sum::<u64>()
         );
+        assert_eq!(backlog.collectable_text_artifact_count, 1);
+        assert_eq!(backlog.collectable_text_artifact_bytes, 42);
         assert_eq!(
             page.code_generation_retention_availability[0].state,
             StorageReportAvailabilityState::Available

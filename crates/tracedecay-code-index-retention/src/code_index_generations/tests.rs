@@ -1335,22 +1335,6 @@ fn pad_generation_file(
     }
 }
 
-#[test]
-fn next_retention_plan_batches_every_collectable_generation() {
-    let (store, _generations) = fixture_store(8);
-
-    let plan = prepare_next_code_generation_retention_cancellable(
-        store.path(),
-        &BTreeSet::new(),
-        &|| false,
-        None,
-    )
-    .expect("plan one retention batch");
-
-    assert_eq!(plan.collectable_generations.len(), 7);
-    assert_eq!(plan.superseded_generations.len(), 7);
-}
-
 /// A superseded backlog drains in batch-count passes: one full digest
 /// verification per batch, never one per generation.
 #[test]
@@ -1859,7 +1843,12 @@ fn collectable_maintenance_preparation_escalates_to_full_verification() {
     .expect("prepare collectable retention batch");
 
     assert!(plan.has_collectable_work());
-    assert_eq!(plan.collectable_generations.len(), 7);
+    assert_eq!(plan.superseded_generations.len(), 7);
+    assert_eq!(
+        plan.collectable_generations.len(),
+        7,
+        "one verified plan batches every collectable generation"
+    );
     assert_eq!(plan.verification, GenerationDigestVerificationV1::Full);
 }
 

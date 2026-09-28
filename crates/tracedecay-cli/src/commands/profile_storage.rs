@@ -506,6 +506,12 @@ async fn handle_storage_report(
             retention.collectable_generation_bytes,
             format_bytes(retention.collectable_generation_bytes)
         );
+        println!(
+            "    would delete: {} text artifact(s), {} bytes ({})",
+            retention.collectable_text_artifact_count,
+            retention.collectable_text_artifact_bytes,
+            format_bytes(retention.collectable_text_artifact_bytes)
+        );
         for generation in &retention.collectable_generations {
             println!(
                 "      {}/code-generations-v1/{} ({} bytes, sealed_at_micros={})",

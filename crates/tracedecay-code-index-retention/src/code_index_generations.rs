@@ -95,11 +95,12 @@ use text_artifacts::{
     TEXT_ARTIFACT_RECEIPT_STORE, execute_text_artifact_retention_under_store_lock,
     plan_collectable_text_artifacts_cancellable,
     recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
+    total_text_artifact_bytes,
 };
 #[cfg(test)]
 use text_artifacts::{
     TEXT_ARTIFACT_TRANSACTION_JOURNAL, build_text_artifact_receipt,
-    stage_collectable_text_artifacts, total_text_artifact_bytes,
+    stage_collectable_text_artifacts,
 };
 
 use generation_scan::{read_generation_format_revision, read_generation_metadata};
@@ -619,6 +620,17 @@ impl CodeGenerationRetentionPlanV1 {
     #[must_use]
     pub fn collectable_generation_bytes(&self) -> u64 {
         total_bytes(&self.collectable_generations)
+    }
+
+    /// Unreferenced text artifacts this plan collects.
+    #[must_use]
+    pub fn collectable_text_artifact_count(&self) -> usize {
+        self.collectable_text_artifacts.len()
+    }
+
+    #[must_use]
+    pub fn collectable_text_artifact_bytes(&self) -> u64 {
+        total_text_artifact_bytes(&self.collectable_text_artifacts)
     }
 
     #[must_use]

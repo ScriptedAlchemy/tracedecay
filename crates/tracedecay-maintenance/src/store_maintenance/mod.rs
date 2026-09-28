@@ -14,7 +14,7 @@ use crate::lease::ProjectStoreMaintenanceLeaseV1;
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, CodeGenerationRetentionPlanV1,
-    CodeGenerationRetentionReportV1, code_index_scopes, code_index_store_root,
+    CodeGenerationRetentionReportV1, CodeIndexScopeV1, code_index_scopes, code_index_store_root,
     execute_code_generation_retention_cancellable,
     prepare_next_code_generation_retention_cancellable,
 };
@@ -50,7 +50,7 @@ impl CodeGenerationRetentionOutcomeV1 {
     /// The outcome of two independent passes over one tick: a failure keeps
     /// the retry cadence, and any remaining work keeps the short cadence.
     #[must_use]
-    pub const fn combine(self, other: Self) -> Self {
+    pub const fn with_pass(self, other: Self) -> Self {
         match (self, other) {
             (Self::Failed, _) | (_, Self::Failed) => Self::Failed,
             (Self::MoreWork, _) | (_, Self::MoreWork) => Self::MoreWork,
@@ -490,6 +490,24 @@ pub async fn run_code_generation_retention(
     }
 }
 
+/// The checkout an unmounted scope belongs to, or `None` when the scope is
+/// mounted, no record proves its root (only the primary scope's root is known
+/// without one), or the recorded checkout is gone.
+fn unmounted_scope_root(
+    store: &RegisteredProjectStoreV1,
+    scope: &CodeIndexScopeV1,
+    mounted_store_roots: &BTreeSet<PathBuf>,
+) -> Option<PathBuf> {
+    if mounted_store_roots.contains(&scope.store_root) {
+        return None;
+    }
+    let root = scope.recorded_root.clone().or_else(|| {
+        (scope.store_root == code_index_store_root(&store.data_root, &store.canonical_root))
+            .then(|| store.canonical_root.clone())
+    })?;
+    root.exists().then_some(root)
+}
+
 /// One registered project's profile shard, for a retention pass that runs
 /// whether or not any of its worktrees is mounted in this daemon.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -548,35 +566,26 @@ pub async fn run_registered_code_generation_retention(
         .data_root
         .join(tracedecay_runtime_core::config::DB_FILENAME)
         .with_extension("graph-replay");
-    let primary_store_root = code_index_store_root(&store.data_root, &store.canonical_root);
     let mut outcome = CodeGenerationRetentionOutcomeV1::Complete;
     for scope in scopes {
         if cancellation.is_cancelled() {
             log_code_generation_retention_degraded(observations, "retention_cancelled");
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
-        if mounted_store_roots.contains(&scope.store_root) {
+        let Some(root) = unmounted_scope_root(store, &scope, mounted_store_roots) else {
             continue;
-        }
-        let root = match scope.recorded_root {
-            Some(root) => root,
-            None if scope.store_root == primary_store_root => store.canonical_root.clone(),
-            None => continue,
         };
-        if !root.exists() {
-            continue;
-        }
         let protection = match code_generation_protection(schedulers, profile_database, &root).await
         {
             Ok(protection) => protection,
             Err(unavailable) => {
                 log_code_generation_retention_degraded(observations, unavailable.reason());
-                outcome = outcome.combine(CodeGenerationRetentionOutcomeV1::Failed);
+                outcome = outcome.with_pass(CodeGenerationRetentionOutcomeV1::Failed);
                 continue;
             }
         };
         if graph_replay::replay_pool_is_held(&graph_replay_pool_root) {
-            return outcome.combine(defer_graph_replay_pool_busy(observations, &root));
+            return outcome.with_pass(defer_graph_replay_pool_busy(observations, &root));
         }
         let plan = match plan_collection(
             &scope.store_root,
@@ -590,7 +599,7 @@ pub async fn run_registered_code_generation_retention(
         {
             Ok(plan) => plan,
             Err(failed) => {
-                outcome = outcome.combine(failed);
+                outcome = outcome.with_pass(failed);
                 continue;
             }
         };
@@ -608,10 +617,10 @@ pub async fn run_registered_code_generation_retention(
         .await
         {
             Ok(report) if collection_left_work(&report) => {
-                outcome = outcome.combine(CodeGenerationRetentionOutcomeV1::MoreWork);
+                outcome = outcome.with_pass(CodeGenerationRetentionOutcomeV1::MoreWork);
             }
             Ok(_) => {}
-            Err(failed) => outcome = outcome.combine(failed),
+            Err(failed) => outcome = outcome.with_pass(failed),
         }
     }
     outcome
