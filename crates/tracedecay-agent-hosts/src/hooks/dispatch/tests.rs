@@ -966,3 +966,79 @@ fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
         .expect("publication waits for the live callback instead of failing busy");
     callback.join().unwrap();
 }
+
+/// A hook that fires while the daemon is away spools its event under the
+/// published binding. The daemon republishes that binding when it next opens
+/// the project, and its replay must still commit the queued event.
+#[tokio::test]
+async fn events_spooled_before_a_binding_republication_replay_after_it() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
+    let project = tempfile::tempdir().unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        "proj_hook_binding_republication",
+    )
+    .unwrap();
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &project_root,
+        profile.data_dir(),
+        "proj_hook_binding_republication",
+    )
+    .unwrap();
+    fn republication_scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {
+        Ok(scope("worktree.binding-republication"))
+    }
+    let runtime = HookRuntimeV1 {
+        scope_resolver: republication_scope,
+        ..crate::ports::hook_runtime::crate_test_runtime(profile.clone())
+    };
+    let host = NativeHostIdentityV1::ClaudeCode;
+    let source = tracedecay_hooks::NativeHookCaptureSourceV1::Host(host);
+    let stop = include_str!(
+        "../../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
+    )
+    .as_bytes();
+    let (project_id, worktree_id) =
+        project_and_worktree_locators_for_scope(&scope("worktree.binding-republication"));
+
+    publish_daemon_bindings(&runtime, &layout).unwrap();
+    let observed_at = now_utc();
+    assert_eq!(
+        tracedecay_hooks::capture_native_event_for_replay(
+            &layout.data_root,
+            worktree_id,
+            source,
+            stop,
+            native_capture_material(source, stop, observed_at).unwrap(),
+            observed_at,
+            tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+        ),
+        tracedecay_hooks::NativeHookCaptureOutcomeV1::Captured,
+    );
+
+    std::thread::sleep(Duration::from_millis(2));
+    publish_daemon_bindings(&runtime, &layout).unwrap();
+    let now = now_utc();
+    let binding =
+        tracedecay_hooks::published_hook_scope_binding(&layout.data_root, worktree_id, host, now)
+            .unwrap();
+    let (spool, _) = HookSpoolV1::open(
+        tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host),
+        HookSpoolConfigV1::stock(host),
+        now,
+    )
+    .unwrap();
+    let pass =
+        tracedecay_hooks::drain_host_spool_once(spool, project_id, Some(&binding), now, |_, _| {
+            std::future::ready(tracedecay_hooks::HookReplayAdmissionOutcomeV1::Admitted)
+        })
+        .await;
+
+    assert_eq!(
+        (pass.committed, pass.tombstoned, pass.retained),
+        (1, 0, 0),
+        "the queued Stop must replay, not be tombstoned as stale: {pass:?}"
+    );
+}
