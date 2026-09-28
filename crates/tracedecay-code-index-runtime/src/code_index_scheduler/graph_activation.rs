@@ -15,7 +15,9 @@ use super::{
 use crate::code_graph_seat::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
-use crate::code_index::graph_projection::{CodeGraphProjectionError, CodeGraphProjectionStore};
+use crate::code_index::graph_projection::{
+    CodeGraphProjectionError, CodeGraphProjectionStore, InteractiveCatalogCache,
+};
 use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
 
 /// Test-only injected retryable activation failures, keyed by worktree id.
@@ -653,6 +655,21 @@ impl PendingInteractiveCatalogWarmV1 {
     }
 }
 
+fn seat_published_graph(
+    snapshot: tracedecay_graph_db::VerifiedGraphSnapshot,
+    generation_id: tracedecay_domain::CodeGenerationId,
+    catalog: Option<Arc<InteractiveCatalogCache>>,
+) -> Result<CodeGraphProjectionStore, CodeGraphProjectionError> {
+    match catalog {
+        Some(catalog) => CodeGraphProjectionStore::seat_verified_snapshot_with_catalog(
+            snapshot,
+            generation_id,
+            catalog,
+        ),
+        None => CodeGraphProjectionStore::seat_verified_snapshot(snapshot, generation_id),
+    }
+}
+
 impl LatestCodeTextGenerationV1 {
     #[hotpath::measure(label = "code_graph.activation.persistent_generation")]
     fn activate_persistent_graph_generation(
@@ -671,9 +688,10 @@ impl LatestCodeTextGenerationV1 {
             }
             .map_err(CodeGraphProjectionError::from)
         )?;
-        let store = Arc::new(CodeGraphProjectionStore::seat_verified_snapshot(
+        let store = Arc::new(seat_published_graph(
             snapshot,
             generation_id.clone(),
+            retained.shared_content_catalog(),
         )?);
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
@@ -729,9 +747,10 @@ impl LatestCompleteCodeIndexV1 {
                     }
                 })
         )?;
-        let store = Arc::new(CodeGraphProjectionStore::seat_verified_snapshot(
+        let store = Arc::new(seat_published_graph(
             snapshot,
             generation_id.clone(),
+            retained.shared_content_catalog(),
         )?);
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));

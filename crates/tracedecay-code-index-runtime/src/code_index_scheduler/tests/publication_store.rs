@@ -51,8 +51,8 @@ use crate::{
         UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
     },
     code_index_scheduler::{
-        CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
-        SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
+        CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
+        CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     },
 };
 
@@ -2968,13 +2968,185 @@ fn linked_worktrees_that_seal_identical_files_share_one_segment_per_file() {
         first, linked,
         "identical files seal to identical, worktree-independent segments"
     );
-    assert_ne!(first_evidence, linked_evidence);
+    assert_eq!(
+        first_evidence, linked_evidence,
+        "the linked checkout adopts the sealed evidence instead of packing another"
+    );
     let mut expected = first.into_iter().collect::<BTreeSet<_>>();
     expected.extend([first_evidence, linked_evidence]);
     assert_eq!(
         segment_files(&segments_root),
         expected,
         "the project stores each shared file segment exactly once"
+    );
+}
+
+/// A second clean worktree of a tree that is already sealed becomes ready
+/// without packing another generation. A checkout whose tree diverged still
+/// extracts, so adoption is not a blind alias of the sibling scope.
+#[test]
+fn a_clean_linked_worktree_serves_the_sealed_tree_without_extracting_it() {
+    let first = GitFixture::new(&[("src/lib.rs", "pub fn shared_symbol() -> u32 { 2398 }\n")]);
+    let linked_root = TempDir::new_in(super::canonical_temp_root()).expect("linked root");
+    let linked = linked_root.path().join("linked");
+    let diverged_root = TempDir::new_in(super::canonical_temp_root()).expect("diverged root");
+    let diverged = diverged_root.path().join("diverged");
+    super::git(
+        first.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().expect("linked path"),
+            "HEAD",
+        ],
+    );
+    super::git(
+        first.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "diverged",
+            diverged.to_str().expect("diverged path"),
+            "HEAD",
+        ],
+    );
+    let store = TempDir::new().expect("project store");
+    let code_index_root = store.path().join("code-index-v1");
+    std::fs::create_dir_all(&code_index_root).expect("project code-index root");
+    let first_scope = scoped_code_index_store_root(&code_index_root, first.path());
+    let linked_scope = scoped_code_index_store_root(&code_index_root, &linked);
+    let diverged_scope = scoped_code_index_store_root(&code_index_root, &diverged);
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let mut primary = registry
+        .open_worktree(test_project_id(), first.path(), first_scope)
+        .expect("open primary");
+    let primary_outcome = published(primary.reconcile_now().expect("seal the primary checkout"));
+    drop(primary);
+    let segments_root = code_index_root.join("code-generation-segments-v1");
+    let sealed_segments = segment_files(&segments_root);
+
+    let mut linked_scheduler = registry
+        .open_worktree(test_project_id(), &linked, linked_scope.clone())
+        .expect("open linked");
+    let linked_outcome = published(
+        linked_scheduler
+            .reconcile_now()
+            .expect("adopt the sealed tree"),
+    );
+    assert_eq!(linked_outcome.reextracted_files, 0);
+    assert_eq!(linked_outcome.generation_id, primary_outcome.generation_id);
+    assert_eq!(
+        linked_outcome.snapshot_content_identity,
+        primary_outcome.snapshot_content_identity
+    );
+    assert_eq!(
+        segment_files(&segments_root),
+        sealed_segments,
+        "adopting the sealed tree must not write a segment"
+    );
+    // Query admission overflows before a text owner exists. That marker must
+    // not make the next pass extract or decode the tree the sibling sealed.
+    linked_scheduler.request_background_reconcile();
+    match linked_scheduler
+        .reconcile_now()
+        .expect("overflow against the sealed tree")
+    {
+        CodeIndexReconcileOutcomeV1::Noop(evidence) => {
+            assert_eq!(
+                evidence.snapshot_content_identity,
+                primary_outcome.snapshot_content_identity
+            );
+            assert!(
+                evidence.overflow_reconciled,
+                "the pending overflow was settled by the sealed tree"
+            );
+        }
+        CodeIndexReconcileOutcomeV1::Published(_) => {
+            panic!("a pending overflow extracted the tree that was already sealed");
+        }
+    }
+    assert_eq!(
+        linked_scheduler.sealed_decode_count(),
+        0,
+        "settling that overflow must not materialize the sealed tree"
+    );
+    let served = linked_scheduler
+        .latest_complete()
+        .expect("the adopted generation serves");
+    assert!(
+        served
+            .generation
+            .snapshot()
+            .files
+            .iter()
+            .any(|file| file.logical_path == "src/lib.rs"),
+        "the adopted checkout serves the sealed source"
+    );
+    match linked_scheduler
+        .reconcile_now()
+        .expect("a later pass of the same tree")
+    {
+        CodeIndexReconcileOutcomeV1::Noop(evidence) => {
+            assert_eq!(
+                evidence.snapshot_content_identity,
+                primary_outcome.snapshot_content_identity
+            );
+        }
+        CodeIndexReconcileOutcomeV1::Published(_) => {
+            panic!("a later pass extracted the tree that was already sealed");
+        }
+    }
+    assert_eq!(segment_files(&segments_root), sealed_segments);
+    drop(linked_scheduler);
+
+    // The publisher's pointer memo must not be the only reader that accepts
+    // the adopted index. A later open has no memo and still serves the sealed
+    // tree, without sealing another segment.
+    let reopened = registry
+        .open_worktree(test_project_id(), &linked, linked_scope)
+        .expect("reopen the adopted checkout");
+    let reopened_served = reopened
+        .latest_complete()
+        .expect("a later reader serves the adopted checkout");
+    assert!(
+        reopened_served
+            .generation
+            .snapshot()
+            .files
+            .iter()
+            .any(|file| file.logical_path == "src/lib.rs"),
+        "a later reader serves the sealed source"
+    );
+    assert_eq!(segment_files(&segments_root), sealed_segments);
+    drop(reopened);
+
+    super::write(
+        &diverged,
+        "src/lib.rs",
+        "pub fn diverged_symbol() -> u32 { 1 }\n",
+    );
+    super::git(&diverged, &["add", "-A"]);
+    super::git(&diverged, &["commit", "-qm", "diverge the tree"]);
+    let mut diverged_scheduler = registry
+        .open_worktree(test_project_id(), &diverged, diverged_scope)
+        .expect("open diverged");
+    let diverged_outcome = published(
+        diverged_scheduler
+            .reconcile_now()
+            .expect("extract the diverged tree"),
+    );
+    assert_ne!(
+        diverged_outcome.snapshot_content_identity,
+        primary_outcome.snapshot_content_identity
+    );
+    assert_ne!(
+        segment_files(&segments_root),
+        sealed_segments,
+        "a diverged tree still seals its own source"
     );
 }
 
@@ -3257,9 +3429,9 @@ fn linked_worktrees_that_index_identical_trees_share_one_text_artifact() {
         scopes.code_index_root.join("code-text-artifacts-v1")
     );
     assert_eq!(code_text_artifacts_root(&scopes.linked_scope), shared_root);
-    assert_ne!(
+    assert_eq!(
         first.generation_id, linked.generation_id,
-        "each worktree seals its own generation"
+        "identical clean checkouts publish one generation"
     );
     assert_eq!(
         (

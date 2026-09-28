@@ -2807,8 +2807,15 @@ async fn linked_worktree_serves_shared_graph_when_a_second_build_exceeds_residen
     let primary = seal_worktree_identity(&project_id, &project_root, &store_root);
     let linked = seal_worktree_identity(&project_id, &linked_root, &store_root);
     let diverged = seal_worktree_identity(&project_id, &diverged_root, &store_root);
-    assert_ne!(primary.generation_id, linked.generation_id);
+    assert_eq!(
+        primary.generation_id, linked.generation_id,
+        "identical clean checkouts publish one generation"
+    );
     assert_eq!(primary.content_identity, linked.content_identity);
+    assert_ne!(
+        primary.replay.sealed_state_digest, linked.replay.sealed_state_digest,
+        "a linked checkout keeps the sibling generation while its sealed bytes differ"
+    );
     assert_ne!(primary.content_identity, diverged.content_identity);
 
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");

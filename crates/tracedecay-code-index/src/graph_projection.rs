@@ -37,7 +37,6 @@ pub(crate) use self::builder::{
     sample_code_graph_rows, unresolved_call_limitations,
 };
 use self::builder::{ProductionCodeGraphInputs, build_projection};
-use self::interactive::InteractiveCatalogCache;
 pub use self::interactive::{
     CodeGraphCatalogReleaseV1, CodeGraphCensusV1, CodeGraphDegreeRankingV1,
     CodeGraphEdgeKindCountsV1, CodeGraphFileDependenciesV1, CodeGraphFileSymbolCountV1,
@@ -46,7 +45,7 @@ pub use self::interactive::{
     CodeGraphReadCostMeter, CodeGraphRelationKeyV1, CodeGraphRelationKeysV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
     CodeGraphSymbolPredicate, CodeGraphSymbolRefV1, CodeGraphSymbolSearchPageV1,
-    CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
+    CodeGraphSymbolSummaryV1, InteractiveCatalogCache, UnresolvedCallerGapsV1,
 };
 use self::schema::{
     SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, record_property,
@@ -413,12 +412,42 @@ impl CodeGraphProjectionStore {
         snapshot: VerifiedGraphSnapshot,
         generation: CodeGenerationId,
     ) -> Result<Self, CodeGraphProjectionError> {
+        Self::seat_verified_snapshot_with_catalog(
+            snapshot,
+            generation,
+            Arc::new(InteractiveCatalogCache::new()),
+        )
+    }
+
+    /// Seats `snapshot` on a catalog another worktree of this generation
+    /// already holds.
+    ///
+    /// The catalog is a full scan of the published rows. A second worktree
+    /// that builds its own repeats that scan while the first catalog and the
+    /// engine are still resident.
+    pub fn seat_verified_snapshot_with_catalog(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+        catalog: Arc<InteractiveCatalogCache>,
+    ) -> Result<Self, CodeGraphProjectionError> {
+        Ok(Self::seat_verified_snapshot_private(snapshot, generation)?.with_catalog(catalog))
+    }
+
+    fn seat_verified_snapshot_private(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+    ) -> Result<Self, CodeGraphProjectionError> {
         match Self::from_verified_snapshot(snapshot.clone(), generation.clone()) {
             Err(CodeGraphProjectionError::GenerationMismatch) => {
                 Self::from_shared_content_snapshot(snapshot, generation)
             }
             other => other,
         }
+    }
+
+    fn with_catalog(mut self, catalog: Arc<InteractiveCatalogCache>) -> Self {
+        self.interactive_catalog = catalog;
+        self
     }
 
     /// Seats a snapshot whose rows were projected for a different code

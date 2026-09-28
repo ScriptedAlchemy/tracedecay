@@ -44,7 +44,7 @@ use crate::code_index::{
         CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
         SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-        SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
+        SharedCheckoutManifestV1, SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
         VerifiedSealedTextGenerationMetadataV1,
     },
     projection::{
@@ -1370,6 +1370,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let mut generations = BTreeSet::new();
         let mut exact_revisions = BTreeSet::new();
+        let mut detached_revisions = BTreeSet::new();
         let mut prior_order = None;
         for entry in &pointer.generation_index {
             Self::validate_generation_file(&entry.generation_file)
@@ -1414,6 +1415,19 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     }
                 }
                 (None, None, None) => {}
+                (None, Some(revision), Some(tree)) => {
+                    // A detached HEAD names a commit and a tree and has no
+                    // branch ref. Those two oids are the whole claim. A ref
+                    // without an oid, or one oid without the other, is still
+                    // incomplete.
+                    tracedecay_domain::GitOidV1::new(revision.clone()).map_err(Self::corruption)?;
+                    tracedecay_domain::GitOidV1::new(tree.clone()).map_err(Self::corruption)?;
+                    if !detached_revisions.insert((revision.as_str(), tree.as_str())) {
+                        return Err(Self::corruption(
+                            "durable code-generation index contains duplicate Git evidence",
+                        ));
+                    }
+                }
                 _ => {
                     return Err(Self::corruption(
                         "durable code-generation index contains incomplete Git evidence",
@@ -3164,6 +3178,118 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
         Ok(())
+    }
+}
+
+impl DaemonCodeIndexPublicationStoreV1 {
+    /// Install a sibling's restamped manifest as this scope's active generation.
+    ///
+    /// The bytes already name the shared segments. This writes the manifest and
+    /// the pointer only, and leaves the decoded-generation slot empty: seating
+    /// text and the shared graph must not rehydrate the corpus.
+    pub(super) fn publish_shared_checkout_manifest(
+        &self,
+        shared: &SharedCheckoutManifestV1,
+        publication_digest: &str,
+        segment_bytes: u64,
+        cardinality: Option<DurableGenerationCardinalityV1>,
+        source_reference: Option<String>,
+        source_revision: Option<String>,
+        source_tree: Option<String>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let store_lock = try_acquire_code_generation_store_lock(
+            self.generations_root
+                .parent()
+                .ok_or_else(|| Self::unavailable("code-generation store root has no parent"))?,
+        )
+        .map_err(Self::unavailable)?
+        .ok_or(CodeIndexPublicationStoreErrorV1::Unavailable(
+            "code-generation store has an active owner".to_owned(),
+        ))?;
+        if self.read_publication_pointer()?.is_some() {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
+        let generation_size = u64::try_from(shared.bytes.len()).map_err(Self::unavailable)?;
+        if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
+            return Err(Self::unavailable(
+                "sealed code generation exceeds the durable history byte bound",
+            ));
+        }
+        let mut temporary = TemporaryGenerationFileV1::new(
+            self.generations_root
+                .join(format!(".shared-checkout.{}.tmp", std::process::id())),
+        );
+        if let Err(error) = Self::write_durable(&temporary.path, &shared.bytes) {
+            temporary.rollback_uncommitted(&self.generations_root)?;
+            return Err(error);
+        }
+        let state_digest = match Self::state_digest_file(&temporary.path) {
+            Ok(digest) => digest,
+            Err(error) => {
+                temporary.rollback_uncommitted(&self.generations_root)?;
+                return Err(error);
+            }
+        };
+        let generation_file = format!(
+            "generation-{}.json",
+            sha256_hex_suffix(&state_digest).unwrap_or(&state_digest)
+        );
+        let generation_path = self.generations_root.join(&generation_file);
+        if let Err(error) = (|| {
+            match generation_path.symlink_metadata() {
+                Ok(_) => {
+                    if !Self::files_equal(&generation_path, &temporary.path)? {
+                        return Err(Self::unavailable(
+                            "immutable code-generation path contains different bytes",
+                        ));
+                    }
+                    std::fs::remove_file(&temporary.path).map_err(Self::unavailable)?;
+                    temporary.commit();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::rename(&temporary.path, &generation_path)
+                        .map_err(Self::unavailable)?;
+                    temporary.path = generation_path;
+                    Self::sync_directory(&self.generations_root)?;
+                    temporary.commit();
+                }
+                Err(error) => return Err(Self::unavailable(error)),
+            }
+            Ok(())
+        })() {
+            temporary.rollback_uncommitted(&self.generations_root)?;
+            return Err(error);
+        }
+        let mut generation_index = vec![DurableGenerationIndexEntryV1 {
+            generation_id: shared.generation_id.as_str().to_owned(),
+            snapshot_content_identity: shared.content_identity.as_str().to_owned(),
+            sealed_at_micros: shared.sealed_at_micros,
+            size_bytes: generation_size,
+            segment_bytes,
+            generation_file: generation_file.clone(),
+            state_digest: state_digest.clone(),
+            source_reference,
+            source_revision,
+            source_tree,
+            cardinality,
+            text_artifact: None,
+        }];
+        let generation_index_digest = Self::generation_index_digest(&generation_index, false)?;
+        let pointer = DurablePublicationPointerV1 {
+            generation_id: shared.generation_id.as_str().to_owned(),
+            snapshot_content_identity: shared.content_identity.as_str().to_owned(),
+            publication_digest: publication_digest.to_owned(),
+            sealed_at_micros: shared.sealed_at_micros,
+            generation_file,
+            state_digest,
+            generation_index: std::mem::take(&mut generation_index),
+            generation_index_truncated: false,
+            generation_index_digest: Some(generation_index_digest),
+        };
+        let bytes = serde_json::to_vec(&pointer).map_err(|error| {
+            Self::unavailable(format!("publication pointer serialization failed: {error}"))
+        })?;
+        self.commit_observed_pointer(&store_lock, None, &pointer, &bytes)
     }
 }
 

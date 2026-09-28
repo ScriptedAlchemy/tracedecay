@@ -106,7 +106,7 @@ pub(crate) mod resident_bytes;
 pub use partitioned_codec::{
     SealedGenerationFileWindowsV1, SealedGenerationSegmentIdentityV1,
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-    SealedGenerationSegmentReaderV1,
+    SealedGenerationSegmentReaderV1, SharedCheckoutManifestV1,
 };
 mod sealed_codec;
 pub use sealed_codec::{

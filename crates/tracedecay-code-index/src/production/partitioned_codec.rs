@@ -48,7 +48,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    FileOccurrenceId, ManifestDigest, SymbolIdentityDigest, SymbolOccurrenceId,
+    CommitId, FileOccurrenceId, ManifestDigest, RefId, RepositoryDirtyStateV1,
+    SymbolIdentityDigest, SymbolOccurrenceId, TreeId, WorktreeId, canonical_sha256,
 };
 
 use super::canonical_json::{
@@ -192,7 +193,7 @@ struct PartitionedPublishedGenerationRefV1<'a> {
     generation_evidence: &'a PartitionedGenerationEvidenceDescriptorV1,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PartitionedPublishedGenerationV1 {
     /// Gated by the revision probe before this strict parse runs.
@@ -1892,7 +1893,104 @@ impl VerifiedSealedLexicalPageSourceV1 {
     }
 }
 
+/// A clean checkout's sealed manifest, restamped onto another worktree of the
+/// same tree. File segments and the generation id stay the sibling's: those
+/// name repository content, and decoding them again is the allocation a
+/// second linked worktree must not repeat.
+#[derive(Clone, Debug)]
+pub struct SharedCheckoutManifestV1 {
+    pub bytes: Vec<u8>,
+    pub generation_id: tracedecay_domain::CodeGenerationId,
+    pub content_identity: tracedecay_domain::ContentDigest,
+    pub sealed_at_micros: i64,
+    pub file_occurrence_ids: Vec<FileOccurrenceId>,
+    pub snapshot: SanitizedCodeSnapshotV1,
+    pub repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
+    pub ignored_source_admissions_digest: ManifestDigest,
+    pub ignored_source_paths: Vec<String>,
+}
+
 impl CodeIndexPublishedGenerationV1 {
+    /// Restamp `bytes` onto this checkout when they seal `expected_tree` cleanly.
+    ///
+    /// `None` means the manifest is a different tree, a dirty snapshot, or an
+    /// ignored-source admission. The caller extracts that checkout itself.
+    /// Corrupt bytes are an error so a damaged sibling is not treated as a
+    /// different tree.
+    pub fn restamp_partitioned_manifest_for_checkout(
+        bytes: &[u8],
+        expected_tree: &TreeId,
+        worktree: &WorktreeId,
+        reference: Option<&RefId>,
+        source_revision: Option<&CommitId>,
+    ) -> Result<Option<SharedCheckoutManifestV1>, CodeIndexProductionErrorV1> {
+        let mut generation = parse_partitioned_manifest(bytes)?;
+        if generation.repository_parse_identity.dirty != RepositoryDirtyStateV1::Clean
+            || generation.repository_parse_identity.tree.as_ref() != Some(expected_tree)
+            || !generation.ignored_source_admissions.is_empty()
+        {
+            return Ok(None);
+        }
+        generation.snapshot.worktree = Some(worktree.clone());
+        generation.snapshot.reference = reference.cloned();
+        generation.snapshot.source_revision = source_revision.cloned();
+        generation
+            .snapshot
+            .validate()
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        generation.manifest.snapshot_digest =
+            canonical_sha256(&(crate::intake::INTAKE_DIGEST_SEPARATOR, &generation.snapshot))
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        generation.manifest.seal.expected_digest =
+            crate::capabilities::expected_seal_digest(&generation.manifest)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let generation_bytes = serde_json::to_vec(&generation).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "shared checkout manifest serialization failed: {error}"
+            ))
+        })?;
+        let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&generation_bytes))
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let generation_json = String::from_utf8(generation_bytes).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "shared checkout manifest is not UTF-8: {error}"
+            ))
+        })?;
+        let generation_raw = RawValue::from_string(generation_json)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let bytes = serde_json::to_vec(&PartitionedEnvelopeRefV1 {
+            state_digest: &state_digest,
+            generation: &generation_raw,
+        })
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "shared checkout manifest envelope serialization failed: {error}"
+            ))
+        })?;
+        let file_occurrence_ids = generation
+            .snapshot
+            .files
+            .iter()
+            .map(|file| file.file_occurrence_id.clone())
+            .collect();
+        let ignored_source_paths = generation
+            .ignored_source_admissions
+            .iter()
+            .map(|admission| admission.logical_path.clone())
+            .collect();
+        Ok(Some(SharedCheckoutManifestV1 {
+            bytes,
+            generation_id: generation.manifest.generation_id,
+            content_identity: generation.snapshot.content_identity.clone(),
+            sealed_at_micros: generation.manifest.seal.sealed_at.0,
+            file_occurrence_ids,
+            snapshot: generation.snapshot,
+            repository_parse_identity: generation.repository_parse_identity,
+            ignored_source_admissions_digest: generation.ignored_source_admissions_digest,
+            ignored_source_paths,
+        }))
+    }
+
     pub fn encode_partitioned_sealed(
         &self,
         publish_segment: impl FnMut(

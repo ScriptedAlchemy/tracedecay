@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
 
+use tracedecay_code_index::graph_projection::InteractiveCatalogCache;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
 use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest, VerifiedGraphSnapshot};
@@ -56,6 +57,14 @@ pub trait CodeGraphSeatLeaseV1: Send {
         &self,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
+
+    /// The interactive catalog already published for this snapshot content.
+    ///
+    /// `None` when this generation has no shared graph yet. Callers then seat
+    /// a private catalog.
+    fn shared_content_catalog(&self) -> Option<Arc<InteractiveCatalogCache>> {
+        None
+    }
 }
 
 /// Registry-side seat gate the code-index scheduler consumes.

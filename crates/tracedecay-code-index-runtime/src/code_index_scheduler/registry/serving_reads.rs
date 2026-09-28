@@ -566,9 +566,19 @@ impl CodeIndexSchedulerRegistryV1 {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             worktree.residency.touch();
-            let first_complete_demand = !worktree
-                .complete_generation_requested
-                .swap(true, Ordering::AcqRel);
+            // A retained text owner already serves lexical and exact reads.
+            // Demanding the decoded generation here is a second corpus-sized
+            // resident set, which is what the cgroup kills when another
+            // worktree of the same tree is already serving its graph.
+            let text_owner_serves = worktree
+                .text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
+            let first_complete_demand = !text_owner_serves
+                && !worktree
+                    .complete_generation_requested
+                    .swap(true, Ordering::AcqRel);
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
@@ -721,7 +731,15 @@ impl CodeIndexSchedulerRegistryV1 {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             worktree.residency.touch();
+            // Same as `latest_complete_fresh`: a text owner that already
+            // serves must not be promoted into a whole-generation decode.
+            let text_owner_serves = worktree
+                .text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
             if admission == GenerationDecodeAdmissionV1::AwaitDecode
+                && !text_owner_serves
                 && !worktree
                     .complete_generation_requested
                     .swap(true, Ordering::AcqRel)

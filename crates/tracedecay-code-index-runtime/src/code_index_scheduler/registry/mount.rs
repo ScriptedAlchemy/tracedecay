@@ -1584,9 +1584,15 @@ impl CodeIndexSchedulerRegistryV1 {
                     .is_some_and(|retained| retained.interactive_graph_store().is_ok());
                 if prepare_graph && graph_already_serves {
                     // A retained native graph serves without a full decode.
-                    // Explicit complete-generation demand still admits binding
-                    // and seating, independently of redundant activation.
+                    // A partitioned manifest's text owner is that serving
+                    // authority: decoding it again allocates a second corpus
+                    // beside the resident graph. Legacy manifests still seat
+                    // on an explicit complete-generation demand.
+                    let partitioned_text = graph_text
+                        .as_ref()
+                        .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest);
                     prepare_graph = serving_empty
+                        && !partitioned_text
                         && worker_complete_generation_requested.load(Ordering::Acquire);
                 }
                 // Recovery installs a fresh graph store on the owner; an owner
@@ -1639,21 +1645,24 @@ impl CodeIndexSchedulerRegistryV1 {
                             {
                                 Ok(true) => {
                                     // Verified-head recovery is sufficient for
-                                    // graph-only readers, but an explicit
-                                    // complete-generation consumer still needs
-                                    // the decoded serving owner. Continue that
-                                    // replay in this pass: the retained text
-                                    // projection is joined at the end of the
-                                    // pass and can take minutes on a cold large
-                                    // store, so deferring the replay to the
-                                    // successor strands branch publication
-                                    // behind unrelated lexical work.
+                                    // graph-only readers. A partitioned
+                                    // manifest stays undecoded: its text owner
+                                    // and the recovered head are the serving
+                                    // authority, and a second decode of the
+                                    // same tree is the resident set that
+                                    // crosses the cgroup. A legacy manifest
+                                    // still replays for an explicit
+                                    // complete-generation consumer.
                                     let complete_generation_requested =
                                         worker_complete_generation_requested
                                             .load(Ordering::Acquire);
-                                    prepare_graph = complete_generation_requested;
+                                    let partitioned_text = graph_text.as_ref().is_some_and(
+                                        LatestCodeTextGenerationV1::uses_partitioned_manifest,
+                                    );
+                                    prepare_graph =
+                                        complete_generation_requested && !partitioned_text;
                                     retained_head_recovered_without_complete_replay =
-                                        !complete_generation_requested;
+                                        !complete_generation_requested || partitioned_text;
                                     tracing::info!(
                                         event = "code_index_graph_head_recovered",
                                         complete_generation_requested,
@@ -1902,8 +1911,11 @@ impl CodeIndexSchedulerRegistryV1 {
                             }
                             _ => false,
                         };
-                        let defer_serving_decode = graph_serves_from_text
-                            && !worker_complete_generation_requested.load(Ordering::Acquire);
+                        // The recovered head already serves. Decoding the
+                        // generation as well keeps a second corpus resident
+                        // next to that graph; complete-generation demand does
+                        // not justify it for a partitioned manifest.
+                        let defer_serving_decode = graph_serves_from_text;
                         if defer_serving_decode {
                             clear_graph_resident_memory_park(&worker_convergence_park);
                             worker_memory_retry.reset();

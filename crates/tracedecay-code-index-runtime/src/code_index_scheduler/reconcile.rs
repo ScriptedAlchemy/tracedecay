@@ -21,6 +21,7 @@ use tracedecay_application::code_index::{
 };
 use tracedecay_code_index_retention::code_index_generations::{
     CodeIndexScopeStoreResetV1, DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
+    code_generation_segments_root,
 };
 use tracedecay_contracts::{
     code_index_freshness::{
@@ -53,7 +54,8 @@ use crate::code_index::{
         CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-        DAEMON_CODE_INDEX_CHUNKER_REVISION, VerifiedSealedTextGenerationMetadataV1,
+        DAEMON_CODE_INDEX_CHUNKER_REVISION, SharedCheckoutManifestV1,
+        VerifiedSealedTextGenerationMetadataV1,
     },
 };
 
@@ -907,6 +909,11 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// worker takes this flag to re-arm exactly one pass; taking it clears it,
     /// so a refusal can never spin the worker.
     ignored_roster_refusal_requires_rebuild: bool,
+    /// This process published the active generation by restamping a sibling's
+    /// sealed tree. A later pass in this process may skip capture while the
+    /// git tree still matches. A restarted scheduler does not inherit the
+    /// flag, so it still validates the sealed segments.
+    shared_checkout_adopted: bool,
     /// Admitted paths whose own admission proof no longer holds - the source
     /// is tracked by git again, or its entrypoint now resolves outside the
     /// package it was admitted from.
@@ -1254,6 +1261,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             latest_content_identity,
             ignored_source_admissions: Vec::new(),
             ignored_roster_refusal_requires_rebuild: false,
+            shared_checkout_adopted: false,
             refused_ignored_source_paths: BTreeSet::new(),
             query_owners: hotpath::mutex!(
                 Mutex::new(None),
@@ -2745,9 +2753,292 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn reconcile_now(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
+        if let Some(outcome) = self.try_publish_shared_checkout()? {
+            return Ok(outcome);
+        }
+        if let Some(outcome) = self.try_reuse_sealed_checkout()? {
+            return Ok(outcome);
+        }
         self.reconcile_now_with_capture(|scheduler, control| {
             scheduler.capture_authoritative_snapshot(Some(control))
         })
+    }
+
+    /// Publish a sibling scope's sealed tree as this worktree's generation
+    /// when the checkout is clean and the trees match.
+    ///
+    /// Capture and extraction of that tree are what exhaust a cgroup after the
+    /// first worktree has already released its decoded generation. The sibling
+    /// manifest names the shared segments; restamping the checkout identity
+    /// does not read them.
+    fn try_publish_shared_checkout(
+        &mut self,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        if !self.ignored_source_admissions.is_empty() || self.shutting_down.load(Ordering::Acquire)
+        {
+            return Ok(None);
+        }
+        if self
+            .publication
+            .read_publication_pointer()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let Some(head_tree) = self.identity.head_tree().cloned() else {
+            return Ok(None);
+        };
+        let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        if !classification.changes().is_empty() {
+            return Ok(None);
+        }
+        let Some(code_index_root) = self.store_root.parent() else {
+            return Ok(None);
+        };
+        // Only scopes of one project's `code-index-v1/` share a sealed tree.
+        // A store root that keeps its own segments is a separate project, and
+        // its parent directory is not a sibling-scope index.
+        if code_generation_segments_root(&self.store_root).parent() != Some(code_index_root) {
+            return Ok(None);
+        }
+        let mut siblings = std::fs::read_dir(code_index_root)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.as_path() != self.store_root)
+            .collect::<Vec<_>>();
+        siblings.sort();
+        for sibling in siblings {
+            let pointer_path = sibling.join("active-code-generation-v1.json");
+            let Ok(pointer_bytes) = std::fs::read(&pointer_path) else {
+                continue;
+            };
+            let Ok(pointer) = serde_json::from_slice::<DurablePublicationPointerV1>(&pointer_bytes)
+            else {
+                continue;
+            };
+            let Some(entry) = pointer
+                .generation_index
+                .iter()
+                .find(|entry| entry.generation_id == pointer.generation_id)
+            else {
+                continue;
+            };
+            if entry.source_tree.as_deref() != Some(head_tree.as_str()) {
+                continue;
+            }
+            let manifest_path = sibling
+                .join("code-generations-v1")
+                .join(&entry.generation_file);
+            let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
+                continue;
+            };
+            if u64::try_from(manifest_bytes.len()).ok() != Some(entry.size_bytes) {
+                continue;
+            }
+            let shared =
+                match CodeIndexPublishedGenerationV1::restamp_partitioned_manifest_for_checkout(
+                    &manifest_bytes,
+                    &head_tree,
+                    &self.worktree_id,
+                    self.identity.head_ref(),
+                    self.identity.head_commit(),
+                ) {
+                    Ok(Some(shared)) => shared,
+                    Ok(None) | Err(_) => continue,
+                };
+            self.publication
+                .publish_shared_checkout_manifest(
+                    &shared,
+                    &pointer.publication_digest,
+                    entry.segment_bytes,
+                    entry.cardinality.clone(),
+                    self.identity
+                        .head_ref()
+                        .map(|reference| reference.as_str().to_owned()),
+                    self.identity
+                        .head_commit()
+                        .map(|commit| commit.as_str().to_owned()),
+                    Some(head_tree.as_str().to_owned()),
+                )
+                .map_err(CodeIndexProductionErrorV1::Publication)?;
+            self.shared_checkout_adopted = true;
+            self.note_adopted_checkout_currency(&shared);
+            tracing::info!(
+                event = "code_index_shared_checkout_adopted",
+                "linked worktree adopted a sibling's sealed tree without extracting it"
+            );
+            let lane_digest = canonical_sha256(&shared.content_identity)
+                .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+            return Ok(Some(CodeIndexReconcileOutcomeV1::Published(
+                CodeIndexPublishEvidenceV1 {
+                    generation_id: shared.generation_id,
+                    repository_id: self.repository_id.clone(),
+                    snapshot_content_identity: shared.content_identity,
+                    lane_digest,
+                    file_occurrence_ids: shared.file_occurrence_ids,
+                    reextracted_files: 0,
+                    changed_chunks: 0,
+                    reused_chunks: 0,
+                    clone_payloads_reused: None,
+                    clone_stale_invalidations: None,
+                    clone_body_changes_observed: None,
+                    overflow_reconciled: false,
+                },
+            )));
+        }
+        Ok(None)
+    }
+
+    /// A later pass of a checkout whose sealed tree is still this clean HEAD.
+    ///
+    /// Adoption publishes before any decode. The worker wakes again after that
+    /// publish, and the ordinary path would capture and parse the tree the
+    /// sibling already sealed. Git evidence selects the candidate; the sealed
+    /// file digests are still the proof, read one file at a time.
+    ///
+    /// A pending overflow is not that proof. Query admission overflows while
+    /// the text owner is still empty, and treating that marker as "capture
+    /// the tree" decodes the sealed generation beside the worktree that
+    /// already serves it. The digest sweep below is what decides.
+    fn try_reuse_sealed_checkout(
+        &mut self,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        if !self.shared_checkout_adopted
+            || !self.ignored_source_admissions.is_empty()
+            || self.shutting_down.load(Ordering::Acquire)
+        {
+            return Ok(None);
+        }
+        if let Some(active) = self
+            .publication
+            .active_already_decoded()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+            && !self.observe_generation_compatibility(&active).is_reusable()
+        {
+            return Ok(None);
+        }
+        let Some(head_tree) = self.identity.head_tree().cloned() else {
+            return Ok(None);
+        };
+        let Some(pointer) = self
+            .publication
+            .read_publication_pointer()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+        else {
+            return Ok(None);
+        };
+        let Some(entry) = pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == pointer.generation_id)
+        else {
+            return Ok(None);
+        };
+        if entry.source_tree.as_deref() != Some(head_tree.as_str())
+            || entry.source_revision.as_deref()
+                != self.identity.head_commit().map(|commit| commit.as_str())
+            || entry.source_reference.as_deref()
+                != self.identity.head_ref().map(|reference| reference.as_str())
+        {
+            return Ok(None);
+        }
+        let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        if !classification.changes().is_empty() {
+            return Ok(None);
+        }
+        let manifest_path = self
+            .store_root
+            .join("code-generations-v1")
+            .join(&entry.generation_file);
+        let manifest_bytes = std::fs::read(&manifest_path)?;
+        if u64::try_from(manifest_bytes.len()).ok() != Some(entry.size_bytes) {
+            return Ok(None);
+        }
+        let shared = match CodeIndexPublishedGenerationV1::restamp_partitioned_manifest_for_checkout(
+            &manifest_bytes,
+            &head_tree,
+            &self.worktree_id,
+            self.identity.head_ref(),
+            self.identity.head_commit(),
+        ) {
+            Ok(Some(shared)) => shared,
+            Ok(None) | Err(_) => return Ok(None),
+        };
+        let git_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let content_manifest = SourceContentManifestV1::for_snapshot(&shared.snapshot);
+        let (matches, _) = self.freshness_fence.sweep_sources(
+            &self.project_root,
+            &self.ignored_source_admissions,
+            &git_metadata,
+            &content_manifest,
+            &self.shutting_down,
+        );
+        if !matches {
+            return Ok(None);
+        }
+        // The sweep just proved the bytes still match. Drop the overflow that
+        // arrived before this pass; a hint that lands after the take stays
+        // for the next one. Leaving the overflow in place is what made the
+        // following pass capture and decode.
+        let drained = DrainedPendingHintsV1::new(
+            Arc::clone(&self.hints),
+            self.hints
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+        let overflow_reconciled = drained.overflow();
+        drained.commit();
+        self.note_adopted_checkout_currency(&shared);
+        Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
+            CodeIndexNoopEvidenceV1 {
+                snapshot_content_identity: shared.content_identity,
+                overflow_reconciled,
+            },
+        )))
+    }
+
+    /// Record source currency for a sealed tree without decoding its segments.
+    ///
+    /// The stat sweep is the negative cache. The digests are the ones the
+    /// sibling sealed for this git tree. A later pass re-derives them from
+    /// disk before it will skip capture again.
+    fn note_adopted_checkout_currency(&mut self, shared: &SharedCheckoutManifestV1) {
+        self.latest_content_identity = Some(shared.content_identity.clone());
+        let Ok(sweep) = self.worktree_stat_sweep() else {
+            return;
+        };
+        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let witness = ReconciledSourceWitnessV1::new(sweep.signature.clone(), &shared.snapshot);
+        self.freshness_fence.mark_reconciled(
+            metadata.clone(),
+            Some(witness),
+            &self.ignored_source_admissions,
+            false,
+        );
+        let Ok(repository_parse_identity_digest) =
+            canonical_sha256(&shared.repository_parse_identity)
+        else {
+            return;
+        };
+        RestoreFreshnessWitnessV1 {
+            generation_id: shared.generation_id.as_str().to_owned(),
+            git_metadata_signature: metadata.stable_signature(),
+            stat_signature: sweep.signature,
+            repository_parse_identity_digest: repository_parse_identity_digest.as_str().to_owned(),
+            ignored_source_admissions_digest: shared
+                .ignored_source_admissions_digest
+                .as_str()
+                .to_owned(),
+            ignored_source_paths: shared.ignored_source_paths.clone(),
+        }
+        .persist(&self.store_root);
     }
 
     pub(super) fn reconcile_now_with_capture<C>(

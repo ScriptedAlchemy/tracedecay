@@ -73,7 +73,7 @@ enum InteractiveCatalogState {
 
 struct InteractiveCatalogBuildLease;
 
-pub(super) struct InteractiveCatalogCache {
+pub struct InteractiveCatalogCache {
     state: RwLock<InteractiveCatalogState>,
     build: Mutex<()>,
     /// Count of full projection warm scans run against this store, so tests
@@ -102,7 +102,7 @@ pub enum CodeGraphCatalogReleaseV1 {
 const SEMANTIC_NEIGHBOR_SEED_CHUNK: usize = 50_000;
 
 impl InteractiveCatalogCache {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: RwLock::new(InteractiveCatalogState::Cold),
             build: Mutex::new(()),

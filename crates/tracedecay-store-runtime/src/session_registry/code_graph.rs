@@ -31,6 +31,7 @@ use tracedecay_store::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
+use tracedecay_code_index::graph_projection::InteractiveCatalogCache;
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_code_index_runtime::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
@@ -533,15 +534,21 @@ pub(crate) struct CodeGraphShardPublicationLocksV1 {
     /// revision. The `Arc` is owned by the session registry, not by this lock
     /// cell: activation drops the retained runtime (and therefore this cell)
     /// as soon as publish returns, and the next worktree must still find the
-    /// graph.
+    /// graph. The catalog is the same scan: a second worktree warms it again
+    /// only when the first has already dropped it.
     shared_graphs: SharedCodeGraphByContentV1,
+}
+
+pub(crate) struct SharedPublishedCodeGraphV1 {
+    snapshot: Arc<VerifiedGraphSnapshot>,
+    catalog: Arc<InteractiveCatalogCache>,
 }
 
 /// Project-scoped map of content identity to the verified graph that already
 /// serves it. Strong on the session registry so it outlives each activation's
 /// retained runtime.
 pub(crate) type SharedCodeGraphByContentV1 =
-    Arc<Mutex<HashMap<String, Arc<VerifiedGraphSnapshot>>>>;
+    Arc<Mutex<HashMap<String, SharedPublishedCodeGraphV1>>>;
 
 /// The shard-wide corpus build permit; dropping it admits the next scope.
 type CodeGraphBuildPermitV1 = tokio::sync::OwnedMutexGuard<()>;
@@ -584,7 +591,10 @@ impl CodeGraphShardPublicationLocksV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         graphs
             .entry(key)
-            .or_insert_with(|| Arc::new(snapshot.clone()));
+            .or_insert_with(|| SharedPublishedCodeGraphV1 {
+                snapshot: Arc::new(snapshot.clone()),
+                catalog: Arc::new(InteractiveCatalogCache::new()),
+            });
     }
 
     fn shared_graph(&self, key: &str) -> Option<VerifiedGraphSnapshot> {
@@ -592,7 +602,15 @@ impl CodeGraphShardPublicationLocksV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(key)
-            .map(|snapshot| snapshot.as_ref().clone())
+            .map(|shared| shared.snapshot.as_ref().clone())
+    }
+
+    fn shared_catalog(&self, key: &str) -> Option<Arc<InteractiveCatalogCache>> {
+        self.shared_graphs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .map(|shared| Arc::clone(&shared.catalog))
     }
 }
 
@@ -1327,6 +1345,18 @@ impl RetainedCodeGraphRuntimeV1 {
         {
             return None;
         }
+        // The pointer's digest is this checkout's sealed bytes. A runtime whose
+        // digest was rewritten out from under that pointer must not reuse a
+        // sibling graph; that disagreement is the fail-closed conflict below.
+        let sealed_digest = pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == self.generation_id.as_str())
+            .map(|entry| entry.state_digest.as_str())
+            .unwrap_or(pointer.state_digest.as_str());
+        if sealed_digest != self.sealed_state_digest.as_str() {
+            return None;
+        }
         Some(format!(
             "{}\u{1f}{}",
             tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION,
@@ -1337,6 +1367,11 @@ impl RetainedCodeGraphRuntimeV1 {
     fn adopt_shared_content_graph(&self) -> Option<VerifiedGraphSnapshot> {
         let key = self.shared_graph_content_key()?;
         self.publication_locks.shared_graph(&key)
+    }
+
+    fn shared_content_catalog(&self) -> Option<Arc<InteractiveCatalogCache>> {
+        let key = self.shared_graph_content_key()?;
+        self.publication_locks.shared_catalog(&key)
     }
 
     /// Publishes this runtime's sealed generation as its verified graph head.
@@ -1580,6 +1615,19 @@ impl RetainedCodeGraphRuntimeV1 {
             || self.lifecycle_cancelled.load(Ordering::Acquire)
         {
             return Err(GraphDbError::Cancelled);
+        }
+        // A linked checkout restamps the manifest, so its state digest is not
+        // the digest on the sibling's verified head. The content-keyed graph
+        // is that head. Recovering it here is what keeps the worker from
+        // decoding the generation into a second corpus-sized resident set.
+        if require_current_head {
+            if let Some(shared) = self.adopt_shared_content_graph() {
+                tracing::info!(
+                    event = "code_graph_recovered_shared_content",
+                    "serving the code graph already published for this snapshot content"
+                );
+                return Ok(shared);
+            }
         }
         let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
         let identity = self.generation_id.as_str();
@@ -3076,6 +3124,10 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
         tracedecay_graph_db::GraphDbError,
     > {
         Self::recover_verified_generation(self, request_cancelled)
+    }
+
+    fn shared_content_catalog(&self) -> Option<Arc<InteractiveCatalogCache>> {
+        Self::shared_content_catalog(self)
     }
 }
 
