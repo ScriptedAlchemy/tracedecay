@@ -32,6 +32,7 @@ use tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     ContentDigest, LanguageId, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
+    validate_code_logical_path,
 };
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
@@ -536,7 +537,9 @@ impl SourceSweepCacheV1 {
         let eligible = candidates
             .iter()
             .filter(|candidate| {
-                candidate.explicitly_admitted || !is_generated_path_segment(&candidate.logical_path)
+                validate_code_logical_path(&candidate.logical_path).is_ok()
+                    && (candidate.explicitly_admitted
+                        || !is_generated_path_segment(&candidate.logical_path))
             })
             .collect::<Vec<_>>();
         let present = stat_concurrently(&eligible, |candidate| {
