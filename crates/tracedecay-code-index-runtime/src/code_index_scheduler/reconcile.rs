@@ -1474,6 +1474,16 @@ impl CodeIndexWorktreeSchedulerV1 {
         Ok(())
     }
 
+    /// One reconcile attempt's fence, bound to the process RSS cell.
+    ///
+    /// Checkpoints read that cell directly. The maintenance sampler's cadence
+    /// is longer than a linked-worktree capture, so a fence that only watched
+    /// epoch and shutdown kept allocating until the cgroup kill line.
+    fn reconcile_control(&self) -> DaemonCodeIndexControlV1 {
+        DaemonCodeIndexControlV1::new(Arc::clone(&self.epoch), Arc::clone(&self.shutting_down))
+            .with_resident_memory(Arc::clone(self.resident_memory.pressure()))
+    }
+
     /// The worker runtime this scheduler's build runs under, entered on the
     /// calling thread for the returned guard's lifetime.
     pub(super) fn ensure_worker_plan(
@@ -2162,10 +2172,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn capture_retained_reconcile_attempt(
         &self,
     ) -> Result<Option<RetainedReconcileCaptureV1>, CodeIndexSchedulerErrorV1> {
-        let control =
-            DaemonCodeIndexControlV1::new(Arc::clone(&self.epoch), Arc::clone(&self.shutting_down));
-        let captured =
-            self.capture_authoritative_snapshot_without_active_generation_reuse(Some(&control))?;
+        let control = self.reconcile_control();
+        let captured = self
+            .capture_authoritative_snapshot_without_active_generation_reuse(Some(&control))
+            .map_err(|error| prefer_resident_memory_refusal(&control, error))?;
         let git_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
         let stat_signature = self.worktree_stat_signature().ok();
         let drained_hints = {
@@ -2174,6 +2184,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if control.is_cancelled() {
+                stop_if_resident_memory(&control)?;
                 return Ok(None);
             }
             DrainedPendingHintsV1::new(Arc::clone(&self.hints), hints.take())
@@ -2201,6 +2212,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             stat_signature,
         } = capture;
         if control.is_cancelled() {
+            stop_if_resident_memory(&control)?;
             return Ok(None);
         }
         let rebuild_incompatible_generation = !self
@@ -2264,19 +2276,21 @@ impl CodeIndexWorktreeSchedulerV1 {
                 )
                 .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
                 .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
-                owner.build_and_publish(
-                    CodeIndexBuildRequestV1 {
-                        snapshot: captured.snapshot,
-                        captured_files: captured.captured_files,
-                        changed_files: captured.changed_paths,
-                        invalidations: BTreeSet::new(),
-                        repository_parse_identity: captured.repository_parse_identity,
-                        ignored_source_admissions: Vec::new(),
-                        sealed_at: now_micros(),
-                        target_projection_key: projection_key()?,
-                    },
-                    &control,
-                )?
+                owner
+                    .build_and_publish(
+                        CodeIndexBuildRequestV1 {
+                            snapshot: captured.snapshot,
+                            captured_files: captured.captured_files,
+                            changed_files: captured.changed_paths,
+                            invalidations: BTreeSet::new(),
+                            repository_parse_identity: captured.repository_parse_identity,
+                            ignored_source_admissions: Vec::new(),
+                            sealed_at: now_micros(),
+                            target_projection_key: projection_key()?,
+                        },
+                        &control,
+                    )
+                    .map_err(|error| prefer_resident_memory_refusal(&control, error.into()))?
             };
             if !self
                 .observe_generation_compatibility(&generation)
@@ -2792,10 +2806,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // the next ready probe does not see this pass as stale.
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
-            let control = DaemonCodeIndexControlV1::new(
-                Arc::clone(&self.epoch),
-                Arc::clone(&self.shutting_down),
-            );
+            let control = self.reconcile_control();
             let mut captured = match capture(self, &control) {
                 Ok(captured) => captured,
                 Err(CodeIndexSchedulerErrorV1::Production(
@@ -2805,10 +2816,13 @@ impl CodeIndexWorktreeSchedulerV1 {
                 )) if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                     && !self.shutting_down.load(Ordering::Acquire) =>
                 {
+                    // A watermark crossing is not a newer source epoch. Retrying
+                    // it here starts another allocating capture immediately.
+                    stop_if_resident_memory(&control)?;
                     std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(prefer_resident_memory_refusal(&control, error)),
             };
             let hints = {
                 let mut hints = self
@@ -2818,6 +2832,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 (!control.is_cancelled()).then(|| hints.take())
             };
             let Some(hints) = hints else {
+                stop_if_resident_memory(&control)?;
                 if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                     && !self.shutting_down.load(Ordering::Acquire)
                 {
@@ -2856,6 +2871,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 && unchanged_source
             {
                 if control.is_cancelled() {
+                    stop_if_resident_memory(&control)?;
                     if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                         && !self.shutting_down.load(Ordering::Acquire)
                     {
@@ -2932,8 +2948,12 @@ impl CodeIndexWorktreeSchedulerV1 {
                 )) if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                     && !self.shutting_down.load(Ordering::Acquire) =>
                 {
+                    stop_if_resident_memory(&control)?;
                     std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
                     continue;
+                }
+                Err(error) if control.refused_by_resident_memory() => {
+                    return Err(prefer_resident_memory_refusal(&control, error.into()));
                 }
                 Err(CodeIndexProductionErrorV1::Input(
                     CodeIndexInputErrorV1::NoExtractableFiles,
@@ -4219,6 +4239,37 @@ pub(super) fn cancelled_code_index_reconcile() -> CodeIndexSchedulerErrorV1 {
         crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
     )
     .into()
+}
+
+fn resident_memory_refused_reconcile() -> CodeIndexSchedulerErrorV1 {
+    CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(
+        CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+            "measured process RSS is over the admission watermark".to_owned(),
+        ),
+    ))
+}
+
+/// A checkpoint that stopped for RSS is a capacity refusal. Shutdown and a
+/// newer source epoch keep the error the caller already observed.
+fn prefer_resident_memory_refusal(
+    control: &DaemonCodeIndexControlV1,
+    error: CodeIndexSchedulerErrorV1,
+) -> CodeIndexSchedulerErrorV1 {
+    if control.refused_by_resident_memory() {
+        resident_memory_refused_reconcile()
+    } else {
+        error
+    }
+}
+
+fn stop_if_resident_memory(
+    control: &DaemonCodeIndexControlV1,
+) -> Result<(), CodeIndexSchedulerErrorV1> {
+    if control.refused_by_resident_memory() {
+        Err(resident_memory_refused_reconcile())
+    } else {
+        Ok(())
+    }
 }
 
 impl Drop for CodeIndexWorktreeSchedulerV1 {

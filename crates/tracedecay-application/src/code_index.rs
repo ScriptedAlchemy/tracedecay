@@ -22,6 +22,9 @@ use tracedecay_code_index::{
     projection::CodeChunkProjectionSink,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::resident_memory::{
+    ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
+};
 use tracedecay_session_memory::context::{RequestInterruption, application_request_interruption};
 
 /// Production owner type exposed to daemon, CLI, MCP, and hook composition.
@@ -125,12 +128,26 @@ impl CodeIndexExecutionControlV1 for RequestContextCodeIndexControlV1<'_> {
 ///
 /// A scheduler captures the current epoch when it seals a snapshot. A later
 /// filesystem hint advances the epoch and fairly cancels only that superseded
-/// build; unrelated worktrees retain independent fences.
-#[derive(Clone, Default)]
+/// build; unrelated worktrees retain independent fences. When a resident-memory
+/// cell is bound, the same checkpoints read the process: a build admitted
+/// under the watermark must stop once live RSS crosses it, instead of
+/// allocating until the cgroup kill line.
+#[derive(Clone)]
 pub struct DaemonCodeIndexControlV1 {
     epoch: Arc<AtomicU64>,
     expected_epoch: u64,
     shutting_down: Arc<AtomicBool>,
+    pressure: Option<Arc<ResidentMemoryPressureV1>>,
+    tripped: Arc<AtomicBool>,
+}
+
+impl Default for DaemonCodeIndexControlV1 {
+    fn default() -> Self {
+        Self::new(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
 }
 
 impl DaemonCodeIndexControlV1 {
@@ -140,18 +157,58 @@ impl DaemonCodeIndexControlV1 {
             epoch,
             expected_epoch,
             shutting_down,
+            pressure: None,
+            tripped: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Read `pressure` at each checkpoint. A watermark crossing stays tripped
+    /// for this attempt so a later low sample does not resume the same build.
+    #[must_use]
+    pub fn with_resident_memory(mut self, pressure: Arc<ResidentMemoryPressureV1>) -> Self {
+        self.pressure = Some(pressure);
+        self
     }
 
     pub fn advance(epoch: &AtomicU64) {
         epoch.fetch_add(1, Ordering::AcqRel);
     }
+
+    /// The watermark ended this attempt. Shutdown and a newer source epoch
+    /// keep their own identity.
+    #[must_use]
+    pub fn refused_by_resident_memory(&self) -> bool {
+        self.tripped.load(Ordering::Acquire)
+            && !self.shutting_down.load(Ordering::Acquire)
+            && self.epoch.load(Ordering::Acquire) == self.expected_epoch
+    }
 }
 
 impl CodeIndexExecutionControlV1 for DaemonCodeIndexControlV1 {
     fn is_cancelled(&self) -> bool {
-        self.shutting_down.load(Ordering::Acquire)
+        if self.shutting_down.load(Ordering::Acquire)
             || self.epoch.load(Ordering::Acquire) != self.expected_epoch
+        {
+            return true;
+        }
+        if self.tripped.load(Ordering::Acquire) {
+            return true;
+        }
+        let Some(pressure) = &self.pressure else {
+            return false;
+        };
+        // The maintenance sampler is slower than a worktree reconcile. Trusting
+        // the last published state here is how a second linked worktree kept
+        // allocating until the cgroup killer.
+        let _ = pressure.sample_and_publish();
+        if matches!(
+            pressure.state(),
+            ResidentMemoryPressureStateV1::OverBudget { .. }
+        ) {
+            self.tripped.store(true, Ordering::Release);
+            return true;
+        }
+        false
     }
 
     fn is_deadline_exceeded(&self) -> bool {
