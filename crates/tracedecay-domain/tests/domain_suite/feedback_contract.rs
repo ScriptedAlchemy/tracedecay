@@ -176,8 +176,10 @@ fn saved_feedback_binds_generation_address_and_durable_observation() {
 
     assert!(input.validate().is_ok());
     assert_eq!(
-        input.dedupe_key(&digest('5')).unwrap(),
-        input.dedupe_key(&digest('5')).unwrap()
+        serde_json::to_value(input.dedupe_key(&digest('5')).unwrap()).unwrap(),
+        serde_json::json!(
+            "feedback.dedupe.v1.71793bfe5a3a5c2212147797809f5333cd3ebbf2d18b1111aab9f53d78b850a7"
+        )
     );
     assert_ne!(
         input.dedupe_key(&digest('5')).unwrap(),
@@ -219,7 +221,10 @@ fn no_prior_baseline_cannot_be_forged_as_a_history_record() {
         state: FeedbackBaselineStateV1::NoPriorBaseline,
     };
 
-    assert!(baseline.validate().is_err());
+    assert_eq!(
+        baseline.validate().unwrap_err().to_string(),
+        "feedback baseline no-prior state is not canonical"
+    );
 }
 
 #[test]
@@ -299,7 +304,12 @@ fn terminal_reasons_reject_inconsistent_provider_truth() {
         FeedbackCycleTerminationV1::Cancelled,
         FeedbackCycleTerminationV1::DaemonUnavailable,
     ] {
-        assert!(
+        let expected = if termination == FeedbackCycleTerminationV1::StaleReplanRequired {
+            "feedback cycle stale state is not canonical"
+        } else {
+            "feedback cycle terminal provider state is not canonical"
+        };
+        assert_eq!(
             FeedbackCycleResultV1::new(
                 &request,
                 termination,
@@ -313,12 +323,14 @@ fn terminal_reasons_reject_inconsistent_provider_truth() {
                 0,
                 0,
             )
-            .is_err(),
+            .unwrap_err()
+            .to_string(),
+            expected,
             "{termination:?} must retain its typed provider cause"
         );
     }
 
-    assert!(
+    assert_eq!(
         FeedbackCycleResultV1::new(
             &request,
             FeedbackCycleTerminationV1::DuplicateNoop,
@@ -332,9 +344,11 @@ fn terminal_reasons_reject_inconsistent_provider_truth() {
             0,
             0,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "duplicate feedback cycle result is not canonical"
     );
-    assert!(
+    assert_eq!(
         FeedbackCycleResultV1::new(
             &request,
             FeedbackCycleTerminationV1::UserStop,
@@ -348,11 +362,13 @@ fn terminal_reasons_reject_inconsistent_provider_truth() {
             0,
             0,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "user-stopped feedback cycle result is not canonical"
     );
     let mut partial_tests = complete_impact();
     partial_tests.affected_tests_state = FeedbackImpactStateV1::Partial;
-    assert!(
+    assert_eq!(
         FeedbackCycleResultV1::new(
             &request,
             FeedbackCycleTerminationV1::Clean,
@@ -366,7 +382,9 @@ fn terminal_reasons_reject_inconsistent_provider_truth() {
             0,
             0,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "clean feedback cycle result is not canonical"
     );
 }
 
@@ -402,7 +420,7 @@ fn canonical_clean_result_requires_complete_impact_and_affected_test_truth() {
         )
         .is_ok()
     );
-    assert!(
+    assert_eq!(
         FeedbackCycleResultV1::new(
             &request,
             FeedbackCycleTerminationV1::Clean,
@@ -416,6 +434,8 @@ fn canonical_clean_result_requires_complete_impact_and_affected_test_truth() {
             0,
             0,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "clean feedback cycle result is not canonical"
     );
 }

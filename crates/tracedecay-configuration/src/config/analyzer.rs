@@ -187,7 +187,12 @@ mod tests {
                 ConfigurationValueV1::AnalyzerSettings(settings(vec![selection("rust", true)])),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "setting analyzer.settings.v1 cannot be placed in UserProfile { profile_id: UserProfileId(\"profile.fixture\") }"
+        );
     }
 
     #[test]
@@ -197,18 +202,30 @@ mod tests {
         // Unsupported schema version.
         let mut future = settings(vec![selection("rust", true)]);
         future.schema_version = 2;
-        assert!(resolve_configuration(&registry, &[project_layer(future)]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[project_layer(future)])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: analyzer settings schema version is not canonical"
+        );
 
         // Non-canonical selection order (also catches duplicate languages).
         let unordered = settings(vec![selection("rust", true), selection("python", true)]);
-        assert!(resolve_configuration(&registry, &[project_layer(unordered)]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[project_layer(unordered)])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: analyzer language selection order is not canonical"
+        );
 
         // Invalid resource limits inside an otherwise well-formed selection.
         let mut zero_memory = selection("rust", true);
         zero_memory.resource_limits.maximum_memory_mib = 0;
-        assert!(
+        assert_eq!(
             resolve_configuration(&registry, &[project_layer(settings(vec![zero_memory]))])
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: analyzer resource limits is not canonical"
         );
 
         // A mistyped value at the analyzer key never reaches a snapshot.
@@ -222,7 +239,12 @@ mod tests {
                 ConfigurationValueV1::Text("disabled".to_owned()),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[mistyped]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[mistyped])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: setting value kind does not match analyzer.settings.v1: expected AnalyzerSettings, got Text"
+        );
     }
 
     #[test]

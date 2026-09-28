@@ -720,7 +720,7 @@ mod tests {
     fn request_rejects_authority_from_another_brain() {
         let mut authority = fence();
         authority.brain_id = BrainId::new("brain.other").unwrap();
-        assert!(
+        assert_eq!(
             RemoteProtocolRequestV1::new(
                 RequestId::new("request.remote").unwrap(),
                 BrainId::new("brain.remote").unwrap(),
@@ -730,7 +730,9 @@ mod tests {
                 UtcMicros(10),
                 (),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "remote request authority Brain identity is inconsistent with the application contract"
         );
     }
 
@@ -747,7 +749,12 @@ mod tests {
             credential_revision: 1,
             observed_at: UtcMicros(10),
         });
-        assert!(validate_current_authority_state(&request, &state).is_err());
+        assert_eq!(
+            validate_current_authority_state(&request, &state)
+                .unwrap_err()
+                .to_string(),
+            "current remote authority identity is inconsistent with the application contract"
+        );
 
         let exact = CurrentAuthorityRequestV1 {
             placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),

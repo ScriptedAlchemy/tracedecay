@@ -225,7 +225,10 @@ mod tests {
             oldest_past_window_at: UtcMicros(200),
             window_watermark_at: UtcMicros(100),
         };
-        assert!(record.validate().is_err());
+        assert_eq!(
+            record.validate().unwrap_err().to_string(),
+            "retention backlog watermark is inconsistent with the application contract"
+        );
     }
 
     #[test]
@@ -247,7 +250,10 @@ mod tests {
             deferred_native_retirement_count: 0,
         };
 
-        assert!(record.validate().is_err());
+        assert_eq!(
+            record.validate().unwrap_err().to_string(),
+            "code generation retention totals is inconsistent with the application contract"
+        );
     }
 
     #[test]
@@ -269,7 +275,10 @@ mod tests {
             deferred_native_retirement_count: 0,
         };
 
-        assert!(record.validate().is_err());
+        assert_eq!(
+            record.validate().unwrap_err().to_string(),
+            "code generation retention totals is inconsistent with the application contract"
+        );
     }
 
     #[test]
@@ -291,7 +300,10 @@ mod tests {
             deferred_native_retirement_count: 0,
         };
 
-        assert!(record.validate().is_err());
+        assert_eq!(
+            record.validate().unwrap_err().to_string(),
+            "code generation retention totals is inconsistent with the application contract"
+        );
     }
 
     #[test]

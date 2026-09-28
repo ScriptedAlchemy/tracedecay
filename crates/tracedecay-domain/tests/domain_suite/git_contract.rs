@@ -104,9 +104,23 @@ fn git_oid_rejects_noncanonical_values() {
         &"g".repeat(40),
         &"a".repeat(63),
     ] {
-        assert!(GitOidV1::new(bad).is_err(), "accepted oid {bad:?}");
+        let expected = if bad.is_empty() {
+            "GitOidV1 must not be empty"
+        } else {
+            "GitOidV1 is not canonical"
+        };
+        assert_eq!(
+            GitOidV1::new(bad).unwrap_err().to_string(),
+            expected,
+            "accepted oid {bad:?}"
+        );
     }
-    assert!(serde_json::from_value::<GitOidV1>(json!("not-an-oid")).is_err());
+    assert_eq!(
+        serde_json::from_value::<GitOidV1>(json!("not-an-oid"))
+            .unwrap_err()
+            .to_string(),
+        "GitOidV1 is not canonical"
+    );
 }
 
 #[test]
@@ -202,18 +216,27 @@ fn file_diff_invariants_for_binary_submodule_and_renames() {
 
     let mut invalid = binary.clone();
     invalid.hunks = vec![hunk((1, 1), (1, 1))];
-    assert!(invalid.validate().is_err());
+    assert_eq!(
+        invalid.validate().unwrap_err().to_string(),
+        "binary or submodule diff hunks is not canonical"
+    );
 
     let mut renamed = file_diff("new.rs", GitChangeKindV1::Renamed);
     renamed.original_path = Some("old.rs".to_owned());
     renamed.validate().unwrap();
 
     renamed.original_path = None;
-    assert!(renamed.validate().is_err());
+    assert_eq!(
+        renamed.validate().unwrap_err().to_string(),
+        "diff original path is not canonical"
+    );
 
     let mut misplaced = file_diff("plain.rs", GitChangeKindV1::Modified);
     misplaced.original_path = Some("old.rs".to_owned());
-    assert!(misplaced.validate().is_err());
+    assert_eq!(
+        misplaced.validate().unwrap_err().to_string(),
+        "diff original path is not canonical"
+    );
 }
 
 #[test]
@@ -392,9 +415,18 @@ fn hunk_ref_digest_detects_independent_field_drift() {
         },
     ];
 
+    reference
+        .verify_digest(&digest)
+        .expect("the unmodified HunkRef verifies");
     for mutated in mutations {
-        assert!(
-            mutated.verify_digest(&digest).is_err(),
+        let expected = if mutated.direction == reference.direction {
+            "manifest digest does not match its canonical domain-separated payload"
+        } else {
+            "hunk ref worktree expectation is not canonical"
+        };
+        assert_eq!(
+            mutated.verify_digest(&digest).unwrap_err().to_string(),
+            expected,
             "field drift must invalidate the HunkRef digest"
         );
     }

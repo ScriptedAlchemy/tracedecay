@@ -390,7 +390,12 @@ mod tests {
             "replayed": false,
         });
 
-        assert!(serde_json::from_value::<SourceEditSurfaceResultV1>(malformed).is_err());
+        assert_eq!(
+            serde_json::from_value::<SourceEditSurfaceResultV1>(malformed)
+                .unwrap_err()
+                .to_string(),
+            "data did not match any variant of untagged enum SourceEditSurfaceOutcomeV1"
+        );
     }
 
     #[test]
@@ -403,6 +408,11 @@ mod tests {
             "replayed": false,
         });
 
-        assert!(serde_json::from_value::<SourceEditSurfaceResultV1>(unknown).is_err());
+        assert_eq!(
+            serde_json::from_value::<SourceEditSurfaceResultV1>(unknown)
+                .unwrap_err()
+                .to_string(),
+            "data did not match any variant of untagged enum SourceEditSurfaceOutcomeV1"
+        );
     }
 }

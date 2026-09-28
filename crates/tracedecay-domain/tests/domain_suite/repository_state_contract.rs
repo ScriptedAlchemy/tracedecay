@@ -67,7 +67,12 @@ fn repository_state_snapshot_rejects_tampered_identity() {
     let mut tampered = value;
     tampered["snapshot_id"] = serde_json::json!("repository.state.v1.invalid");
 
-    assert!(serde_json::from_value::<RepositoryStateSnapshotV1>(tampered).is_err());
+    assert_eq!(
+        serde_json::from_value::<RepositoryStateSnapshotV1>(tampered)
+            .unwrap_err()
+            .to_string(),
+        "repository state snapshot id does not match its canonical state"
+    );
 }
 
 #[test]
