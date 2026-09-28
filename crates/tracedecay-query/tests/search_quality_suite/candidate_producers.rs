@@ -3082,7 +3082,8 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     )
     .expect("the current revision must open");
 
-    for revision in [28i64, 30] {
+    let current = i64::from(verified.format_revision());
+    for revision in [current - 1, current + 1] {
         let connection =
             rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
@@ -3430,7 +3431,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
             |row| row.get(0),
         )
         .expect("read current format revision");
-    assert_eq!(format_revision, 29);
+    assert_eq!(format_revision, i64::from(verified.format_revision()));
     let (ngram_lists, ngram_postings, untagged_ngram_lists): (i64, i64, i64) = connection
         .query_row(
             "SELECT COUNT(*), SUM(document_frequency), SUM(substr(documents, 1, 1) NOT IN (x'00', x'01', x'02')) FROM ngram_postings",
@@ -3495,7 +3496,7 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
     let (blocks, documents, untagged_blocks): (i64, i64, i64) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM row_blocks), (SELECT COUNT(*) FROM row_chunks), \
-             (SELECT COUNT(*) FROM row_blocks WHERE substr(payload, 1, 1) != x'17')",
+             (SELECT COUNT(*) FROM row_blocks WHERE substr(payload, 1, 1) != x'18')",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -6251,6 +6252,99 @@ fn disk_artifact_ledger_charges_stay_page_local_across_corpus_scaling() {
     );
 }
 
+/// A named symbol must outrank hundreds of bulky body mentions of the same
+/// term, and the warm query must finish inside a budget the full-block
+/// candidate decode cannot meet.
+#[test]
+fn warm_lexical_search_finds_the_named_symbol_ahead_of_bulk_body_matches() {
+    const BULK_FILES: usize = 800;
+    const WARM_BUDGET: std::time::Duration = std::time::Duration::from_millis(80);
+    let mut sources = Vec::with_capacity(BULK_FILES + 1);
+    sources.push((
+        "file.cascade.marker".to_owned(),
+        "src/cascade_marker.ts".to_owned(),
+        b"export function cascadeMarker() { return 1; }\n".to_vec(),
+    ));
+    for ordinal in 0..BULK_FILES {
+        let mut source = format!("export function bulk{ordinal}() {{\n  const payload = \"");
+        let mut state = (ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        while source.len() < 60 * 1024 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let byte = b' ' + (state % 94) as u8;
+            source.push(if matches!(byte, b'"' | b'\\') {
+                'A'
+            } else {
+                byte as char
+            });
+        }
+        source.push_str("\";\n  return \"cascadeMarker\";\n}\n");
+        sources.push((
+            format!("file.bulk.{ordinal:04}"),
+            format!("src/bulk_{ordinal:04}.ts"),
+            source.into_bytes(),
+        ));
+    }
+    sources.sort_by(|left, right| left.1.cmp(&right.1));
+    let fixture = real_lexical_source_fixture_from_sources(sources);
+    let metadata = fixture.metadata.clone();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let path = directory.path().join("sparse-lexical.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&path, metadata.clone()).expect("create artifact");
+    let verified = builder
+        .rebuild_and_finalize(&mut fixture.open_source(64), &control)
+        .expect("build lexical artifact");
+    drop(builder);
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &path,
+        &verified,
+        &metadata,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen lexical artifact");
+    let mut request = lexical_request("cascadeMarker", &["cascadeMarker"], &[], &[], 0, 8);
+    request.generation = metadata.generation.clone();
+    reader
+        .read_lexical_postings(&request)
+        .expect("warmup lexical search");
+    let started = Instant::now();
+    let batch = complete(
+        reader
+            .read_lexical_postings(&request)
+            .expect("warm lexical search"),
+    );
+    let elapsed = started.elapsed();
+    let names = scored_fields(&reader, &batch);
+    let top = names
+        .first()
+        .map(|(name, _)| name.as_str())
+        .expect("lexical search returns the named symbol");
+    assert!(
+        top.contains("cascadeMarker"),
+        "the named symbol must outrank bulky body mentions, top was {top}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|(name, _)| !name.contains("cascadeMarker")),
+        "bulky body mentions must share the result page with the named symbol"
+    );
+    assert!(
+        batch.coverage.capped > 0,
+        "the page must stay capped while bulky body mentions remain eligible"
+    );
+    assert!(
+        elapsed < WARM_BUDGET,
+        "warm lexical search took {}ms, budget is {}ms",
+        elapsed.as_millis(),
+        WARM_BUDGET.as_millis()
+    );
+}
+
 #[test]
 fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage() {
     let fixture = real_lexical_source_fixture_with_files(9);
@@ -6663,6 +6757,83 @@ fn lexical_phrase_candidate_set_and_frequency_are_reused_without_drift() {
         assert_eq!(
             first.evidence_by_occurrence[&candidate.source_occurrence_id].matched_phrases,
             vec!["reserve stock".to_owned()]
+        );
+    }
+}
+
+#[test]
+fn lexical_streaming_top_k_preserves_echo_penalties() {
+    let source = "pub fn reserve() {}";
+    let artifact = rust_artifact(&[
+        source,
+        "pub fn reserve() { let inventory = 1; }",
+        "pub fn reserve() { let inventory = 2; }",
+    ]);
+    let lane = artifact.lane();
+    let full = complete(
+        lane.retrieve_lexical(&artifact.request(source, &["reserve"], &[], &[], 0, 32))
+            .expect("all lexical candidates"),
+    );
+    assert!(full.candidates.len() > 2);
+    assert!(
+        full.evidence_by_occurrence
+            .values()
+            .any(|evidence| evidence.echo_penalty_applied)
+    );
+    let capped = complete(
+        lane.retrieve_lexical(&artifact.request(source, &["reserve"], &[], &[], 0, 2))
+            .expect("bounded lexical candidates"),
+    );
+    assert_eq!(capped.candidates, full.candidates[..2]);
+    for (occurrence, evidence) in &capped.evidence_by_occurrence {
+        assert_eq!(evidence, &full.evidence_by_occurrence[occurrence]);
+    }
+}
+
+#[test]
+fn normalized_phrase_aliases_share_document_frequency() {
+    let artifact = rust_artifact(&[
+        "pub fn reserve() {\n    // reserve stock inventory ledger\n}\n",
+        "pub fn unrelated() {\n    // nothing relevant lives here\n}\n",
+    ]);
+    let lane = artifact.lane();
+    let single = complete(
+        lane.retrieve_lexical(&artifact.request(
+            "phrase lookup",
+            &[],
+            &[],
+            &["reserve stock"],
+            0,
+            8,
+        ))
+        .expect("single phrase"),
+    );
+    let aliases = complete(
+        lane.retrieve_lexical(&artifact.request(
+            "phrase lookup",
+            &[],
+            &[],
+            &["reserve stock", "RESERVE STOCK"],
+            0,
+            8,
+        ))
+        .expect("normalized phrase aliases"),
+    );
+    assert!(!single.candidates.is_empty());
+    assert_eq!(
+        candidate_files(&single.candidates),
+        candidate_files(&aliases.candidates)
+    );
+    for (occurrence, evidence) in &single.evidence_by_occurrence {
+        let aliased = &aliases.evidence_by_occurrence[occurrence];
+        let doubled = evidence
+            .field_scores_micros
+            .iter()
+            .map(|(field, score)| (*field, score * 2))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            aliased.field_scores_micros, doubled,
+            "two spellings contribute twice, but each matching document counts once in IDF"
         );
     }
 }

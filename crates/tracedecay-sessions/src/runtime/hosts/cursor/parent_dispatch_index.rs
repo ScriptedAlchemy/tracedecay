@@ -12,11 +12,12 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use tracedecay_private_fs::windows_file::{
     FileChangeToken as WindowsFileChangeToken, change_token as windows_file_change_token,
@@ -25,6 +26,8 @@ use tracedecay_store::cursor_dispatch::{
     cursor_dispatch_model, is_subagent_dispatch_tool, record_bytes_may_name_subagent_dispatch,
 };
 
+#[cfg(unix)]
+use crate::runtime::source::jsonl_change_token_settled;
 use crate::runtime::source::{
     JsonlFileChangeToken, JsonlNativeFileIdentity, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
     RawJsonlFrameReader, ResumeDigest, jsonl_file_change_token, jsonl_native_file_identity,
@@ -121,10 +124,27 @@ fn parent_file_revision(file: &File) -> std::io::Result<Option<ParentFileRevisio
     }))
 }
 
+fn parent_revision_settled(revision: &ParentFileRevision) -> bool {
+    #[cfg(unix)]
+    {
+        jsonl_change_token_settled(revision.change)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = revision;
+        true
+    }
+}
+
 struct ParentDispatchEntry {
     revision: ParentFileRevision,
     verified_cursor: u64,
     resume_digest: ResumeDigest,
+    /// The verified prefix was proved while `revision`'s change time was
+    /// already settled. A proof taken inside the coarse quantum does not
+    /// authorize a later zero-I/O hit: a same-length rewrite can share that
+    /// token and only become distinguishable once the clock moves.
+    verified_settled: bool,
     models: HashMap<String, String>,
 }
 
@@ -200,6 +220,8 @@ impl ParentDispatchIndex {
             LookupPlan::RefreshObserved { model } => {
                 if let Some(entry) = self.entries.get_mut(parent_path) {
                     entry.revision = revision;
+                    entry.verified_settled =
+                        entry.verified_cursor == revision.len && parent_revision_settled(&revision);
                 }
                 self.touch(parent_path);
                 (model, receipt)
@@ -260,9 +282,15 @@ impl ParentDispatchIndex {
         // revision, identity, length, and the change token, which on Unix
         // carries ctime and on Windows carries native ChangeTime, is identical
         // to the one this entry was verified under, and the entry covers the
-        // whole file. Nothing can have been appended or rewritten, so
-        // re-hashing the prefix would only re-prove that.
-        if entry.revision == revision && verified_cursor == revision.len {
+        // whole file. A settled token cannot be shared with a later write, so
+        // nothing can have been appended or rewritten. A token still inside
+        // the kernel's coarse timestamp quantum can, so that case falls
+        // through to the prefix digest.
+        if entry.revision == revision
+            && verified_cursor == revision.len
+            && entry.verified_settled
+            && parent_revision_settled(&revision)
+        {
             return Ok((LookupPlan::RefreshObserved { model: cached }, 0));
         }
         let (resume_digest, digest_bytes) = jsonl_prefix_digest(file, verified_cursor)?;
@@ -339,10 +367,21 @@ impl ParentDispatchIndex {
         };
         // The digest covers only `[0, verified_cursor)`. A model parsed from
         // the unterminated tail past it is trustworthy only while the native
-        // revision did not move during the scan; otherwise that tail may have
-        // been rewritten and the next lookup must re-read it.
+        // revision did not move during the scan and, when that revision is
+        // still inside the coarse timestamp quantum, the tail bytes still
+        // match. A same-length rewrite in that quantum leaves the revision
+        // unchanged, so the tail itself is the witness.
         if final_revision != scan.revision {
             delta.transient_model = None;
+        } else if delta.transient_model.is_some() && !parent_revision_settled(&final_revision) {
+            match tail_witness_matches(&mut delta.file, delta.verified_cursor, delta.tail_witness) {
+                Ok(true) => {}
+                Ok(false) => delta.transient_model = None,
+                Err(_) => {
+                    self.forget(scan.parent_path);
+                    return (None, receipt);
+                }
+            }
         }
         let Some(entry) = self.entries.get_mut(scan.parent_path) else {
             return (delta.transient_model, receipt);
@@ -353,6 +392,9 @@ impl ParentDispatchIndex {
         entry.revision = final_revision;
         entry.verified_cursor = delta.verified_cursor;
         entry.resume_digest = delta.resume_digest;
+        entry.verified_settled = delta.verified_cursor == final_revision.len
+            && delta.transient_model.is_none()
+            && parent_revision_settled(&final_revision);
         let model = entry
             .models
             .get(scan.agent_id)
@@ -369,6 +411,7 @@ impl ParentDispatchIndex {
                 revision,
                 verified_cursor: 0,
                 resume_digest: ResumeDigest::new(),
+                verified_settled: false,
                 models: HashMap::new(),
             },
         );
@@ -447,6 +490,7 @@ struct ScanDelta {
     bytes_parsed: u64,
     records_parsed: u64,
     transient_model: Option<String>,
+    tail_witness: Option<u64>,
 }
 
 fn shared_parent_dispatch_index() -> &'static Mutex<ParentDispatchIndex> {
@@ -538,6 +582,7 @@ fn scan_parent_delta_inner(
     let mut bytes_parsed = 0_u64;
     let mut records_parsed = 0_u64;
     let mut transient_model = None;
+    let mut tail_witness = None;
 
     loop {
         match frames.next_frame()? {
@@ -569,6 +614,7 @@ fn scan_parent_delta_inner(
             } => break,
             RawJsonlFrame::Partial { .. } => {
                 let record = frames.record();
+                tail_witness = Some(partial_tail_witness(record));
                 if record_bytes_may_name_subagent_dispatch(record) {
                     records_parsed = records_parsed.saturating_add(1);
                     if let Ok(value) = serde_json::from_slice::<Value>(record)
@@ -591,7 +637,42 @@ fn scan_parent_delta_inner(
         bytes_parsed,
         records_parsed,
         transient_model,
+        tail_witness,
     })
+}
+
+fn partial_tail_witness(bytes: &[u8]) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay-cursor-dispatch-tail-v1");
+    hasher.update(bytes);
+    let digest: [u8; 32] = hasher.finalize().into();
+    u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ])
+}
+
+fn tail_witness_matches(
+    file: &mut File,
+    verified_cursor: u64,
+    expected: Option<u64>,
+) -> std::io::Result<bool> {
+    let Some(expected) = expected else {
+        return Ok(false);
+    };
+    let len = file.metadata()?.len();
+    let Some(tail_len) = len.checked_sub(verified_cursor) else {
+        return Ok(false);
+    };
+    if tail_len > MAX_JSONL_RECORD_BYTES as u64 {
+        return Ok(false);
+    }
+    let Ok(tail_len) = usize::try_from(tail_len) else {
+        return Ok(false);
+    };
+    let mut tail = vec![0_u8; tail_len];
+    file.seek(SeekFrom::Start(verified_cursor))?;
+    file.read_exact(&mut tail)?;
+    Ok(partial_tail_witness(&tail) == expected)
 }
 
 fn collect_dispatch_models(record: &Value, models: &mut HashMap<String, String>) {
@@ -778,11 +859,7 @@ mod tests {
             let (model, again) = lookup(&layout, &format!("missing-agent-{agent}"));
             assert!(model.is_none());
             assert_eq!(again.bytes_parsed, 0);
-            assert_eq!(
-                again.prefix_digest_bytes, 0,
-                "every subagent lookup on one unchanged parent must be served \
-                 from the cached revision without re-hashing the verified prefix"
-            );
+            assert_prefix_not_reparsed(file_len, again);
             assert_eq!(again.records_parsed, 0);
             assert!(!again.rescanned_from_zero);
         }
@@ -844,14 +921,17 @@ mod tests {
             let (model, unchanged) = lookup(&layout, &format!("post-append-agent-{agent}"));
             assert!(model.is_none());
             assert_eq!(unchanged.bytes_parsed, 0);
-            assert_eq!(unchanged.prefix_digest_bytes, 0);
+            assert_prefix_not_reparsed(after_len, unchanged);
             assert_eq!(unchanged.records_parsed, 0);
             assert!(!unchanged.rescanned_from_zero);
         }
 
         let (model, unchanged) = lookup(&layout, "late-agent");
         assert_eq!(model.as_deref(), Some("late-model"));
-        assert_eq!(unchanged, DispatchScanReceipt::EMPTY);
+        assert_eq!(unchanged.bytes_parsed, 0);
+        assert_eq!(unchanged.records_parsed, 0);
+        assert!(!unchanged.rescanned_from_zero);
+        assert_prefix_not_reparsed(after_len, unchanged);
     }
 
     #[test]
@@ -974,6 +1054,26 @@ mod tests {
     }
 
     #[test]
+    fn same_quantum_rewrite_is_visible_after_the_change_time_settles() {
+        let layout = layout();
+        let old = dispatch_record("agent_id", "rewrite-agent", "old-model");
+        let new = dispatch_record("agent_id", "rewrite-agent", "new-model");
+        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
+        write_lines(&layout.candidate_two, &[old]);
+        assert_eq!(
+            lookup(&layout, "rewrite-agent").0.as_deref(),
+            Some("old-model")
+        );
+        rewrite_in_place(&layout.candidate_two, &[new]);
+        crate::runtime::source::spin_until_jsonl_change_settled(&layout.candidate_two);
+
+        assert_eq!(
+            lookup(&layout, "rewrite-agent").0.as_deref(),
+            Some("new-model")
+        );
+    }
+
+    #[test]
     fn candidate_one_wins_when_both_parents_dispatch() {
         let layout = layout();
         write_lines(
@@ -1077,9 +1177,11 @@ mod tests {
         });
     }
 
-    fn revision_of(path: &std::path::Path) -> super::ParentFileRevision {
-        let file = fs::File::open(path).unwrap();
-        super::parent_file_revision(&file).unwrap().unwrap()
+    fn assert_prefix_not_reparsed(file_len: u64, receipt: DispatchScanReceipt) {
+        assert!(
+            receipt.prefix_digest_bytes == 0 || receipt.prefix_digest_bytes == file_len,
+            "an unchanged parent reports no prefix read, or one read of the verified prefix"
+        );
     }
 
     fn parsed_scan<'a>(
@@ -1145,7 +1247,7 @@ mod tests {
 
         let (_, unchanged) = index.lookup(&layout.candidate_two, "late-agent");
         assert_eq!(unchanged.bytes_parsed, 0);
-        assert_eq!(unchanged.prefix_digest_bytes, 0);
+        assert_prefix_not_reparsed(initial_len + appended_len, unchanged);
     }
 
     #[test]
@@ -1199,18 +1301,11 @@ mod tests {
         assert_eq!(parsed.transient_model.as_deref(), Some("model-a"));
 
         fs::write(&layout.candidate_two, format!("{complete}\n{partial_b}")).unwrap();
-        let scanned = commit.revision;
-        assert!(
-            scanned != revision_of(&layout.candidate_two),
-            "the native revision must witness the tail rewrite"
-        );
-
-        let (model, receipt) = index.commit_scanned_delta(parsed, commit);
+        let (model, _receipt) = index.commit_scanned_delta(parsed, commit);
         assert!(
             model.is_none(),
             "a transient model parsed from an unverified, rewritten tail must be refused"
         );
-        assert_eq!(receipt.prefix_digest_bytes, complete.len() as u64 + 1);
 
         let (again, _) = index.lookup(&layout.candidate_two, "tail-agent");
         assert_eq!(again.as_deref(), Some("model-b"));

@@ -16,6 +16,8 @@ use tracedecay_global_db::tests::harness::{
 };
 use tracedecay_lcm::{LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode};
 use tracedecay_runtime_core::db::engine::params;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
@@ -1096,7 +1098,7 @@ fn native_compaction_requires_exact_selected_raw_membership() {
 
         let temporary = tempfile::tempdir().unwrap();
         let codex_bin = temporary.path().join("codex");
-        std::fs::write(
+        write_executable_script(
             &codex_bin,
             r#"#!/bin/sh
 while IFS= read -r line; do
@@ -1112,8 +1114,6 @@ done
 "#,
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&codex_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_codex(&codex_bin);
 
         let converged =
@@ -1533,13 +1533,11 @@ fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restar
         // restart and no new raw message.
         let temporary = tempfile::tempdir().unwrap();
         let cursor_bin = temporary.path().join("cursor-agent");
-        std::fs::write(
+        write_executable_script(
             &cursor_bin,
             "#!/bin/sh\nprintf '%s\\n' 'summary produced after configuration'\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
             &db,
             &project_root,
@@ -1682,13 +1680,11 @@ fn refresh_begins_at_the_committed_frontier_after_background_summaries_publish()
 
         let temporary = tempfile::tempdir().unwrap();
         let cursor_bin = temporary.path().join("cursor-agent");
-        std::fs::write(
+        write_executable_script(
             &cursor_bin,
             "#!/bin/sh\nprintf '%s\\n' 'summary published before the explicit refresh'\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin(LcmSummarizerExecutablesV1 {
             cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, Some(5))
                 .unwrap(),
@@ -2382,7 +2378,7 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
         let temporary = tempfile::tempdir().unwrap();
         let cursor_bin = temporary.path().join("cursor-agent");
         let counter = temporary.path().join("calls");
-        std::fs::write(
+        write_executable_script(
             &cursor_bin,
             format!(
                 "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || printf 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nprintf 'page-bound summary %s\\n' \"$count\"\n",
@@ -2391,8 +2387,6 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_cursor_agent(&cursor_bin);
 
         for _ in 0..8 {
@@ -2506,13 +2500,11 @@ fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
 
         let temporary = tempfile::tempdir().unwrap();
         let cursor_bin = temporary.path().join("cursor-agent");
-        std::fs::write(
+        write_executable_script(
             &cursor_bin,
             "#!/bin/sh\nprintf '%s\\n' 'summary of the revised protected content'\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_cursor_agent(&cursor_bin);
         let mut revised = message(session_id, 1);
         revised.message_id = format!("{session_id}-message-1");
@@ -2694,7 +2686,7 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
         let temporary = tempfile::tempdir().unwrap();
         let cursor_bin = temporary.path().join("cursor-agent");
         let counter = temporary.path().join("calls");
-        std::fs::write(
+        write_executable_script(
             &cursor_bin,
             format!(
                 "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || printf 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nprintf 'replacement disjoint leaf %s\\n' \"$count\"\n",
@@ -2703,8 +2695,6 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_cursor_agent(&cursor_bin);
 
         let first =
@@ -2823,7 +2813,7 @@ fn retained_summary_rejects_a_role_revision_during_model_generation() {
         let cursor_bin = temporary.path().join("cursor-agent");
         let started = temporary.path().join("started");
         let release = temporary.path().join("release");
-        std::fs::write(
+        write_executable_script(
             &cursor_bin,
             format!(
                 "#!/bin/sh\nprintf started > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nprintf '%s\\n' 'stale summary from before the revision'\n",
@@ -2832,8 +2822,6 @@ fn retained_summary_rejects_a_role_revision_during_model_generation() {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_cursor_agent(&cursor_bin);
 
         let convergence_db = db.clone();
@@ -3481,12 +3469,12 @@ fn codex_and_cursor_daemon_adapters_commit_exact_authoritative_summaries() {
         let temporary = tempfile::tempdir().unwrap();
         let cursor_bin = temporary.path().join("cursor-agent");
         let codex_bin = temporary.path().join("codex");
-        std::fs::write(
+        write_executable_script(
             &cursor_bin,
             "#!/bin/sh\nprintf '%s\\n' 'cursor authoritative summary'\n",
         )
         .unwrap();
-        std::fs::write(
+        write_executable_script(
             &codex_bin,
             r#"#!/bin/sh
 while IFS= read -r line; do
@@ -3502,10 +3490,6 @@ done
 "#,
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        for path in [&cursor_bin, &codex_bin] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
         fixture.pin(LcmSummarizerExecutablesV1 {
             cursor_agent: fake_summarizer(&cursor_bin),
             codex: fake_summarizer(&codex_bin),

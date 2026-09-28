@@ -118,6 +118,8 @@ pub mod sqlite_read_snapshot;
 pub mod storage;
 pub mod store_telemetry;
 pub mod sync;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_executable;
 pub mod text;
 pub mod timeutil;
 pub mod tracedecay;

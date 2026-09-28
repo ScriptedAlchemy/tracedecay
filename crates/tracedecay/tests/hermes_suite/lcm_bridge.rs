@@ -1,5 +1,3 @@
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -8,6 +6,7 @@ use crate::common::host_sources;
 use tempfile::TempDir;
 use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
 use tracedecay_agent_hosts::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 // Compiles the generated plugin sources with py_compile (argv[1] is the
 // plugin dir). Only `generated_python_sources_compile` runs this: loading the
@@ -158,13 +157,7 @@ fn write_fake_tracedecay_binaries(dir: &Path) -> std::io::Result<()> {
             continue;
         }
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{posix_body}"))?;
-        #[cfg(unix)]
-        {
-            let mut permissions = std::fs::metadata(&path)?.permissions();
-            permissions.set_mode(permissions.mode() | 0o111);
-            std::fs::set_permissions(&path, permissions)?;
-        }
+        write_executable_script(&path, format!("#!/bin/sh\n{posix_body}"))?;
     }
     Ok(())
 }

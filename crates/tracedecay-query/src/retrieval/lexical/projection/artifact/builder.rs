@@ -7239,6 +7239,7 @@ mod tests {
     fn open_serves_the_sealed_clone_census_and_verification_recomputes_it() {
         let directory = tempfile::tempdir().expect("artifact directory");
         let path = directory.path().join("sealed.sqlite");
+        drop(create_private_file_retained(&path).expect("private artifact file"));
         let metadata = test_metadata();
         let metadata_digest = metadata_digest(&metadata).expect("metadata digest");
         let connection = Connection::open(&path).expect("artifact database");

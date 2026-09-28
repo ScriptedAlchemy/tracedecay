@@ -77,8 +77,8 @@ use super::super::{
     ExactMatchRowViewV1, FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalFieldTextV1,
     LexicalIndexedRow, LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1,
     bm25_score_micros, exact_matches, field_weight_millis, fuzzy_distance_bound,
-    lexical_lane_binding, lexical_lane_candidate, matches_phrase, normalize_lexical,
-    score_lexical_row,
+    lexical_lane_binding, lexical_lane_candidate, normalize_lexical, phrase_field_counts,
+    proximity_field_counts, score_lexical_row,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
@@ -323,6 +323,23 @@ impl CodeLexicalArtifactRestoreWitnessV1 {
     }
 }
 
+/// One already-opened private artifact file, plus the receipt, projection,
+/// cache budget, and integrity mode used to restore its reader.
+///
+/// `artifact_path` and `artifact_file` are the same no-follow open the
+/// connection was created from. Sibling connections reopen that path only
+/// after the handle still names the same file.
+struct OpenLexicalArtifactConnection<'a> {
+    connection: Connection,
+    artifact_path: &'a Path,
+    artifact_file: &'a File,
+    expected: &'a VerifiedCodeLexicalArtifactV1,
+    authority: &'a super::super::CodeLexicalProjectionMetadataV1,
+    cache_budget_bytes: usize,
+    control: &'a dyn CodeIndexExecutionControlV1,
+    integrity_authority: ReaderIntegrityAuthorityV1,
+}
+
 #[derive(Clone, Copy)]
 enum ReaderIntegrityAuthorityV1 {
     /// The immutable artifact was fully verified before publication. Its
@@ -455,17 +472,21 @@ impl CodeLexicalArtifactReaderV1 {
                 "content-addressed lexical artifact has no finalized receipt".to_owned(),
             )
         })?;
-        let reader = Self::open_connection_with_control(
+        if receipt.file_size_bytes() != expected_file_size_bytes {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "embedded receipt disagrees with the durable head file size".to_owned(),
+            ));
+        }
+        let reader = Self::open_connection_with_control(OpenLexicalArtifactConnection {
             connection,
-            path,
-            &file,
-            &receipt,
+            artifact_path: path,
+            artifact_file: &file,
+            expected: &receipt,
             authority,
             cache_budget_bytes,
-            expected_file_size_bytes,
             control,
-            ReaderIntegrityAuthorityV1::ReceiptOnly,
-        )?;
+            integrity_authority: ReaderIntegrityAuthorityV1::ReceiptOnly,
+        })?;
         let verified_state = stable_artifact_file_state(&file)?;
         verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
         verify_stable_artifact_file_state(&file, &verified_state)?;
@@ -605,17 +626,16 @@ impl CodeLexicalArtifactReaderV1 {
         progress(4, TOTAL_RESTORE_CHECKS);
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
-            Self::open_connection_with_control(
+            Self::open_connection_with_control(OpenLexicalArtifactConnection {
                 connection,
-                path,
-                &file,
-                &receipt,
+                artifact_path: path,
+                artifact_file: &file,
+                expected: &receipt,
                 authority,
-                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-                expected_file_size_bytes,
+                cache_budget_bytes: CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
                 control,
-                ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
-            )
+                integrity_authority: ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
+            })
         )?;
         progress(5, TOTAL_RESTORE_CHECKS);
         verify_stable_artifact_file_state(&file, &opened_state)?;
@@ -662,17 +682,16 @@ impl CodeLexicalArtifactReaderV1 {
         })?;
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
-            Self::open_connection_with_control(
+            Self::open_connection_with_control(OpenLexicalArtifactConnection {
                 connection,
-                path,
-                &file,
+                artifact_path: path,
+                artifact_file: &file,
                 expected,
                 authority,
                 cache_budget_bytes,
-                expected.file_size_bytes(),
                 control,
-                ReaderIntegrityAuthorityV1::ReceiptOnly,
-            )
+                integrity_authority: ReaderIntegrityAuthorityV1::ReceiptOnly,
+            })
         )?;
         verify_stable_artifact_file_state(&file, &file_state)?;
         verify_named_path_identity(path, &file)?;
@@ -686,17 +705,19 @@ impl CodeLexicalArtifactReaderV1 {
     /// content part, and the reader serves the opener's generation,
     /// repository, freshness, and clone route.
     fn open_connection_with_control(
-        connection: Connection,
-        artifact_path: &Path,
-        artifact_file: &File,
-        expected: &VerifiedCodeLexicalArtifactV1,
-        authority: &super::super::CodeLexicalProjectionMetadataV1,
-        cache_budget_bytes: usize,
-        sealed_file_size_bytes: u64,
-        control: &dyn CodeIndexExecutionControlV1,
-        integrity_authority: ReaderIntegrityAuthorityV1,
+        OpenLexicalArtifactConnection {
+            connection,
+            artifact_path,
+            artifact_file,
+            expected,
+            authority,
+            cache_budget_bytes,
+            control,
+            integrity_authority,
+        }: OpenLexicalArtifactConnection<'_>,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
+        let sealed_file_size_bytes = expected.file_size_bytes();
         hotpath::measure_block!("query.artifact.open.schema_verify", {
             connection
                 .pragma_update(None, "query_only", true)
@@ -1575,7 +1596,8 @@ fn visit_document_ids(
 /// Stream each candidate row with every request-term frequency it carries.
 /// The request's posting lists advance once in document order alongside the
 /// ascending candidates, so a row costs at most one keyed block read and no
-/// posting probe.
+/// posting probe. Phrase document frequencies need these rows; ordinary
+/// term scoring reads the block preface instead.
 fn visit_lexical_rows(
     connection: &Connection,
     rows: &RowBlocksV1<'_>,
@@ -2016,8 +2038,10 @@ impl<'a> ArtifactQueryV1<'a> {
             control,
             |_, stored, _| {
                 let row = self.decode_row(&stored).map_err(map_query_artifact_error)?;
+                // Frequency counts documents once per normalized phrase, even
+                // when the request includes multiple original spellings.
                 for (phrase, frequency) in &mut phrase_frequencies {
-                    if matches_phrase(&row, phrase) {
+                    if !phrase_field_counts(&row, phrase).is_empty() {
                         *frequency += 1;
                     }
                 }
@@ -2027,58 +2051,66 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut pruned = Vec::new();
         let documents =
             self.lexical_documents(request, &fuzzy, &stats, &phrase_queries, &mut pruned)?;
-        // The scan holds one transient row and retains complete rows only for
-        // the cap-bounded winners. That avoids a second winner hydration pass
-        // while preserving the same strict materialization ceiling.
+        let mut text_documents = phrase_documents;
+        if !prepared.proximities.is_empty() {
+            text_documents |= self.proximity_documents(&prepared, &stats)?;
+        }
+        // Term and fuzzy scores need field lengths, which the block preface
+        // stores uncompressed. Phrase and proximity counts still read text,
+        // and only the cap-bounded winners are inflated into candidates.
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
-        let mut excluded = self.document_count as u64;
-        let mut eligible = 0u64;
-        let mut ranked = BinaryHeap::new();
-        visit_lexical_rows(
-            self.connection,
-            &self.row_blocks,
+        let (selected, eligible, excluded) = self.select_lexical_winners(
             &documents,
-            &stats.postings,
-            &self.metrics,
+            &text_documents,
+            &prepared,
+            &fuzzy,
+            &phrase_frequencies,
+            &stats,
+            &request.field_filters,
+            cap,
             control,
-            |document, stored, frequencies| {
-                let row = self.decode_row(&stored).map_err(map_query_artifact_error)?;
-                let score = self.score_row(
-                    &row,
-                    &prepared,
-                    &fuzzy,
-                    &phrase_frequencies,
-                    &stats,
-                    &frequencies,
-                );
-                let Some(ranking) = admitted_score_micros(&score, &request.field_filters)? else {
-                    return Ok(());
-                };
-                eligible += 1;
-                excluded = excluded.saturating_sub(1);
-                retain_bounded(
-                    &mut ranked,
-                    cap,
-                    Keyed {
-                        key: (Reverse(ranking), row.id.as_str().to_owned(), document),
-                        value: (score, row),
-                    },
-                );
-                Ok(())
-            },
         )?;
-        let selected = ranked.into_sorted_vec();
         let truncated = eligible - selected.len() as u64;
+        let mut winner_documents = selected
+            .iter()
+            .map(|entry| entry.document)
+            .collect::<Vec<_>>();
+        winner_documents.sort_unstable();
+        let mut winner_rows = BTreeMap::new();
+        for document in winner_documents {
+            retrieval_checkpoint(control)?;
+            winner_rows.insert(document, self.row(document)?);
+        }
         let mut candidates = Vec::with_capacity(selected.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, entry) in selected.into_iter().enumerate() {
             if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
                 retrieval_checkpoint(control)?;
             }
-            let Keyed {
-                value: (score, row),
-                ..
-            } = entry;
+            let row = winner_rows.remove(&entry.document).ok_or_else(|| {
+                RetrievalPortError::Contract("lexical winner row was not read".to_owned())
+            })?;
+            self.preface_matches_row(&entry.draft, &row)?;
+            let frequencies = &entry.draft.frequencies;
+            let score = self.score_row(
+                &row,
+                &prepared,
+                &fuzzy,
+                &phrase_frequencies,
+                &stats,
+                frequencies,
+            );
+            let ranking =
+                admitted_score_micros(&score, &request.field_filters)?.ok_or_else(|| {
+                    RetrievalPortError::Contract(
+                        "lexical winner lost the score that selected it".to_owned(),
+                    )
+                })?;
+            if ranking != entry.rank {
+                return Err(RetrievalPortError::Contract(
+                    "lexical scoring preface diverged from the stored row".to_owned(),
+                ));
+            }
             let mut candidate = lexical_lane_candidate(
                 &row,
                 &self.metadata.freshness,
@@ -2220,6 +2252,255 @@ impl<'a> ArtifactQueryV1<'a> {
             candidates,
             evidence_by_occurrence,
         )))
+    }
+
+    fn proximity_documents(
+        &self,
+        prepared: &PreparedLexicalQueryV1<'_>,
+        stats: &LexicalStatsCacheV1,
+    ) -> Result<RoaringBitmap, RetrievalPortError> {
+        let mut matched = RoaringBitmap::new();
+        for proximity in &prepared.proximities {
+            let mut intersection = None;
+            for term in &proximity.terms {
+                let documents = stats
+                    .postings
+                    .documents(term, |field| field != LexicalFieldV1::Subtoken)
+                    .map_err(map_query_artifact_error)?;
+                intersection = Some(match intersection {
+                    Some(current) => current & documents,
+                    None => documents,
+                });
+            }
+            if let Some(documents) = intersection {
+                matched |= documents;
+            }
+        }
+        Ok(matched)
+    }
+
+    /// Keep one transient scoring record and only cap-bounded winners.
+    /// Phrase frequencies are complete before this scan; ordinary term queries
+    /// need only the uncompressed preface and posting cursors.
+    #[allow(clippy::too_many_arguments)]
+    fn select_lexical_winners(
+        &self,
+        documents: &RoaringBitmap,
+        text_documents: &RoaringBitmap,
+        prepared: &PreparedLexicalQueryV1<'_>,
+        fuzzy: &FuzzyExpansionsV1,
+        phrase_frequencies: &BTreeMap<String, usize>,
+        stats: &LexicalStatsCacheV1,
+        filters: &[LexicalFieldFilterV1],
+        cap: usize,
+        control: &dyn RetrievalExecutionControl,
+    ) -> Result<(Vec<SelectedLexicalV1>, u64, u64), RetrievalPortError> {
+        hotpath::measure_block!("query.stream.score_from_preface", {
+            let mut cursors = stats.postings.cursors().map_err(map_query_artifact_error)?;
+            let mut ranked = LexicalWinnerHeap::new();
+            let mut excluded = self.document_count as u64;
+            let mut eligible = 0u64;
+            for (ordinal, document) in documents.iter().enumerate() {
+                if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                    retrieval_checkpoint(control)?;
+                }
+                let preface = self
+                    .row_blocks
+                    .scoring_preface(document)
+                    .map_err(map_query_artifact_error)?;
+                let mut entries = Vec::new();
+                for cursor in &mut cursors {
+                    if let Some(frequency) = cursor
+                        .frequency_at(document)
+                        .map_err(map_query_artifact_error)?
+                    {
+                        entries.push((
+                            cursor.field,
+                            cursor.term.to_owned(),
+                            usize::try_from(frequency).map_err(contract_error)?,
+                        ));
+                    }
+                }
+                let mut phrase_tfs = Vec::new();
+                let mut proximity_tfs = Vec::new();
+                if text_documents.contains(document) {
+                    let stored = self
+                        .row_blocks
+                        .row(document)
+                        .map_err(map_query_artifact_error)?;
+                    let row = self.decode_row(&stored).map_err(map_query_artifact_error)?;
+                    if preface.chunk_id != row.id.as_str()
+                        || preface.field_lengths != row.field_lengths
+                        || preface.trimmed_normalized_len != row.normalized_text.trim().len()
+                    {
+                        return Err(RetrievalPortError::Contract(
+                            "lexical scoring preface does not match its row".to_owned(),
+                        ));
+                    }
+                    for (index, (_, normalized)) in prepared.phrases.iter().enumerate() {
+                        let counts = phrase_field_counts(&row, normalized);
+                        for (field, count) in counts {
+                            phrase_tfs.push((field, index, count));
+                        }
+                    }
+                    for (index, proximity) in prepared.proximities.iter().enumerate() {
+                        for (field, count) in proximity_field_counts(
+                            &row,
+                            &proximity.terms,
+                            proximity.original.maximum_gap,
+                        ) {
+                            proximity_tfs.push((field, index, count));
+                        }
+                    }
+                }
+                let draft = LexicalDraftV1 {
+                    chunk_id: preface.chunk_id,
+                    field_lengths: preface.field_lengths,
+                    frequencies: LexicalTermFrequenciesV1(entries),
+                    phrase_tfs,
+                    proximity_tfs,
+                    trimmed_normalized_len: preface.trimmed_normalized_len,
+                };
+                let score =
+                    self.score_draft(&draft, prepared, fuzzy, phrase_frequencies, stats, false);
+                let Some(upper) = admitted_score_micros(&score, filters)? else {
+                    continue;
+                };
+                eligible += 1;
+                excluded = excluded.saturating_sub(1);
+                if cap == 0 {
+                    continue;
+                }
+                // Echo only lowers the score. A candidate whose upper bound
+                // loses to the current worst winner never needs text hydration.
+                let best_key = (Reverse(upper), draft.chunk_id.clone(), document);
+                if ranked.len() == cap && ranked.peek().is_some_and(|worst| best_key >= worst.key) {
+                    continue;
+                }
+                let echo_possible = !prepared.echo_query.is_empty()
+                    && draft.trimmed_normalized_len == prepared.echo_query.len();
+                let rank = if echo_possible {
+                    retrieval_checkpoint(control)?;
+                    let row = self.row(document)?;
+                    self.preface_matches_row(&draft, &row)?;
+                    let score = self.score_row(
+                        &row,
+                        prepared,
+                        fuzzy,
+                        phrase_frequencies,
+                        stats,
+                        &draft.frequencies,
+                    );
+                    admitted_score_micros(&score, filters)?.ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "lexical echo confirmation lost an admitted score".to_owned(),
+                        )
+                    })?
+                } else {
+                    upper
+                };
+                retain_bounded(
+                    &mut ranked,
+                    cap,
+                    Keyed {
+                        key: (Reverse(rank), draft.chunk_id.clone(), document),
+                        value: SelectedLexicalV1 {
+                            draft,
+                            document,
+                            rank,
+                        },
+                    },
+                );
+            }
+            retrieval_checkpoint(control)?;
+            self.metrics.rows(documents.len());
+            Ok((
+                ranked
+                    .into_sorted_vec()
+                    .into_iter()
+                    .map(|entry| entry.value)
+                    .collect(),
+                eligible,
+                excluded,
+            ))
+        })
+    }
+
+    fn score_draft(
+        &self,
+        draft: &LexicalDraftV1,
+        prepared: &PreparedLexicalQueryV1<'_>,
+        fuzzy: &FuzzyExpansionsV1,
+        phrase_frequencies: &BTreeMap<String, usize>,
+        stats: &LexicalStatsCacheV1,
+        echo_penalty: bool,
+    ) -> LexicalRowScoreV1 {
+        score_lexical_row(
+            &draft.field_lengths,
+            &[],
+            prepared,
+            fuzzy,
+            phrase_frequencies,
+            |field, term| term_frequency(&draft.frequencies, field, term),
+            |field, term| stats.document_frequency(field, term),
+            |field, term_frequency, document_frequency| {
+                self.term_score_with_lengths(
+                    field,
+                    term_frequency,
+                    &draft.field_lengths,
+                    document_frequency,
+                    stats,
+                )
+            },
+            |field, phrase| {
+                prepared
+                    .phrases
+                    .iter()
+                    .position(|(_, normalized)| normalized == phrase)
+                    .and_then(|index| {
+                        draft
+                            .phrase_tfs
+                            .iter()
+                            .find_map(|(matched, matched_index, count)| {
+                                (*matched == field && *matched_index == index).then_some(*count)
+                            })
+                    })
+                    .unwrap_or(0)
+            },
+            |field, proximity| {
+                prepared
+                    .proximities
+                    .iter()
+                    .position(|candidate| std::ptr::eq(candidate, proximity))
+                    .and_then(|index| {
+                        draft
+                            .proximity_tfs
+                            .iter()
+                            .find_map(|(matched, matched_index, count)| {
+                                (*matched == field && *matched_index == index).then_some(*count)
+                            })
+                    })
+                    .unwrap_or(0)
+            },
+            echo_penalty,
+        )
+    }
+
+    fn preface_matches_row(
+        &self,
+        draft: &LexicalDraftV1,
+        row: &ArtifactRowV1,
+    ) -> Result<(), RetrievalPortError> {
+        if draft.chunk_id == row.id.as_str()
+            && draft.field_lengths == row.field_lengths
+            && draft.trimmed_normalized_len == row.normalized_text.trim().len()
+        {
+            Ok(())
+        } else {
+            Err(RetrievalPortError::Contract(
+                "lexical scoring preface does not match its row".to_owned(),
+            ))
+        }
     }
 
     fn row(&self, document: u32) -> Result<ArtifactRowV1, RetrievalPortError> {
@@ -2576,7 +2857,7 @@ impl<'a> ArtifactQueryV1<'a> {
     ) -> LexicalRowScoreV1 {
         crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
             score_lexical_row(
-                row,
+                row.field_lengths(),
                 &row.exact_terms,
                 prepared,
                 fuzzy,
@@ -2586,8 +2867,43 @@ impl<'a> ArtifactQueryV1<'a> {
                 |field, term_frequency, document_frequency| {
                     self.term_score_with_df(field, term_frequency, row, document_frequency, stats)
                 },
+                |field, phrase| {
+                    phrase_field_counts(row, phrase)
+                        .into_iter()
+                        .find_map(|(matched, count)| (matched == field).then_some(count))
+                        .unwrap_or(0)
+                },
+                |field, proximity| {
+                    proximity_field_counts(row, &proximity.terms, proximity.original.maximum_gap)
+                        .into_iter()
+                        .find_map(|(matched, count)| (matched == field).then_some(count))
+                        .unwrap_or(0)
+                },
+                !prepared.echo_query.is_empty()
+                    && prepared.echo_query == row.normalized_text().trim(),
             )
         })
+    }
+
+    fn term_score_with_lengths(
+        &self,
+        field: LexicalFieldV1,
+        term_frequency: usize,
+        field_lengths: &BTreeMap<LexicalFieldV1, usize>,
+        document_frequency: usize,
+        stats: &LexicalStatsCacheV1,
+    ) -> u64 {
+        let total = stats.field_total(field);
+        let average = total.div_ceil(self.document_count.max(1)).max(1);
+        let document_length = field_lengths.get(&field).copied().unwrap_or(0).max(1);
+        bm25_score_micros(
+            self.document_count,
+            document_frequency,
+            term_frequency,
+            document_length,
+            average,
+            field_weight_millis(field),
+        )
     }
 
     fn term_score_with_df(
@@ -2598,16 +2914,12 @@ impl<'a> ArtifactQueryV1<'a> {
         document_frequency: usize,
         stats: &LexicalStatsCacheV1,
     ) -> u64 {
-        let total = stats.field_total(field);
-        let average = total.div_ceil(self.document_count.max(1)).max(1);
-        let document_length = row.field_lengths.get(&field).copied().unwrap_or(0).max(1);
-        bm25_score_micros(
-            self.document_count,
-            document_frequency,
+        self.term_score_with_lengths(
+            field,
             term_frequency,
-            document_length,
-            average,
-            field_weight_millis(field),
+            &row.field_lengths,
+            document_frequency,
+            stats,
         )
     }
 }
@@ -2682,6 +2994,23 @@ impl LexicalStatsCacheV1 {
             .fold(0usize, usize::saturating_add)
     }
 }
+
+struct LexicalDraftV1 {
+    chunk_id: String,
+    field_lengths: BTreeMap<LexicalFieldV1, usize>,
+    frequencies: LexicalTermFrequenciesV1,
+    phrase_tfs: Vec<(LexicalFieldV1, usize, usize)>,
+    proximity_tfs: Vec<(LexicalFieldV1, usize, usize)>,
+    trimmed_normalized_len: usize,
+}
+
+struct SelectedLexicalV1 {
+    draft: LexicalDraftV1,
+    document: u32,
+    rank: u64,
+}
+
+type LexicalWinnerHeap = BinaryHeap<Keyed<(Reverse<u64>, String, u32), SelectedLexicalV1>>;
 
 /// Heap entry ordered by `key` alone. Payload is excluded from equality so a
 /// worst-first `BinaryHeap` ranks capped winners without comparing row
@@ -3185,7 +3514,7 @@ fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortE
 #[cfg(test)]
 mod tests {
     use std::cmp::Reverse;
-    use std::collections::{BTreeSet, BinaryHeap};
+    use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4042,6 +4371,10 @@ mod tests {
         let payloads = (0..documents)
             .map(|document| document.to_le_bytes())
             .collect::<Vec<_>>();
+        let lengths = vec![
+            BTreeMap::<LexicalFieldV1, usize>::new();
+            usize::try_from(documents).expect("document count")
+        ];
         let rows = (0..documents)
             .map(|document| {
                 let index = usize::try_from(document).expect("document index");
@@ -4051,6 +4384,8 @@ mod tests {
                     parent_chunk_id: None,
                     row: &payloads[index],
                     text: "fn alpha() {}",
+                    field_lengths: &lengths[index],
+                    trimmed_normalized_len: 0,
                 }
             })
             .collect::<Vec<_>>();

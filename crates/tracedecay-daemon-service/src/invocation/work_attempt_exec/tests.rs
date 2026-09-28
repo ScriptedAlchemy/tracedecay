@@ -60,6 +60,8 @@ use tracedecay_domain::{
     WorkProductSourceWatermarkV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
     WorkSandboxPolicy, WorkflowOperationRef, WorkflowStageClassV1, WorktreeId, canonical_sha256,
 };
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 /// argv the module maps onto each admitted `(backend, protocol)` pair. These
@@ -656,13 +658,8 @@ fn leased_attempt(worktree_root: &Path, instructions: &str, shape: &SnapshotShap
 /// `env_clear()`, nothing but the allowlist survives into the child.
 #[cfg(unix)]
 fn fake_executable(directory: &Path, name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = directory.join(name);
-    std::fs::write(&path, body).unwrap();
-    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&path, permissions).unwrap();
+    write_executable_script(&path, body).unwrap();
     path
 }
 

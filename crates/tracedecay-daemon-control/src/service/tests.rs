@@ -25,6 +25,8 @@ use super::{
 };
 use tracedecay_daemon_protocol::SOCKET_ENV;
 use tracedecay_runtime_core::config::{ProfileRoot, USER_DATA_DIR_ENV};
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 pub(super) const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
 
@@ -63,6 +65,20 @@ fn fixture_profile(dir: &std::path::Path) -> ProfileRoot {
 fn profile_with_data_dir(data_dir: &std::path::Path) -> ProfileRoot {
     std::fs::create_dir_all(data_dir).expect("profile data dir");
     ProfileRoot::new(data_dir)
+}
+
+/// Leaves a socket file at `path` that nothing listens on. The socket is
+/// bound but never put into the listening state: a listener that is bound and
+/// then dropped stays connectable while a sibling test's forked child still
+/// holds the inherited descriptor, which makes a stale-socket fixture
+/// intermittently live.
+#[cfg(unix)]
+fn bind_stale_socket(path: &std::path::Path) {
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+        .expect("stale socket");
+    socket
+        .bind(&socket2::SockAddr::unix(path).expect("stale socket address"))
+        .expect("bind stale socket");
 }
 
 /// A fake program script whose `$NAME` references are baked to fixture
@@ -226,7 +242,7 @@ impl FailingRestoreFixture {
 
         let systemctl = fake_bin.join("systemctl");
         let log = dir.path().join("systemctl.log");
-        std::fs::write(
+        write_executable_script(
             &systemctl,
             bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = start ] && exit 7\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
@@ -234,8 +250,6 @@ impl FailingRestoreFixture {
         ),
         )
         .expect("fake systemctl");
-        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-            .expect("systemctl permissions");
         let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
         let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
@@ -686,7 +700,7 @@ fn daemon_readiness_probe_classifies_connect_and_protocol_failures() {
     ));
 
     let stale_socket = profile_dir.path().join("stale.sock");
-    drop(UnixListener::bind(&stale_socket).expect("bind stale socket"));
+    bind_stale_socket(&stale_socket);
     let stale = super::probe::daemon_readiness_probe(
         &profile,
         &stale_socket,
@@ -842,7 +856,7 @@ fn daemon_socket_connectable_separates_a_slow_daemon_from_no_daemon() {
     );
 
     let stale = profile_with_data_dir(&root.path().join("stale"));
-    drop(UnixListener::bind(stale.data_dir().join("daemon.sock")).expect("bind stale socket"));
+    bind_stale_socket(&stale.data_dir().join("daemon.sock"));
     assert!(
         !super::daemon_socket_connectable(&stale),
         "a socket file whose listener is gone has no listener to broker through"
@@ -948,13 +962,11 @@ fn daemon_readiness_probe_classifies_authentication_denial() {
 fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
     let dir = TempDir::new().expect("temp dir");
     let systemctl = dir.path().join("systemctl");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
     )
     .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let error = runner
@@ -969,9 +981,7 @@ fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn fake_service_program(bin: &std::path::Path, name: &str, script: &str) -> PathBuf {
     let program = bin.join(name);
-    std::fs::write(&program, script).expect("fake service program");
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-        .expect("fake service program permissions");
+    write_executable_script(&program, script).expect("fake service program");
     program
 }
 
@@ -1521,9 +1531,7 @@ fn assert_path_lookup_skips_non_executable_shadow(program: &str, lifecycle: &str
         .expect("shadow permissions");
 
     let executable = executable_dir.join(program);
-    std::fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("executable program");
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
-        .expect("executable permissions");
+    write_executable_script(&executable, "#!/bin/sh\nexit 0\n").expect("executable program");
 
     let path_var = std::env::join_paths([shadow_dir, executable_dir]).expect("fixture PATH");
     let resolved = super::runner::require_service_program_on_path(
@@ -1666,9 +1674,7 @@ fn refresh_installed_service_skips_missing_unit() {
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     std::fs::create_dir_all(&home).expect("home dir");
     let systemctl = fake_bin.join("systemctl");
-    std::fs::write(&systemctl, "#!/bin/sh\nexit 0\n").expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
+    write_executable_script(&systemctl, "#!/bin/sh\nexit 0\n").expect("fake systemctl");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
@@ -1698,6 +1704,10 @@ fn post_update_rejects_reachable_unmanaged_daemon() {
     let profile = ProfileRoot::new(&data_dir).with_xdg_config_home(&config_home);
     let socket_path = super::default_socket_path(profile.data_dir()).expect("default socket");
     let _listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
+    let fake_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    fake_service_program(&fake_bin, "systemctl", "#!/bin/sh\nexit 1\n");
+    let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
 
     let error = super::quiesce_installed_service_before_lease(&profile, TEST_BUILD_VERSION)
         .expect_err("unmanaged daemon must block post-update mutations");
@@ -1719,7 +1729,7 @@ fn refresh_installed_service_preserves_existing_socket_path() {
     let systemctl = fake_bin.join("systemctl");
     let log = dir.path().join("systemctl.log");
     let stopped = dir.path().join("systemctl.stopped");
-    std::fs::write(
+    write_executable_script(
             &systemctl,
             bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
@@ -1727,8 +1737,6 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         ),
         )
         .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
@@ -1826,7 +1834,7 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
 
     let systemctl = fake_bin.join("systemctl");
     let log = dir.path().join("systemctl.log");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
@@ -1834,8 +1842,6 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
         ),
     )
     .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
@@ -1900,7 +1906,7 @@ fn restore_after_update_does_not_activate_a_held_stopped_unit() {
 
     let systemctl = fake_bin.join("systemctl");
     let log = dir.path().join("systemctl.log");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
@@ -1908,8 +1914,6 @@ fn restore_after_update_does_not_activate_a_held_stopped_unit() {
         ),
     )
     .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
@@ -1955,7 +1959,7 @@ fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
 
     let systemctl = fake_bin.join("systemctl");
     let log = dir.path().join("systemctl.log");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\ncase \"$2\" in start|restart|enable) exit 99;; esac\nexit 0\n",
@@ -1963,8 +1967,6 @@ fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
         ),
     )
     .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
@@ -2026,13 +2028,11 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     std::fs::create_dir_all(&home).expect("home dir");
     let systemctl = fake_bin.join("systemctl");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
     )
     .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let profile = fixture_profile(dir.path());
     let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
@@ -2092,7 +2092,7 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
     // with shell redirection: PATH holds only the fake bin dir, so external
     // commands like `rm`/`touch` are unavailable inside the script.
     let started = dir.path().join("systemctl.started");
-    std::fs::write(
+    write_executable_script(
             &systemctl,
             bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ ! -f \"$TRACEDECAY_SYSTEMCTL_STARTED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = start ] && : > \"$TRACEDECAY_SYSTEMCTL_STARTED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
@@ -2100,8 +2100,6 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
         ),
         )
         .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let profile = fixture_profile(dir.path());
     let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
@@ -2152,13 +2150,11 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     std::fs::create_dir_all(&home).expect("home dir");
     let systemctl = fake_bin.join("systemctl");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
     )
     .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
     let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
@@ -2209,13 +2205,11 @@ fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline(
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     std::fs::create_dir_all(&home).expect("home dir");
     let systemctl = fake_bin.join("systemctl");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
     )
     .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
     let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
@@ -2232,7 +2226,7 @@ fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline(
     // Leave a socket file behind with nothing listening: the reported-running
     // unit never serves it, so the wait must fail instead of trusting the
     // service manager's state alone.
-    drop(UnixListener::bind(&socket_path).expect("bind managed daemon socket"));
+    bind_stale_socket(&socket_path);
 
     let error = super::wait_for_installed_service_state_with(
         &profile,
@@ -2261,7 +2255,7 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
 
     let systemctl = fake_bin.join("systemctl");
     let log = dir.path().join("systemctl.log");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
@@ -2269,8 +2263,6 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
         ),
     )
     .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
@@ -2325,7 +2317,7 @@ fn refresh_installed_service_preserves_stopped_state() {
     std::fs::create_dir_all(&home).expect("home dir");
     let systemctl = fake_bin.join("systemctl");
     let log = dir.path().join("systemctl.log");
-    std::fs::write(
+    write_executable_script(
             &systemctl,
             bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-active ] && { echo inactive; exit 3; }\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
@@ -2333,8 +2325,6 @@ fn refresh_installed_service_preserves_stopped_state() {
         ),
         )
         .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
     let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
@@ -2371,13 +2361,11 @@ fn systemd_service_state_detects_runtime_mask() {
     let fake_bin = dir.path().join("bin");
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     let systemctl = fake_bin.join("systemctl");
-    std::fs::write(
+    write_executable_script(
             &systemctl,
             "#!/bin/sh\n[ \"$2\" = is-active ] && { echo inactive; exit 3; }\n[ \"$2\" = is-enabled ] && { echo masked-runtime; exit 1; }\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
         )
         .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     assert_eq!(
@@ -2395,6 +2383,10 @@ fn refresh_preserves_persistent_systemd_mask_symlink() {
     let config_home = dir.path().join("config");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let fake_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    fake_service_program(&fake_bin, "systemctl", "#!/bin/sh\nexit 1\n");
+    let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
     let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
