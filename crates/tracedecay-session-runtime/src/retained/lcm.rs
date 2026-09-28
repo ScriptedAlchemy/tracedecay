@@ -590,7 +590,9 @@ fn lcm_doctor_outcome_status(
     }
 }
 
-fn lcm_doctor_projection(status: SessionProjectionServingStatus) -> LcmDoctorProjectionV1 {
+/// The wire reading of a projection's serving state, shared by
+/// `tracedecay_lcm_doctor` and `tracedecay_status`.
+pub fn lcm_doctor_projection(status: SessionProjectionServingStatus) -> LcmDoctorProjectionV1 {
     let (state, reason) = match &status.state {
         SessionProjectionServingState::Current => (LcmDoctorProjectionStateV1::Current, None),
         SessionProjectionServingState::Stale { reason } => (

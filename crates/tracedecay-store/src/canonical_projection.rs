@@ -4,7 +4,7 @@ use serde::Deserialize;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
     CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1,
-    CanonicalWorkflowSemanticKindV1, DurableObservationV1, ObservationContractError,
+    CanonicalWorkflowSemanticKindV1, DurableObservationV1, ObservationContractError, ObservationId,
     ObservationScopeV1,
 };
 
@@ -448,23 +448,33 @@ fn canonical_spawned_sessions(envelope: &CanonicalObservationEnvelopeV1) -> Vec<
         .collect()
 }
 
-/// The host's own identifier of the record's tool invocation, for a fork or
-/// tool result to bind to. Every capture falls back to the record's stable id
-/// (or `{stable_id}:tool:{index}`) when the host wrote none, so an invocation
-/// id rooted in the stable id is the capture's, not the host's, and is never
-/// served. A subagent dispatch wins over other invocations on the same record
-/// because that is the call a child session's `parent_tool_use_id` names.
-fn host_tool_use_id(envelope: &CanonicalObservationEnvelopeV1) -> Option<&str> {
+/// Whether `invocation_id` is the host's own identifier. Every capture falls
+/// back to the record's stable id (or `{stable_id}:tool:{index}`) when the
+/// host wrote none, so an invocation id rooted in the stable id is the
+/// capture's, not the host's, and is never served.
+fn is_host_invocation_id(
+    envelope: &CanonicalObservationEnvelopeV1,
+    invocation_id: &ObservationId,
+) -> bool {
     let stable_record_id = envelope.stable_record_id().as_str();
-    let synthesized_prefix = format!("{stable_record_id}:tool:");
+    let invocation_id = invocation_id.as_str();
+    invocation_id != stable_record_id
+        && !invocation_id
+            .strip_prefix(stable_record_id)
+            .is_some_and(|suffix| suffix.starts_with(":tool:"))
+}
+
+/// The host's own identifier of the record's tool invocation, for a fork or
+/// tool result to bind to. A subagent dispatch wins over other invocations on
+/// the same record because that is the call a child session's
+/// `parent_tool_use_id` names.
+fn host_tool_use_id(envelope: &CanonicalObservationEnvelopeV1) -> Option<&str> {
     let mut invocations = envelope.facts().iter().filter_map(|fact| match fact {
         CanonicalObservationFactV1::ToolInvocation {
             invocation_id,
             name,
             ..
-        } if invocation_id.as_str() != stable_record_id
-            && !invocation_id.as_str().starts_with(&synthesized_prefix) =>
-        {
+        } if is_host_invocation_id(envelope, invocation_id) => {
             Some((invocation_id.as_str(), name.as_str()))
         }
         _ => None,
@@ -537,7 +547,15 @@ fn canonical_message_metadata_for(
         .map(str::to_owned);
     let normalizer = tool_metadata_normalizer(source.as_deref());
     if let Some(normalize) = normalizer {
-        normalize(&mut metadata, envelope.facts())?;
+        match rendering {
+            CanonicalRendering::Current => normalize(&mut metadata, envelope.facts(), &|id| {
+                is_host_invocation_id(envelope, id)
+            })?,
+            // Released rows served the capture fallback as the call id.
+            CanonicalRendering::ShippedRelease => {
+                normalize(&mut metadata, envelope.facts(), &|_| true)?;
+            }
+        }
     }
     let tool_use_id = match rendering {
         CanonicalRendering::Current => host_tool_use_id(envelope),
