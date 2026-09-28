@@ -863,7 +863,7 @@ mod tests {
                 let _ = child.wait();
             }
             "child_output" => {
-                fs::write(&marker, std::process::id().to_string()).expect("fixture marker write");
+                publish_fixture_pid(Path::new(&marker));
                 let mut stdout = std::io::stdout().lock();
                 loop {
                     stdout.write_all(&[b'x'; 8 * 1024]).expect("fixture output");
@@ -871,11 +871,11 @@ mod tests {
                 }
             }
             "child_idle" => {
-                fs::write(&marker, std::process::id().to_string()).expect("fixture marker write");
+                publish_fixture_pid(Path::new(&marker));
                 thread::sleep(Duration::from_mins(1));
             }
             "child_limited_output" => {
-                fs::write(&marker, std::process::id().to_string()).expect("fixture marker write");
+                publish_fixture_pid(Path::new(&marker));
                 let mut stdout = std::io::stdout().lock();
                 stdout
                     .write_all(&vec![b'x'; LIMITED_OUTPUT_BYTES])
@@ -884,6 +884,15 @@ mod tests {
             }
             _ => panic!("unknown fixture mode"),
         }
+    }
+
+    /// Readers poll for the marker's existence, so the pid is written to a
+    /// sibling and renamed into place; a cancelled child must never leave an
+    /// empty marker behind.
+    fn publish_fixture_pid(marker: &Path) {
+        let staging = marker.with_extension("partial");
+        fs::write(&staging, std::process::id().to_string()).expect("fixture marker write");
+        fs::rename(&staging, marker).expect("fixture marker publish");
     }
 
     #[tokio::test]
