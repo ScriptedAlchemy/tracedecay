@@ -671,7 +671,7 @@ impl LatestCodeTextGenerationV1 {
             }
             .map_err(CodeGraphProjectionError::from)
         )?;
-        let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
+        let store = Arc::new(CodeGraphProjectionStore::seat_verified_snapshot(
             snapshot,
             generation_id.clone(),
         )?);
@@ -729,7 +729,7 @@ impl LatestCompleteCodeIndexV1 {
                     }
                 })
         )?;
-        let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
+        let store = Arc::new(CodeGraphProjectionStore::seat_verified_snapshot(
             snapshot,
             generation_id.clone(),
         )?);

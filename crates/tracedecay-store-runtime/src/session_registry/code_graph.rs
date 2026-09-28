@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 #[cfg(any(test, feature = "test-helpers"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::{
@@ -30,6 +31,7 @@ use tracedecay_store::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
+use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_code_index_runtime::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
@@ -527,6 +529,12 @@ pub(crate) struct CodeGraphShardPublicationLocksV1 {
     /// while the seated snapshot is already serving.
     build: Arc<tokio::sync::Mutex<()>>,
     flight: CodeGraphPublicationFlightV1,
+    /// One published code graph per snapshot content identity and projector
+    /// revision. Linked worktrees of one tree share content identity but not
+    /// generation id or Grafeo namespace, so without this each scope builds
+    /// and pins a second corpus-sized graph. The map lives on the project
+    /// shard locks, which every worktree of the project already shares.
+    shared_graphs: Mutex<HashMap<String, Arc<VerifiedGraphSnapshot>>>,
 }
 
 /// The shard-wide corpus build permit; dropping it admits the next scope.
@@ -559,6 +567,26 @@ impl CodeGraphShardPublicationLocksV1 {
                 }
             }
         }
+    }
+
+    /// Keeps the first snapshot published for `key`. A later publisher of the
+    /// same content reuses it instead of replacing the serving graph.
+    fn remember_shared_graph(&self, key: String, snapshot: &VerifiedGraphSnapshot) {
+        let mut graphs = self
+            .shared_graphs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        graphs
+            .entry(key)
+            .or_insert_with(|| Arc::new(snapshot.clone()));
+    }
+
+    fn shared_graph(&self, key: &str) -> Option<VerifiedGraphSnapshot> {
+        self.shared_graphs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .map(|snapshot| snapshot.as_ref().clone())
     }
 }
 
@@ -1253,6 +1281,58 @@ impl RetainedCodeGraphRuntimeV1 {
         self
     }
 
+    /// Content key for the active publication pointer, or `None` when this
+    /// runtime must build or recover its own graph.
+    ///
+    /// Sharing is fail-closed: a missing pointer, a pointer for another
+    /// generation, or an empty content identity never reuses a sibling graph.
+    /// The projector revision is part of the key so a projector bump cannot
+    /// serve the previous row shape.
+    fn shared_graph_content_key(&self) -> Option<String> {
+        let pointer_path = self
+            .generations_root
+            .parent()?
+            .join("active-code-generation-v1.json");
+        let bytes = match std::fs::read(&pointer_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                tracing::warn!(
+                    event = "code_graph_shared_content_pointer_unreadable",
+                    error = %error,
+                    "active code-generation pointer could not be read; this scope builds its own graph"
+                );
+                return None;
+            }
+        };
+        let pointer = match serde_json::from_slice::<DurablePublicationPointerV1>(&bytes) {
+            Ok(pointer) => pointer,
+            Err(error) => {
+                tracing::warn!(
+                    event = "code_graph_shared_content_pointer_unreadable",
+                    error = %error,
+                    "active code-generation pointer could not be decoded; this scope builds its own graph"
+                );
+                return None;
+            }
+        };
+        if pointer.generation_id != self.generation_id.as_str()
+            || pointer.snapshot_content_identity.is_empty()
+        {
+            return None;
+        }
+        Some(format!(
+            "{}\u{1f}{}",
+            tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION,
+            pointer.snapshot_content_identity
+        ))
+    }
+
+    fn adopt_shared_content_graph(&self) -> Option<VerifiedGraphSnapshot> {
+        let key = self.shared_graph_content_key()?;
+        self.publication_locks.shared_graph(&key)
+    }
+
     /// Publishes this runtime's sealed generation as its verified graph head.
     ///
     /// The graph rows are built from the sealed file segments on disk, one
@@ -1316,10 +1396,25 @@ impl RetainedCodeGraphRuntimeV1 {
         };
         let context = GraphPublicationOperationContextV1::new(&control, &probe)
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let interruption = || match probe.interruption() {
-            Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-            Some(RuntimeInterruptionV1::DeadlineExceeded) => Err(GraphDbError::DeadlineExceeded),
-            None => Ok(()),
+        // Park without the resident-memory guard. A linked worktree that is
+        // already over the watermark must still be able to wait out the
+        // sibling that is publishing the same snapshot content and then serve
+        // that graph. Consulting the guard here refused the adopt before the
+        // sibling had stored it, and the following corpus build is what the
+        // cgroup killed.
+        let build = {
+            let park = || {
+                if request_cancelled.load(Ordering::Acquire)
+                    || self.lifecycle_cancelled.load(Ordering::Acquire)
+                {
+                    return Err(GraphDbError::Cancelled);
+                }
+                if Instant::now() >= deadline_at {
+                    return Err(GraphDbError::DeadlineExceeded);
+                }
+                Ok(())
+            };
+            self.publication_locks.claim_build(&park)?
         };
         // A cancellation the watermark caused is reported as the typed budget
         // it exhausted: the scheduler classifies that name as a graph refusal
@@ -1334,10 +1429,24 @@ impl RetainedCodeGraphRuntimeV1 {
             }
             other => other,
         };
-        let build = self
-            .publication_locks
-            .claim_build(&interruption)
-            .map_err(refuse_if_resident_memory)?;
+        if request_cancelled.load(Ordering::Acquire)
+            || self.lifecycle_cancelled.load(Ordering::Acquire)
+        {
+            drop(build);
+            return Err(GraphDbError::Cancelled);
+        }
+        if let Some(shared) = self.adopt_shared_content_graph() {
+            tracing::info!(
+                event = "code_graph_publication_reused_shared_content",
+                "serving the code graph already published for this snapshot content"
+            );
+            drop(build);
+            return Ok(shared);
+        }
+        if resident_memory_guard.is_cancelled() {
+            drop(build);
+            return Err(refuse_if_resident_memory(GraphDbError::Cancelled));
+        }
         let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
             self.authority.namespace().clone(),
         )
@@ -1400,6 +1509,11 @@ impl RetainedCodeGraphRuntimeV1 {
         })
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?
         .map_err(refuse_if_resident_memory);
+        if let Ok(snapshot) = published.as_ref() {
+            if let Some(key) = self.shared_graph_content_key() {
+                self.publication_locks.remember_shared_graph(key, snapshot);
+            }
+        }
         // Everything corpus-sized this publication built, the spilled graph
         // rows, the staged relational rows, the sealed copy buffers, is dead
         // by here. Free it, release the duplicate staging rows the seal
@@ -1530,8 +1644,20 @@ impl RetainedCodeGraphRuntimeV1 {
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         let current_head = storage
             .verified_head(&relational_projection, &context)
-            .map_err(GraphDbError::from)?
-            .ok_or_else(|| GraphDbError::unavailable("code graph has no verified head"))?;
+            .map_err(GraphDbError::from)?;
+        let Some(current_head) = current_head else {
+            // This namespace has no head of its own. A sibling that already
+            // published the same snapshot content can serve it. A present head
+            // keeps the digest and conflict checks below, including a cold
+            // reopen whose sealed identity was rewritten. Historical recovery
+            // never adopts: that read is for this generation's own replay.
+            if require_current_head {
+                if let Some(shared) = self.adopt_shared_content_graph() {
+                    return Ok(shared);
+                }
+            }
+            return Err(GraphDbError::unavailable("code graph has no verified head"));
+        };
         if require_current_head && current_head.key != expected_key {
             return Err(GraphDbError::conflict(
                 "code_graph.recover_verified_snapshot_from_head.generation",

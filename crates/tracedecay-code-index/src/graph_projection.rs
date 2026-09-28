@@ -16,15 +16,13 @@ use tracedecay_domain::{
     EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, RelationEdgeKindV1,
     RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-use tracedecay_graph_db::NeverCancelled;
 use tracedecay_graph_db::{
     GraphCancellation, GraphConflictContextV1, GraphDbError, GraphEntity, GraphEntityId,
     GraphEntityRef, GraphGenerationId, GraphGenerationManifest, GraphGenerationManifestIdentity,
     GraphIdempotencyKey, GraphLabel, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
     GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId,
     GraphRelationKind, GraphServingEnginePin, GraphWatermark, MAX_VERIFIED_GENERATION_RELATIONS,
-    SourceGeneration, VerifiedGraphSnapshot,
+    NeverCancelled, SourceGeneration, VerifiedGraphSnapshot,
 };
 
 mod builder;
@@ -339,6 +337,13 @@ pub struct CodeGraphProjectionStore {
     snapshot: Arc<VerifiedGraphSnapshot>,
     projection: GraphProjectionIdentity,
     generation: CodeGenerationId,
+    /// Code generation whose rows this snapshot was projected from.
+    ///
+    /// Equals [`Self::generation`] when this worktree published the snapshot.
+    /// A linked worktree serving a sibling's identical snapshot keeps
+    /// [`Self::generation`] as the generation its callers pin, and this field
+    /// as the generation stamped on the shared rows.
+    graph_generation: CodeGenerationId,
     /// Generation-pinned name/kind catalog state and its single build gate.
     /// The state lock is never held across the projection scan, so
     /// occurrence-seeded reads remain independent while catalog warming runs.
@@ -389,16 +394,71 @@ impl CodeGraphProjectionStore {
         if snapshot.generation() != &expected {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
-        Ok(Self {
+        Ok(Self::assemble(
+            snapshot,
+            projection,
+            generation.clone(),
+            generation,
+        ))
+    }
+
+    /// Seats `snapshot` for `generation`.
+    ///
+    /// An own-generation snapshot must match this worktree's graph generation
+    /// id. A snapshot published for another code generation of the same
+    /// content is seated only when its rows are stamped with that other
+    /// generation and its graph id matches the stamp. Callers keep pinning
+    /// `generation`; reads of the current-generation entity use the stamp.
+    pub fn seat_verified_snapshot(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+    ) -> Result<Self, CodeGraphProjectionError> {
+        match Self::from_verified_snapshot(snapshot.clone(), generation.clone()) {
+            Err(CodeGraphProjectionError::GenerationMismatch) => {
+                Self::from_shared_content_snapshot(snapshot, generation)
+            }
+            other => other,
+        }
+    }
+
+    /// Seats a snapshot whose rows were projected for a different code
+    /// generation than `generation`.
+    pub fn from_shared_content_snapshot(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+    ) -> Result<Self, CodeGraphProjectionError> {
+        let projection = snapshot.projection().clone();
+        let current = read_current_generation(&snapshot, &projection, Arc::new(NeverCancelled))?;
+        let revision = GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())?;
+        let expected = code_graph_generation_id(&current.generation, &revision)?;
+        if snapshot.generation() != &expected || current.generation == generation {
+            return Err(CodeGraphProjectionError::GenerationMismatch);
+        }
+        Ok(Self::assemble(
+            snapshot,
+            projection,
+            generation,
+            current.generation,
+        ))
+    }
+
+    fn assemble(
+        snapshot: VerifiedGraphSnapshot,
+        projection: GraphProjectionIdentity,
+        generation: CodeGenerationId,
+        graph_generation: CodeGenerationId,
+    ) -> Self {
+        Self {
             snapshot: Arc::new(snapshot),
             projection,
             generation,
+            graph_generation,
             interactive_catalog: Arc::new(InteractiveCatalogCache::new()),
             serving_engine: Arc::new(Mutex::new(None)),
             released: Arc::new(AtomicBool::new(false)),
             rewarming: Arc::new(AtomicBool::new(false)),
             rewarm_failure: Arc::new(Mutex::new(None)),
-        })
+        }
     }
 
     /// Opens this generation's graph engine once and keeps it resident until
@@ -551,7 +611,7 @@ impl CodeGraphProjectionStore {
         let snapshot = Arc::clone(&self.snapshot);
         let current =
             read_current_generation(&snapshot, &self.projection, Arc::clone(&cancellation))?;
-        if current.generation != *generation {
+        if current.generation != self.graph_generation {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
         Ok(CodeGraphEvidenceReader {
@@ -596,7 +656,7 @@ impl CodeGraphProjectionStore {
         let snapshot = Arc::clone(&self.snapshot);
         let current =
             read_current_generation(&snapshot, &self.projection, Arc::clone(&cancellation))?;
-        if current.generation != *generation {
+        if current.generation != self.graph_generation {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
         Ok(CodeGraphInteractiveReader::assemble(

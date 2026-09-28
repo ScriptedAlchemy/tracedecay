@@ -2668,3 +2668,273 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         assert_eq!(Arc::strong_count(&runtime.authority), graph_leases);
     });
 }
+
+struct SealedWorktreeIdentity {
+    generation_id: CodeGenerationId,
+    repository_id: RepositoryId,
+    reference: Option<RefId>,
+    worktree_id: WorktreeId,
+    replay: CodeGraphReplayBindingV1,
+    content_identity: String,
+}
+
+fn seal_worktree_identity(
+    project_id: &ProjectId,
+    project_root: &Path,
+    store_root: &Path,
+) -> SealedWorktreeIdentity {
+    let canonical = project_root.canonicalize().expect("canonical worktree");
+    let scoped_store = scoped_code_index_store_root(store_root, &canonical);
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &canonical,
+        scoped_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open worktree scheduler");
+    scheduler.reconcile_now().expect("seal the generation");
+    let latest = scheduler.latest_complete().expect("complete generation");
+    let repository_id = latest.generation().snapshot().repository.clone();
+    let reference = latest.generation().snapshot().reference.clone();
+    let worktree_id = scheduler.identity().worktree_id().clone();
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    drop(scheduler);
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+            .expect("active generation pointer"),
+    )
+    .expect("decode active generation pointer");
+    SealedWorktreeIdentity {
+        generation_id,
+        repository_id,
+        reference,
+        worktree_id,
+        replay: CodeGraphReplayBindingV1 {
+            generations_root: scoped_store.join("code-generations-v1"),
+            sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
+                pointer.state_digest.clone(),
+            )
+            .expect("sealed state digest"),
+        },
+        content_identity: pointer.snapshot_content_identity,
+    }
+}
+
+fn isolated_resident_pressure(
+    over_watermark: bool,
+) -> Arc<tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1> {
+    let pressure = Arc::new(
+        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::new(
+            std::num::NonZeroU64::new(1024 * 1024 * 1024).expect("nonzero pressure limit"),
+        ),
+    );
+    let observed = if over_watermark {
+        pressure.high_watermark_bytes() + 1
+    } else {
+        pressure.low_watermark_bytes()
+    };
+    pressure.publish_observed_resident_bytes(observed);
+    pressure
+}
+
+/// Identical linked worktrees serve one code graph. The second scope is
+/// already over the resident-memory watermark, so a second corpus build must
+/// not run: the second generation still resolves the shared symbol. A third
+/// worktree whose tree diverged is refused with the resident-memory budget
+/// instead of allocating that build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linked_worktree_serves_shared_graph_when_a_second_build_exceeds_resident_memory() {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    let linked_root = root.join("linked");
+    let diverged_root = root.join("diverged");
+    std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn shared_graph_symbol() -> usize { 2398 }\n",
+    )
+    .expect("project source");
+    git(&project_root, &["add", "."]);
+    git(&project_root, &["commit", "-qm", "shared graph fixture"]);
+    let project_id = ProjectId::new("project.shared-worktree-graph").expect("project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    git(
+        &project_root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            linked_root.to_str().expect("linked path"),
+            "HEAD",
+        ],
+    );
+    git(
+        &project_root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "diverged",
+            diverged_root.to_str().expect("diverged path"),
+            "HEAD",
+        ],
+    );
+    std::fs::write(
+        diverged_root.join("src/lib.rs"),
+        "pub fn diverged_graph_symbol() -> usize { 1 }\n",
+    )
+    .expect("diverged source");
+    git(&diverged_root, &["add", "."]);
+    git(&diverged_root, &["commit", "-qm", "diverge the tree"]);
+
+    let store_root = root.join("code-index-store");
+    let primary = seal_worktree_identity(&project_id, &project_root, &store_root);
+    let linked = seal_worktree_identity(&project_id, &linked_root, &store_root);
+    let diverged = seal_worktree_identity(&project_id, &diverged_root, &store_root);
+    assert_ne!(primary.generation_id, linked.generation_id);
+    assert_eq!(primary.content_identity, linked.content_identity);
+    assert_ne!(primary.content_identity, diverged.content_identity);
+
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        70,
+        "shared worktree graph",
+    )
+    .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(
+            project_id.clone(),
+            [project_root.canonicalize().expect("canonical project")],
+        )
+        .await
+        .expect("project graph database");
+    let under_budget = isolated_resident_pressure(false);
+    let over_budget = isolated_resident_pressure(true);
+    let primary_runtime = registry
+        .retain_code_graph_runtime(
+            project_id.clone(),
+            primary.repository_id,
+            primary.worktree_id,
+            primary.reference,
+            primary.generation_id.clone(),
+            Arc::clone(&project_database),
+            primary.replay,
+        )
+        .await
+        .expect("retain the primary code graph runtime")
+        .with_resident_memory_pressure(&under_budget);
+    let linked_runtime = registry
+        .retain_code_graph_runtime(
+            project_id.clone(),
+            linked.repository_id,
+            linked.worktree_id,
+            linked.reference,
+            linked.generation_id.clone(),
+            Arc::clone(&project_database),
+            linked.replay,
+        )
+        .await
+        .expect("retain the linked code graph runtime")
+        .with_resident_memory_pressure(&over_budget);
+    let diverged_runtime = registry
+        .retain_code_graph_runtime(
+            project_id,
+            diverged.repository_id,
+            diverged.worktree_id,
+            diverged.reference,
+            diverged.generation_id,
+            project_database,
+            diverged.replay,
+        )
+        .await
+        .expect("retain the diverged code graph runtime")
+        .with_resident_memory_pressure(&over_budget);
+
+    primary_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("primary worktree publishes the shared graph");
+    linked_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("linked worktree serves the published graph without a second build");
+    let shared = linked_runtime
+        .recover_verified_snapshot_from_head(Arc::new(AtomicBool::new(false)))
+        .expect("linked worktree recovers the shared graph with no head of its own");
+    let store =
+        tracedecay_code_index::graph_projection::CodeGraphProjectionStore::seat_verified_snapshot(
+            shared,
+            linked.generation_id.clone(),
+        )
+        .expect("seat the shared graph for the linked generation");
+    store
+        .mark_interactive_catalog_warming()
+        .expect("mark warming");
+    store
+        .warm_serving_engine()
+        .expect("warm the serving engine");
+    store
+        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .expect("derive the catalog from the shared projection");
+    let resolved = store
+        .interactive_reader_with_cancellation(
+            &linked.generation_id,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("interactive reader for the linked generation")
+        .resolve_qualified_name(
+            "src/lib.rs::shared_graph_symbol",
+            None,
+            4,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("resolve the shared symbol");
+    let resolved = resolved
+        .iter()
+        .map(|summary| {
+            let metadata = summary
+                .metadata
+                .as_ref()
+                .expect("production symbol metadata");
+            (
+                metadata.simple_name.as_str(),
+                metadata.kind.as_str(),
+                summary
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.logical_path.as_deref()),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolved,
+        vec![("shared_graph_symbol", "function", Some("src/lib.rs"))]
+    );
+
+    match diverged_runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false))) {
+        Err(GraphDbError::BudgetExhausted { kind, limit }) => {
+            assert_eq!(kind, tracedecay_graph_db::GraphBudgetKind::ResidentMemory);
+            assert_eq!(limit, over_budget.limit_bytes());
+        }
+        other => panic!(
+            "a diverged worktree over the resident-memory watermark must refuse the build: {other:?}"
+        ),
+    }
+}
