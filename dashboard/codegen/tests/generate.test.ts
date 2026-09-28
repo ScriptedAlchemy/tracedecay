@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z, type ZodTypeAny } from "zod";
+import ts from "typescript";
 import { generateContracts, type JsonSchema, OUTPUT_FILES } from "../src/generate.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -200,11 +201,81 @@ describe("contracts generator", () => {
 
     const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
     expect(generated).toContain(
-      "export const ClosedReadingSchema = z.object({\n  status: z.string(),\n}).strict();",
+      "export const ClosedReadingSchema: z.ZodObject<{\n  status: z.ZodType<string, z.ZodTypeDef, unknown>;\n}, \"strict\"> = z.object({\n  status: z.string(),\n}).strict();",
     );
+    expect(generated).toContain("export type ClosedReading = {\n  status: string;\n};");
     expect(generated).toContain(
-      "export const OpenReadingSchema = z.object({\n  status: z.string(),\n});",
+      "export const OpenReadingSchema: z.ZodObject<{\n  status: z.ZodType<string, z.ZodTypeDef, unknown>;\n}> = z.object({\n  status: z.string(),\n});",
     );
+    expect(generated).toContain("export type OpenReading = {\n  status: string;\n};");
+  });
+
+  it("type-checks structural aliases against decoder expressions and consumers", () => {
+    const bundle: JsonSchema = {
+      schemaRevision: "test.1",
+      $defs: {
+        Node: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string" },
+            child: { $ref: "#/$defs/Node" },
+            label: { type: ["string", "null"] },
+            metadata: {},
+          },
+          required: ["id", "label", "metadata"],
+        },
+        DashboardDomainStateV1: { enum: ["ready", "unsupported_schema"] },
+        Status: { enum: ["ready", "pending"] },
+        Choice: { oneOf: [{ const: "yes" }, { const: "no" }] },
+        Result: {
+          oneOf: [
+            { type: "object", properties: { kind: { const: "ok" }, node: { $ref: "#/$defs/Node" } }, required: ["kind", "node"] },
+            { type: "object", properties: { kind: { const: "missing" } }, required: ["kind"] },
+          ],
+        },
+      },
+    };
+    // Check the initializer-to-annotation boundary too: the production file
+    // skips this expensive work, but fixture decoders must agree with aliases.
+    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!
+      .replace("// @ts-nocheck", "");
+    const source = generated + `
+const catchInput: z.input<typeof DashboardDomainStateV1Schema> = 42;
+const valid: Node = { id: "root", label: null, child: { id: "leaf", label: "ok" } };
+const decoded: Node = NodeSchema.parse(valid);
+const inferred: z.infer<typeof NodeSchema> = valid;
+// @ts-expect-error required nullable fields cannot be omitted
+const missing: Node = { id: "root" };
+// @ts-expect-error a recursive child must satisfy the same contract
+const invalidChild: Node = { id: "root", label: null, child: { id: 42 } };
+// @ts-expect-error the decoder output retains the literal enum
+const invalidStatus: z.infer<typeof StatusSchema> = "other";
+const extended: Node & { extra: number } = NodeSchema.extend({ extra: z.number() }).parse({});
+const field: string = NodeSchema.shape.id.parse("id");
+const status: Status = StatusSchema.options[0];
+const choice: Choice = ChoiceSchema.options[0].parse("yes");
+function unwrap(result: Result): Node | undefined {
+  switch (result.kind) {
+    case "ok": return result.node;
+    case "missing": return undefined;
+    default: return assertNever(result);
+  }
+}
+`;
+    const filename = resolve(HERE, "structural-contract-fixture.ts");
+    const options: ts.CompilerOptions = {
+      strict: true, noEmit: true, skipLibCheck: true,
+      target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+      exactOptionalPropertyTypes: true,
+    };
+    const host = ts.createCompilerHost(options);
+    const readFile = host.readFile;
+    host.readFile = (path) => path === filename ? source : readFile(path);
+    const program = ts.createProgram([filename], options, host);
+    const diagnostics = ts.getPreEmitDiagnostics(program);
+    expect(diagnostics.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([]);
   });
 
   it("emits declared integer bounds without constraining unbounded integers", () => {

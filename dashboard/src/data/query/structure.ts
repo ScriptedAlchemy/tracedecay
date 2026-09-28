@@ -24,7 +24,7 @@
  * as a producer error.
  */
 import { useQuery } from '@tanstack/react-query';
-import type { z } from 'zod';
+import type { WireSchema } from './wireSchema.ts';
 
 import { fetchEnvelope } from './envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../scope/store.ts';
@@ -49,7 +49,7 @@ type StructureReadWire<T> =
 
 export async function fetchStructure<T>(
   url: string,
-  schema: z.ZodType<StructureReadWire<T>>,
+  schema: WireSchema<StructureReadWire<T>>,
 ): Promise<StructureResult<T>> {
   const result = await fetchEnvelope(url, schema);
   if (result.outcome === 'transport') {
@@ -88,7 +88,7 @@ export async function fetchStructure<T>(
 export function useStructure<T>(
   key: readonly unknown[],
   url: string,
-  schema: z.ZodType<StructureReadWire<T>>,
+  schema: WireSchema<StructureReadWire<T>>,
   options?: { enabled?: boolean },
 ) {
   const scope = useScope((s) => s.scope);
