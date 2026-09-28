@@ -433,11 +433,11 @@ fn task_xml_rejects_partial_and_duplicate_remote_tls_arguments() {
 
     assert_eq!(
         remote_tls_from_task_xml(partial).unwrap_err().to_string(),
-        "HARVEST partial"
+        "config error: Remote Brain TLS listener requires --remote-listen, --remote-tls-cert, and --remote-tls-key together"
     );
     assert_eq!(
         remote_tls_from_task_xml(duplicate).unwrap_err().to_string(),
-        "HARVEST duplicate"
+        "config error: installed daemon service repeats --remote-listen"
     );
 }
 

@@ -574,19 +574,25 @@ mod tests {
             current.effective_capabilities.clear();
         }
 
-        assert!(
-            authorization
+        assert_eq!(
+            (authorization
                 .recheck_publication(&context, &operation, &admission, UtcMicros(11))
-                .await
-                .is_err(),
+                .await)
+                .err()
+                .expect("rejected")
+                .kind(),
+            ApplicationProblemKind::NotFoundOrNotAuthorized,
             "configuration/capability mutation must conceal the result"
         );
-        assert!(
-            source
+        assert_eq!(
+            (source
                 .authorize(mounted)
                 .admit(&context, &operation, UtcMicros(12))
-                .await
-                .is_err(),
+                .await)
+                .err()
+                .expect("rejected")
+                .kind(),
+            ApplicationProblemKind::NotFoundOrNotAuthorized,
             "a later call must not reuse project-open access"
         );
     }

@@ -315,6 +315,42 @@ mod tests {
         assert_eq!(mounted.project_id, project_id);
     }
 
+    #[tokio::test]
+    async fn request_resolution_answers_nothing_for_an_absent_or_unnamed_project() {
+        let registry = ProjectRuntimeRegistryV1::default();
+        let alpha = PathBuf::from("/projects/alpha");
+        let project_id = ProjectId::new("project.alpha").expect("project id");
+        registry
+            .publish(
+                alpha.clone(),
+                DaemonAdvisoryCycleInvocationOwner::new(
+                    project_id.clone(),
+                    Arc::new(UnavailableAdvisoryCycle),
+                ),
+            )
+            .await
+            .expect("alpha owner publication");
+
+        let named = registry.request_runtimes(Some(&alpha), None).await;
+        assert_eq!(
+            named.advisory_cycle.expect("alpha owner").project_id,
+            project_id
+        );
+        let beta = PathBuf::from("/projects/beta");
+        for project_root in [None, Some(beta.as_path())] {
+            let resolved = registry.request_runtimes(project_root, None).await;
+            assert!(
+                resolved.advisory_cycle.is_none(),
+                "{project_root:?} must not resolve alpha's owner"
+            );
+            assert!(resolved.feedback.is_none());
+            assert!(resolved.feedback_owner.is_none());
+            assert!(resolved.configuration.is_none());
+            assert!(resolved.work.is_none());
+            assert!(resolved.lsp_owner.is_none());
+        }
+    }
+
     /// The registry changes after admission and before the snapshot is
     /// taken: the owner under the admitted key is replaced. The lease still
     /// serves the owner it counted; only a fresh admission sees the

@@ -1125,7 +1125,10 @@ mod tests {
             json!({"request_handle": " leading"}),
         )
         .unwrap_err();
-        assert_eq!(error.to_string(), "HARVEST");
+        assert_eq!(
+            error.to_string(),
+            "application surface request handle is invalid"
+        );
     }
 
     #[test]

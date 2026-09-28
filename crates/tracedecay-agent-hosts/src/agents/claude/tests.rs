@@ -261,6 +261,13 @@ fn claude_md_ownership_is_the_sentinel_not_prose() {
         owned_claude_md_ranges(&dangling).is_empty(),
         "a start sentinel without its end is not an owned block"
     );
+    let prefix = "Operator notes.\n\n";
+    let block = CLAUDE_MD_SENTINELS.render("owned body");
+    let owned = format!("{prefix}{block}");
+    assert_eq!(
+        owned_claude_md_ranges(&owned),
+        vec![prefix.len()..prefix.len() + block.len()]
+    );
 }
 
 #[cfg(target_os = "linux")]

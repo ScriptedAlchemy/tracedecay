@@ -1004,21 +1004,6 @@ async fn reading_answers_only_for_a_project_that_holds_the_component() {
     );
 }
 
-#[tokio::test]
-async fn request_resolution_answers_nothing_for_an_absent_or_unnamed_project() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    registry.publish(root("alpha"), component(1)).await.unwrap();
-
-    for project_root in [None, Some(root("beta").as_path())] {
-        let resolved = registry.request_runtimes(project_root, None).await;
-        assert!(resolved.feedback.is_none());
-        assert!(resolved.feedback_owner.is_none());
-        assert!(resolved.configuration.is_none());
-        assert!(resolved.work.is_none());
-        assert!(resolved.lsp_owner.is_none());
-    }
-}
-
 /// Project-open registers owners under `Path::canonicalize()` (`\\?\C:\...` on
 /// Windows). Later storage-status / primitive lookups arrive with the ordinary
 /// handshake spelling. Admission already treats those as one project; `get`
@@ -1143,6 +1128,10 @@ async fn get_does_not_treat_a_different_project_as_an_equivalent_root() {
     let registry = ProjectRuntimeRegistryV1::default();
     registry.publish(root("alpha"), TestFirst(1)).await.unwrap();
 
+    assert_eq!(
+        registry.get::<TestFirst>(&root("alpha")).await,
+        Some(TestFirst(1))
+    );
     assert!(
         registry.get::<TestFirst>(&root("beta")).await.is_none(),
         "linked or foreign roots must not collapse onto another project's owner"

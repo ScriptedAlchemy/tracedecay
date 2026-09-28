@@ -134,11 +134,21 @@ mod tests {
             json!({ "action": "status" }),
         )
         .unwrap_err();
-        assert_eq!(error.to_string(), "HARVEST");
+        assert_eq!(
+            error.to_string(),
+            "action: unknown field `action`, expected one of `scope`, `session`, `source`, `target`, `handle`"
+        );
     }
 
     #[test]
     fn fact_store_curate_rejects_caller_owned_authority() {
+        assert!(matches!(
+            decode_retained_request(
+                RetainedSurfaceOperation::FactStoreCurate,
+                json!({ "fact_review_limit": 5 }),
+            ),
+            Ok(RetainedSurfaceRequestV1::FactStoreCurate(_))
+        ));
         for forbidden in [
             "operations",
             "proposal_id",
@@ -154,7 +164,12 @@ mod tests {
                 serde_json::Value::Object(value),
             )
             .unwrap_err();
-            assert_eq!(error.to_string(), format!("HARVEST {forbidden}"));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "{forbidden}: unknown field `{forbidden}`, expected `fact_review_limit` or `min_confidence_millionths`"
+                )
+            );
         }
     }
 }

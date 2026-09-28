@@ -1078,9 +1078,19 @@ mod tests {
         ]});
         super::validate_routing_examples(&proposal, "review-changes").unwrap();
         proposal["routing_validation"][0]["ground_truth"] = json!([]);
-        assert!(super::validate_routing_examples(&proposal, "review-changes").is_err());
+        assert_eq!(
+            super::validate_routing_examples(&proposal, "review-changes")
+                .unwrap_err()
+                .to_string(),
+            "routing scenarios require hosts, task-outcome checks, and a tool budget"
+        );
         proposal["routing_validation"][0]["ground_truth"] = json!(["source"]);
         proposal["routing_validation"].as_array_mut().unwrap().pop();
-        assert!(super::validate_routing_examples(&proposal, "review-changes").is_err());
+        assert_eq!(
+            super::validate_routing_examples(&proposal, "review-changes")
+                .unwrap_err()
+                .to_string(),
+            "routing_validation requires positive, near-neighbor, and no-skill examples"
+        );
     }
 }

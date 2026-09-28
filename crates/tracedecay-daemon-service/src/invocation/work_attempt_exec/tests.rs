@@ -1797,8 +1797,11 @@ fn crossed_backend_protocol_pairs_cannot_be_admitted_upstream() {
             WorkProviderProtocol::ClaudeStreamJson,
         ),
     ] {
-        assert!(
-            crossed_execution_snapshot(&shape, backend, protocol).is_err(),
+        assert_eq!(
+            crossed_execution_snapshot(&shape, backend, protocol)
+                .unwrap_err()
+                .to_string(),
+            "Work execution configuration snapshot is invalid",
             "backend {backend:?} must not admit protocol {protocol:?}"
         );
     }
