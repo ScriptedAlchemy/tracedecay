@@ -29,7 +29,7 @@ use tracedecay_contracts::{
     callable_code_operations,
 };
 use tracedecay_domain::{
-    CodeGenerationId, EphemeralSanitizedQueryViewV1, FactId, PublicRetrieverStatus,
+    CodeGenerationId, EphemeralSanitizedQueryViewV1, PublicRetrieverStatus,
     QueryFallbackSubpayload, QueryNormalizationRevision, RetrieverKind, SanitizerRevision,
     TemporalModeV1, UtcMicros,
 };
@@ -98,7 +98,7 @@ enum ExactPortScenario {
     Valid,
     ValidCursor,
     UnexpectedCursor,
-    WrongCursorKind,
+    MismatchedCursor,
     ResolvedGeneration,
     MissingGeneration,
     UnavailableWithoutGeneration,
@@ -164,10 +164,10 @@ impl ExactOnlyPort {
             ExactPortScenario::MismatchedPageCounts
         ));
         evidence.page.cursor = next_cursor.map(PageCursor::from);
-        if matches!(self.scenario, ExactPortScenario::WrongCursorKind) {
-            evidence.page.cursor = Some(PageCursor::FactListAfter {
-                fact_id: FactId::new("fact.fixture.wrong-cursor-kind".to_owned()).unwrap(),
-            });
+        if matches!(self.scenario, ExactPortScenario::MismatchedCursor) {
+            evidence.page.cursor = Some(PageCursor::from(
+                OpaqueCursor::new("cursor.fixture.another-page".to_owned()).unwrap(),
+            ));
         }
         if matches!(self.scenario, ExactPortScenario::ValidCursor) {
             evidence.page.expires_at = Some(UtcMicros(10));
@@ -519,8 +519,8 @@ fn callable_code_service_rejects_an_unresumable_port_cursor() {
 }
 
 #[test]
-fn callable_code_service_rejects_a_nonopaque_page_cursor() {
-    let problem = execute_exact(ExactPortScenario::WrongCursorKind).unwrap_err();
+fn callable_code_service_rejects_an_evidence_cursor_the_page_does_not_carry() {
+    let problem = execute_exact(ExactPortScenario::MismatchedCursor).unwrap_err();
     assert_eq!(problem.problem.kind(), ApplicationProblemKind::Unavailable);
     assert_eq!(
         problem.problem.diagnostic.as_ref().unwrap().code,
