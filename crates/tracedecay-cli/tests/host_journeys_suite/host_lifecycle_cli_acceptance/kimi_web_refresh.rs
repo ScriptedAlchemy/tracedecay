@@ -392,8 +392,10 @@ fn kimi_web_refresh_falls_back_to_the_operator_step_when_kimi_never_serves() {
     );
 }
 
+/// Without its `kimi` CLI, Kimi Code is not installed: the sweep skips it and
+/// exits 0 rather than waiting on an operator step nothing can reach.
 #[test]
-fn kimi_web_refresh_falls_back_to_the_operator_step_without_a_kimi_cli() {
+fn kimi_web_refresh_skips_kimi_code_without_a_kimi_cli() {
     let cli = IsolatedCli::new();
     let kimi = FakeKimi::install(&cli);
     let _ = cli.run(&["install", "--agent", "kimi"]);
@@ -403,16 +405,16 @@ fn kimi_web_refresh_falls_back_to_the_operator_step_without_a_kimi_cli() {
     let update = cli.run(&["update-plugin"]);
     let update_stderr = stderr(&update);
 
-    assert_eq!(
-        update.status.code(),
-        Some(PENDING_OPERATOR_ACTION_EXIT),
+    assert_eq!(update.status.code(), Some(0), "{update_stderr}");
+    assert!(
+        update_stderr.contains(
+            "  kimi: skipped, not installed (host CLI `kimi` is unavailable for Kimi Code \
+             plugin lifecycle; install it or add it to PATH and retry)\n"
+        ),
         "{update_stderr}"
     );
     assert!(
-        update_stderr.contains(
-            "The automatic refresh through `kimi web` did not apply: the `kimi` CLI is \
-             unavailable"
-        ),
+        !update_stderr.contains("pending operator action"),
         "{update_stderr}"
     );
     assert_eq!(kimi.managed_version(), PREVIOUS_VERSION);

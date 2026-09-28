@@ -575,7 +575,7 @@ fn seeded_scope(
     scope
 }
 
-fn execute_scope_retention_with_test_binding_cleanup(
+fn execute_proof_bound_scope_retention(
     store_root: &Path,
     live_roots: &BTreeSet<PathBuf>,
     minimum_stranding_age_secs: i64,
@@ -587,32 +587,14 @@ fn execute_scope_retention_with_test_binding_cleanup(
     tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionErrorV1,
 > {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, ScopeRootAuthorityReceiptV1,
-        ScopeRootBindingCleanupReplayV1, ScopeRootCandidateBindingV1, ScopeRootLivenessProofV1,
-        complete_scope_root_binding_cleanup, execute_scope_root_retention,
-        plan_scope_root_retention, plan_scope_root_retention_with_liveness_proof,
-        prepare_scope_root_binding_cleanup, recover_scope_root_retention,
+        CodeGenerationRetentionModeV1, ScopeRootAuthorityReceiptV1, ScopeRootLivenessProofV1,
+        execute_scope_root_retention, plan_scope_root_retention_with_liveness_proof,
+        recover_scope_root_retention,
     };
 
     if mode == CodeGenerationRetentionModeV1::Apply {
         recover_scope_root_retention(store_root)?;
     }
-    let observed =
-        plan_scope_root_retention(store_root, live_roots, minimum_stranding_age_secs, now_secs)?;
-    let source_scope = tracedecay_store::StoreShardIdV1::project(
-        tracedecay_domain::BrainId::new("brain.scope-test").expect("test brain"),
-        tracedecay_domain::UserProfileId::new("profile.scope-test").expect("test profile"),
-        tracedecay_domain::ProjectId::new("project.scope-test").expect("test project"),
-    );
-    let candidate = observed
-        .collectable_scopes
-        .first()
-        .map_or_else(|| "0".repeat(64), |scope| scope.scope_hash.clone());
-    let receipt = |revision: &str, digit: char| ScopeRootAuthorityReceiptV1 {
-        revision: revision.to_owned(),
-        terminal_count: 1,
-        digest: format!("sha256:{}", digit.to_string().repeat(64)),
-    };
     let proof = ScopeRootLivenessProofV1::new(
         live_roots
             .iter()
@@ -620,52 +602,19 @@ fn execute_scope_retention_with_test_binding_cleanup(
                 tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(root)
             })
             .collect(),
-        receipt("registry", '1'),
-        receipt("git", '2'),
-        receipt("mount", '3'),
-        receipt("config", '4'),
-        receipt("vector", '5'),
-        receipt("dependency", '6'),
-        ScopeRootCandidateBindingV1 {
-            scope_hash: candidate.clone(),
-            source_scope: source_scope.clone(),
-            vector_census_revision: "vector".to_owned(),
-            live: false,
+        ScopeRootAuthorityReceiptV1 {
+            revision: "git".to_owned(),
+            terminal_count: 1,
+            digest: format!("sha256:{}", "2".repeat(64)),
         },
     )?;
-    let plan = if observed.collectable_scopes.is_empty() {
-        observed
-    } else {
-        plan_scope_root_retention_with_liveness_proof(
-            store_root,
-            proof.clone(),
-            minimum_stranding_age_secs,
-            now_secs,
-        )?
-    };
-    if !plan.collectable_scopes.is_empty() {
-        prepare_scope_root_binding_cleanup(
-            store_root,
-            &plan,
-            &candidate,
-            &source_scope,
-            &proof,
-            completed_at,
-        )?;
-    }
-    let report =
-        execute_scope_root_retention(store_root, plan, &proof, mode, now_secs, completed_at)?;
-    if !report.collected_scopes.is_empty() {
-        complete_scope_root_binding_cleanup(
-            store_root,
-            &ScopeRootBindingCleanupReplayV1 {
-                scope_hash: candidate,
-                source_scope,
-                liveness_proof: proof,
-            },
-        )?;
-    }
-    Ok(report)
+    let plan = plan_scope_root_retention_with_liveness_proof(
+        store_root,
+        proof.clone(),
+        minimum_stranding_age_secs,
+        now_secs,
+    )?;
+    execute_scope_root_retention(store_root, plan, &proof, mode, now_secs, completed_at)
 }
 
 struct ReadyRetrievalControlV1;

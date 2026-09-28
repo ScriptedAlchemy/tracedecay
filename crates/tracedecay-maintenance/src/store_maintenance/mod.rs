@@ -15,7 +15,9 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegis
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod graph_replay;
+mod scope_reconciliation;
 use graph_replay::{defer_graph_replay_pool_busy, log_code_generation_retention_degraded};
+pub use scope_reconciliation::run_code_index_scope_reconciliation;
 
 /// Outcome of one bounded code-generation retention pass.
 ///

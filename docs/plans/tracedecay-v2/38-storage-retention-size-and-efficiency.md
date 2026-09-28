@@ -93,14 +93,16 @@ measurements, not inferred table sizes.
    7.2 GiB that no retention pass could reach and no report counted. Scope-root
    reconciliation now closes this: it collects a stranded scope through the same
    journal/quarantine/receipt ordering, only under the maintenance writer lease,
-   and only against one revision-bound, complete liveness proof. That proof joins
-   registered and `gix`-observed worktree scopes, every durable configuration
-   active/rollback vector root, pending/ready/published vector dependencies,
-   exact verified-generation leases, and the durable physical-scope-to-logical-
-   shard binding. Any missing, corrupt, stale, or unreadable authority collects
-   nothing and emits a named degradation. Collection starts only past a
-   seven-day minimum stranding age and never recursively removes anything
-   outside the journaled quarantine path.
+   and only against one liveness proof: the scopes of every worktree `gix`
+   registers for the repository and of every mounted worktree still on disk,
+   derived again immediately before quarantine and required to match. An
+   unreadable authority collects nothing and emits a named degradation. A scope
+   whose recorded checkout root is gone (a removed worktree) is collected on the
+   next full maintenance tick; any other unnamed scope waits out a seven-day
+   minimum stranding age. Collection never recursively removes anything outside
+   the journaled quarantine path, and the shared segments and text artifacts
+   only the collected scope named are swept by the next generation-retention
+   pass.
 
    A second, quieter failure sat beside it: the Doctor and storage-report
    entry points guarded this family with byte budgets (64 MiB and 32 MiB) that

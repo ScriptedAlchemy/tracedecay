@@ -181,17 +181,15 @@ macro_rules! host_lifecycle_exit_status {
         "
 
 Exit status:
-  0   every host completed, or was skipped: not applicable, or its host CLI
-      is not installed and TraceDecay only found leftover config for it.
-      `uninstall` stops tracking a host whose CLI is not installed and
-      leaves the host-owned registration in place
-  1   a host failed: the lifecycle ran and failed, or an untracked host
-      named with --agent has no host CLI; the per-host summary names each one
+  0   every host completed, or was skipped: not applicable, or the host is
+      `not installed` (its CLI is not on PATH) or `not signed in`, whether
+      tracked, named with --agent, or only detected. `uninstall` stops
+      tracking such a host and leaves the host-owned registration in place
+  1   a host failed: the lifecycle ran and failed; the per-host summary
+      names each one
   75  nothing failed, but a host needs an operator step: an interactive
       host step (Kimi Code's `/plugins install`; `tracedecay doctor` reports
-      it until it is done), or a tracked host's CLI is not installed (install
-      it, or `tracedecay uninstall --agent <host>` to stop tracking it);
-      act on the printed step, then rerun"
+      it until it is done); act on the printed step, then rerun"
     };
 }
 
@@ -357,16 +355,14 @@ Update re-runs install for every configured agent integration so a separate
 `tracedecay reinstall` is not needed. --no-reinstall skips that refresh.
 
 Exit status (a completed binary upgrade stays installed in every case):
-  0   the binary is current and every host refreshed, or was skipped because
-      its host CLI is not installed and only leftover config was found
+  0   the binary is current and every host refreshed, or was skipped as
+      `not installed` or `not signed in`
   1   the upgrade failed, or the refresh failed for a host or for the daemon;
       the per-host summary names each failed host
   75  the refresh waits on an operator step: an interactive host step (Kimi
-      Code's `/plugins install`), or a tracked host whose CLI is not
-      installed (install it, or `tracedecay uninstall --agent <host>` to
-      stop tracking it); act on the printed step, then rerun. Also 75 when
-      the restored daemon serves a store whose persisted shape this binary
-      does not open: it names the store and the exact reset command
+      Code's `/plugins install`); act on the printed step, then rerun. Also
+      75 when the restored daemon serves a store whose persisted shape this
+      binary does not open: it names the store and the exact reset command
       (`tracedecay wipe --all --yes`), which nothing runs on your behalf
 
 Related: tracedecay upgrade (refresh only after a real install),
@@ -457,14 +453,16 @@ pub(crate) const DOCTOR_AFTER_HELP: &str = "\
 Examples:
   tracedecay doctor                              Check everything
 
+A host that is not installed or not signed in is reported as skipped with
+that reason and never counts as an issue, warning, or pending step.
+
 Exit status:
-  0   no issue found (warnings may still be printed)
+  0   no issue found (warnings and skipped hosts may still be printed)
   1   an issue was found
   75  no issue, but an operator step is pending: the daemon serves a store
-      in its reset-required state (Doctor names the exact reset command), a
-      host waits on its interactive activation (Kimi Code's `/plugins
-      install`), or a tracked host's CLI is not installed (install it, or
-      `tracedecay uninstall --agent <host>` to stop tracking it)
+      in its reset-required state (Doctor names the exact reset command), or
+      a host waits on its interactive activation (Kimi Code's `/plugins
+      install`)
 
 Related: tracedecay install (fix missing integration), tracedecay daemon
 status, tracedecay status (index health).";
