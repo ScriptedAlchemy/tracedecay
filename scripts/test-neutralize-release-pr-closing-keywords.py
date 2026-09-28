@@ -148,76 +148,136 @@ class NeutralizeReleasePrClosingKeywordsTests(unittest.TestCase):
 
 
 class ManualReleasePrRefreshTests(unittest.TestCase):
-    """A manual release-pr refresh runs only the lockfile script."""
+    """A manual release-pr refresh runs only the lockfile script, from a
+    linked worktree of the operator's repository."""
+
+    def run_refresh(
+        self, scratch_path: Path, cargo_stub: str
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path, Path, bytes]:
+        main = scratch_path / "main"
+        checkout = scratch_path / "checkout"
+        remote = scratch_path / "remote.git"
+        global_config = scratch_path / "global.gitconfig"
+        global_config.write_text("[user]\n\tname = Global Operator\n")
+        git_env = {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": str(global_config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        }
+
+        def git(*args: str, cwd: Path = main) -> None:
+            subprocess.run(["git", *args], cwd=cwd, check=True, env=git_env)
+
+        (main / "scripts").mkdir(parents=True)
+        for name in (
+            "update-release-pr-lockfile.sh",
+            "neutralize-release-pr-closing-keywords.sh",
+            "neutralize-release-pr-closing-keywords.py",
+        ):
+            shutil.copy2(ROOT / "scripts" / name, main / "scripts" / name)
+        (main / "version.txt").write_text("1.0.0-beta.58\n")
+        (main / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.95.0"\n')
+        (main / "Cargo.lock").write_text("version = 4\n")
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Operator")
+        git("config", "user.email", "operator@example.invalid")
+        git("init", "-q", "--bare", str(remote))
+        git("remote", "add", "origin", str(remote))
+        git("add", ".")
+        git("commit", "-q", "-m", "fixture")
+        git("worktree", "add", "-q", "-b", "release-please--x", str(checkout))
+
+        bin_dir = scratch_path / "bin"
+        bin_dir.mkdir()
+        body_path = scratch_path / "body.md"
+        body_path.write_text(RELEASE_PLEASE_BODY)
+        edited_path = scratch_path / "edited.md"
+        stubs = {
+            "cargo": cargo_stub.format(lockfile=checkout / "Cargo.lock"),
+            "gh": (
+                "#!/bin/sh\n"
+                'case "$1 $2" in\n'
+                f'  "pr view") cat "{body_path}" ;;\n'
+                '  "pr edit") while [ "$#" -gt 0 ]; do\n'
+                '      if [ "$1" = --body-file ]; then '
+                f'cp "$2" "{edited_path}"; fi; shift; done ;;\n'
+                "  *) exit 64 ;;\n"
+                "esac\n"
+            ),
+        }
+        for name, source in stubs.items():
+            stub = bin_dir / name
+            stub.write_text(source)
+            stub.chmod(0o755)
+
+        shared_config_before = (main / ".git" / "config").read_bytes()
+        result = subprocess.run(
+            ["bash", "scripts/update-release-pr-lockfile.sh"],
+            cwd=checkout,
+            env={
+                **git_env,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "RELEASE_PR_JSON": '{"number": 42, "headBranchName": "release-please--x"}',
+                "GH_TOKEN": "unused",
+                "GITHUB_REPOSITORY": "ScriptedAlchemy/tracedecay",
+            },
+            capture_output=True,
+            text=True,
+        )
+        return result, git_env, edited_path, remote, shared_config_before
 
     def test_lockfile_refresh_neutralizes_the_release_pr_body(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
-            scratch_path = Path(scratch)
-            checkout = scratch_path / "checkout"
-            (checkout / "scripts").mkdir(parents=True)
-            for name in (
-                "update-release-pr-lockfile.sh",
-                "neutralize-release-pr-closing-keywords.sh",
-                "neutralize-release-pr-closing-keywords.py",
-            ):
-                shutil.copy2(ROOT / "scripts" / name, checkout / "scripts" / name)
-            (checkout / "version.txt").write_text("1.0.0-beta.58\n")
-            (checkout / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.95.0"\n')
-            (checkout / "Cargo.lock").write_text("version = 4\n")
-            git_env = {
-                **os.environ,
-                "GIT_AUTHOR_NAME": "t",
-                "GIT_AUTHOR_EMAIL": "t@example.invalid",
-                "GIT_COMMITTER_NAME": "t",
-                "GIT_COMMITTER_EMAIL": "t@example.invalid",
-            }
-            subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
-            subprocess.run(["git", "add", "."], cwd=checkout, check=True)
-            subprocess.run(
-                ["git", "commit", "-q", "-m", "fixture"], cwd=checkout, check=True, env=git_env
-            )
-
-            bin_dir = scratch_path / "bin"
-            bin_dir.mkdir()
-            body_path = scratch_path / "body.md"
-            body_path.write_text(RELEASE_PLEASE_BODY)
-            edited_path = scratch_path / "edited.md"
-            stubs = {
-                # The lockfile already matches, the manual-refresh case that
-                # exits before any commit.
-                "cargo": "#!/bin/sh\nexit 0\n",
-                "gh": (
-                    "#!/bin/sh\n"
-                    'case "$1 $2" in\n'
-                    f'  "pr view") cat "{body_path}" ;;\n'
-                    '  "pr edit") while [ "$#" -gt 0 ]; do\n'
-                    '      if [ "$1" = --body-file ]; then '
-                    f'cp "$2" "{edited_path}"; fi; shift; done ;;\n'
-                    "  *) exit 64 ;;\n"
-                    "esac\n"
-                ),
-            }
-            for name, source in stubs.items():
-                stub = bin_dir / name
-                stub.write_text(source)
-                stub.chmod(0o755)
-
-            result = subprocess.run(
-                ["bash", "scripts/update-release-pr-lockfile.sh"],
-                cwd=checkout,
-                env={
-                    **git_env,
-                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-                    "RELEASE_PR_JSON": '{"number": 42, "headBranchName": "release-please--x"}',
-                    "GH_TOKEN": "unused",
-                    "GITHUB_REPOSITORY": "ScriptedAlchemy/tracedecay",
-                },
-                capture_output=True,
-                text=True,
+            # The lockfile already matches, the manual-refresh case that
+            # exits before any commit.
+            result, _, edited_path, _, _ = self.run_refresh(
+                Path(scratch), "#!/bin/sh\nexit 0\n"
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(edited_path.exists(), "the release PR body was never rewritten")
             self.assertEqual(edited_path.read_text(), RELEASE_PLEASE_BODY_NEUTRALIZED)
+
+    def test_lockfile_commit_leaves_the_operator_git_config_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch_path = Path(scratch)
+            shared_config = scratch_path / "main" / ".git" / "config"
+            global_config = scratch_path / "global.gitconfig"
+            result, git_env, _, remote, shared_config_before = self.run_refresh(
+                scratch_path,
+                "#!/bin/sh\nprintf 'version = 4\\n# bumped\\n' > '{lockfile}'\n",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(shared_config.read_bytes(), shared_config_before)
+            self.assertEqual(global_config.read_text(), "[user]\n\tname = Global Operator\n")
+            operator = subprocess.run(
+                ["git", "config", "user.name"],
+                cwd=scratch_path / "main",
+                env=git_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertEqual(operator, "Operator")
+            pushed = subprocess.run(
+                [
+                    "git",
+                    "log",
+                    "-1",
+                    "--format=%an <%ae>|%cn <%ce>|%s",
+                    "release-please--x",
+                ],
+                cwd=remote,
+                env=git_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            bot = "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+            self.assertEqual(pushed, f"{bot}|{bot}|chore(release): update root lockfile")
 
 
 if __name__ == "__main__":
