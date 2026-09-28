@@ -249,19 +249,19 @@ pub fn retained_tool_target(
                 | Op::LcmExpandQuery
                 | Op::MessageSearch
         ) {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "unknown parameter `storage_scope` for `tracedecay_{}`",
-                    operation.as_str()
-                ),
-            });
+            return Err(ApplicationSurfaceAdapterError::invalid_request(format!(
+                "unknown parameter `storage_scope` for `tracedecay_{}`",
+                operation.as_str()
+            ))
+            .into_trace_decay_error());
         }
         return match storage_scope.as_str() {
             Some("user") => Ok(InvocationTarget::Profile),
             Some("project") => Ok(InvocationTarget::CurrentProject),
-            _ => Err(TraceDecayError::Config {
-                message: "storage_scope must be one of project, user".to_owned(),
-            }),
+            _ => Err(ApplicationSurfaceAdapterError::invalid_request(
+                "storage_scope must be one of project, user",
+            )
+            .into_trace_decay_error()),
         };
     }
     let profile = match operation {
@@ -319,19 +319,15 @@ pub async fn execute_retained_surface_tool(
     if let Some(arguments) = args.as_object_mut() {
         arguments.remove("storage_scope");
     }
-    let normalized =
-        tracedecay_daemon_protocol::separate_application_tool_request(args).map_err(|error| {
-            TraceDecayError::Config {
-                message: error.to_string(),
-            }
-        })?;
+    let normalized = tracedecay_daemon_protocol::separate_application_tool_request(args)
+        .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     let requested_format = normalized.requested_format;
     let request = hotpath::measure_block!(
         "mcp.retained.decode",
         tracedecay_daemon_protocol::decode_retained_request(retained, normalized.request)
     )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("invalid retained application request for {tool_name}: {error}"),
+    .map_err(|error| {
+        ApplicationSurfaceAdapterError::invalid_request(error).into_trace_decay_error()
     })?;
     let request_id = match protocol_request_id {
         Some(request_id) => request_id,
@@ -557,7 +553,20 @@ pub(crate) fn graph_tool_error_problem(
             retryable,
             detail,
             ..
-        } => graph_tool_unavailable(reason_code, *retryable, detail),
+        } => match tracedecay_mcp::tool_errors::project_route_problem_kind(reason_code) {
+            Some("invalid_request") => {
+                tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
+                    reason_code.clone(),
+                    safe_diagnostic_message(detail),
+                )
+            }
+            Some("denied") => {
+                tracedecay_contracts::ApplicationProblem::not_found_or_not_authorized(
+                    tracedecay_contracts::RetryDirective::Never,
+                )
+            }
+            _ => graph_tool_unavailable(reason_code, *retryable, detail),
+        },
         error => tracedecay_contracts::ApplicationProblem::ExecutionFailed {
             classification: tracedecay_contracts::ApplicationExecutionFailureClassV1::Permanent,
             diagnostic: tracedecay_contracts::SafeDiagnostic {
@@ -682,16 +691,22 @@ mod tests {
             (
                 Op::MemoryStatus,
                 json!({"memory_scope": "user", "storage_scope": "user"}),
-                "unknown parameter `storage_scope` for `tracedecay_memory_status`",
+                "application surface request does not match its reviewed schema: unknown \
+                 parameter `storage_scope` for `tracedecay_memory_status`",
             ),
             (
                 Op::LcmDoctor,
                 json!({"storage_scope": "hermes_profile"}),
-                "storage_scope must be one of project, user",
+                "application surface request does not match its reviewed schema: \
+                 storage_scope must be one of project, user",
             ),
         ] {
             let error = retained_tool_target(operation, &arguments).unwrap_err();
-            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(
+                error.project_route_context(),
+                Some(("application_surface_invalid_request", false, message)),
+                "{error}"
+            );
         }
     }
 

@@ -836,16 +836,7 @@ async fn assert_schema_rejection(server: &McpServer, args: Value, detail: &str) 
     let host = host_call(server, args).await;
     assert_eq!(
         host.response["error"],
-        json!({
-            "code": -32603,
-            "message": format!(
-                "tool execution failed: config error: invalid retained application request for tracedecay_sessions_for: {detail}"
-            ),
-            "data": {
-                "tool": "tracedecay_sessions_for",
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool sessions_for ...` (`tracedecay tool sessions_for --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-            }
-        }),
+        crate::support::application_invalid_request_error("tracedecay_sessions_for", detail),
         "{}",
         host.response
     );

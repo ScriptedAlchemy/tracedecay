@@ -1366,14 +1366,16 @@ async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages(
     )
     .await;
     let unauthorized = expect_tool_refusal(unauthorized);
-    assert_eq!(unauthorized["kind"], "unavailable", "{unauthorized}");
     assert_eq!(
-        unauthorized["code"], "redundancy-repository-not-authorized",
+        unauthorized["kind"], "not_found_or_not_authorized",
         "{unauthorized}"
     );
     assert_eq!(
-        unauthorized["message"],
-        "the selected repository is outside the authorized repository scope",
+        unauthorized["code"], "not_found_or_not_authorized",
+        "{unauthorized}"
+    );
+    assert_eq!(
+        unauthorized["message"], "The requested resource was not found or is not authorized",
         "{unauthorized}"
     );
     shutdown_graph_fixture(fixture).await;
@@ -2101,6 +2103,107 @@ async fn source_body_returns_full_function_source_for_exact_lookup() {
         end_line_text.trim_end().ends_with('}'),
         "end_line ({end_line}) should point at the closing brace; line text: {end_line_text:?}"
     );
+    fixture.harness.shutdown().await;
+}
+
+/// Inputs that can never succeed answer a typed, non-retryable refusal: an
+/// agent that reads a retryable `unavailable` here would retry forever.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn unknown_and_malformed_inputs_are_typed_refusals_not_outages() {
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    wait_for_current_graph(&server).await;
+    let refusal = |response: &Value| {
+        assert!(response["error"].is_null(), "{response}");
+        let problem = refusal_problem(&response["result"]);
+        (
+            problem["kind"].clone(),
+            problem["code"].clone(),
+            problem["retryable"].clone(),
+        )
+    };
+    let not_found = (
+        json!("not_found_or_not_authorized"),
+        json!("not_found_or_not_authorized"),
+        json!(false),
+    );
+
+    for node_id in [
+        "nope",
+        "symbol.v1.sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    ] {
+        let body = handle_real_server_tool_call_raw(
+            &server,
+            "tracedecay_source_body",
+            json!({"node_id": node_id, "format": "json"}),
+        )
+        .await;
+        assert_eq!(refusal(&body), not_found, "source_body {node_id}: {body}");
+    }
+
+    let history = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_test_results",
+        json!({"format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        refusal(&history),
+        not_found,
+        "no managed test run has been recorded: {history}"
+    );
+
+    let outside = url::Url::from_file_path(
+        fixture
+            .project_root
+            .parent()
+            .expect("fixture root has a parent")
+            .join("outside.rs"),
+    )
+    .expect("outside document uri")
+    .to_string();
+    for (document_uri, class) in [
+        ("not a uri".to_owned(), "feedback-document-uri-invalid"),
+        (outside, "feedback-document-outside-root"),
+    ] {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let cycle = loop {
+            let cycle = handle_real_server_tool_call_raw(
+                &server,
+                "tracedecay_feedback_advisory_cycle",
+                json!({"document_uri": document_uri, "format": "json"}),
+            )
+            .await;
+            let warming = cycle["result"]["structuredContent"]["problem"]["code"]
+                == "feedback.advisory-cycle.unavailable";
+            if !warming || std::time::Instant::now() >= deadline {
+                break cycle;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        let problem = refusal_problem(&cycle["result"]);
+        assert_eq!(
+            (
+                &problem["kind"],
+                &problem["code"],
+                &problem["message"],
+                &problem["retryable"]
+            ),
+            (
+                &json!("invalid_request"),
+                &json!("feedback.advisory-cycle.invalid-request"),
+                &json!(format!(
+                    "The advisory feedback cycle request is invalid ({class})"
+                )),
+                &json!(false)
+            ),
+            "{document_uri}: {cycle}"
+        );
+    }
     fixture.harness.shutdown().await;
 }
 

@@ -14,9 +14,11 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
-use crate::support::{extract_real_server_text, handle_real_server_tool_call_raw};
+use crate::support::{
+    application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
+};
 
-const UNKNOWN_FIELD_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_curate: operations: unknown field `operations`, expected `fact_review_limit` or `min_confidence_millionths`";
+const UNKNOWN_FIELD_DETAIL: &str = "operations: unknown field `operations`, expected `fact_review_limit` or `min_confidence_millionths`";
 
 #[tokio::test]
 async fn empty_store_curate_skips_and_refuses_caller_authority() {
@@ -164,11 +166,10 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
         }),
     )
     .await;
-    assert_eq!(forbidden["error"]["code"], -32603, "{forbidden}");
-    assert_eq!(forbidden["error"]["message"], UNKNOWN_FIELD_MESSAGE);
     assert_eq!(
-        forbidden["error"]["data"]["tool"],
-        "tracedecay_fact_store_curate"
+        forbidden["error"],
+        application_invalid_request_error("tracedecay_fact_store_curate", UNKNOWN_FIELD_DETAIL),
+        "{forbidden}"
     );
     assert!(forbidden["result"].is_null(), "{forbidden}");
 

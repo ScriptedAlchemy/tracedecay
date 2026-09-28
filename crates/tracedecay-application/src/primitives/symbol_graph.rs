@@ -569,10 +569,14 @@ where
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
+                let seed = match relation_seed(&graph, &request.node_id) {
+                    Ok(seed) => seed,
+                    Err(failure) => return failed_with(context, failure),
+                };
                 let (records, unresolved) = match relation_traversal(
                     &graph.reader,
                     Arc::clone(&graph.cancellation),
-                    &request.node_id,
+                    seed,
                     request.maximum_depth,
                     true,
                     &request.scope,
@@ -645,10 +649,14 @@ where
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
+                let seed = match relation_seed(&graph, &request.node_id) {
+                    Ok(seed) => seed,
+                    Err(failure) => return failed_with(context, failure),
+                };
                 let (mut records, _) = match relation_traversal(
                     &graph.reader,
                     Arc::clone(&graph.cancellation),
-                    &request.node_id,
+                    seed,
                     request.maximum_depth,
                     false,
                     &request.scope,
@@ -978,15 +986,46 @@ fn return_region(signature: &str) -> &str {
         .map_or("", |(_, returns)| returns.trim())
 }
 
+/// The relation seed a caller named: a malformed id is the caller's error and
+/// an id absent from the admitted graph is not found, so neither is reported
+/// as a retryable outage.
+fn relation_seed(
+    graph: &OpenSymbolGraph,
+    node_id: &str,
+) -> Result<SymbolOccurrenceId, PrimitiveFailure> {
+    let seed = SymbolOccurrenceId::new(node_id.to_owned()).map_err(|_| {
+        primitive_failure(
+            PrimitiveFailureKind::InvalidRequest,
+            "application.symbol-graph.node-id-invalid",
+            "node_id is not a symbol occurrence id",
+        )
+    })?;
+    match graph
+        .reader
+        .symbol_summary(&seed, Arc::clone(&graph.cancellation))
+    {
+        Ok(Some(_)) => Ok(seed),
+        Ok(None) => Err(primitive_failure(
+            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+            "application.symbol-graph.node-not-found",
+            "node_id is not in the admitted graph",
+        )),
+        Err(_) => Err(primitive_failure(
+            PrimitiveFailureKind::Unavailable,
+            "application.symbol-graph.query-unavailable",
+            "relation seed lookup failed",
+        )),
+    }
+}
+
 fn relation_traversal(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
-    seed: &str,
+    seed: SymbolOccurrenceId,
     maximum_depth: u32,
     incoming: bool,
     scope: &SymbolGraphScope,
 ) -> Result<(Vec<SymbolRelationRecord>, UnresolvedCallerGapsV1), ()> {
-    let seed = SymbolOccurrenceId::new(seed.to_owned()).map_err(|_| ())?;
     let seed_occurrence = seed.clone();
     let mut seen = HashSet::from([seed.clone()]);
     let mut frontier = vec![seed];

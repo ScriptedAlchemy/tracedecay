@@ -2,6 +2,8 @@ use std::fmt::Display;
 
 use serde_json::{Value, json};
 
+use crate::support::application_invalid_request_error;
+
 use super::memory_facts_test::{
     FactStoreMcpFixture, close_test_graph, invoke_production_tool, setup_project,
 };
@@ -165,21 +167,27 @@ async fn fact_store_contradict_rejects_noncanonical_arguments() {
         (json!({"after": {"fact_id": "fact.v1.invalid"}}), "after"),
     ] {
         let body = rejection_body(&fixture, arguments).await;
-        assert_eq!(body["code"], -32603, "{body}");
         assert_eq!(
-            body["message"],
-            format!(
-                "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_contradict: {field}: unknown field `{field}`, expected one of `threshold_millionths`, `memory_scope`, `category`, `limit`, `project_selector`"
+            body,
+            application_invalid_request_error(
+                "tracedecay_fact_store_contradict",
+                &format!(
+                    "{field}: unknown field `{field}`, expected one of `threshold_millionths`, \
+                     `memory_scope`, `category`, `limit`, `project_selector`"
+                )
             ),
             "{body}"
         );
     }
 
     let category = rejection_body(&fixture, json!({"category": "legacy-generalized"})).await;
-    assert_eq!(category["code"], -32603, "{category}");
     assert_eq!(
-        category["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_contradict: category: unknown variant `legacy-generalized`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`",
+        category,
+        application_invalid_request_error(
+            "tracedecay_fact_store_contradict",
+            "category: unknown variant `legacy-generalized`, expected one of `general`, \
+             `user_pref`, `project`, `tool`, `decision`, `code_area`"
+        ),
         "{category}"
     );
 

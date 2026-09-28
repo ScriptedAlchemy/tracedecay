@@ -11,8 +11,8 @@ use tracedecay::mcp::McpServer;
 use tracedecay_domain::{CanonicalMessageRoleV1, UtcMicros};
 
 use crate::support::{
-    activate_test_temporal_generation, extract_real_server_text, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw, open_active_project_session_db,
+    activate_test_temporal_generation, application_invalid_request_error, extract_real_server_text,
+    handle_real_server_tool_call, handle_real_server_tool_call_raw, open_active_project_session_db,
     persist_temporal_lcm_observation, real_mcp_server, setup_empty_project,
 };
 
@@ -637,17 +637,16 @@ async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for()
         "an as-of mode without its cutoff must fail decode: {as_of_without_cutoff}"
     );
 
-    assert_decode(
-        &missing_session,
-        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_load_session: missing field `session_id`",
-    );
+    assert_decode(&missing_session, "missing field `session_id`");
     assert_decode(
         &unknown_field,
-        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_load_session: not_a_field: unknown field `not_a_field`, expected one of `provider`, `session_id`, `cursor`, `temporal_mode`, `limit`, `role`, `roles`, `start_time`, `end_time`, `content_offset`, `content_limit`",
+        "not_a_field: unknown field `not_a_field`, expected one of `provider`, `session_id`, \
+         `cursor`, `temporal_mode`, `limit`, `role`, `roles`, `start_time`, `end_time`, \
+         `content_offset`, `content_limit`",
     );
     assert_decode(
         &negative_limit,
-        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_load_session: limit: invalid value: integer `-1`, expected u64",
+        "limit: invalid value: integer `-1`, expected u64",
     );
 
     server.shutdown().await;
@@ -754,13 +753,12 @@ fn assert_not_found(payload: &Value) {
     assert!(payload.get("messages").is_none(), "{payload}");
 }
 
-fn assert_decode(response: &Value, message: &str) {
-    assert_eq!(response["error"]["code"], -32603, "{response}");
+fn assert_decode(response: &Value, detail: &str) {
     assert_eq!(
-        response["error"]["data"]["tool"], "tracedecay_lcm_load_session",
+        response["error"],
+        application_invalid_request_error("tracedecay_lcm_load_session", detail),
         "{response}"
     );
-    assert_eq!(response["error"]["message"], message, "{response}");
 }
 
 #[allow(clippy::too_many_arguments)]

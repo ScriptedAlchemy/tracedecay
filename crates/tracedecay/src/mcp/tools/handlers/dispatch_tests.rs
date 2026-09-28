@@ -2037,12 +2037,15 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     .await
     .unwrap_err();
 
-    let message = error.to_string();
-    assert!(
-        message.contains(
-            "storage_scope=user is unavailable for non-retained tool `tracedecay_lcm_compress`"
-        ),
-        "a known-but-unavailable LCM effect must report its typed reason, got {message}"
+    assert_eq!(
+        error.project_route_context(),
+        Some((
+            "application_surface_invalid_request",
+            false,
+            "application surface request does not match its reviewed schema: storage_scope=user \
+             is unavailable for non-retained tool `tracedecay_lcm_compress`"
+        )),
+        "a known-but-unavailable LCM effect must report its typed reason, got {error}"
     );
     assert!(
         !sessions_db.exists(),

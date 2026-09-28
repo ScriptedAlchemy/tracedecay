@@ -2691,12 +2691,13 @@ async fn lcm_status_over_mcp_counts_the_requested_session() {
         json!({"hermes_home": "/tmp/not-a-profile"}),
     )
     .await;
-    assert_eq!(rejected["error"]["code"], -32603);
     assert_eq!(
-        rejected["error"]["message"],
-        "tool execution failed: config error: unknown parameter `hermes_home` for `tracedecay_lcm_status`"
+        rejected["error"],
+        application_invalid_request_error(
+            "tracedecay_lcm_status",
+            "unknown parameter `hermes_home` for `tracedecay_lcm_status`"
+        )
     );
-    assert_eq!(rejected["error"]["data"]["tool"], "tracedecay_lcm_status");
     server.shutdown().await;
 }
 

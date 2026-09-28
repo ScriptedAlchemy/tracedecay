@@ -169,7 +169,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use dispatch_groups::dispatch_application_surface_tools;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
-use tracedecay_daemon_protocol::DaemonInvocationExecutor;
+use tracedecay_daemon_protocol::{ApplicationSurfaceAdapterError, DaemonInvocationExecutor};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
@@ -456,9 +456,10 @@ pub fn handle_tool_call_with_registry_options<'a>(
         hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
         for removed in ["hermes_home"] {
             if args.get(removed).is_some() {
-                return Err(TraceDecayError::Config {
-                    message: format!("unknown parameter `{removed}` for `{tool_name}`"),
-                });
+                return Err(ApplicationSurfaceAdapterError::invalid_request(format!(
+                    "unknown parameter `{removed}` for `{tool_name}`"
+                ))
+                .into_trace_decay_error());
             }
         }
         if let Some(retained) = RetainedSurfaceOperation::from_tool_name(tool_name) {
@@ -472,15 +473,16 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 .await;
             }
         } else if let Some(storage_scope) = args.get("storage_scope") {
-            return Err(TraceDecayError::Config {
-                message: if tool_name.starts_with("tracedecay_lcm_")
+            return Err(ApplicationSurfaceAdapterError::invalid_request(
+                if tool_name.starts_with("tracedecay_lcm_")
                     && storage_scope.as_str() == Some("user")
                 {
                     format!("storage_scope=user is unavailable for non-retained tool `{tool_name}`")
                 } else {
                     format!("unknown parameter `storage_scope` for `{tool_name}`")
                 },
-            });
+            )
+            .into_trace_decay_error());
         }
         if tool_accepts_registered_project_selector(tool_name) {
             support::validate_registered_project_selector_aliases(&args)?;

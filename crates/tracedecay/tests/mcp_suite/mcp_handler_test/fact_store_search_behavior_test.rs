@@ -16,8 +16,9 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
 
 use crate::support::{
-    TestTempDir, commit_worktree, extract_real_server_text, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw, production_composition_fixture, test_temp_dir,
+    TestTempDir, application_invalid_request_error, commit_worktree, extract_real_server_text,
+    handle_real_server_tool_call, handle_real_server_tool_call_raw, production_composition_fixture,
+    test_temp_dir,
 };
 
 const TOOL: &str = "tracedecay_fact_store_search";
@@ -193,15 +194,7 @@ fn assert_empty_miss(payload: &Value, project_id: &str) {
     );
 }
 
-const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool fact_store_search ...` (`tracedecay tool fact_store_search --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.";
-
-fn decode_failure(detail: &str) -> String {
-    format!(
-        "tool execution failed: config error: invalid retained application request for {TOOL}: {detail}"
-    )
-}
-
-fn assert_schema_rejection(response: &Value, message: &str) {
+fn assert_schema_rejection(response: &Value, detail: &str) {
     assert_eq!(response["jsonrpc"], "2.0", "{response}");
     assert_eq!(response["id"], 1, "{response}");
     assert!(
@@ -210,14 +203,7 @@ fn assert_schema_rejection(response: &Value, message: &str) {
     );
     assert_eq!(
         response["error"],
-        json!({
-            "code": -32603,
-            "message": message,
-            "data": {
-                "cli_fallback": CLI_FALLBACK,
-                "tool": TOOL
-            }
-        }),
+        application_invalid_request_error(TOOL, detail),
         "{response}"
     );
 }
@@ -515,37 +501,33 @@ async fn fact_store_search_rejects_blank_limit_and_unknown_fields() {
     let server = &project.server;
 
     for (arguments, detail) in [
-        (json!({}), decode_failure("missing field `query`")),
-        (
-            json!({"limit": 1}),
-            decode_failure("missing field `query`"),
-        ),
+        (json!({}), String::from("missing field `query`")),
+        (json!({"limit": 1}), String::from("missing field `query`")),
         (
             json!({"query": null}),
-            decode_failure("query: invalid type: null, expected a string"),
+            String::from("query: invalid type: null, expected a string"),
         ),
         (
             json!({"query": 12}),
-            decode_failure("query: invalid type: integer `12`, expected a string"),
+            String::from("query: invalid type: integer `12`, expected a string"),
         ),
         (
             json!({"query": "ledger", "action": "search"}),
-            decode_failure("unknown field `action`"),
+            String::from("unknown field `action`"),
         ),
         (
             json!({"query": "ledger", "format": "yaml"}),
-            "tool execution failed: config error: application surface request does not match its reviewed schema: `format` must be markdown or json"
-                .to_owned(),
+            "`format` must be markdown or json".to_owned(),
         ),
         (
             json!({"query": "ledger", "category": "pitfall"}),
-            decode_failure(
+            String::from(
                 "unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`",
             ),
         ),
         (
             json!({"query": "ledger", "memory_scope": "global"}),
-            decode_failure("unknown variant `global`, expected `project` or `user`"),
+            String::from("unknown variant `global`, expected `project` or `user`"),
         ),
     ] {
         let response = call_raw(server, arguments).await;

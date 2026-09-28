@@ -12,7 +12,10 @@ use super::memory_facts_test::{
     close_test_graph, fact_store_cross_project_fixture, invoke_exact_tool, invoke_production_tool,
     setup_project,
 };
-use crate::support::{handle_real_server_tool_call, handle_real_server_tool_call_raw};
+use crate::support::{
+    application_invalid_request_error, handle_real_server_tool_call,
+    handle_real_server_tool_call_raw,
+};
 
 const FRIDAY: &str = "Northwind closes the ledger on Friday";
 const AUDIT: &str = "Northwind records the audit trail after close";
@@ -436,14 +439,9 @@ fn assert_invalid_request(result: &Value) {
 }
 
 fn assert_schema_refusal(response: &Value, detail: &str) {
-    let error = &response["error"];
-    assert_eq!(error["code"], -32603, "{response}");
     assert_eq!(
-        error["message"],
-        format!(
-            "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_probe: {detail}"
-        ),
+        response["error"],
+        application_invalid_request_error("tracedecay_fact_store_probe", detail),
         "{response}"
     );
-    assert_eq!(error["data"]["tool"], "tracedecay_fact_store_probe");
 }

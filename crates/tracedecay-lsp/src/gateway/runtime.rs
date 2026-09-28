@@ -51,6 +51,7 @@ pub const MAX_SEMANTIC_OPERATIONS: usize = MAX_PENDING_REQUESTS * 2;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspRuntimeFailure {
     class: String,
+    invalid_request: bool,
 }
 
 impl LspRuntimeFailure {
@@ -68,11 +69,27 @@ impl LspRuntimeFailure {
         if bounded.is_empty() {
             bounded.push_str("runtime-failure");
         }
-        Self { class: bounded }
+        Self {
+            class: bounded,
+            invalid_request: false,
+        }
+    }
+
+    /// The caller's own input, such as a document URI outside the project,
+    /// cannot form a request; repeating it cannot succeed.
+    pub fn invalid_request(class: impl Into<String>) -> Self {
+        Self {
+            invalid_request: true,
+            ..Self::new(class)
+        }
     }
 
     pub fn class(&self) -> &str {
         &self.class
+    }
+
+    pub fn is_invalid_request(&self) -> bool {
+        self.invalid_request
     }
 }
 

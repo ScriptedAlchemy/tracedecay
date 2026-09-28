@@ -38,7 +38,8 @@ use tracedecay::mcp::McpServer;
 
 use crate::support::{
     commit_worktree, dispatch_mcp_tool_call, handle_real_server_tool_call_raw,
-    production_composition_fixture_with_sources, test_temp_dir, warm_code_index_search,
+    production_composition_fixture_with_sources, refusal_problem, test_temp_dir,
+    warm_code_index_search,
 };
 
 const MAIN_RS: &str = "\
@@ -101,6 +102,17 @@ fn caller_rows(evidence: &Value) -> Vec<(String, String, u64, u64)> {
 
 fn row(name: &str, file: &str, line: u64, depth: u64) -> (String, String, u64, u64) {
     (name.to_owned(), file.to_owned(), line, depth)
+}
+
+/// `(kind, code, retryable)` of a typed tool refusal.
+fn refusal_fields(response: &Value) -> (Value, Value, Value) {
+    assert!(response["error"].is_null(), "{response}");
+    let problem = refusal_problem(&response["result"]);
+    (
+        problem["kind"].clone(),
+        problem["code"].clone(),
+        problem["retryable"].clone(),
+    )
 }
 
 /// A request the surface refuses before any traversal, as a typed problem.
@@ -204,11 +216,19 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     );
     assert_eq!(no_callers["coverage"]["completeness"], "complete");
 
-    let unknown = call_callers(&server, json!({"node_id": UNKNOWN_OCCURRENCE})).await;
-    assert!(
-        !unknown["error"].is_null() || unknown["result"]["isError"] == true,
-        "an unknown occurrence cannot be mistaken for a known function with no callers: {unknown}"
-    );
+    for unknown_id in [UNKNOWN_OCCURRENCE, "nope"] {
+        let unknown = call_callers(&server, json!({"node_id": unknown_id})).await;
+        assert_eq!(
+            refusal_fields(&unknown),
+            (
+                json!("not_found_or_not_authorized"),
+                json!("not_found_or_not_authorized"),
+                json!(false)
+            ),
+            "an unknown occurrence ({unknown_id}) is not found, never a retryable outage or a \
+             known function with no callers: {unknown}"
+        );
+    }
 
     let markdown = dispatch_mcp_tool_call(
         &server,
