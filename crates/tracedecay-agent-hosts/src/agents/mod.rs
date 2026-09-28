@@ -83,19 +83,23 @@ pub use host_config_io::{
     with_host_config_write_intents,
 };
 pub(crate) use host_config_io::{
-    JsonConfigMutation, collect_regular_files, ensure_project_local_safe_path,
-    ensure_project_local_safe_paths, hook_command, host_home_override,
-    record_host_config_observation_bytes, update_json_config_transactionally,
-    update_toml_config_transactionally,
+    JsonConfigMutation, collect_regular_files, emptied_text_mutation,
+    ensure_project_local_safe_path, ensure_project_local_safe_paths, hook_command,
+    host_home_override, lifecycle_created_container, lifecycle_created_file,
+    note_created_container, record_host_config_observation_bytes, root_relative_path,
+    update_json_config_transactionally, update_toml_config_transactionally,
+    with_host_config_creations,
 };
 #[cfg(test)]
 use host_config_io::{
     TestHostConfigWritePauseController, pause_next_host_config_write_after_validation,
     pause_next_host_config_write_at_publication,
 };
+#[cfg(test)]
+pub(crate) use host_config_io::{recorded_install_then_uninstall, recorded_lifecycle};
 pub(crate) use mcp_registration::doctor_check_prompt_contains_tracedecay;
 pub use mcp_registration::{
-    McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry,
+    McpDoctorLabels, doctor_check_mcp_registration, install_mcp_server_entry,
     mcp_config_has_tracedecay, mcp_registration_entry, mcp_servers_registration_state,
     read_only_tool_names, report_mcp_registration, tool_names, uninstall_mcp_server_entry,
 };

@@ -11,6 +11,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use tracedecay_contracts::RequestContext;
+use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_domain::CodeGenerationId;
 
 use tracedecay_code_index::{
@@ -66,11 +67,18 @@ impl<'a> CodeIndexIgnoredDependencyAdmissionRequestV1<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodeIndexIgnoredDependencyAdmissionErrorV1 {
-    Unavailable { detail: String },
+    Unavailable {
+        detail: String,
+    },
     ReadOnly,
     Cancelled,
     TimedOut,
-    Stale { active_generation: CodeGenerationId },
+    Stale {
+        active_generation: CodeGenerationId,
+    },
+    /// No generation to admit against is coming until the park's
+    /// remediation is applied; repeating the request cannot change that.
+    Parked(CodeIndexConvergenceParkedV1),
 }
 
 pub type CodeIndexIgnoredDependencyAdmissionFutureV1<'a> = Pin<

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::chunks::{
-    CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1, published_symbol_spans,
-    typescript_family_path,
+    CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1, module_import_language_path,
+    published_symbol_spans, typescript_family_path,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::{
@@ -160,12 +160,13 @@ pub fn build_sealed_code_graph_rows(
 ///
 /// A dotted Rust-style call stays a limitation unless the canonical resolver
 /// bound its exact receiver site, and so does a call the extractor marked as
-/// sitting under an unmodeled import; TypeScript member calls are decided by
-/// the module resolver and arrive in `typescript_unresolved`.
+/// sitting under an unmodeled import. TypeScript, Python, Go, Java, and Ruby
+/// calls are decided by their module resolvers and arrive in
+/// `import_unresolved`.
 pub(crate) fn unresolved_call_limitations<'a>(
     references: &[(&str, &'a CodeIndexUnresolvedReferenceV1)],
     edges: impl Iterator<Item = &'a CanonicalRelationEdgeV1>,
-    typescript_unresolved: Vec<CodeIndexUnresolvedReferenceV1>,
+    import_unresolved: Vec<CodeIndexUnresolvedReferenceV1>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<CodeIndexUnresolvedReferenceV1>, CodeGraphProjectionError> {
     let mut site_candidates = BTreeMap::new();
@@ -206,9 +207,9 @@ pub(crate) fn unresolved_call_limitations<'a>(
     let mut unresolved_calls = Vec::new();
     for &(logical_path, reference) in references {
         check()?;
-        // TypeScript member calls are retained only through an imported
-        // namespace; the module resolver decides which are gaps.
-        if typescript_family_path(logical_path) {
+        // The module resolvers decide which of these languages' retained
+        // calls are gaps.
+        if typescript_family_path(logical_path) || module_import_language_path(logical_path) {
             continue;
         }
         // An enclosing-symbol fallback is not exact call-site proof, even
@@ -247,10 +248,10 @@ pub(crate) fn unresolved_call_limitations<'a>(
             }
         }
     }
-    // A TypeScript call whose import names project code the seal could not
-    // bind is the same kind of disclosed gap as an unresolved Rust receiver.
+    // A call whose import names project code the seal could not bind is the
+    // same kind of disclosed gap as an unresolved Rust receiver.
     check()?;
-    unresolved_calls.extend(typescript_unresolved);
+    unresolved_calls.extend(import_unresolved);
     unresolved_calls.sort();
     unresolved_calls.dedup();
     Ok(unresolved_calls)

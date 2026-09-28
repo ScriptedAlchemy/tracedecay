@@ -7,7 +7,7 @@ import type {
   WorkflowStep,
   WorkflowStepEffectOutcome,
   WorkflowStepStatus,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 
 /**
  * The Workflows ledger model: pure derivations over decoded generated

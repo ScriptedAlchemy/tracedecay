@@ -2,7 +2,7 @@ import type {
   ExecutionTopologyMeasurementV1,
   ExecutionTopologyMetricsV1,
   MetricCoverageV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { formatMicrosUtc } from '../../ui/format.ts';
 import { humanizeMetric } from '../../ui/metricModel.ts';
 import type { WorkResult } from './workApi.ts';

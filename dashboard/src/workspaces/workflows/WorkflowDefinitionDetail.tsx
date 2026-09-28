@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
-import type { WorkflowDefinition, WorkflowStep } from '../../contracts/index.ts';
+import type { WorkflowDefinition, WorkflowStep } from '../../contracts/generated.ts';
 import { cn } from '../../ui/cn.ts';
 import { Absence, GradeTag } from '../../ui/EvidenceGrade.tsx';
 import { Panel, Readout } from '../../ui/instrument.tsx';

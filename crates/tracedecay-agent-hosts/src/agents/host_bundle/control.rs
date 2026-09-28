@@ -187,6 +187,23 @@ pub(super) fn validate_receipt(
     {
         return Err(HostBundleError::ReceiptCorrupted);
     }
+    let created_config = receipt.created_config.as_deref().unwrap_or_default();
+    for creation in created_config {
+        validate_relative_install_path(Path::new(&creation.relative_path))?;
+        if !creation
+            .created_containers
+            .iter()
+            .all(|pointer| pointer.starts_with('/'))
+            || !creation
+                .created_containers
+                .is_sorted_by(|left, right| left < right)
+        {
+            return Err(HostBundleError::ReceiptCorrupted);
+        }
+    }
+    if !created_config.is_sorted_by(|left, right| left.relative_path < right.relative_path) {
+        return Err(HostBundleError::ReceiptCorrupted);
+    }
     Ok(())
 }
 

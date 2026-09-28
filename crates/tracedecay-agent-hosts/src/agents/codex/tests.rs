@@ -1230,10 +1230,13 @@ fn hook_trust_uninstall_removes_a_config_it_created() {
     install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
     let config_path = codex_config_path(home.path());
 
-    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
-    assert!(config_path.exists());
-    CodexIntegration
-        .deactivate_deployed_host_registration(&install_ctx(home.path()))
-        .unwrap();
+    crate::agents::recorded_install_then_uninstall(
+        home.path(),
+        || sync_codex_hook_trust(home.path(), TEST_BIN),
+        || {
+            assert!(config_path.exists());
+            CodexIntegration.deactivate_deployed_host_registration(&install_ctx(home.path()))
+        },
+    );
     assert!(!config_path.exists());
 }

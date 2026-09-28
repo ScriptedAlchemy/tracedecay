@@ -5,7 +5,12 @@
 //! genuine conflicts, and renders the client-visible refusal.
 
 use super::*;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::test_support::hold_after_project_sessions_for_test;
 
+/// Each store it mounts is one transactionally safe unit that cannot observe
+/// `cancellation` from inside; the token is checked between them so a
+/// draining daemon waits for at most the unit in flight, not the whole open.
 #[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
 #[cfg_attr(
     not(feature = "hotpath"),
@@ -18,6 +23,7 @@ pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
+    cancellation: &CancellationToken,
 ) -> Result<tracedecay_project::project::TraceDecay> {
     let open_options = crate::daemon::handshake_open_options(handshake);
     let registry_database = store_administration.registered_profile_database().await?;
@@ -67,6 +73,7 @@ pub(super) async fn open_project_for_handshake(
                 message: "registered project open requires an authoritative project identity"
                     .to_owned(),
             })?;
+    project_open_cancellation_checkpoint(cancellation)?;
     // First-touch enrollment: persist the minted identity in the `.git/`
     // repository identity marker so a subsequent open resolves the same
     // identity before the registry row lands. A non-git root persists
@@ -83,6 +90,11 @@ pub(super) async fn open_project_for_handshake(
         store_administration.registered_project_session_database(project_path, &store_layout),
     )
     .await?;
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        Box::pin(hold_after_project_sessions_for_test()).await?;
+    }
+    project_open_cancellation_checkpoint(cancellation)?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
     // The retired relational graph health/index lane is never spent on the
     // admission path. Opening establishes the exact registered configuration

@@ -6,7 +6,7 @@ import {
   WorkGraphReadV1Schema,
   type ExecutionTopologyMetricsV1,
   type WorkAttemptListV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { workAttempt as attempt, workAttemptList } from '../../test/workAttemptFixture.ts';
 import { workGraphRead, type WorkGraphVersionSpec } from '../../test/workGraphFixture.ts';
 import {

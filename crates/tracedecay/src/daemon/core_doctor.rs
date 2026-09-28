@@ -686,6 +686,7 @@ mod doctor_runtime_route_tests {
     use tracedecay_daemon_service::shutdown::DaemonLifecycle;
     use tracedecay_mcp::McpTransport;
     use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+    use tracedecay_runtime_core::cancellation::CancellationToken;
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -1314,10 +1315,14 @@ mod doctor_runtime_route_tests {
             "core-doctor-fast-runtime-health",
         )
         .expect("enter daemon database scope");
-        let graph =
-            super::super::open_project_for_handshake(&project, &handshake, &store_administration)
-                .await
-                .expect("open retained project graph");
+        let graph = super::super::open_project_for_handshake(
+            &project,
+            &handshake,
+            &store_administration,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("open retained project graph");
         let key = crate::daemon::ProjectServerKey::from_open_project(&graph, &handshake)
             .expect("project server key");
         let route_live = Arc::new(AtomicBool::new(true));

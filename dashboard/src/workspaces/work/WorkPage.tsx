@@ -4,7 +4,7 @@ import type {
   ExecutionTopologyViewV1,
   FeedbackProximityReadResultV1,
   WorkAttemptListV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Corners, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
