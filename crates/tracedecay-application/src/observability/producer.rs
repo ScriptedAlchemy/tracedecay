@@ -16,7 +16,8 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::{
     AnalyticsEventInsert, ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
-    RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
+    ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
+    PreparedObservabilityEmissionV1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
 };
 
 use tracedecay_session_memory::observability_store::record_observability_batch;
@@ -24,7 +25,7 @@ use tracedecay_session_memory::observability_store::record_observability_batch;
 mod outbox;
 mod rollup_rebuild;
 use outbox::{
-    claim_and_settle_durable, mark_delivery_delayed, recover_pending, settle_claimed_durable,
+    claim_and_settle_owner_run, mark_delivery_delayed, recover_pending, settle_claimed_durable,
 };
 use rollup_rebuild::{RollupAdvanceOutcome, run_one_rollup_maintenance};
 
@@ -705,40 +706,87 @@ async fn record_queued_batch(
     progress: &mut ProducerWorkerProgress,
 ) {
     let mut ordinary = Vec::new();
+    let mut unclaimed = Vec::new();
     for observation in observations {
-        if observation.owner_fact.is_some() {
-            record_batch(
-                db,
-                std::mem::take(&mut ordinary),
-                &mut progress.persisted,
-                &mut progress.first_error,
-                state.deadlines.persistence,
-            )
-            .await;
-            record_queued(
-                db,
-                &state.durable_emission_lock,
-                &state.next_sequence,
-                observation,
-                progress,
-                state.deadlines.persistence,
-            )
-            .await;
-            continue;
+        let QueuedObservation {
+            envelope,
+            carried_drops,
+            owner_fact,
+        } = observation;
+        match owner_fact {
+            Some(owner) if !owner.durable_claimed => {
+                record_batch(
+                    db,
+                    std::mem::take(&mut ordinary),
+                    &mut progress.persisted,
+                    &mut progress.first_error,
+                    state.deadlines.persistence,
+                )
+                .await;
+                unclaimed.push((envelope, owner));
+            }
+            Some(owner) => {
+                persist_unclaimed_owner_run(db, state, &mut unclaimed, progress).await;
+                record_batch(
+                    db,
+                    std::mem::take(&mut ordinary),
+                    &mut progress.persisted,
+                    &mut progress.first_error,
+                    state.deadlines.persistence,
+                )
+                .await;
+                record_queued(
+                    db,
+                    &state.durable_emission_lock,
+                    &state.next_sequence,
+                    QueuedObservation {
+                        envelope,
+                        carried_drops,
+                        owner_fact: Some(owner),
+                    },
+                    progress,
+                    state.deadlines.persistence,
+                )
+                .await;
+            }
+            None => {
+                persist_unclaimed_owner_run(db, state, &mut unclaimed, progress).await;
+                ordinary.extend(
+                    carried_drops
+                        .into_iter()
+                        .map(|range| telemetry_drop_envelope(range, false)),
+                );
+                ordinary.push(envelope);
+            }
         }
-        ordinary.extend(
-            observation
-                .carried_drops
-                .into_iter()
-                .map(|range| telemetry_drop_envelope(range, false)),
-        );
-        ordinary.push(observation.envelope);
     }
+    persist_unclaimed_owner_run(db, state, &mut unclaimed, progress).await;
     record_batch(
         db,
         ordinary,
         &mut progress.persisted,
         &mut progress.first_error,
+        state.deadlines.persistence,
+    )
+    .await;
+}
+
+async fn persist_unclaimed_owner_run(
+    db: &RegisteredGlobalDb,
+    state: &ProducerWorkerState,
+    run: &mut Vec<(ObservabilityEnvelopeV1, QueuedOwnerFact)>,
+    progress: &mut ProducerWorkerProgress,
+) {
+    if run.is_empty() {
+        return;
+    }
+    let run = std::mem::take(run);
+    let _durable_guard = state.durable_emission_lock.lock().await;
+    claim_and_settle_owner_run(
+        db,
+        &state.next_sequence,
+        run,
+        progress,
         state.deadlines.persistence,
     )
     .await;
@@ -864,16 +912,16 @@ async fn settle_worker(
             .await;
         }
     } else {
+        let mut batch = Vec::with_capacity(OBSERVABILITY_WRITE_BATCH);
         while let Some(observation) = data.recv().await {
-            record_queued(
-                db,
-                &state.durable_emission_lock,
-                &state.next_sequence,
-                observation,
-                progress,
-                state.deadlines.persistence,
-            )
-            .await;
+            batch.push(observation);
+            while batch.len() < OBSERVABILITY_WRITE_BATCH {
+                let Ok(observation) = data.try_recv() else {
+                    break;
+                };
+                batch.push(observation);
+            }
+            record_queued_batch(db, state, std::mem::take(&mut batch), progress).await;
         }
         recover_pending(
             db,
@@ -977,12 +1025,10 @@ async fn record_queued(
             )
             .await;
         } else {
-            claim_and_settle_durable(
+            claim_and_settle_owner_run(
                 db,
-                &owner_fact.emission_identity,
                 next_sequence,
-                observation.envelope,
-                owner_fact.json,
+                vec![(observation.envelope, owner_fact)],
                 progress,
                 persistence_deadline,
             )

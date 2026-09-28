@@ -148,12 +148,13 @@ pub use tracedecay_sessions::runtime::TranscriptPersistenceError;
 pub use api_types::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
     AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert,
-    ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1, ProjectAliasRecord,
-    ProjectRegistryContext, ProjectStoreContext, ProjectStoreResolution,
-    RegisteredProjectRootInventoryV1, SavingsDay, SavingsTotal, SessionActivityRow,
-    SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
-    StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,
-    TranscriptBatch, registry_context_candidate_roots,
+    ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
+    ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
+    PreparedObservabilityEmissionV1, ProjectAliasRecord, ProjectRegistryContext,
+    ProjectStoreContext, ProjectStoreResolution, RegisteredProjectRootInventoryV1, SavingsDay,
+    SavingsTotal, SessionActivityRow, SessionIngestHealth, SessionProviderCoverage,
+    SessionProviderCoverageState, StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord,
+    StoreInstanceUpsert, TranscriptBatch, registry_context_candidate_roots,
 };
 pub use support::{
     AccountingMode, env_flag, env_value_truthy, global_accounting_enabled, global_accounting_mode,
