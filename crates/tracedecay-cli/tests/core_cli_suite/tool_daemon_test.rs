@@ -2082,6 +2082,32 @@ fn doctor_renders_the_daemon_canonical_findings_the_dashboard_serves() {
             "doctor omitted the daemon finding `{statement}`:\n{stderr}"
         );
     }
+    assert!(
+        stderr.contains(" language_server: "),
+        "doctor omitted the daemon's language-server finding:\n{stderr}"
+    );
+
+    // `lsp servers` takes the same runtime read Doctor does, so it resolves
+    // analyzer availability through the daemon instead of this shell's PATH.
+    let lsp = tracedecay_command_with_home(&home_path)
+        .args(["lsp", "servers", "--json"])
+        .current_dir(&project_path)
+        .output()
+        .expect("lsp servers should run");
+    let lsp_inventory: Value = serde_json::from_slice(&lsp.stdout).unwrap_or_else(|error| {
+        panic!(
+            "lsp servers --json printed no JSON ({error}):\n{}",
+            String::from_utf8_lossy(&lsp.stderr)
+        )
+    });
+    assert_eq!(
+        (
+            &lsp_inventory["resolution"],
+            &lsp_inventory["daemon_unavailable"]
+        ),
+        (&json!("daemon"), &Value::Null),
+        "{lsp_inventory}"
+    );
 
     let dashboard = tracedecay_command_with_home(&home_path)
         .args(["dashboard", "--host", "127.0.0.1", "--port", "0"])
