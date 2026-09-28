@@ -3,7 +3,7 @@ import type {
   WorkAttemptV1,
   WorkEffectStateV1,
   WorkRestartReasonV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { WorkChannel } from './workChannel.ts';
 import type {
   WorkAccountingAnchor,

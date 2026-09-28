@@ -4,7 +4,7 @@ import type {
   WorkEvidenceContinuationV1,
   WorkEvidenceRetrieveRequestV1,
   WorkGraphReadV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { workQueryKey } from '../../data/query/work.ts';
 import { callWork, type WorkResult } from './workApi.ts';

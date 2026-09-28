@@ -842,16 +842,16 @@ impl MaintenanceCoordinator {
 }
 
 /// Samples this process's resident set, republishes it as Hotpath gauges, and
-/// feeds its unreclaimable bytes to the resident-memory admission authority.
+/// feeds its admission bytes to the resident-memory admission authority.
 ///
 /// A 20G RSS overrun past the admission limit was visible only to `ps` during
 /// a 2026-08 incident; the dedicated sampler closes that gap on a short
 /// cadence. Publishing the same sample to
 /// [`process_resident_memory_pressure_v1`](tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1)
 /// closes the loop: admission stops trusting its reservation model once the
-/// measurement says the process is over budget. The post-reclaim observation
-/// returned by the pressure cell is the authority for the unreclaimable gauge
-/// and logs.
+/// measurement says the process is over budget. The unreclaimable gauge stays
+/// the anonymous set; admission and the over-budget log use the pressure
+/// state, which also counts cgroup committed bytes.
 #[cfg(target_os = "linux")]
 fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {
     use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1;
@@ -861,9 +861,9 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
         return;
     };
     hotpath::gauge!("daemon.process.resident_bytes").set(sample.resident_bytes);
-    if let Some(observed_bytes) = state.observed_bytes() {
-        hotpath::gauge!("daemon.process.unreclaimable_resident_bytes").set(observed_bytes);
-    }
+    // The gauge keeps its name: admission may publish the larger cgroup
+    // committed figure, which is not this process's unreclaimable set.
+    hotpath::gauge!("daemon.process.unreclaimable_resident_bytes").set(sample.unreclaimable_bytes);
     let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
     let transition = {
         let mut log = log

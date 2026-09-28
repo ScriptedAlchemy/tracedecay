@@ -35,9 +35,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
-    JsonConfigDialect, McpUninstallPolicy, NonInteractiveInstallOutcome, host_home_override,
-    install_mcp_server_entry, load_json_file, load_json_file_strict, mcp_config_has_tracedecay,
-    uninstall_mcp_server_entry,
+    JsonConfigDialect, NonInteractiveInstallOutcome, host_home_override, install_mcp_server_entry,
+    load_json_file, load_json_file_strict, mcp_config_has_tracedecay, uninstall_mcp_server_entry,
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
@@ -152,15 +151,7 @@ impl AgentIntegration for KimiIntegration {
         project_path: &Path,
     ) -> Result<()> {
         let mcp_path = project_path.join(".kimi-code/mcp.json");
-        uninstall_mcp_server_entry(
-            &mcp_path,
-            "mcpServers",
-            JsonConfigDialect::Json,
-            McpUninstallPolicy {
-                prune_empty_root: true,
-                remove_empty_file: true,
-            },
-        )?;
+        uninstall_mcp_server_entry(&mcp_path, "mcpServers", JsonConfigDialect::Json)?;
         let agents_md = project_path.join("AGENTS.md");
         super::remove_managed_skill_prompt_index(
             &agents_md,
@@ -359,10 +350,6 @@ fn uninstall_kimi_user_mcp(kimi_code_home: &Path) -> Result<()> {
         &kimi_user_mcp_path(kimi_code_home),
         "mcpServers",
         JsonConfigDialect::Json,
-        McpUninstallPolicy {
-            prune_empty_root: true,
-            remove_empty_file: true,
-        },
     )
 }
 

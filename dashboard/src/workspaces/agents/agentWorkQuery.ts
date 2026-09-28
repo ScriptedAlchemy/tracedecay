@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import type { WorkGraphReadV1 } from '../../contracts/index.ts';
+import type { WorkGraphReadV1 } from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { callWork, type WorkResult } from '../work/workApi.ts';
 import { WORK_VIEWS_ROUTE } from '../work/workRoutes.ts';

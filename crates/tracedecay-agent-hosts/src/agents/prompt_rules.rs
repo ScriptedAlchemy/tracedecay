@@ -313,7 +313,7 @@ pub(crate) fn remove_prompt_rules_with(
             PromptRulesRemoval::Rewrite(contents) => {
                 (true, super::TextFileMutation::Write(contents))
             }
-            PromptRulesRemoval::Remove => (true, super::TextFileMutation::Remove),
+            PromptRulesRemoval::Remove => (true, super::emptied_text_mutation(path, String::new())),
         })
     })?;
     if removed {

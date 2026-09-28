@@ -7,7 +7,7 @@ import type {
   WorkAttemptListV1,
   WorkExecutionHistoryV1,
   WorkGraphReadV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { workQueryKey } from '../../data/query/work.ts';
 import { callWork, type WorkResult } from './workApi.ts';

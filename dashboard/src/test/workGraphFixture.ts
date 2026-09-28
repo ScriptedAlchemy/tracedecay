@@ -5,7 +5,7 @@ import type {
   WorkRuntimeProjectionCoverageV1,
   WorkRelationReplanDecisionV1,
   WorkTimelineLaneV1,
-} from '../contracts/index.ts';
+} from '../contracts/generated.ts';
 
 /**
  * Work-product graph reads for the Work tests, shaped the way the daemon shapes
