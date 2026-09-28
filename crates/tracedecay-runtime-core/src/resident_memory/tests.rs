@@ -737,6 +737,42 @@ fn unobserved_rss_leaves_admission_on_the_reservation_ceiling_alone() {
 }
 
 #[test]
+fn nominal_rss_refuses_growth_that_would_cross_the_limit() {
+    let (authority, pressure) = pressure_authority();
+    let requested = bytes(PRESSURE_TEST_LIMIT_BYTES / 4);
+    let observed = pressure.limit_bytes() - requested.get() + 1;
+    assert!(
+        !pressure
+            .publish_observed_resident_bytes(observed)
+            .is_over_budget()
+    );
+
+    let failure = authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect_err("growth must fit measured headroom before allocation");
+    assert!(failure.is_observed_over_budget());
+    let failure = authority
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap(),
+            requested,
+        )
+        .expect_err("shared growth must fit the same measured headroom");
+    assert!(failure.is_observed_over_budget());
+    assert_eq!(authority.snapshot().used_bytes, 0);
+
+    pressure.publish_observed_resident_bytes(observed - 1);
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect("growth that fits the headroom can proceed");
+}
+
+#[test]
 fn measured_rss_above_the_high_watermark_refuses_growth_with_a_typed_state() {
     let (authority, pressure) = pressure_authority();
     let observed = pressure.high_watermark_bytes() + 1;
