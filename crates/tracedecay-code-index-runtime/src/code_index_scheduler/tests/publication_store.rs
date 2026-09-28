@@ -12,13 +12,16 @@ use std::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurableGenerationIndexEntryV1,
+    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
+    DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DurableGenerationIndexEntryV1,
     DurablePublicationPointerV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
     acquire_code_generation_store_lock, code_generation_segments_root,
     code_text_artifact_staging_root, code_text_artifacts_root, durable_generation_index_digest,
-    execute_code_generation_retention_cancellable,
+    execute_code_generation_retention_cancellable, execute_scope_root_retention,
+    plan_scope_root_retention_with_liveness_proof,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
-    try_acquire_code_generation_store_read_lock, withdraw_verified_text_artifact_under_lock,
+    scope_root_liveness_proof, try_acquire_code_generation_store_read_lock,
+    withdraw_verified_text_artifact_under_lock,
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, ComponentRevision, EphemeralSanitizedQueryViewV1,
@@ -38,9 +41,8 @@ use super::super::publication_store::{ActiveGenerationDecodeChargeV1, ActiveGene
 
 use super::{
     EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, downgrade_pointer_to_pre_segment_bytes_shape,
-    execute_scope_retention_with_test_binding_cleanup, published,
-    remove_historical_pointer_entries, retention_generations, scheduler, seeded_scope,
-    test_project_id, unix_now_secs,
+    execute_proof_bound_scope_retention, published, remove_historical_pointer_entries,
+    retention_generations, scheduler, seeded_scope, test_project_id, unix_now_secs,
 };
 use crate::{
     code_index::production::{
@@ -1708,7 +1710,7 @@ fn stranded_code_index_scope_is_collected_while_its_live_sibling_is_untouched() 
     let stranded_scope = seeded_scope(&fixture, code_index.path(), &deleted_worktree, 2);
     let live_roots = BTreeSet::from([live_root]);
 
-    let report = execute_scope_retention_with_test_binding_cleanup(
+    let report = execute_proof_bound_scope_retention(
         code_index.path(),
         &live_roots,
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
@@ -1800,7 +1802,7 @@ fn code_index_scope_with_a_pending_generation_journal_is_refused() {
     .expect("seed pending generation journal");
     let live_roots = BTreeSet::from([live_root]);
 
-    let report = execute_scope_retention_with_test_binding_cleanup(
+    let report = execute_proof_bound_scope_retention(
         code_index.path(),
         &live_roots,
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
@@ -1845,7 +1847,7 @@ fn freshly_stranded_code_index_scope_is_retained_until_the_age_gate_passes() {
     let stranded_scope = seeded_scope(&fixture, code_index.path(), &just_removed, 1);
     let live_roots = BTreeSet::from([live_root]);
 
-    let report = execute_scope_retention_with_test_binding_cleanup(
+    let report = execute_proof_bound_scope_retention(
         code_index.path(),
         &live_roots,
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
@@ -1889,7 +1891,7 @@ fn scope_reconciliation_refuses_to_collect_without_a_proven_live_root_set() {
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
         unix_now_secs() + EIGHT_DAYS_SECS,
     );
-    let applied = execute_scope_retention_with_test_binding_cleanup(
+    let applied = execute_proof_bound_scope_retention(
         code_index.path(),
         &unproven,
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
@@ -2923,6 +2925,54 @@ fn publish_linked_worktree_scopes(files: &[(&str, &str)]) -> LinkedWorktreeScope
     }
 }
 
+/// Remove the linked worktree through Git and collect whatever scope the
+/// production liveness proof no longer names, as scope reconciliation does.
+fn remove_linked_worktree_and_collect_stranded_scopes(scopes: &LinkedWorktreeScopesV1) {
+    super::git(
+        scopes._first.path(),
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            scopes.linked.to_str().expect("linked path"),
+        ],
+    );
+    let now = unix_now_secs();
+    let proof = scope_root_liveness_proof(scopes._first.path(), &BTreeSet::new())
+        .expect("liveness proof over the remaining worktrees");
+    let plan = plan_scope_root_retention_with_liveness_proof(
+        &scopes.code_index_root,
+        proof.clone(),
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        now,
+    )
+    .expect("plan scope collection");
+    let report = execute_scope_root_retention(
+        &scopes.code_index_root,
+        plan,
+        &proof,
+        CodeGenerationRetentionModeV1::Apply,
+        now,
+        UtcMicros(now * 1_000_000),
+    )
+    .expect("collect the removed worktree's scope");
+    assert_eq!(
+        report
+            .collected_scopes
+            .iter()
+            .map(|scope| scope.scope_hash.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            scopes
+                .linked_scope
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("scope hash")
+        ],
+        "only the removed worktree's scope is stranded, and without waiting out the age gate"
+    );
+}
+
 #[test]
 fn linked_worktrees_that_seal_identical_files_share_one_segment_per_file() {
     // Several bodies per file: in memory they sort by worktree-specific
@@ -3033,7 +3083,8 @@ fn retiring_one_worktree_keeps_the_segments_its_sibling_still_names() {
     }
 
     // Collecting the linked scope strands only what it alone named.
-    std::fs::remove_dir_all(&scopes.linked_scope).expect("collect linked scope");
+    remove_linked_worktree_and_collect_stranded_scopes(&scopes);
+    assert!(!scopes.linked_scope.exists());
     retain(&scopes.first_scope);
     let present = segment_files(&segments_root);
     for digest in &first {
@@ -3397,8 +3448,14 @@ fn retiring_one_worktree_keeps_the_text_artifact_its_sibling_references() {
         shared.exists(),
         "retention from one scope keeps an artifact a sibling scope names"
     );
-    // Collecting the linked scope leaves the artifact unnamed.
-    std::fs::remove_dir_all(&scopes.linked_scope).expect("collect linked scope");
+    // Removing the linked worktree collects its scope and leaves the artifact
+    // unnamed.
+    remove_linked_worktree_and_collect_stranded_scopes(&scopes);
+    assert!(!scopes.linked_scope.exists());
+    assert!(
+        shared.exists(),
+        "collecting a scope leaves shared files to retention"
+    );
     retain(&scopes.first_scope);
     assert!(!shared.exists(), "an artifact no scope names is collected");
 }

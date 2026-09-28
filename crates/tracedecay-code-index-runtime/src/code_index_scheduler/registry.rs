@@ -3069,6 +3069,12 @@ impl CodeIndexSchedulerRegistryV1 {
         self.mounted.lock().await.contains_key(&project_root)
     }
 
+    /// The canonical root of every mounted worktree. Scope reconciliation
+    /// treats each one that still exists on disk as live.
+    pub async fn mounted_roots(&self) -> BTreeSet<PathBuf> {
+        self.mounted.lock().await.keys().cloned().collect()
+    }
+
     fn publication_authority_reset(
         worktree: &MountedCodeIndexWorktreeV1,
     ) -> Option<CodeIndexConvergenceParkedV1> {

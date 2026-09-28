@@ -168,10 +168,6 @@ impl AgentIntegration for ZedIntegration {
         uninstall_mcp_if_selected(components, &path)
     }
 
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
-    }
-
     fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(
             &zed_settings_path(home),

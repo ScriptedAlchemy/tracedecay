@@ -21,7 +21,6 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-tracedecay-store = { path = "../tracedecay-store" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
