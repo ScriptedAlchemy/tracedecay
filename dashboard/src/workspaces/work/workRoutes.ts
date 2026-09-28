@@ -13,7 +13,7 @@ import {
   WorkProductMutationReceiptV1Schema,
   WorkProductMutationRequestV1Schema,
   WorkTopologyViewRequestV1Schema,
-} from "../../contracts/index.ts";
+} from "../../contracts/generated.ts";
 import type { WorkRoute } from "./workApi.ts";
 
 /**

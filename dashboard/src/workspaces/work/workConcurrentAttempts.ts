@@ -7,7 +7,7 @@ import type {
   WorkEvidenceRetrievalV1,
   WorkExecutionHistoryV1,
   WorkExecutionSpanV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { WorkResult } from './workApi.ts';
 
 export interface ConcurrentAttemptRow {

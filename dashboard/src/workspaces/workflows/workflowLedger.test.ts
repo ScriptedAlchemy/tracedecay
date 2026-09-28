@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { WorkflowDefinition, WorkflowRunProjection } from '../../contracts/index.ts';
+import type { WorkflowDefinition, WorkflowRunProjection } from '../../contracts/generated.ts';
 import {
   DEFINITION_ABSENCES,
   definitionShape,
