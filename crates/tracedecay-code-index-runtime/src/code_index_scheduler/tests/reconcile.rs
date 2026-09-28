@@ -3011,6 +3011,91 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
     registry.shutdown().await;
 }
 
+/// A sealed successor serves as soon as its text owner is installed. Lexical
+/// projection can still be unfinished, and a later edit seals without waiting
+/// for that build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_generation_serves_and_next_edit_seals_while_text_projection_is_held() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let first = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let first_id = first.generation().manifest().generation_id.clone();
+    let (projection_started, release_projection) = registry
+        .pause_next_published_text_projection(canonical_root)
+        .await;
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        matches!(
+            registry
+                .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+                .await,
+            super::super::CodeIndexDemandAdmissionV1::Queued
+        ),
+        "the edit reaches the worker"
+    );
+    tokio::time::timeout(Duration::from_secs(10), projection_started)
+        .await
+        .expect("publication did not reach text projection")
+        .expect("publication projection gate stays armed");
+
+    let sealed = registry
+        .sealed_publication_identity(fixture.path(), Some(&first_id))
+        .await
+        .expect("sealed identity read")
+        .expect("the edit sealed while its projection is held");
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await.as_ref(),
+        Some(sealed.generation_id()),
+        "the sealed generation serves before its lexical projection finishes"
+    );
+    assert!(
+        registry
+            .latest_text_serving_for_root(fixture.path())
+            .await
+            .is_none_or(|text| {
+                &text.metadata().manifest().generation_id != sealed.generation_id()
+            }),
+        "lexical query owners stay absent until the artifact exists"
+    );
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 3 }\n");
+    assert!(
+        matches!(
+            registry
+                .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+                .await,
+            super::super::CodeIndexDemandAdmissionV1::Queued
+        ),
+        "the later edit reaches the worker"
+    );
+    let later = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(Some(identity)) = registry
+                .sealed_publication_identity(fixture.path(), Some(sealed.generation_id()))
+                .await
+            {
+                return identity;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a later edit seals while the previous projection is still held");
+    assert_ne!(later.generation_id(), sealed.generation_id());
+    let _ = release_projection.send(());
+    registry.shutdown().await;
+}
+
 /// A producer that reads only sealed source must not wait for the serving
 /// swap. While the first publication's text projection is held, nothing
 /// serves, yet the sealed identity already names the generation and its
@@ -3341,21 +3426,21 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
         "src/lib.rs",
         "pub fn alpha() -> u32 { 1 }\npub fn edited_during_projection() -> u32 { 2 }\n",
     );
-    // The publishing pass released the admission before its projection; hold
-    // it so the seat's freshness is read before any successor pass runs.
-    let admission = registry
-        .background_reconcile_admission()
-        .acquire_owned()
+    let sealed_before_write = registry
+        .sealed_publication_identity(fixture.path(), None)
         .await
-        .expect("hold the successor pass at its dequeue point");
+        .expect("sealed identity")
+        .expect("the projection is held on a sealed generation");
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "the write is not a ready generation while its projection is unfinished"
+    );
     release_projection
         .send(())
         .expect("release publication projection");
-    let seated =
-        wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
-            registry.latest_complete_serving_for_test(fixture.path())
-        })
-        .await;
     let simple_names = |latest: &LatestCompleteCodeIndexV1| {
         latest
             .generation
@@ -3365,31 +3450,8 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
             .map(|symbol| symbol.simple_name.clone())
             .collect::<BTreeSet<_>>()
     };
-    assert_eq!(
-        simple_names(&seated),
-        BTreeSet::from(["alpha".to_owned()]),
-        "the seated generation was sealed before the write"
-    );
-    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
-
-    let freshness = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("mounted freshness");
-    assert_eq!(
-        freshness.staleness_state,
-        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Refreshing),
-        "a seat whose source moved during its projection is not current"
-    );
-    assert!(
-        registry
-            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-            .await
-            .is_none(),
-        "a ready read refuses the seat the write outdated"
-    );
-
-    drop(admission);
+    // No hook hint and no explicit sync. The post-projection sweep has to
+    // notice the plain write and the successor has to index it.
     let reconciled = wait_until_serving_seat(
         &registry,
         fixture.path(),
@@ -3398,13 +3460,15 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
             registry
                 .latest_complete_serving_for_test(fixture.path())
                 .await
-                .filter(|latest| {
-                    latest.generation.manifest().generation_id
-                        != seated.generation.manifest().generation_id
-                })
+                .filter(|latest| simple_names(latest).contains("edited_during_projection"))
         },
     )
     .await;
+    assert_ne!(
+        &reconciled.generation.manifest().generation_id,
+        sealed_before_write.generation_id(),
+        "the generation sealed before the write is not the one that serves it"
+    );
     assert_eq!(
         simple_names(&reconciled),
         BTreeSet::from(["alpha".to_owned(), "edited_during_projection".to_owned()]),
