@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::common;
 use crate::common::{
-    canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
+    canonical_existing_path, hermetic_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -2628,8 +2628,7 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
 
     let output = tracedecay_command_with_home(&home_path)
         .args(["daemon", "status"])
-        .env("PATH", &fake_bin)
-        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .env("PATH", hermetic_path(&[&fake_bin]))
         .output()
         .unwrap();
 

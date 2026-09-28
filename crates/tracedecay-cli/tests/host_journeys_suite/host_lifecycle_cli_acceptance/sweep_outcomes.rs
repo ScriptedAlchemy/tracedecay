@@ -83,7 +83,7 @@ fn update_plugin_skips_a_leftover_host_whose_cli_is_not_installed() {
     install_cline(&cli);
     seed_leftover_kiro_registration(&cli);
 
-    let output = cli.run_without_host_clis(&["update-plugin"]);
+    let output = cli.run(&["update-plugin"]);
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
@@ -123,7 +123,7 @@ fn update_plugin_waits_on_the_operator_for_a_tracked_host_whose_cli_is_not_insta
     seed_leftover_kiro_registration(&cli);
     track_kiro(&cli);
 
-    let output = cli.run_without_host_clis(&["update-plugin"]);
+    let output = cli.run(&["update-plugin"]);
 
     let stderr = stderr(&output);
     assert_eq!(
@@ -139,7 +139,7 @@ fn update_plugin_waits_on_the_operator_for_a_tracked_host_whose_cli_is_not_insta
         "the pending host stays tracked until the operator decides: {tracked}"
     );
 
-    let untrack = cli.run_without_host_clis(&["uninstall", "--agent", "kiro"]);
+    let untrack = cli.run(&["uninstall", "--agent", "kiro"]);
     let untrack_stderr = self::stderr(&untrack);
     assert_eq!(untrack.status.code(), Some(0), "{untrack_stderr}");
     assert!(
@@ -156,7 +156,7 @@ fn update_plugin_waits_on_the_operator_for_a_tracked_host_whose_cli_is_not_insta
         "the printed uninstall stops tracking only that host: {tracked}"
     );
 
-    let after = cli.run_without_host_clis(&["update-plugin"]);
+    let after = cli.run(&["update-plugin"]);
     let after_stderr = self::stderr(&after);
     assert_eq!(after.status.code(), Some(0), "{after_stderr}");
     assert!(
@@ -187,7 +187,7 @@ fn update_plugin_reports_registrations_already_in_place_as_unchanged() {
     for (host, relative) in hosts {
         let case = host_case(host);
         seed_host(case, &cli);
-        let install = cli.run_without_host_clis(&["install", "--agent", case.id]);
+        let install = cli.run(&["install", "--agent", case.id]);
         let install_stderr = stderr(&install);
         assert_eq!(install.status.code(), Some(0), "{install_stderr}");
         let path = cli.home.path().join(relative);
@@ -202,7 +202,7 @@ fn update_plugin_reports_registrations_already_in_place_as_unchanged() {
         installed.push((path.clone(), fs::read(&path).unwrap(), metadata.ino()));
     }
 
-    let refresh = cli.run_without_host_clis(&["update-plugin"]);
+    let refresh = cli.run(&["update-plugin"]);
 
     let refresh_stderr = stderr(&refresh);
     assert_eq!(refresh.status.code(), Some(0), "{refresh_stderr}");
@@ -242,7 +242,7 @@ fn update_plugin_reports_registrations_already_in_place_as_unchanged() {
 fn install_fails_an_untracked_named_host_whose_cli_is_not_installed() {
     let cli = IsolatedCli::new();
 
-    let output = cli.run_without_host_clis(&["install", "--agent", "kiro"]);
+    let output = cli.run(&["install", "--agent", "kiro"]);
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
@@ -265,20 +265,7 @@ fn post_update_reports_a_tracked_host_without_its_cli_as_pending_beside_kimi() {
     track_kiro(&cli);
     let _ = cli.run(&["install", "--agent", "kimi"]);
 
-    // Post-update still needs the service manager, so only Kiro's CLI goes.
-    let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let path = std::env::join_paths(
-        std::iter::once(cli.bin_dir.clone())
-            .chain(std::env::split_paths(&inherited).filter(|dir| {
-                !dir.join("kiro-cli").exists() && !dir.join("kiro-cli.exe").exists()
-            })),
-    )
-    .unwrap();
-    let output = cli
-        .command(&["post-update"])
-        .env("PATH", path)
-        .output()
-        .unwrap();
+    let output = cli.run(&["post-update"]);
 
     let stderr = stderr(&output);
     assert_eq!(
@@ -348,7 +335,7 @@ fn doctor_waits_on_the_operator_for_the_steps_update_plugin_reports() {
         .path()
         .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
 
-    let doctor = cli.run_without_host_clis(&["doctor"]);
+    let doctor = cli.run(&["doctor"]);
     let doctor_stderr = stderr(&doctor);
     assert_eq!(
         doctor.status.code(),
@@ -371,9 +358,9 @@ fn doctor_waits_on_the_operator_for_the_steps_update_plugin_reports() {
     );
 
     complete_kimi_plugins_install(&cli, &staged);
-    let untrack = cli.run_without_host_clis(&["uninstall", "--agent", "kiro"]);
+    let untrack = cli.run(&["uninstall", "--agent", "kiro"]);
     assert_eq!(untrack.status.code(), Some(0), "{}", stderr(&untrack));
-    let converged = cli.run_without_host_clis(&["doctor"]);
+    let converged = cli.run(&["doctor"]);
     let converged_stderr = stderr(&converged);
     assert_eq!(converged.status.code(), Some(0), "{converged_stderr}");
     assert!(
