@@ -1799,6 +1799,71 @@ async fn linked_route_reuses_primary_authority_while_shadow_writer_is_held() {
     engine.shutdown_all().await;
 }
 
+/// A checkout build that resolved an installed profile must not enroll its
+/// scratch corpus there: first-touch init from another build is refused
+/// before the enrollment marker or registry row lands, and this build's own
+/// init of the same corpus still enrolls it.
+#[cfg(unix)]
+#[tokio::test]
+async fn first_touch_init_from_another_build_leaves_the_profile_untouched() {
+    let home = TempDir::new().expect("isolated home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let corpus = home.join("scratch-corpus");
+    std::fs::create_dir_all(&corpus).expect("create corpus");
+    run_git(&corpus, &["init", "-b", "main", "--quiet"]);
+    std::fs::write(corpus.join("README.md"), "scratch corpus\n").expect("fixture");
+    run_git(&corpus, &["add", "."]);
+    run_git(&corpus, &["commit", "-m", "fixture", "--quiet"]);
+
+    let own_build = DaemonHandshake {
+        project_path: Some(corpus.clone()),
+        allow_init: true,
+        client_identity: test_client_identity_for(home.join("profile")),
+        ..test_handshake_defaults()
+    };
+    let other_build = DaemonHandshake {
+        client_version: "0.0.1-checkout+0123456789abcdef".to_owned(),
+        ..own_build.clone()
+    };
+    let engine = test_daemon_engine_for_profile(&own_build.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &own_build.client_identity.profile_root,
+        "cross-build-enrollment-test",
+    );
+
+    let refusal = match engine.open_project_server(&other_build).await {
+        Ok(_) => panic!("another build must not enroll the corpus"),
+        Err(error) => error,
+    };
+    let daemon_version = own_build.client_version.clone();
+    assert_eq!(
+        refusal.project_route_context(),
+        Some((
+            "daemon_protocol_revision_skew",
+            false,
+            format!(
+                "daemon (version {daemon_version}) refuses to enroll '{}' for client version \
+                 0.0.1-checkout+0123456789abcdef; restart or reconnect the MCP host so it \
+                 loads the current TraceDecay client and tool catalog",
+                corpus.display()
+            )
+            .as_str()
+        )),
+        "{refusal}"
+    );
+    assert!(
+        !tracedecay_runtime_core::storage::has_repository_identity_marker(&corpus),
+        "a refused enrollment must write no identity marker"
+    );
+
+    engine
+        .open_project_server(&own_build)
+        .await
+        .expect("this build's first-touch init enrolls the corpus");
+    assert!(tracedecay_runtime_core::storage::has_repository_identity_marker(&corpus));
+    engine.shutdown_all().await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn shutdown_fences_git_index_transactions_and_joins_store_actors() {
