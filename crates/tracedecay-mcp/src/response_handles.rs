@@ -73,6 +73,7 @@ fn public_inventory_problem(error: &TraceDecayError) -> (&'static str, &'static 
         | TraceDecayError::Search { .. }
         | TraceDecayError::Config { .. }
         | TraceDecayError::HostCliUnavailable { .. }
+        | TraceDecayError::HostCliNotSignedIn { .. }
         | TraceDecayError::ProfileResetRequired { .. }
         | TraceDecayError::ResetRequired { .. }
         | TraceDecayError::ProjectRoute { .. }
@@ -116,6 +117,7 @@ pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
         | TraceDecayError::Search { .. }
         | TraceDecayError::Config { .. }
         | TraceDecayError::HostCliUnavailable { .. }
+        | TraceDecayError::HostCliNotSignedIn { .. }
         | TraceDecayError::ProfileResetRequired { .. }
         | TraceDecayError::ResetRequired { .. }
         | TraceDecayError::ProjectRoute { .. }
@@ -401,6 +403,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
         TraceDecayError::HostCliUnavailable { .. } => "host_cli_unavailable",
+        TraceDecayError::HostCliNotSignedIn { .. } => "host_cli_not_signed_in",
         TraceDecayError::ProfileResetRequired { .. } => "profile_reset_required",
         TraceDecayError::ProjectRoute { .. } => "project_route",
         TraceDecayError::SyncLock { .. } => "sync_lock",

@@ -245,8 +245,8 @@ impl AgentIntegration for DroidIntegration {
         false
     }
 
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
-        require_droid_cli().map(drop)
+    fn require_host(&self, _home: &Path) -> Result<super::HostPresence> {
+        require_droid_cli().map(|_| super::HostPresence::HostCli)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
