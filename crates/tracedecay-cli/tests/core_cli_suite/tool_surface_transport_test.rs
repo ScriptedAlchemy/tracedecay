@@ -806,3 +806,71 @@ fn work_and_workflow_tools_answer_through_their_typed_owner() {
         "not_found_or_not_authorized"
     );
 }
+
+/// A refusal raised before dispatch answers `--json` with the same typed
+/// problem record MCP puts in the JSON-RPC error `data`, so a shell caller
+/// branches on `code` instead of parsing prose, and the refused edit writes
+/// nothing.
+#[test]
+fn tool_json_reports_argument_refusals_as_typed_problems() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let source_before = std::fs::read_to_string(project_path.join("src/lib.rs")).unwrap();
+
+    for (tool, args, detail) in [
+        (
+            "configuration_get",
+            r#"{"key":"sweep"}"#,
+            "application surface request does not match its reviewed schema: configuration surface request is inconsistent with the application contract",
+        ),
+        (
+            "str_replace",
+            r#"{"path":"src/lib.rs","old_str":"42","new_str":"43"}"#,
+            "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
+        ),
+    ] {
+        let outcome = run_surface_tool_json_from(&home_path, &project_path, tool, args);
+        assert!(
+            !outcome.success,
+            "`tracedecay tool {tool}` must fail\nstdout:\n{}\nstderr:\n{}",
+            outcome.stdout, outcome.stderr
+        );
+        assert_eq!(
+            outcome.payload(),
+            serde_json::json!({
+                "problem": {
+                    "tool": format!("tracedecay_{tool}"),
+                    "code": "application_surface_invalid_request",
+                    "reason_code": "application_surface_invalid_request",
+                    "kind": "invalid_request",
+                    "retryable": false,
+                    "detail": detail,
+                }
+            }),
+            "stderr:\n{}",
+            outcome.stderr
+        );
+    }
+
+    let unknown = run_tool_from(&home_path, &project_path, "not_a_real_tool", &["--json"]);
+    assert!(
+        !unknown.success,
+        "an unknown tool must fail: {}",
+        unknown.stderr
+    );
+    let problem = &unknown.payload()["problem"];
+    assert_eq!(
+        (&problem["code"], &problem["kind"], &problem["retryable"]),
+        (
+            &serde_json::json!("unknown_tool"),
+            &serde_json::json!("invalid_request"),
+            &serde_json::json!(false)
+        ),
+        "{problem}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
+        source_before
+    );
+}

@@ -74,10 +74,10 @@ async fn health_read_reports_ok_until_the_serving_database_is_gone() {
         .error
         .as_ref()
         .expect("an unknown format must be a JSON-RPC error, not markdown");
-    assert_eq!(bad_format.code, -32603);
+    assert_eq!(bad_format.code, -32602);
     assert_eq!(
         bad_format.message,
-        "tool execution failed: config error: application surface request does not match its reviewed schema: `format` must be markdown or json"
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `format` must be markdown or json"
     );
 
     let database = serving_database_path(&fixture).await;
