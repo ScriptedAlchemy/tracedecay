@@ -825,34 +825,43 @@ impl DoctorCounters {
         Self::default()
     }
     pub fn pass(&mut self, msg: &str) {
-        eprintln!("  \x1b[32m✔\x1b[0m {msg}");
-        self.record(DoctorCheckLevelV1::Pass, msg);
+        self.report(DoctorCheckLevelV1::Pass, msg);
     }
     pub fn fail(&mut self, msg: &str) {
-        eprintln!("  \x1b[31m✘\x1b[0m {msg}");
-        self.issues += 1;
-        self.record(DoctorCheckLevelV1::Issue, msg);
+        self.report(DoctorCheckLevelV1::Issue, msg);
     }
     pub fn warn(&mut self, msg: &str) {
-        eprintln!("  \x1b[33m!\x1b[0m {msg}");
-        self.warnings += 1;
-        self.record(DoctorCheckLevelV1::Warning, msg);
+        self.report(DoctorCheckLevelV1::Warning, msg);
     }
     pub fn pending(&mut self, msg: &str) {
-        eprintln!("  \x1b[33m…\x1b[0m {msg}");
-        self.pending_actions += 1;
-        self.record(DoctorCheckLevelV1::PendingOperatorAction, msg);
+        self.report(DoctorCheckLevelV1::PendingOperatorAction, msg);
     }
     /// A host that is not installed or not signed in; counted nowhere.
     pub fn skipped(&mut self, msg: &str) {
-        eprintln!("  - {msg}");
-        self.record(DoctorCheckLevelV1::Skipped, msg);
+        self.report(DoctorCheckLevelV1::Skipped, msg);
     }
     pub fn info(&mut self, msg: &str) {
-        eprintln!("    {msg}");
-        self.record(DoctorCheckLevelV1::Info, msg);
+        self.report(DoctorCheckLevelV1::Info, msg);
     }
-    fn record(&mut self, level: DoctorCheckLevelV1, msg: &str) {
+    fn report(&mut self, level: DoctorCheckLevelV1, msg: &str) {
+        let marker = match level {
+            DoctorCheckLevelV1::Pass => "  \x1b[32m✔\x1b[0m ",
+            DoctorCheckLevelV1::Issue => {
+                self.issues += 1;
+                "  \x1b[31m✘\x1b[0m "
+            }
+            DoctorCheckLevelV1::Warning => {
+                self.warnings += 1;
+                "  \x1b[33m!\x1b[0m "
+            }
+            DoctorCheckLevelV1::PendingOperatorAction => {
+                self.pending_actions += 1;
+                "  \x1b[33m…\x1b[0m "
+            }
+            DoctorCheckLevelV1::Skipped => "  - ",
+            DoctorCheckLevelV1::Info => "    ",
+        };
+        eprintln!("{marker}{msg}");
         self.checks.push(DoctorCheckV1 {
             level,
             message: msg.to_owned(),
