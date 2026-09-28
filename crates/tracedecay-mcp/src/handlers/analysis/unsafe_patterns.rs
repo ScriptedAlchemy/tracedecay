@@ -4,9 +4,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use serde_json::Value;
+use tracedecay_code_extraction::source_mask::{RustTestScopeError, rust_test_lines};
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::result::CoverageCompleteness;
 use tracedecay_contracts::retrieval::{
-    UnsafePatternKindV1, UnsafePatternMatchV1, UnsafePatternsResultV1,
+    UnsafePatternFileOmissionV1, UnsafePatternKindV1, UnsafePatternMatchV1,
+    UnsafePatternOmissionCauseV1, UnsafePatternOmissionReasonV1, UnsafePatternsResultV1,
     UnsafePatternsSurfaceRequestV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -53,6 +56,18 @@ fn line_matches_unsafe_kind(line: &str, kind: UnsafePatternKindV1) -> Option<usi
         UnsafePatternKindV1::Unimplemented => line.find("unimplemented!("),
         UnsafePatternKindV1::UnsafeBlock => contains_unsafe_block_start(line),
     }
+}
+
+fn count_unsafe_sites(masked: &str, kinds: &[UnsafePatternKindV1]) -> u64 {
+    masked
+        .lines()
+        .map(|line| {
+            kinds
+                .iter()
+                .filter(|kind| line_matches_unsafe_kind(line, **kind).is_some())
+                .count() as u64
+        })
+        .sum()
 }
 
 fn contains_method_call(line: &str, method: &str, empty_parens: bool) -> Option<usize> {
@@ -147,13 +162,14 @@ pub(super) async fn compute_unsafe_patterns(
     // Graph phase is done. The source walk reads and masks candidate files, so
     // it belongs on a blocking worker like the sibling analysis scans.
     let scan_project_root = project_root.to_path_buf();
-    let (matches, by_kind, touched) = hotpath::future!(
+    let (matches, by_kind, touched, omissions) = hotpath::future!(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
             files.sort();
             let mut matches: Vec<UnsafePatternMatchV1> = Vec::new();
             let mut by_kind: BTreeMap<String, u64> = BTreeMap::new();
             let mut touched: Vec<String> = Vec::new();
+            let mut omissions: Vec<UnsafePatternFileOmissionV1> = Vec::new();
 
             'outer: for file in &files {
                 let test_file = path_looks_like_test(file);
@@ -188,15 +204,29 @@ pub(super) async fn compute_unsafe_patterns(
                     )
                 });
                 let masked = masked_owned.as_deref().unwrap_or(&source);
-                let test_lines = if path_is_rust(file) {
-                    tracedecay_code_extraction::source_mask::rust_test_lines(&source).map_err(
-                        |error| {
-                            verified_analysis_unavailable(
+                // A test-named file is wholly test scope, so its per-line
+                // classification is never consulted.
+                let test_lines = if path_is_rust(file) && !test_file {
+                    match rust_test_lines(&source) {
+                        Ok(lines) => lines,
+                        // Only this file's scopes are unknown: withhold its
+                        // sites rather than refuse the whole analysis.
+                        Err(RustTestScopeError::SyntaxErrors) => {
+                            omissions.push(UnsafePatternFileOmissionV1 {
+                                file: file.clone(),
+                                reason: UnsafePatternOmissionReasonV1::TestScopeUnclassified,
+                                cause: UnsafePatternOmissionCauseV1::SyntaxErrors,
+                                withheld_match_count: count_unsafe_sites(masked, &kinds),
+                            });
+                            continue;
+                        }
+                        Err(error @ RustTestScopeError::ParseFailed) => {
+                            return Err(verified_analysis_unavailable(
                                 "unsafe-pattern-test-scope",
                                 &format!("failed to classify Rust test scopes in {file}: {error}"),
-                            )
-                        },
-                    )?
+                            ));
+                        }
+                    }
                 } else {
                     Vec::new()
                 };
@@ -245,7 +275,7 @@ pub(super) async fn compute_unsafe_patterns(
                     }
                 }
             }
-            Ok((matches, by_kind, touched))
+            Ok((matches, by_kind, touched, omissions))
         }),
         label = "mcp.analysis.unsafe_patterns.scan"
     )
@@ -259,6 +289,12 @@ pub(super) async fn compute_unsafe_patterns(
             match_count: matches.len() as u64,
             by_kind,
             matches,
+            coverage: if omissions.is_empty() {
+                CoverageCompleteness::Complete
+            } else {
+                CoverageCompleteness::Partial
+            },
+            omissions,
         }),
         touched,
     ))
