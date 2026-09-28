@@ -199,12 +199,12 @@ impl CodeIndexExecutionControlV1 for DaemonCodeIndexControlV1 {
         };
         // The maintenance sampler is slower than a worktree reconcile. Trusting
         // the last published state here is how a second linked worktree kept
-        // allocating until the cgroup killer.
-        let _ = pressure.sample_and_publish();
-        if matches!(
-            pressure.state(),
-            ResidentMemoryPressureStateV1::OverBudget { .. }
-        ) {
+        // allocating until the cgroup killer. Reclaimers stay off this thread:
+        // the indexing pool's stack cannot host them.
+        let Some(state) = pressure.sample_for_checkpoint() else {
+            return false;
+        };
+        if matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. }) {
             self.tripped.store(true, Ordering::Release);
             return true;
         }
@@ -228,4 +228,71 @@ where
     S: CodeChunkProjectionSink,
 {
     CodeIndexProductionOwnerV1::new(config, publication, projection)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+    use tracedecay_runtime_core::resident_memory::{
+        ProcessResidentSampleV1, ResidentMemoryPressureV1,
+    };
+
+    use super::DaemonCodeIndexControlV1;
+
+    #[test]
+    fn a_checkpoint_stops_at_the_watermark_without_reclaiming() {
+        let limit = NonZeroU64::new(100 * 1024 * 1024).expect("limit");
+        let reads = Arc::new(AtomicU64::new(0));
+        let sampled = Arc::clone(&reads);
+        let ceiling = limit.get();
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(move || {
+                let read = sampled.fetch_add(1, Ordering::AcqRel);
+                let bytes = if read == 0 { 1 } else { ceiling };
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: bytes,
+                    unreclaimable_bytes: bytes,
+                    cgroup_committed_bytes: None,
+                })
+            }),
+        ));
+        let reclaimed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&reclaimed);
+        pressure
+            .register_pressure_reclaimer(
+                0,
+                Arc::new(move |_| {
+                    flag.store(true, Ordering::Release);
+                    0
+                }),
+            )
+            .expect("register reclaimer");
+        let epoch = Arc::new(AtomicU64::new(3));
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let control = DaemonCodeIndexControlV1::new(Arc::clone(&epoch), Arc::clone(&shutting_down))
+            .with_resident_memory(pressure);
+
+        assert!(
+            !control.is_cancelled(),
+            "a sample under the watermark must keep the build admitted"
+        );
+        assert!(!control.refused_by_resident_memory());
+        assert!(
+            control.is_cancelled(),
+            "the next live sample over the watermark must stop the build"
+        );
+        assert!(control.refused_by_resident_memory());
+        assert!(
+            !reclaimed.load(Ordering::Acquire),
+            "the indexing checkpoint must not run pressure reclaimers"
+        );
+        assert_eq!(epoch.load(Ordering::Acquire), 3);
+        assert!(!shutting_down.load(Ordering::Acquire));
+        assert!(!control.is_deadline_exceeded());
+    }
 }

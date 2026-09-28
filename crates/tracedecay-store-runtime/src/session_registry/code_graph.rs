@@ -244,29 +244,31 @@ impl GraphCancellation for ResidentMemoryGuardedGraphCancellationV1 {
         }
         // The maintenance sampler's cadence is longer than a sealed graph
         // build. A checkpoint that trusts the last published state keeps
-        // allocating until the cgroup kill line. Read the process here.
-        let _ = self.pressure.sample_and_publish();
-        if let tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1::OverBudget {
-            observed_bytes,
-            limit_bytes,
-            high_watermark_bytes,
-            ..
-        } = self.pressure.state()
-        {
-            if !self.tripped.swap(true, Ordering::AcqRel) {
-                tracing::warn!(
-                    event = "code_graph_publication_refused_resident_memory",
-                    observed_bytes,
-                    high_watermark_bytes,
-                    limit_bytes,
-                    "measured process RSS is over the admission watermark; the sealed graph \
-                     publication stops at its next checkpoint and the generation keeps serving \
-                     exact and lexical without a native graph"
-                );
-            }
-            return true;
+        // allocating until the cgroup kill line. Read the process here,
+        // without reclaiming: this checkpoint also runs on the indexing pool.
+        let Some(
+            tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1::OverBudget {
+                observed_bytes,
+                limit_bytes,
+                high_watermark_bytes,
+                ..
+            },
+        ) = self.pressure.sample_for_checkpoint()
+        else {
+            return false;
+        };
+        if !self.tripped.swap(true, Ordering::AcqRel) {
+            tracing::warn!(
+                event = "code_graph_publication_refused_resident_memory",
+                observed_bytes,
+                high_watermark_bytes,
+                limit_bytes,
+                "measured process RSS is over the admission watermark; the sealed graph \
+                 publication stops at its next checkpoint and the generation keeps serving \
+                 exact and lexical without a native graph"
+            );
         }
-        false
+        true
     }
 }
 

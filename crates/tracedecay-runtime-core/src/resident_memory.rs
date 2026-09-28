@@ -631,6 +631,20 @@ impl ResidentMemoryPressureV1 {
         ))
     }
 
+    /// Publish a fresh admission sample without running pressure reclaimers.
+    ///
+    /// Capture and graph checkpoints run on the indexing pool. A reclaimer
+    /// sheds retained owners and trims the allocator; doing that on a pool
+    /// thread once RSS crosses the watermark overflows that thread's stack.
+    /// The latch is what stops the allocating pass. [`Self::sample_and_publish`]
+    /// remains the path that reclaims, from admission and the maintenance sampler.
+    pub fn sample_for_checkpoint(&self) -> Option<ResidentMemoryPressureStateV1> {
+        let sample = (self.sampler)()?;
+        self.publish_observation(sample.admission_bytes());
+        self.publish_over_budget_gauge();
+        Some(self.state())
+    }
+
     /// [`Self::sample_and_publish`] reduced to the admission bytes: the
     /// post-reclaim observation, or zero when the process cannot be read.
     pub fn measure_admission_bytes(&self) -> u64 {
