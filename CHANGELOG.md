@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ⚠ BREAKING CHANGES
 
 * **mcp:** every `tracedecay tool` route now connects to the daemon socket named by TRACEDECAY_DAEMON_SOCKET when it is set, instead of the daemon the client profile's authority record names. A missing socket is the typed daemon-unreachable refusal with exit code 69 for every tool (previously typed tools such as `status` still answered). The MCP generic compatibility fallback is gone: a tool name no typed owner serves is `unknown tool`.
-* **query:** pagination cursors now bind a fingerprint of every parameter they were minted for. Cursors minted by earlier builds, and a cursor replayed with a changed parameter, are refused as a typed invalid_request naming the parameter, and `tracedecay tool` exits non-zero instead of exiting 0 with an empty failed result. Restart pagination without a cursor.
+* **query:** callable-code pagination cursors (`code_callees` and the other callable-code reads) now bind a fingerprint of every parameter they were minted for. Such cursors minted by earlier builds, and one replayed with a changed parameter, are refused as a typed invalid_request naming the parameter, and `tracedecay tool` exits non-zero instead of exiting 0 with an empty failed result. Restart pagination without a cursor.
 * **automation:** fact_store_curate returns FactStoreCurateResultV1 {run_id, task, request_digest, state: "started"} instead of the AutomationRunResultV1 terminal. Read the run's terminal with automation_run_view. @tracedecay/sdk 0.2.0 validates the new receipt; 0.1.0 clients reject it.
 
 ### simplify
