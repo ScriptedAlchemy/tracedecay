@@ -15,6 +15,7 @@ use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::{ProjectId, UtcMicros};
 #[cfg(test)]
 use tracedecay_hooks::HookImmediateAdmissionStateV1;
+use tracedecay_hooks::config::HookConfigurationReadStoreV1;
 use tracedecay_hooks::{
     AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
     HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
@@ -191,24 +192,38 @@ pub fn publish_daemon_bindings(
             support: tracedecay_hooks::stock_event_support(*host, family),
         })
         .collect();
+        let mut binding = HookScopeBindingV1 {
+            host: *host,
+            project_id,
+            repository_id,
+            worktree_id,
+            worktree_epoch,
+            binding_token: domain_hash32(project_key, host.hook_key()),
+            capabilities,
+        };
+        let writer = tracedecay_hooks::HookConfigurationFileWriterV1::new(
+            tracedecay_hooks::hook_configuration_path(&layout.data_root, worktree_id, *host),
+        );
+        // Spooled envelopes are replayed only against an equal epoch, so
+        // republishing an unchanged scope (every daemon restart and project
+        // reopen) must not mint a new one: that would tombstone every event a
+        // hook captured while the daemon was away.
+        if let Ok(Some(published)) = writer.reader().load(*host) {
+            let republished = HookScopeBindingV1 {
+                worktree_epoch: published.binding.worktree_epoch,
+                ..binding.clone()
+            };
+            if republished == published.binding {
+                binding = republished;
+            }
+        }
         let snapshot = tracedecay_hooks::HookConfigurationSnapshotV1 {
             schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
             revision,
             published_at: now,
             expires_at: UtcMicros(now.0.saturating_add(24 * 60 * 60 * 1_000_000)),
-            binding: HookScopeBindingV1 {
-                host: *host,
-                project_id,
-                repository_id,
-                worktree_id,
-                worktree_epoch,
-                binding_token: domain_hash32(project_key, host.hook_key()),
-                capabilities,
-            },
+            binding,
         };
-        let writer = tracedecay_hooks::HookConfigurationFileWriterV1::new(
-            tracedecay_hooks::hook_configuration_path(&layout.data_root, worktree_id, *host),
-        );
         tracedecay_hooks::HookConfigurationPublisherV1::new(writer)
             .publish(snapshot)
             .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
