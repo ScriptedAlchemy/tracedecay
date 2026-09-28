@@ -23,7 +23,7 @@ use tracedecay_contracts::{
     retrieval::{
         CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
         CodeImplementationsRequest, CodeNavigationRequest, CodeTimelineRequest,
-        ImplementationSelector, ModuleApiRequest,
+        ImplementationSelector, ModuleApiRequest, SymbolRelationRecord,
     },
 };
 use tracedecay_domain::{
@@ -5159,6 +5159,110 @@ async fn callers_page_reports_the_true_relation_count_and_hydrates_only_the_requ
         identities.len(),
         collected.len(),
         "each relation is served once"
+    );
+    registry.shutdown().await;
+}
+
+/// A directly recursive function is its own caller and callee, as every
+/// language server's call hierarchy reports it.
+#[tokio::test]
+async fn direct_recursion_is_reported_by_callers_and_callees() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn fact(n: u64) -> u64 {\n    if n <= 1 { 1 } else { n * fact(n - 1) }\n}\n\npub fn run() -> u64 {\n    fact(5)\n}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    install_verified_graph_store(&latest);
+    let generation = latest.generation.manifest().generation_id.clone();
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let scope = CodeQueryScope::new(generation, None).expect("query scope");
+    let fact = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name == "src/lib.rs::fact")
+        .expect("fact symbol");
+    let request = CodeRelationRequest {
+        node_id: fact.occurrence.as_str().to_owned(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: false,
+        scope,
+        meta: callers_page_meta(CALLER_PAGE, None),
+    };
+    let names = |outcome: RetrievalPortOutcome<SymbolRelationRecord>| {
+        let RetrievalPortOutcome::Completed(evidence) = outcome else {
+            panic!("expected a complete relation page, got {outcome:?}");
+        };
+        evidence
+            .payload
+            .expect("relation page")
+            .items
+            .into_iter()
+            .map(|record| record.symbol.qualified_name)
+            .collect::<BTreeSet<_>>()
+    };
+
+    let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
+    let context = application_context(&operation, repository.clone(), worktree.clone());
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let callers = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+    assert_eq!(
+        names(callers),
+        BTreeSet::from(["src/lib.rs::fact".to_owned(), "src/lib.rs::run".to_owned()])
+    );
+
+    let operation = callable_code_operation(CallableCodeOperationKind::Callees).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let callees = registry
+        .callees(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+    assert_eq!(
+        names(callees),
+        BTreeSet::from(["src/lib.rs::fact".to_owned()])
     );
     registry.shutdown().await;
 }
