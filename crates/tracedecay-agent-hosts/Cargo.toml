@@ -44,6 +44,7 @@ toml = "1"
 toml_edit = "0.25"
 tracing = "0.1"
 url = "2"
+ureq = { version = "3", features = ["json"] }
 yaml-edit = { version = "0.2.3", default-features = false }
 
 tracedecay-contracts = { path = "../tracedecay-contracts" }
@@ -68,6 +69,10 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracedecay-application = { path = "../tracedecay-application" }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false }
 tracedecay-query = { path = "../tracedecay-query" }
+
+# `kimi web` shutdown sends SIGTERM to the exact child it spawned.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Linux-only extended-attribute probe in `agents::mod` (host install provenance).
 [target.'cfg(target_os = "linux")'.dependencies]

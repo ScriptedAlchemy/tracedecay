@@ -1389,33 +1389,32 @@ impl ProcessResidentMemoryV1 {
         }
     }
 
-    /// Refuse growth while measured RSS is over budget.
+    /// Refuse growth that exceeds measured RSS headroom or its pressure latch.
     ///
     /// Only *new* admissions are refused. Nothing already reserved is revoked,
     /// shrunk, or released by this path: the reservation guards outlive
-    /// pressure exactly as before, and the refusal clears on its own once a
+    /// pressure exactly as before. Nominal RSS must leave room under the hard
+    /// limit for the allocation; an existing pressure latch still clears when a
     /// later sample falls to the low watermark.
     fn observed_over_budget_refusal(
         &self,
         requested_bytes: NonZeroU64,
     ) -> Option<ResidentMemoryAdmissionFailureV1> {
-        let ResidentMemoryPressureStateV1::OverBudget {
-            observed_bytes,
-            limit_bytes,
-            high_watermark_bytes,
-            ..
-        } = self.pressure.state()
-        else {
-            return None;
-        };
-        if requested_bytes.get() <= RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1 {
+        let pressure = self.pressure.state();
+        let observed_bytes = pressure.observed_bytes()?;
+        let high_watermark_bytes = self.pressure.high_watermark_bytes();
+        if requested_bytes.get() <= RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1
+            || (!pressure.is_over_budget()
+                && requested_bytes.get()
+                    <= self.pressure.limit_bytes().saturating_sub(observed_bytes))
+        {
             return None;
         }
         hotpath::gauge!("daemon.memory.admission_refused").inc(1.0);
         hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
         Some(ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
             observed_bytes,
-            limit_bytes,
+            limit_bytes: self.pressure.limit_bytes(),
             high_watermark_bytes,
             requested_bytes: requested_bytes.get(),
             floor_bytes: RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,

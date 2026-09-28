@@ -178,6 +178,7 @@ tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
 tracedecay-daemon-service = { path = "../tracedecay-daemon-service" }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api" }
 tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-framing = { path = "../tracedecay-framing" }
 tracedecay-global-db = { path = "../tracedecay-global-db" }
 tracedecay-hooks = { path = "../tracedecay-hooks" }
 tracedecay-hotpath-guard = { path = "../tracedecay-hotpath-guard" }

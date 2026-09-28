@@ -25,6 +25,7 @@ sha2 = "0.11"
 thiserror = "2"
 tracing = "0.1"
 tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-framing = { path = "../tracedecay-framing" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 
 [dev-dependencies]

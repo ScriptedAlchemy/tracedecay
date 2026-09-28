@@ -1,15 +1,17 @@
 //! Kimi Code CLI agent integration.
 //!
-//! Kimi Code currently exposes plugin lifecycle only through its interactive
-//! `/plugins` host API. `TraceDecay` stages its first-party bundle under its
-//! own profile through the receipt-backed component transaction, while
-//! registration in `plugins/installed.json` remains owned by Kimi's
-//! interactive host flow. Until Kimi ships a documented non-interactive
-//! mutation API, global install/update commit only that staged source and
-//! return the `/plugins install` remediation, and uninstall refuses while the
-//! registration stands. Project-local `--local`
-//! installs write
-//! `<project>/.kimi-code/mcp.json` plus prompt rules in `<project>/AGENTS.md`.
+//! `TraceDecay` stages its first-party bundle under its own profile through
+//! the receipt-backed component transaction, while registration in
+//! `plugins/installed.json` stays owned by Kimi's installer. The first install
+//! is the operator's interactive `/plugins install <staged path>`, which
+//! carries Kimi's trust confirmation, so a global install commits only the
+//! staged source and returns that remediation. Once Kimi lists the plugin as
+//! installed from exactly that staged path, install/update refresh it through
+//! Kimi's own installer behind `kimi web` (see [`web_refresh`]) and fall back
+//! to the same remediation when that refresh cannot be proven. Uninstall
+//! refuses while the registration stands. Project-local `--local` installs
+//! write `<project>/.kimi-code/mcp.json` plus prompt rules in
+//! `<project>/AGENTS.md`.
 //! Global installs register MCP in Kimi's user-level `mcp.json`; unlike plugin
 //! MCP declarations, Kimi launches those entries from the session workspace.
 //!
@@ -39,6 +41,10 @@ use super::{
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
+
+mod web_refresh;
+
+pub(crate) use web_refresh::{KimiWebRefreshError, refresh_installed_plugin};
 
 /// Environment variable that overrides the Kimi Code CLI home directory.
 /// When unset, the home resolves to `~/.kimi-code`.
