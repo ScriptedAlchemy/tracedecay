@@ -9,9 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use roaring::RoaringBitmap;
+use rusqlite::{Connection, OptionalExtension, Params, Transaction, params};
 use serde::Deserialize;
-use tracedecay_domain::FileOccurrenceId;
+use tracedecay_domain::{CodeGenerationId, FileOccurrenceId};
 use tracedecay_private_fs::create_private_file_retained;
 
 use super::builder::{
@@ -20,11 +21,14 @@ use super::builder::{
 };
 use super::format::{
     PostingListDecoderV1, PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, content_metadata_bytes,
-    decode_fingerprint_postings, decode_term_lists, encode_fingerprint_postings, encode_term_lists,
-    metadata_digest, term_lists_bytes,
+    decode_document_set, decode_fingerprint_postings, decode_term_lists,
+    encode_fingerprint_postings, encode_term_lists, metadata_digest, term_lists_bytes,
 };
+use super::prepared::document_ngram_keys;
 use super::row_codec::{
-    BlockRowV1, ConnectionRowDictionaryV1, decode_artifact_row, decode_row_block, encode_row_blocks,
+    BlockRowV1, ConnectionRowDictionaryV1, RowDictionaryEntryV1, RowDictionaryV1,
+    decode_artifact_row, decode_row_block, encode_row_blocks, row_file_reference,
+    scoring_preface_rows,
 };
 use super::schema::field_code;
 use super::{checkpoint, sqlite_error};
@@ -36,6 +40,10 @@ use super::CodeLexicalArtifactErrorV1;
 
 const CARRIED_SHIFT_TABLE: &str = "carried_document_shift";
 const CARRIED_REBUILD_TABLE: &str = "carried_rebuild_occurrence";
+const CARRIED_RETIRED_NGRAM_TABLE: &str = "carried_retired_ngram";
+/// Past this multiple of changed documents, rewriting every n-gram list is
+/// smaller than patching the keys those documents touch.
+const CARRIED_NGRAM_PATCH_DOCUMENT_FACTOR: i64 = 4;
 
 #[derive(Deserialize)]
 struct StoredContentPathsV1 {
@@ -138,7 +146,7 @@ pub(super) fn stage_carried_parent(
         let transaction = connection.transaction().map_err(sqlite_error)?;
         let _guard = BuilderMutationGuardV1::enter(&gate)?;
         drop_seal_triggers(&transaction)?;
-        let shift = retire_occurrences(&transaction, metadata, &retired, control)?;
+        let shift = retire_occurrences(&transaction, &metadata.generation, &retired, control)?;
         clear_source_receipts(&transaction)?;
         ensure_staging_tables(&transaction)?;
         ensure_carried_builder_triggers(&transaction)?;
@@ -161,8 +169,8 @@ pub(super) fn stage_carried_parent(
 }
 
 /// Fold staged pages of a carried artifact into the sealed tables copied
-/// from its parent. N-gram lists are rebuilt by the caller after this
-/// returns, because they are derived from row blocks rather than runs.
+/// from its parent. The caller then patches or rebuilds n-gram lists, which
+/// are derived from row blocks rather than runs.
 pub(super) fn merge_carried_staging(
     transaction: &Transaction<'_>,
     gate: &std::sync::Arc<std::sync::atomic::AtomicU8>,
@@ -170,6 +178,9 @@ pub(super) fn merge_carried_staging(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let _guard = BuilderMutationGuardV1::enter(gate)?;
     checkpoint(control)?;
+    // Staging reinstalls seal triggers so append cannot rewrite the parent
+    // tables. Folding the new runs has to drop them again.
+    drop_seal_triggers(transaction)?;
     merge_term_runs(transaction, control)?;
     merge_exact_runs(transaction, control)?;
     merge_row_chunks(transaction)?;
@@ -255,15 +266,35 @@ fn read_stored_paths(
     Ok(stored.logical_paths)
 }
 
+struct CarriedKeptRowV1 {
+    document_id: u32,
+    chunk_id: String,
+    row: Vec<u8>,
+    text: String,
+    field_lengths: BTreeMap<LexicalFieldV1, usize>,
+    trimmed_normalized_len: usize,
+}
+
 fn retire_occurrences(
     transaction: &Transaction<'_>,
-    metadata: &CodeLexicalProjectionMetadataV1,
+    generation: &CodeGenerationId,
     retired: &BTreeSet<FileOccurrenceId>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<u64, CodeLexicalArtifactErrorV1> {
+    transaction
+        .execute_batch(&format!(
+            "CREATE TABLE {CARRIED_RETIRED_NGRAM_TABLE}(
+                kind INTEGER NOT NULL,
+                ngram INTEGER NOT NULL,
+                document_id INTEGER NOT NULL,
+                PRIMARY KEY(kind, ngram, document_id)
+            ) WITHOUT ROWID;"
+        ))
+        .map_err(sqlite_error)?;
     let mut retired_documents = HashSet::new();
     let mut retired_paths = BTreeSet::new();
     let mut field_deltas = BTreeMap::<i64, i64>::new();
+    let mut retired_ngrams = Vec::new();
     if !retired.is_empty() {
         let mut statement = transaction
             .prepare("SELECT first_document, payload FROM row_blocks ORDER BY first_document")
@@ -279,22 +310,62 @@ fn retire_occurrences(
         let dictionary = ConnectionRowDictionaryV1::new(transaction);
         for (first_document, payload) in blocks {
             checkpoint(control)?;
+            let preface = scoring_preface_rows(first_document, &payload)?;
             let rows = decode_row_block(first_document, &payload)?;
+            if preface.len() != rows.len() {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact scoring preface does not match its row block".to_owned(),
+                ));
+            }
             let mut kept = Vec::new();
             let mut retired_in_block = false;
-            for row in &rows {
-                let artifact = decode_artifact_row(
-                    &metadata.generation,
-                    &row.chunk_id,
-                    &row.row,
-                    &row.text,
-                    &dictionary,
-                )?;
-                if retired.contains(&artifact.anchor.file_occurrence_id) {
+            for (preface_row, row) in preface.into_iter().zip(rows) {
+                if preface_row.document_id != row.document_id {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact scoring preface document does not match its row"
+                            .to_owned(),
+                    ));
+                }
+                let entry = dictionary.entry(row_file_reference(&row.row)?)?;
+                let RowDictionaryEntryV1::File {
+                    file_occurrence_id,
+                    logical_path,
+                    ..
+                } = entry.as_ref()
+                else {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact row file reference resolved to a non-file entry"
+                            .to_owned(),
+                    ));
+                };
+                let occurrence =
+                    FileOccurrenceId::new(file_occurrence_id.as_str()).map_err(|error| {
+                        CodeLexicalArtifactErrorV1::Corrupt(format!(
+                            "carried lexical row file occurrence is invalid: {error}"
+                        ))
+                    })?;
+                if retired.contains(&occurrence) {
                     retired_in_block = true;
                     retired_documents.insert(row.document_id);
-                    retired_paths.insert(artifact.logical_path);
-                    for (field, length) in artifact.field_lengths {
+                    retired_paths.insert(logical_path.clone());
+                    let decoded = decode_artifact_row(
+                        generation,
+                        &row.chunk_id,
+                        &row.row,
+                        &row.text,
+                        &dictionary,
+                    )?;
+                    retired_ngrams.extend(
+                        document_ngram_keys(
+                            &super::super::normalized_search_text(&decoded),
+                            decoded.sanitized_text.as_str(),
+                            decoded.normalized_text.as_str(),
+                            control,
+                        )?
+                        .into_iter()
+                        .map(|(kind, ngram)| (kind, ngram, row.document_id)),
+                    );
+                    for (field, length) in preface_row.field_lengths {
                         let length = i64::try_from(length).map_err(|_| {
                             CodeLexicalArtifactErrorV1::Contract(
                                 "carried lexical field length exceeds i64".to_owned(),
@@ -309,7 +380,14 @@ fn retire_occurrences(
                         })?;
                     }
                 } else {
-                    kept.push(row);
+                    kept.push(CarriedKeptRowV1 {
+                        document_id: row.document_id,
+                        chunk_id: row.chunk_id,
+                        row: row.row,
+                        text: row.text,
+                        field_lengths: preface_row.field_lengths,
+                        trimmed_normalized_len: preface_row.trimmed_normalized_len,
+                    });
                 }
             }
             if !retired_in_block {
@@ -333,6 +411,8 @@ fn retire_occurrences(
                         parent_chunk_id: None,
                         row: row.row.as_slice(),
                         text: row.text.as_str(),
+                        field_lengths: &row.field_lengths,
+                        trimmed_normalized_len: row.trimmed_normalized_len,
                     })
                     .collect::<Vec<_>>(),
             )?;
@@ -347,6 +427,18 @@ fn retire_occurrences(
         }
         // The dictionary borrow ends before the next statements.
         drop(dictionary);
+        if !retired_ngrams.is_empty() {
+            let mut insert = transaction
+                .prepare(&format!(
+                    "INSERT OR IGNORE INTO {CARRIED_RETIRED_NGRAM_TABLE}(kind, ngram, document_id) VALUES (?1, ?2, ?3)"
+                ))
+                .map_err(sqlite_error)?;
+            for (kind, ngram, document) in retired_ngrams {
+                insert
+                    .execute(params![kind, ngram, i64::from(document)])
+                    .map_err(sqlite_error)?;
+            }
+        }
         scrub_term_postings(transaction, &retired_documents, control)?;
         scrub_exact_postings(transaction, &retired_documents, control)?;
         scrub_fingerprints(transaction, &retired_paths, control)?;
@@ -1124,6 +1216,237 @@ fn merge_clone_fingerprints(
             .map_err(sqlite_error)?;
     }
     Ok(())
+}
+
+struct NgramDocumentDeltaV1 {
+    remove: BTreeSet<u32>,
+    add: BTreeSet<u32>,
+}
+
+/// Whether patching the changed documents' n-gram keys is a smaller walk
+/// than rebuilding every sealed list.
+pub(super) fn carried_ngram_patch_fits(
+    transaction: &Transaction<'_>,
+) -> Result<bool, CodeLexicalArtifactErrorV1> {
+    if !table_exists(transaction, CARRIED_RETIRED_NGRAM_TABLE)? {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "carried lexical artifact is missing its retired n-gram roster".to_owned(),
+        ));
+    }
+    let total = count_sql(transaction, "SELECT COUNT(*) FROM row_chunks", [])?;
+    if total == 0 {
+        return Ok(false);
+    }
+    let shift = i64::try_from(read_carried_document_shift(transaction)?).map_err(|_| {
+        CodeLexicalArtifactErrorV1::Contract(
+            "carried lexical document shift exceeds i64".to_owned(),
+        )
+    })?;
+    let added = count_sql(
+        transaction,
+        "SELECT COUNT(*) FROM row_chunks WHERE document_id >= ?1",
+        [shift],
+    )?;
+    let retired = count_sql(
+        transaction,
+        &format!("SELECT COUNT(DISTINCT document_id) FROM {CARRIED_RETIRED_NGRAM_TABLE}"),
+        [],
+    )?;
+    Ok(retired
+        .saturating_add(added)
+        .saturating_mul(CARRIED_NGRAM_PATCH_DOCUMENT_FACTOR)
+        < total)
+}
+
+/// Remove retired documents from the n-gram lists they contributed and add
+/// the documents appended after the carry shift. Lists no changed document
+/// touches stay as the parent sealed them.
+pub(super) fn patch_carried_ngram_postings(
+    transaction: &Transaction<'_>,
+    generation: &CodeGenerationId,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let deltas = carried_ngram_deltas(transaction, generation, control)?;
+    let mut select = transaction
+        .prepare("SELECT documents FROM ngram_postings WHERE kind = ?1 AND ngram = ?2")
+        .map_err(sqlite_error)?;
+    let mut update = transaction
+        .prepare(
+            "UPDATE ngram_postings SET document_frequency = ?3, documents = ?4 WHERE kind = ?1 AND ngram = ?2",
+        )
+        .map_err(sqlite_error)?;
+    let mut insert = transaction
+        .prepare(
+            "INSERT INTO ngram_postings(kind, ngram, document_frequency, documents) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(sqlite_error)?;
+    let mut delete = transaction
+        .prepare("DELETE FROM ngram_postings WHERE kind = ?1 AND ngram = ?2")
+        .map_err(sqlite_error)?;
+    for (ordinal, ((kind, ngram), delta)) in deltas.iter().enumerate() {
+        if ordinal.is_multiple_of(1024) {
+            checkpoint(control)?;
+        }
+        let stored: Option<Vec<u8>> = select
+            .query_row(params![kind, ngram], |row| row.get(0))
+            .optional()
+            .map_err(sqlite_error)?;
+        if stored.is_none() && !delta.remove.is_empty() {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "carried lexical n-gram list is missing a retired document".to_owned(),
+            ));
+        }
+        let mut documents = match &stored {
+            Some(stored) => decode_document_set(stored)?,
+            None => RoaringBitmap::new(),
+        };
+        for document in &delta.remove {
+            if !documents.remove(*document) {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "carried lexical n-gram list does not contain its retired document".to_owned(),
+                ));
+            }
+        }
+        for document in &delta.add {
+            if !documents.insert(*document) {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "carried lexical n-gram list already contains its appended document".to_owned(),
+                ));
+            }
+        }
+        if documents.is_empty() {
+            delete.execute(params![kind, ngram]).map_err(sqlite_error)?;
+            continue;
+        }
+        let frequency = i64::try_from(documents.len()).map_err(|_| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "carried lexical n-gram document frequency exceeds i64".to_owned(),
+            )
+        })?;
+        let sealed = seal_ngram_documents(&documents)?;
+        if stored.is_some() {
+            update
+                .execute(params![kind, ngram, frequency, sealed])
+                .map_err(sqlite_error)?;
+        } else {
+            insert
+                .execute(params![kind, ngram, frequency, sealed])
+                .map_err(sqlite_error)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn discard_carried_ngram_plan(
+    transaction: &Transaction<'_>,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    transaction
+        .execute_batch(&format!(
+            "DROP TABLE IF EXISTS {CARRIED_RETIRED_NGRAM_TABLE};"
+        ))
+        .map_err(sqlite_error)
+}
+
+fn carried_ngram_deltas(
+    transaction: &Transaction<'_>,
+    generation: &CodeGenerationId,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<BTreeMap<(i64, i64), NgramDocumentDeltaV1>, CodeLexicalArtifactErrorV1> {
+    let mut deltas: BTreeMap<(i64, i64), NgramDocumentDeltaV1> = BTreeMap::new();
+    let mut retired = transaction
+        .prepare(&format!(
+            "SELECT kind, ngram, document_id FROM {CARRIED_RETIRED_NGRAM_TABLE} ORDER BY kind, ngram"
+        ))
+        .map_err(sqlite_error)?;
+    let mut rows = retired.query([]).map_err(sqlite_error)?;
+    let mut visited = 0usize;
+    while let Some(row) = rows.next().map_err(sqlite_error)? {
+        if visited.is_multiple_of(1024) {
+            checkpoint(control)?;
+        }
+        visited += 1;
+        let kind: i64 = row.get(0).map_err(sqlite_error)?;
+        let ngram: i64 = row.get(1).map_err(sqlite_error)?;
+        let document =
+            u32::try_from(row.get::<_, i64>(2).map_err(sqlite_error)?).map_err(|_| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "carried lexical retired n-gram document exceeds u32".to_owned(),
+                )
+            })?;
+        deltas
+            .entry((kind, ngram))
+            .or_insert_with(|| NgramDocumentDeltaV1 {
+                remove: BTreeSet::new(),
+                add: BTreeSet::new(),
+            })
+            .remove
+            .insert(document);
+    }
+    drop(rows);
+    drop(retired);
+    let shift = i64::try_from(read_carried_document_shift(transaction)?).map_err(|_| {
+        CodeLexicalArtifactErrorV1::Contract(
+            "carried lexical document shift exceeds i64".to_owned(),
+        )
+    })?;
+    let mut blocks = transaction
+        .prepare(
+            "SELECT first_document, payload FROM row_blocks WHERE first_document >= ?1 ORDER BY first_document",
+        )
+        .map_err(sqlite_error)?;
+    let stored = blocks
+        .query_map(params![shift], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(sqlite_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_error)?;
+    drop(blocks);
+    let dictionary = ConnectionRowDictionaryV1::new(transaction);
+    for (first_document, payload) in stored {
+        checkpoint(control)?;
+        for row in decode_row_block(first_document, &payload)? {
+            if i64::from(row.document_id) < shift {
+                continue;
+            }
+            let decoded =
+                decode_artifact_row(generation, &row.chunk_id, &row.row, &row.text, &dictionary)?;
+            for (kind, ngram) in document_ngram_keys(
+                &super::super::normalized_search_text(&decoded),
+                decoded.sanitized_text.as_str(),
+                decoded.normalized_text.as_str(),
+                control,
+            )? {
+                deltas
+                    .entry((kind, ngram))
+                    .or_insert_with(|| NgramDocumentDeltaV1 {
+                        remove: BTreeSet::new(),
+                        add: BTreeSet::new(),
+                    })
+                    .add
+                    .insert(row.document_id);
+            }
+        }
+    }
+    Ok(deltas)
+}
+
+fn seal_ngram_documents(documents: &RoaringBitmap) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+    let mut encoder = PostingListEncoderV1::new(false);
+    for document in documents {
+        encoder.push(document, 1)?;
+    }
+    encoder.finish_document_set()
+}
+
+fn count_sql(
+    transaction: &Transaction<'_>,
+    sql: &str,
+    params: impl Params,
+) -> Result<i64, CodeLexicalArtifactErrorV1> {
+    transaction
+        .query_row(sql, params, |row| row.get(0))
+        .map_err(sqlite_error)
 }
 
 fn table_exists(connection: &Connection, table: &str) -> Result<bool, CodeLexicalArtifactErrorV1> {

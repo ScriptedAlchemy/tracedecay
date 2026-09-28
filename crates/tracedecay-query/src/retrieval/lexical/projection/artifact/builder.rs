@@ -1961,19 +1961,36 @@ impl CodeLexicalArtifactBuilderV1 {
         transaction
             .execute_batch(
                 "DROP TRIGGER IF EXISTS immutable_ngram_postings_update;
-                 DROP TRIGGER IF EXISTS immutable_ngram_postings_delete;
-                 DELETE FROM ngram_postings;",
+                 DROP TRIGGER IF EXISTS immutable_ngram_postings_delete;",
             )
             .map_err(sqlite_error)?;
-        derive_ngram_postings(
-            &transaction,
-            &ServingIndexStepAuthorityV1 {
-                mutation_gate: &self.mutation_gate,
-                generation: &self.metadata.generation,
-                ngram_memory_bytes: self.memory_budget_bytes / 4,
-            },
-            control,
-        )?;
+        if super::delta::carried_ngram_patch_fits(&transaction)? {
+            let _guard = BuilderMutationGuardV1::enter(&self.mutation_gate)?;
+            super::delta::patch_carried_ngram_postings(
+                &transaction,
+                &self.metadata.generation,
+                control,
+            )?;
+            transaction
+                .execute_batch(
+                    "CREATE TRIGGER frozen_ngram_postings_insert BEFORE INSERT ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;",
+                )
+                .map_err(sqlite_error)?;
+        } else {
+            transaction
+                .execute_batch("DELETE FROM ngram_postings;")
+                .map_err(sqlite_error)?;
+            derive_ngram_postings(
+                &transaction,
+                &ServingIndexStepAuthorityV1 {
+                    mutation_gate: &self.mutation_gate,
+                    generation: &self.metadata.generation,
+                    ngram_memory_bytes: self.memory_budget_bytes / 4,
+                },
+                control,
+            )?;
+        }
+        super::delta::discard_carried_ngram_plan(&transaction)?;
         ensure_carried_builder_triggers(&transaction)?;
         let sections = compute_section_digests(&transaction, control)?;
         verify_final_sections_against_source(&sections, source)?;

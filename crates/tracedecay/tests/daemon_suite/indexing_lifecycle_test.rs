@@ -1082,5 +1082,10 @@ async fn restart_after_sigterm_rebuilds_only_changed_files() {
         result_paths(&unchanged).contains(&"src/resume_corpus/file_0001.rs"),
         "unchanged file stopped being searchable after restart: {unchanged}"
     );
+    let phrase = search(&socket, &handshake, "fn resume_anchor_0001_000").await;
+    assert!(
+        result_paths(&phrase).contains(&"src/resume_corpus/file_0001.rs"),
+        "unchanged file dropped out of phrase search after restart: {phrase}"
+    );
     stop_daemon_gracefully(&mut daemon);
 }
