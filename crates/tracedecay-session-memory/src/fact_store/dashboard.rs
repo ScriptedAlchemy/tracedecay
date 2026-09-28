@@ -22,15 +22,14 @@ use tracedecay_store::{
 };
 
 use super::crud::{
-    list_project_memory_facts_controlled_tx, project_memory_fact_history_controlled_tx,
+    get_project_memory_fact_controlled_tx, list_project_memory_facts_controlled_tx,
+    project_memory_fact_history_controlled_tx,
 };
 use super::primitives::{
     OwnerKey, PROJECT_MEMORY_READ_OPERATION, ensure_project_memory_read_active, from_json,
     nonnegative_u64, row_i64, row_string, storage_error, storage_message,
 };
-use super::projection::{
-    load_project_memory_projection_controlled_tx, load_project_memory_projections_controlled_tx,
-};
+use super::projection::load_project_memory_projections_controlled_tx;
 use super::scoring::{project_memory_fact_vector, project_memory_holographic_error};
 
 #[derive(Clone)]
@@ -468,13 +467,7 @@ pub(super) async fn dashboard_project_memory_fact_detail_tx(
 ) -> FactStoreResult<Option<ProjectMemoryDashboardFactDetailV1>> {
     ensure_project_memory_read_active(read_control)?;
     let target = query.target();
-    let fact = load_project_memory_projection_controlled_tx(
-        transaction,
-        target.owner(),
-        target.fact_id(),
-        read_control,
-    )
-    .await?;
+    let fact = get_project_memory_fact_controlled_tx(transaction, target, read_control).await?;
     ensure_project_memory_read_active(read_control)?;
     let Some(fact) = fact else {
         return Ok(None);
