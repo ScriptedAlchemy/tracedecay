@@ -33,6 +33,7 @@ use crate::result::{
     RetrieverContributionState, TemporalState,
 };
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 
 const SCOUT_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Cli,
@@ -666,6 +667,12 @@ const fn configuration_control_spec(
 
 pub fn context_scout_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
+    context_scout_surface_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn context_scout_surface_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(CONTEXT_SCOUT_SPECS.len());
     let mut bindings = Vec::with_capacity(CONTEXT_SCOUT_SPECS.len() * SCOUT_SURFACES.len());
     for spec in &CONTEXT_SCOUT_SPECS {
@@ -764,8 +771,7 @@ pub fn context_scout_surface_catalog_contribution()
         capabilities,
         bindings,
     ))?;
-    let schemas = context_scout_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(contribution, materialize, context_scout_executable_schemas)
 }
 
 fn context_scout_executable_schemas(

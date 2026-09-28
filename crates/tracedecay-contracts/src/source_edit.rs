@@ -17,6 +17,7 @@ use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 use crate::source_edit_rollback::{source_edit_rollback_operation, source_edit_rollback_schema};
 
 /// `serde` `skip_serializing_if` predicate for default-off flags.
@@ -450,6 +451,12 @@ pub fn source_edit_handler_descriptors()
 
 pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
 {
+    source_edit_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn source_edit_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let rollback_operation = source_edit_rollback_operation()?;
     let rollback_capability_id = rollback_operation.capability_id().clone();
     let mut capabilities = Vec::with_capacity(SOURCE_EDIT_KINDS.len() + 2);
@@ -651,8 +658,7 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         capabilities,
         bindings,
     ))?;
-    let schemas = source_edit_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(contribution, materialize, source_edit_executable_schemas)
 }
 
 /// SDK schemas are paired with the exact request accepted by each mounted MCP

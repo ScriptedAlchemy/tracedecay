@@ -24,8 +24,8 @@ use tracedecay_tool_catalog::{
 };
 
 use super::catalog::{
-    application_negotiated_features, application_surface_catalog_ref, resolve_application_binding,
-    validate_current_application_binding,
+    application_negotiated_features, application_surface_binding_catalog_ref,
+    resolve_application_binding, validate_current_application_binding,
 };
 use super::configuration_wire::validate_application_outcome;
 use super::feedback_observation::observe_surface_argument_rejection;
@@ -91,7 +91,7 @@ pub async fn execute_application_surface(
         receipt_contract,
         reconciliation_contract,
     ) = hotpath::measure_block!("application_surface.execute.catalog", {
-        let catalog = application_surface_catalog_ref()?;
+        let catalog = application_surface_binding_catalog_ref()?;
         let capability = catalog
             .capabilities()
             .find(|capability| capability.binding_ids().contains(&binding_id))
@@ -303,7 +303,7 @@ pub fn resolve_application_surface_dispatch_with_controls(
     cancellation: CancellationSignal,
     requested_format: RequestedOutputFormat,
 ) -> Result<DispatchedInvocation<ApplicationSurfaceRequest>, ApplicationSurfaceAdapterError> {
-    let catalog = application_surface_catalog_ref()?;
+    let catalog = application_surface_binding_catalog_ref()?;
     let resolver = CatalogBindingResolver::new(catalog);
     let input = application_surface_dispatch_input_with_controls(
         surface,
