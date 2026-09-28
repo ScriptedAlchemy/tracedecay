@@ -487,6 +487,23 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         duplicate["evidence"]["topology_generation"].is_string(),
         "{duplicate}"
     );
+    let mut fabricated = duplicate.clone();
+    fabricated["command_id"] = json!("request.mcp-attempt-read.fabricated-evidence");
+    fabricated["evidence"]["work_generation"] =
+        json!(format!("work-product-projection.sha256:{}", "0".repeat(64)));
+    let refused = call(&server, "tracedecay_work_adjudicate_duplicate", fabricated).await;
+    assert_eq!(
+        refused.pointer("/value/problem/code"),
+        Some(&json!(
+            "application.work.duplicate-adjudication.evidence-stale"
+        )),
+        "{refused}"
+    );
+    assert_eq!(
+        refused.pointer("/value/problem/legal_actions"),
+        Some(&json!(["refresh"])),
+        "{refused}"
+    );
     let adjudicated = call(
         &server,
         "tracedecay_work_adjudicate_duplicate",
