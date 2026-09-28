@@ -105,13 +105,17 @@ pub struct FeedbackExpandRequestV1 {
 }
 
 impl FeedbackExpandRequestV1 {
+    /// A feedback expansion is one bounded page and issues no continuation,
+    /// so a presented cursor is refused rather than silently ignored.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.finding_id.validate()?;
         self.expansion.anchor.validate()?;
-        PageRequest::new(
-            self.expansion.meta.page.page_size,
-            self.expansion.meta.page.cursor.clone(),
-        )?;
+        if self.expansion.meta.page.cursor.is_some() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "expansion.meta.page.cursor",
+            });
+        }
+        PageRequest::first(self.expansion.meta.page.page_size)?;
         Ok(())
     }
 }

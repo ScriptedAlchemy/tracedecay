@@ -27,7 +27,11 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use tracedecay_domain::CodeGenerationId;
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::{
+    CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1, decode_bound_cursor,
+    encode_bound_cursor,
+};
 use tracedecay_runtime_core::sqlite_read_snapshot::{
     BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
 };
@@ -38,8 +42,6 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 
 const GLOBAL_DB_FILENAME: &str = "global.db";
-const PROJECT_CURSOR_PREFIX: &str = "projects:";
-const DIRECTORY_CURSOR_PREFIX: &str = "directories:";
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
 const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
@@ -414,6 +416,38 @@ fn sample_registered_storage(
     })
 }
 
+/// Where a profile storage report page resumes: after a registered project,
+/// or at an opaque position in the profile directory stream.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+enum StorageReportPosition {
+    Projects { after_project_id: Option<String> },
+    Directories { after: Option<String> },
+}
+
+/// The operation and page size a storage report continuation is minted for.
+fn storage_report_binding(limit: usize) -> tracedecay_domain::errors::Result<CursorBindingV1> {
+    CursorBindingV1::builder("storage_report")
+        .parameter("limit", &limit)
+        .build()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("bind storage report cursor: {error}"),
+        })
+}
+
+fn storage_report_cursor(
+    binding: &CursorBindingV1,
+    position: &StorageReportPosition,
+) -> tracedecay_domain::errors::Result<String> {
+    encode_bound_cursor(binding, position).map_err(|error| TraceDecayError::Config {
+        message: format!("encode storage report cursor: {error}"),
+    })
+}
+
+fn storage_report_cursor_refusal(mismatch: &CursorBindingMismatchV1) -> TraceDecayError {
+    TraceDecayError::project_route(mismatch.code(), false, mismatch.message())
+}
+
 /// Builds one bounded page through the daemon's retained global registry
 /// authority. Registered projects and top-level profile directories are
 /// separate cursor phases so neither the registry query nor the filesystem
@@ -427,63 +461,35 @@ pub async fn build_storage_report_page_from_registered_global_db(
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
     let global_db_bytes = database_family_bytes(&profile_root.join(GLOBAL_DB_FILENAME));
-    let cursor = cursor.unwrap_or(PROJECT_CURSOR_PREFIX);
-    if let Some(after_project_id) = cursor.strip_prefix(PROJECT_CURSOR_PREFIX) {
-        let mut projects = global_db
-            .list_code_projects_after(
-                (!after_project_id.is_empty()).then_some(after_project_id),
-                limit.saturating_add(1),
-            )
-            .await?;
-        let has_more = projects.len() > limit;
-        projects.truncate(limit);
-        let next_cursor = if has_more {
-            let Some(last_project) = projects.last() else {
-                return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "project storage report page lost its continuation".to_owned(),
-                });
-            };
-            format!("{PROJECT_CURSOR_PREFIX}{}", last_project.project_id)
-        } else {
-            DIRECTORY_CURSOR_PREFIX.to_owned()
-        };
-        let profile_root = profile_root.to_path_buf();
-        return tokio::task::spawn_blocking(move || {
-            let mut report = StorageReport {
-                profile_root: profile_root.display().to_string(),
+    let binding = storage_report_binding(limit)?;
+    let position = match cursor {
+        Some(cursor) => decode_bound_cursor::<StorageReportPosition>(&binding, cursor)
+            .map_err(|mismatch| storage_report_cursor_refusal(&mismatch))?,
+        None => StorageReportPosition::Projects {
+            after_project_id: None,
+        },
+    };
+    let after_directory = match position {
+        StorageReportPosition::Directories { after } => after,
+        StorageReportPosition::Projects { after_project_id } => {
+            return project_storage_report_page(
+                profile_root,
+                global_db,
+                &binding,
+                after_project_id.as_deref(),
+                limit,
                 global_db_bytes,
-                coverage: StorageReportCoverage::partial(next_cursor),
-                ..StorageReport::default()
-            };
-            for project in projects {
-                // This paged surface has no mounted scheduler or native
-                // binding authority, so the retention protection set is
-                // unresolved and the dry run reports itself unavailable
-                // rather than planning against an unproven protection set.
-                append_project_report(
-                    &profile_root,
-                    &project.project_id,
-                    &project.canonical_root,
-                    None,
-                    &mut report.stores,
-                    &mut report.code_generation_retention,
-                    &mut report.code_generation_retention_availability,
-                )?;
-            }
-            Ok(report)
-        })
-        .await
-        .map_err(|error| report_error("join daemon-backed storage report page", error))?;
-    }
-    let Some(after_directory) = cursor.strip_prefix(DIRECTORY_CURSOR_PREFIX) else {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "invalid daemon storage report cursor".to_owned(),
-        });
+            )
+            .await;
+        }
     };
     let profile_root_buf = profile_root.to_path_buf();
-    let after_directory_owned = after_directory.to_owned();
     let directory_page = tokio::task::spawn_blocking(move || {
-        list_project_directories_page(&profile_root_buf, &after_directory_owned, limit)
+        list_project_directories_page(
+            &profile_root_buf,
+            after_directory.as_deref().unwrap_or_default(),
+            limit,
+        )
     })
     .await
     .map_err(|error| report_error("join storage directory page", error))??;
@@ -511,7 +517,13 @@ pub async fn build_storage_report_page_from_registered_global_db(
     .map_err(|error| report_error("join unregistered storage page", error))?;
     let next_cursor = directory_page
         .next_cursor
-        .map(|cursor| format!("{DIRECTORY_CURSOR_PREFIX}{cursor}"));
+        .map(|after| {
+            storage_report_cursor(
+                &binding,
+                &StorageReportPosition::Directories { after: Some(after) },
+            )
+        })
+        .transpose()?;
     Ok(StorageReport {
         profile_root: profile_root.display().to_string(),
         unregistered_dir_count,
@@ -523,6 +535,61 @@ pub async fn build_storage_report_page_from_registered_global_db(
         ),
         ..StorageReport::default()
     })
+}
+
+async fn project_storage_report_page(
+    profile_root: &Path,
+    global_db: &tracedecay_global_db::RegisteredGlobalDb,
+    binding: &CursorBindingV1,
+    after_project_id: Option<&str>,
+    limit: usize,
+    global_db_bytes: u64,
+) -> tracedecay_domain::errors::Result<StorageReport> {
+    let mut projects = global_db
+        .list_code_projects_after(after_project_id, limit.saturating_add(1))
+        .await?;
+    let has_more = projects.len() > limit;
+    projects.truncate(limit);
+    let next_position = if has_more {
+        let Some(last_project) = projects.last() else {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "project storage report page lost its continuation".to_owned(),
+            });
+        };
+        StorageReportPosition::Projects {
+            after_project_id: Some(last_project.project_id.clone()),
+        }
+    } else {
+        StorageReportPosition::Directories { after: None }
+    };
+    let next_cursor = storage_report_cursor(binding, &next_position)?;
+    let profile_root = profile_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut report = StorageReport {
+            profile_root: profile_root.display().to_string(),
+            global_db_bytes,
+            coverage: StorageReportCoverage::partial(next_cursor),
+            ..StorageReport::default()
+        };
+        for project in projects {
+            // This paged surface has no mounted scheduler or native
+            // binding authority, so the retention protection set is
+            // unresolved and the dry run reports itself unavailable
+            // rather than planning against an unproven protection set.
+            append_project_report(
+                &profile_root,
+                &project.project_id,
+                &project.canonical_root,
+                None,
+                &mut report.stores,
+                &mut report.code_generation_retention,
+                &mut report.code_generation_retention_availability,
+            )?;
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(|error| report_error("join daemon-backed storage report page", error))?
 }
 
 #[derive(Debug)]
@@ -1229,10 +1296,17 @@ mod tests {
             std::fs::create_dir_all(&project).unwrap();
             std::fs::write(project.join("payload"), b"1234").unwrap();
         }
+        let registry =
+            build_storage_report_page_from_registered_global_db(profile_root, &db, None, 1)
+                .await
+                .unwrap();
+        assert!(registry.stores.is_empty());
+        let directories = registry.coverage.next_cursor.unwrap();
+        assert!(directories.starts_with("bc1."), "{directories}");
         let first = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
-            Some(DIRECTORY_CURSOR_PREFIX),
+            Some(&directories),
             1,
         )
         .await
@@ -1264,18 +1338,34 @@ mod tests {
         );
         assert_eq!(second.coverage.next_cursor, repeated.coverage.next_cursor);
         assert_eq!(second.unregistered_bytes, repeated.unregistered_bytes);
-        let (prefix, _) = cursor.rsplit_once(':').unwrap();
-        let invalid = format!("{prefix}:{}", u64::MAX);
-        assert!(matches!(
-            build_storage_report_page_from_registered_global_db(
+        for (presented, limit, code, message) in [
+            (
+                cursor.as_str(),
+                2,
+                "cursor.parameter_changed",
+                "The cursor was issued for a request with a different `limit`. Repeat the \
+                 request with the parameters that returned the cursor, or restart without it.",
+            ),
+            (
+                "directories:portable-v2:0",
+                1,
+                "cursor.invalid",
+                "The cursor was not issued by this operation. Restart without it.",
+            ),
+        ] {
+            let refused = build_storage_report_page_from_registered_global_db(
                 profile_root,
                 &db,
-                Some(&invalid),
-                1
+                Some(presented),
+                limit,
             )
-            .await,
-            Err(tracedecay_domain::errors::TraceDecayError::Config { .. })
-        ));
+            .await
+            .unwrap_err();
+            assert_eq!(
+                refused.project_route_context(),
+                Some((code, false, message))
+            );
+        }
         let third = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
