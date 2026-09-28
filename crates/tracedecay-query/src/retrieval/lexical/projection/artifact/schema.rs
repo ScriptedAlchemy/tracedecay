@@ -33,7 +33,13 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// source's resume cursors are supplied by the opener or dropped before the
 /// seal, so identical trees in different worktrees seal byte-identical
 /// files. Every other revision is refused as incompatible and rebuilt from
-/// the sealed generation.
+/// the sealed generation. There is no reader for an older layout. A byte
+/// copy of a parent artifact stays valid only when that parent was sealed at
+/// this revision: each `row_blocks.payload` begins with preface tag 24, not
+/// the deflate tag 23, and a rewritten block goes through `encode_row_blocks`
+/// with that row's field lengths and trimmed normalized-text length. The
+/// digest domain is `tracedecay.code-lexical-artifact.v30`. Callers take the
+/// revision from this constant.
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 30;
 
 const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v30\0";
