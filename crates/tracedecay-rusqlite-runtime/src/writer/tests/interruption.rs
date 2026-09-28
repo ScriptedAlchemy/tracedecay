@@ -81,10 +81,10 @@ fn cancelled_request_does_not_interrupt_an_unrelated_request_in_the_same_batch()
     let telemetry = WriterTelemetry::default();
     let state = AtomicU8::new(WriterState::Ready as u8);
     let watermark = CommittedWatermarkPublisher::new(binding.clone());
-    let mut persistence = CancellingFirstRequestPersistence {
+    let mut persistence = RuntimeWriterPersistence::new(CancellingFirstRequestPersistence {
         first_probe,
         sequence: 0,
-    };
+    });
 
     worker::process_execution_batch(
         &mut connection,
@@ -159,7 +159,7 @@ fn active_long_running_request_remains_interruptible() {
         &mut connection,
         &binding,
         batch,
-        &mut LongRunningPersistence,
+        &mut RuntimeWriterPersistence::new(LongRunningPersistence),
         &telemetry,
         &state,
         &watermark,

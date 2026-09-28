@@ -10,7 +10,6 @@ use tracedecay_store::{
 use crate::{
     ledger::{self, LedgerDisposition, LedgerError},
     operation::{self, StorageOperationError, StorageOperationExecutor},
-    writer::WriterPersistence,
 };
 
 pub(crate) struct RuntimeWriterPersistence<E> {
@@ -24,11 +23,8 @@ impl<E> RuntimeWriterPersistence<E> {
     }
 }
 
-impl<E> WriterPersistence for RuntimeWriterPersistence<E>
-where
-    E: StorageOperationExecutor + Send + 'static,
-{
-    fn lookup_idempotency(
+impl<E: StorageOperationExecutor> RuntimeWriterPersistence<E> {
+    pub(crate) fn lookup_idempotency(
         &mut self,
         transaction: &Transaction<'_>,
         binding: &StoreRuntimeBindingV1,
@@ -38,7 +34,7 @@ where
         ledger::lookup_receipt(transaction, binding, idempotency).map_err(map_ledger_error)
     }
 
-    fn apply_and_record(
+    pub(crate) fn apply_and_record(
         &mut self,
         savepoint: &mut Savepoint<'_>,
         binding: &StoreRuntimeBindingV1,
