@@ -520,6 +520,11 @@ pub(super) struct SourceFreshnessFenceStateV1 {
     freshness_unknown: bool,
     reconciled_without_generation: bool,
     reconciled_source_epoch: u64,
+    /// A pass captured source that differs from the retained generation and
+    /// is building its successor. An unverified mount has no epoch baseline,
+    /// so this is the only evidence a restart's first pass is a rebuild
+    /// rather than a verification.
+    successor_build_in_flight: bool,
 }
 
 impl SourceFreshnessFenceV1 {
@@ -534,6 +539,7 @@ impl SourceFreshnessFenceV1 {
                 freshness_unknown: true,
                 reconciled_without_generation: false,
                 reconciled_source_epoch: 0,
+                successor_build_in_flight: false,
             })),
             last_reconciled_at_micros: Arc::new(AtomicI64::new(0)),
             source_epoch,
@@ -565,8 +571,25 @@ impl SourceFreshnessFenceV1 {
         state.verified_against_source = true;
         state.reconciled_without_generation = reconciled_without_generation;
         state.reconciled_source_epoch = self.source_epoch.load(Ordering::Acquire);
+        state.successor_build_in_flight = false;
         self.last_reconciled_at_micros
             .store(micros, Ordering::Release);
+    }
+
+    /// Record that the running pass captured changed source and is building
+    /// its successor; the next completed proof clears it.
+    fn note_successor_build(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .successor_build_in_flight = true;
+    }
+
+    pub(super) fn verified_against_source(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .verified_against_source
     }
 
     fn refresh_monotonic_clock(&self, project_wall_clock: bool) {
@@ -593,11 +616,13 @@ impl SourceFreshnessFenceV1 {
     }
 
     /// Whether canonical source input has advanced beyond the last completed
-    /// proof. Moved Git metadata alone leaves the epochs equal: its background
-    /// pass is verification, not evidence that a replacement is being built.
+    /// proof, or a pass found it changed and is building the successor. Moved
+    /// Git metadata alone leaves the epochs equal: its background pass is
+    /// verification, not evidence that a replacement is being built.
     pub(super) fn source_change_pending(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        self.source_epoch.load(Ordering::Acquire) != state.reconciled_source_epoch
+        state.successor_build_in_flight
+            || self.source_epoch.load(Ordering::Acquire) != state.reconciled_source_epoch
     }
 
     /// Whether Git metadata proves that the checkout moved past the last
@@ -2259,6 +2284,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
             let snapshot_content_identity = captured.snapshot.content_identity.clone();
             let reextracted_files = captured.changed_paths.len();
+            self.freshness_fence.note_successor_build();
             let pending = self.publication.take_unpublished().filter(|pending| {
                 pending.snapshot().reference == captured.snapshot.reference
                     && pending.snapshot().source_revision == captured.snapshot.source_revision
@@ -2911,6 +2937,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             let mut snapshot_content_identity = captured.snapshot.content_identity.clone();
             let mut source_manifest = SourceContentManifestV1::for_snapshot(&captured.snapshot);
             let mut reextracted_files = captured.changed_paths.len();
+            self.freshness_fence.note_successor_build();
             let mut generation = self.owner.build_and_publish(
                 CodeIndexBuildRequestV1 {
                     snapshot: captured.snapshot,
@@ -3141,7 +3168,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// [`Self::latest_complete_ready_for_query`] under an explicit decode
     /// admission. Unverified restore, git-metadata drift, and an elapsed
     /// staleness threshold abstain and schedule background work. They do not
-    /// share [`Self::freshness_probe_requires_reconcile`]'s elapsed-threshold
+    /// share [`Self::freshness_probe_verdict`]'s elapsed-threshold
     /// scan: that witness refresh belongs to the query/background ladder.
     #[cfg(test)]
     fn latest_complete_ready_for_query_with(
@@ -3385,14 +3412,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
     }
 
-    /// Decide whether the cheap Git/stat ladder requires an authoritative
-    /// reconcile, without posting a worker wake. Callers that own a separate
-    /// cadence authority use this split form so they can record the arrival
-    /// before making the worker runnable.
-    pub fn freshness_probe_requires_reconcile(&mut self) -> bool {
-        self.freshness_probe_verdict() != FreshnessProbeVerdictV1::Current
-    }
-
     /// `Self::ensure_fresh_for_query` with the O(store) rebuild moved off the
     /// request path.
     ///
@@ -3460,7 +3479,7 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     #[hotpath::skip]
     pub fn verified_against_source(&self) -> bool {
-        self.freshness_fence.snapshot().verified_against_source
+        self.freshness_fence.verified_against_source()
     }
 
     /// True when reconciliation has verified the live worktree against source

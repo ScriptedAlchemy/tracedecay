@@ -651,10 +651,7 @@ fn code_index_freshness_projection(
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
         (
             FreshnessLabelV1::Restoring,
-            Some(
-                "the sealed lexical artifact is completing bounded authentication before serving"
-                    .to_owned(),
-            ),
+            Some("the sealed generation is restoring its serving seats before serving".to_owned()),
         )
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Verifying) {
         (
