@@ -17,8 +17,9 @@ use super::{
     ColdMountPostCheckTestControlV1, PendingWakeDropGateTestV1, PendingWakeV1,
     QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
     ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, cold_mount_admission_barriers,
-    cold_mount_open_controls, cold_mount_post_check_controls, published_text_projection_gate,
-    query_admission_controls, serving_swap_gate, unique_mounted_for_scope, wait_notified_if_unset,
+    cold_mount_open_controls, cold_mount_post_check_controls, graph_decode_gate,
+    published_text_projection_gate, query_admission_controls, serving_swap_gate,
+    unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -85,6 +86,61 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(project_root);
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    /// Hold the next graph prepare of the worker for `project_root` twice:
+    /// right before it decodes the active generation, and right after the
+    /// decode returned. Each pair is the entered receiver and release sender.
+    #[cfg(test)]
+    pub fn pause_around_next_graph_decode(
+        &self,
+        project_root: PathBuf,
+    ) -> [(
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ); 2] {
+        let (before_entered, before_observed) = tokio::sync::oneshot::channel();
+        let (before_released, before_release) = tokio::sync::oneshot::channel();
+        let (after_entered, after_observed) = tokio::sync::oneshot::channel();
+        let (after_released, after_release) = tokio::sync::oneshot::channel();
+        let replaced = graph_decode_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root,
+                [
+                    WorkerStepGateV1 {
+                        entered: before_entered,
+                        release: before_release,
+                    },
+                    WorkerStepGateV1 {
+                        entered: after_entered,
+                        release: after_release,
+                    },
+                ],
+            );
+        assert!(replaced.is_none(), "one graph decode gate per worktree");
+        [
+            (before_observed, before_released),
+            (after_observed, after_released),
+        ]
+    }
+
+    /// Wait at the armed before-decode gate and hand back the after-decode one.
+    #[cfg(test)]
+    pub(super) async fn enter_graph_decode_gate(project_root: &Path) -> Option<WorkerStepGateV1> {
+        let gate = graph_decode_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
+        let [before, after] = gate?;
+        Self::pass_worker_step_gate(Some(before)).await;
+        Some(after)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pass_worker_step_gate(gate: Option<WorkerStepGateV1>) {
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;

@@ -442,6 +442,15 @@ fn serving_swap_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// Holds a worker's graph prepare before and after it decodes the active
+/// generation.
+#[cfg(test)]
+fn graph_decode_gate() -> &'static Mutex<BTreeMap<PathBuf, [WorkerStepGateV1; 2]>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, [WorkerStepGateV1; 2]>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 mod resident_memory;
 #[cfg(test)]
 mod test_gates;
@@ -864,6 +873,13 @@ const CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1: &str = "the native 
      was refused because daemon memory reached its admission watermark; exact and lexical \
      search keep serving, and the graph retries on its own once retained memory is given \
      back or RSS falls (a source change that seals a new generation also retries it)";
+
+/// Remediation when another holder kept the code-generation store lock through
+/// every bounded seat retry of a sealed generation.
+const CONVERGENCE_PARK_GRAPH_STORE_BUSY_REMEDIATION_V1: &str = "the sealed code generation \
+     could not seat because another owner held the code-generation store lock through every \
+     retry; exact and lexical search keep serving, and `tracedecay sync` or the next source \
+     change retries the seat";
 
 /// Remediation when the derived publication was already deleted and rebuilt
 /// once in this mount and is corrupt again. The daemon deletes and rebuilds a
