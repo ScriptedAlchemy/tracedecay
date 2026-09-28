@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { useSearchParams } from 'react-router';
-import type { WorkGraphReadV1 } from '../../contracts/index.ts';
+import type { WorkGraphReadV1 } from '../../contracts/generated.ts';
 import { useFeedbackProximity } from '../../viz/proximity/index.ts';
 import { useWorkEvidence } from './workEvidenceQueries.ts';
 import type { WorkResult } from './workApi.ts';

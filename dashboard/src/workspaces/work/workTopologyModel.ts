@@ -6,7 +6,7 @@ import type {
   WorkAttemptTopologyBindingV1,
   WorkTopologyExecutionPlacementV1,
   WorkTopologyIntegrationStrategyV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { WorkResult } from './workApi.ts';
 import type { WorkChannel } from './workChannel.ts';
 import { absentChannel } from './workChannel.ts';

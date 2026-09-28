@@ -1116,9 +1116,9 @@ fn count_installed_release() {
     INSTALLED_RELEASES.with(|count| count.set(count.get() + 1));
 }
 
-/// The allocator the composition root installed is the one released: a
-/// mimalloc daemon asked glibc's `malloc_trim`, which returns nothing from
-/// mimalloc's pages. Installation happens once; a second is refused.
+/// The allocator the composition root installed is released: glibc's
+/// `malloc_trim` alone returns nothing from mimalloc's pages. Installation
+/// happens once; a second is refused.
 #[test]
 fn allocator_release_runs_the_installed_allocator_release() {
     super::install_process_allocator_release_v1(count_installed_release)

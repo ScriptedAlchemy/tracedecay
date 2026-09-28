@@ -2,7 +2,7 @@ import { useSearchParams } from 'react-router';
 import type {
   FeedbackProximityEncounterV1,
   FeedbackProximityReadResultV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import {
   proximityPage,
   useFeedbackProximity,

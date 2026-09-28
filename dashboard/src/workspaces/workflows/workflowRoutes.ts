@@ -9,7 +9,7 @@ import {
   WorkflowDefinitionSchema,
   WorkflowRunGetRequestSchema,
   WorkflowRunProjectionSchema,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { WorkRoute } from '../work/workApi.ts';
 
 /**

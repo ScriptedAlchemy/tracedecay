@@ -1,7 +1,7 @@
 import { useId, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
-import type { WorkflowDefinition } from '../../contracts/index.ts';
+import type { WorkflowDefinition } from '../../contracts/generated.ts';
 import { scopeWritable, useScope } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn.ts';
 import { GradeTag } from '../../ui/EvidenceGrade.tsx';

@@ -13,9 +13,17 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::text_file_transaction::{self, TextFileMutation, update_text_file_transactionally};
 
+mod creation_ledger;
 mod json_edit;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use creation_ledger::{
+    lifecycle_created_container, lifecycle_created_file, note_created_container, note_created_file,
+    root_relative_path, with_host_config_creations,
+};
+#[cfg(test)]
+pub(crate) use creation_ledger::{recorded_install_then_uninstall, recorded_lifecycle};
 
 /// Load a JSON file, returning an empty object on missing/invalid.
 /// Use this for **read-only** paths (healthcheck, `has_tracedecay`, etc.).
@@ -88,6 +96,40 @@ impl JsonConfigDialect {
             }
         })
     }
+
+    /// The publication that moves a config observed as `existing` to
+    /// `value`. Container structure the running lifecycle created is
+    /// recorded, or pruned on uninstall; a file the lifecycle created is
+    /// deleted once nothing but an empty object is left in it.
+    pub(crate) fn mutation(
+        self,
+        path: &Path,
+        existing: &str,
+        mut value: serde_json::Value,
+    ) -> Result<TextFileMutation> {
+        let before = self.parse_for_edit(path, existing)?;
+        creation_ledger::reconcile_json_containers(path, &before, &mut value);
+        if value.as_object().is_some_and(serde_json::Map::is_empty) && lifecycle_created_file(path)
+        {
+            return Ok(TextFileMutation::Remove);
+        }
+        if value == before {
+            return Ok(TextFileMutation::Unchanged);
+        }
+        Ok(TextFileMutation::Write(
+            self.render_edit(path, existing, &value)?,
+        ))
+    }
+}
+
+/// Publication of text a transform emptied: the file goes when the running
+/// lifecycle created it, and otherwise keeps exactly the remaining text.
+pub(crate) fn emptied_text_mutation(path: &Path, contents: String) -> TextFileMutation {
+    if contents.trim().is_empty() && lifecycle_created_file(path) {
+        TextFileMutation::Remove
+    } else {
+        TextFileMutation::Write(contents)
+    }
 }
 
 /// Load a JSON file for **editing**. Unlike [`load_json_file`], this returns
@@ -155,6 +197,8 @@ fn render_json_config(path: &Path, value: &serde_json::Value) -> Result<String> 
 pub(crate) enum JsonConfigMutation {
     Unchanged,
     Write(serde_json::Value),
+    /// Delete the file. Only for a file the transform proved is back to the
+    /// skeleton the running lifecycle created (see [`lifecycle_created_file`]).
     Remove,
 }
 
@@ -173,9 +217,7 @@ pub(crate) fn update_json_config_transactionally<T>(
         let (output, mutation) = update(settings)?;
         let mutation = match mutation {
             JsonConfigMutation::Unchanged => TextFileMutation::Unchanged,
-            JsonConfigMutation::Write(value) => {
-                TextFileMutation::Write(dialect.render_edit(path, existing, &value)?)
-            }
+            JsonConfigMutation::Write(value) => dialect.mutation(path, existing, value)?,
             JsonConfigMutation::Remove => TextFileMutation::Remove,
         };
         Ok((output, mutation))
@@ -186,7 +228,8 @@ pub(crate) fn update_json_config_transactionally<T>(
 /// edits the document parsed from the exact bytes the write lock observed;
 /// every table, key, comment and blank line it leaves alone publishes
 /// byte-for-byte, so removing what an install added restores the original
-/// file. A document edited down to nothing removes the file.
+/// file. A document edited down to nothing removes a file the running
+/// lifecycle created and keeps one the operator had.
 pub(crate) fn update_toml_config_transactionally<T>(
     path: &Path,
     update: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
@@ -213,10 +256,8 @@ pub(crate) fn update_toml_config_transactionally<T>(
         }
         let mutation = if rendered == existing {
             TextFileMutation::Unchanged
-        } else if rendered.trim().is_empty() {
-            TextFileMutation::Remove
         } else {
-            TextFileMutation::Write(rendered)
+            emptied_text_mutation(path, rendered)
         };
         Ok((output, mutation))
     })

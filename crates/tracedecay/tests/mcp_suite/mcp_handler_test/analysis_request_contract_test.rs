@@ -128,6 +128,8 @@ async fn analysis_reports_refuse_arguments_outside_their_typed_request() {
                 "enclosing": "src/b.rs::two",
                 "in_test": false,
             }],
+            "coverage": "complete",
+            "omissions": [],
         })
     );
     assert_invalid_request(

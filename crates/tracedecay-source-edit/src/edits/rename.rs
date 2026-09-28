@@ -14,7 +14,10 @@ use tracedecay_contracts::source_edit::{
     RenameSiteDispositionV1, RenameSiteKindV1, RenameSiteV1, RenameSymbolBindingV1,
 };
 use tracedecay_domain::{
-    ContentDigest, ManifestDigest, SnapshotFileDispositionV1, canonical_sha256,
+    ContentDigest, LanguageId, ManifestDigest, SnapshotFileDispositionV1, canonical_sha256,
+};
+use tracedecay_privacy::{
+    CodeSourceShapeV1, declared_code_source_shape, sanitize_code_source_bytes,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -364,7 +367,9 @@ pub(crate) async fn rename_symbol(
             };
             #[cfg(not(unix))]
             let unix_mode = None;
-            if ContentDigest::of_bytes(source.as_bytes()) != record.content_digest {
+            if sealed_content_digest(record.language.as_ref(), &source).as_ref()
+                != Some(&record.content_digest)
+            {
                 hazards.push(RenameHazardV1 {
                     kind: RenameHazardKindV1::StaleEvidence,
                     blocking: true,
@@ -854,6 +859,16 @@ pub(crate) async fn rename_symbol(
         }
     });
     Ok(outcome)
+}
+
+/// The digest capture seals for `source`: the generation stores sanitized
+/// bytes, so a file the privacy sanitizer redacts only matches its record
+/// once the same sanitizer runs over the disk bytes. `None` means the bytes
+/// no longer pass the sanitizer, which no admitted generation can match.
+fn sealed_content_digest(language: Option<&LanguageId>, source: &str) -> Option<ContentDigest> {
+    let shape = language.map_or(CodeSourceShapeV1::CodeOrProse, declared_code_source_shape);
+    let sanitized = sanitize_code_source_bytes(source.as_bytes(), shape).ok()?;
+    Some(ContentDigest::of_bytes(&sanitized.into_parts().0))
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ import type {
   WorkflowDefinition,
   WorkflowDefinitionDisposition,
   WorkflowRunProjection,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, scopeWritable, useScope } from '../../data/scope/store.ts';
 import { callWork, type WorkResult } from '../work/workApi.ts';
 import type { WorkflowLifecycleAction } from './workflowLedger.ts';
