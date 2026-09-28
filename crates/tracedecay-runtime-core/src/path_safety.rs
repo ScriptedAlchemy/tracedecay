@@ -196,7 +196,7 @@ pub fn extended_length_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Why a database path cannot be handed to SQLite.
+/// Why a database path cannot be handed to `SQLite`.
 #[derive(Debug, thiserror::Error)]
 pub enum SqliteDatabasePathError {
     #[error("cannot resolve SQLite database path '{path}': {source}")]
@@ -205,7 +205,7 @@ pub enum SqliteDatabasePathError {
         #[source]
         source: io::Error,
     },
-    /// No retry changes this: SQLite's Unix VFS refuses the name and its
+    /// No retry changes this: `SQLite`'s Unix VFS refuses the name and its
     /// Windows VFS silently truncates it to the limit.
     #[error(
         "SQLite database path '{path}' is {bytes} bytes; SQLite's default VFS opens names shorter than {limit} bytes"
@@ -219,10 +219,10 @@ pub enum SqliteDatabasePathError {
     VfsUnavailable { path: PathBuf },
 }
 
-/// The spelling SQLite must be given to open the database at `path`.
+/// The spelling `SQLite` must be given to open the database at `path`.
 ///
 /// `std::fs` adds the extended-length prefix to a long Windows path itself;
-/// SQLite's Windows VFS hands the name to `CreateFileW` as given, so an
+/// `SQLite`'s Windows VFS hands the name to `CreateFileW` as given, so an
 /// ordinary absolute path past `MAX_PATH` (260) fails to open. The path is
 /// made absolute and, on Windows, spelled with [`extended_length_path`]. A
 /// name longer than the default VFS's pathname limit is a typed refusal
@@ -253,7 +253,7 @@ pub fn sqlite_database_path(path: &Path) -> std::result::Result<PathBuf, SqliteD
     Ok(absolute)
 }
 
-/// `mxPathname` of SQLite's default VFS: the longest full pathname it opens.
+/// `mxPathname` of `SQLite`'s default VFS: the longest full pathname it opens.
 fn sqlite_default_vfs_max_pathname() -> Option<usize> {
     // SAFETY: `sqlite3_vfs_find` initializes SQLite on first use and returns
     // either null or a pointer to a registered VFS that lives for the rest of
@@ -421,7 +421,7 @@ mod tests {
     }
 
     /// Runs on every host, like its inverse below. The staging path is the
-    /// 275-character name SQLite could not open on the Windows runner.
+    /// 275-character name `SQLite` could not open on the Windows runner.
     #[test]
     fn an_absolute_windows_path_is_spelled_with_its_extended_length_prefix() {
         let staging = r"D:\a\_temp\tmp\.tmpTPA5kk\profile\projects\proj_8d6c098d2dd75ba9\code-index-v1\bc92ebba09df969fbaddcbda144ce85df1aee980d85ab9e9111ef8bd13ed757c\code-text-artifact-staging-v1\.text-artifact-55d951cf30e3b0e5f75b4162f14663864eb036b71a246d78de9d41f645f91bf7.staging.initializing";
@@ -446,7 +446,7 @@ mod tests {
         }
     }
 
-    /// Unix SQLite refuses a full name of 512 bytes or more with a bare
+    /// Unix `SQLite` refuses a full name of 512 bytes or more with a bare
     /// "unable to open database file"; the handoff names the limit instead.
     #[cfg(unix)]
     #[test]
