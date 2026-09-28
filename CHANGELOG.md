@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.59](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.58...v1.0.0-beta.59) (2026-09-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **mcp:** every `tracedecay tool` route now connects to the daemon socket named by TRACEDECAY_DAEMON_SOCKET when it is set, instead of the daemon the client profile's authority record names. A missing socket is the typed daemon-unreachable refusal with exit code 69 for every tool (previously typed tools such as `status` still answered). The MCP generic compatibility fallback is gone: a tool name no typed owner serves is `unknown tool`.
+* **query:** pagination cursors now bind a fingerprint of every parameter they were minted for. Cursors minted by earlier builds, and a cursor replayed with a changed parameter, are refused as a typed invalid_request naming the parameter, and `tracedecay tool` exits non-zero instead of exiting 0 with an empty failed result. Restart pagination without a cursor.
+* **automation:** fact_store_curate returns FactStoreCurateResultV1 {run_id, task, request_digest, state: "started"} instead of the AutomationRunResultV1 terminal. Read the run's terminal with automation_run_view. @tracedecay/sdk 0.2.0 validates the new receipt; 0.1.0 clients reject it.
+
+### simplify
+
+* **mcp:** delete the tool compatibility dispatch layer ([#2366](https://github.com/ScriptedAlchemy/tracedecay/issues/2366)) ([8b3bcf8](https://github.com/ScriptedAlchemy/tracedecay/commit/8b3bcf85d7403385b7d26929ceeafad48daf7576))
+
+
+### Features
+
+* **automation:** answer fact_store_curate with its run receipt ([#2350](https://github.com/ScriptedAlchemy/tracedecay/issues/2350)) ([a5e0119](https://github.com/ScriptedAlchemy/tracedecay/commit/a5e011915f5569f970a0ed7ef898852117f438c2)), closes [#2299](https://github.com/ScriptedAlchemy/tracedecay/issues/2299) [#2334](https://github.com/ScriptedAlchemy/tracedecay/issues/2334)
+
+
+### Bug Fixes
+
+* **code-index:** answer master-red reads from their true authority ([#2361](https://github.com/ScriptedAlchemy/tracedecay/issues/2361)) ([4ada4eb](https://github.com/ScriptedAlchemy/tracedecay/commit/4ada4eb89c6c7e2d1c5ff119d63f179cb0574b99))
+* **code-index:** charge the sealed graph build its structural peak ([#2348](https://github.com/ScriptedAlchemy/tracedecay/issues/2348)) ([6ae6461](https://github.com/ScriptedAlchemy/tracedecay/commit/6ae646121247deb56e4448037a028abebdd45ba8)), closes [#2123](https://github.com/ScriptedAlchemy/tracedecay/issues/2123)
+* **code-index:** end fresh and ready waits after the graph tail ([#2365](https://github.com/ScriptedAlchemy/tracedecay/issues/2365)) ([fd10010](https://github.com/ScriptedAlchemy/tracedecay/commit/fd1001095a87eb8b39ddeef8866d4fdbde799d0a))
+* **context:** anchor identifiers the task names and lead with them ([#2359](https://github.com/ScriptedAlchemy/tracedecay/issues/2359)) ([ea3b0cb](https://github.com/ScriptedAlchemy/tracedecay/commit/ea3b0cbbf8252d1fc125d0fea97ad2435bb8311c))
+* **daemon:** carry projectless refusals as structured content ([#2345](https://github.com/ScriptedAlchemy/tracedecay/issues/2345)) ([acceceb](https://github.com/ScriptedAlchemy/tracedecay/commit/accecebc5c21f00957ae811d8c4e114cb958ff3c))
+* **daemon:** report a busy configuration store as unavailable ([#2357](https://github.com/ScriptedAlchemy/tracedecay/issues/2357)) ([597403f](https://github.com/ScriptedAlchemy/tracedecay/commit/597403fdb2d97a47353d8b89dc7a90f0c660a1f1))
+* **query:** refuse a cursor presented with changed parameters ([#2358](https://github.com/ScriptedAlchemy/tracedecay/issues/2358)) ([acec192](https://github.com/ScriptedAlchemy/tracedecay/commit/acec192f7639b64ccec222e7df2020af5124a11e))
+* **release:** neutralize closing keywords on manual PR refresh ([#2349](https://github.com/ScriptedAlchemy/tracedecay/issues/2349)) ([4472590](https://github.com/ScriptedAlchemy/tracedecay/commit/447259007f8742a6b824fc8f22407606569a5876))
+
 ## [1.0.0-beta.58](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.57...v1.0.0-beta.58) (2026-09-27)
 
 
