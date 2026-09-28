@@ -201,7 +201,15 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         }
         loop {
             let mut projection_requested = state.take_dirty();
-            let history_requested = state.take_historical_dirty();
+            let mut history_requested = state.take_historical_dirty();
+            // A wake that arrives while the admitted window is still
+            // unpublished must not start the next history window. That window
+            // is the out-of-scope cursor sweep, and it holds this worker until
+            // it returns, so the newest day never leaves its building generation.
+            if state.history_held_for_projection() {
+                history_requested = false;
+                projection_requested = true;
+            }
             if !projection_requested && !history_requested {
                 break;
             }
