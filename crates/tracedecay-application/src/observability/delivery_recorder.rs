@@ -287,7 +287,7 @@ async fn drain_once(
             return 0;
         }
     };
-    let mut acknowledged = 0_usize;
+    let mut settled = Vec::with_capacity(receipts.len());
     for receipt in receipts {
         let result = async {
             let receipt_authority = authority
@@ -295,21 +295,29 @@ async fn drain_once(
                 .map_err(|error| ApplicationContractError::Domain(error.to_owned()))?;
             receipt_authority.begin(&receipt.settlement.attempt).await?;
             receipt_authority.settle(&receipt.settlement).await?;
-            spool
-                .acknowledge(receipt.receipt_id)
-                .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
             Ok::<(), ApplicationContractError>(())
         }
         .await;
-        if let Err(error) = result {
-            summary.failed = summary.failed.saturating_add(1);
-            tracing::warn!(%error, "delivery settlement recorder retained receipt for retry");
-        } else {
-            summary.settled = summary.settled.saturating_add(1);
-            acknowledged = acknowledged.saturating_add(1);
+        match result {
+            Ok(()) => settled.push(receipt.receipt_id),
+            Err(error) => {
+                summary.failed = summary.failed.saturating_add(1);
+                tracing::warn!(%error, "delivery settlement recorder retained receipt for retry");
+            }
         }
     }
-    acknowledged
+    let settled_count = u64::try_from(settled.len()).unwrap_or(u64::MAX);
+    match spool.acknowledge(&settled) {
+        Ok(_) => {
+            summary.settled = summary.settled.saturating_add(settled_count);
+            settled.len()
+        }
+        Err(error) => {
+            summary.failed = summary.failed.saturating_add(settled_count);
+            tracing::warn!(%error, "delivery settlement recorder retained settled receipts for replay");
+            0
+        }
+    }
 }
 
 fn pending_count(spool: &DeliveryRecorderSpoolV1) -> u64 {

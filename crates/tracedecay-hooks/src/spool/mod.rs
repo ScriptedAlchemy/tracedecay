@@ -82,6 +82,10 @@ const CONTROL_FRAME_RESERVE_BYTES: u64 = 4 * 1024;
 const MAX_META_BYTES: usize = 1024 * 1024;
 const MAX_REPLAY_SESSIONS: usize = 4;
 const RECORDS_FILE: &str = "records.v1.bin";
+/// The spool file an append writes in place. Compaction publishes its
+/// replacement by rename, so an in-place data write to this file is a record
+/// landing (or the rare torn-tail repair).
+pub const HOOK_SPOOL_RECORDS_FILE: &str = RECORDS_FILE;
 const META_FILE: &str = "meta.v1.json";
 const CHECKPOINT_FILE: &str = "checkpoint.v1.bin";
 const TRANSITION_FILE: &str = "checkpoint-transition.v1.json";
@@ -731,52 +735,93 @@ impl HookSpoolV1 {
         acknowledgement: HookSpoolAckV1,
         now: UtcMicros,
     ) -> Result<bool, HookSpoolError> {
+        self.acknowledge_many(&[acknowledgement], now)?
+            .pop()
+            .ok_or(HookSpoolError::AckConflict)?
+    }
+
+    /// Persist a replay pass's acknowledgements with one metadata publication
+    /// and at most one compaction.
+    ///
+    /// The drain holds the writer lease for this whole call, and every live
+    /// hook append waits on that lease within its synchronous budget, so the
+    /// cost of settling a pass must not grow with the records it settled.
+    /// Each acknowledgement is validated on its own: a conflicting one is
+    /// reported in its slot and leaves the others to persist. Only a failed
+    /// publication fails the call, and then nothing was acknowledged.
+    #[hotpath::measure(label = "hooks.spool.acknowledge_many")]
+    pub fn acknowledge_many(
+        &mut self,
+        acknowledgements: &[HookSpoolAckV1],
+        now: UtcMicros,
+    ) -> Result<Vec<Result<bool, HookSpoolError>>, HookSpoolError> {
         self.ensure_writable(now)?;
-        if acknowledgement.sequence == 0 || acknowledgement.receipt_id == [0; 16] {
-            return Err(HookSpoolError::AckConflict);
-        }
         let existing = acknowledged_map(&self.meta)?;
-        if acknowledgement.sequence <= self.meta.committed_through {
-            return Ok(false);
-        }
-        if let Some(existing) = existing.get(&acknowledgement.sequence) {
-            return if existing.receipt_id == acknowledgement.receipt_id
-                && existing.disposition == acknowledgement.disposition
-            {
-                Ok(false)
-            } else {
-                Err(HookSpoolError::AckConflict)
-            };
-        }
-        let index = self
-            .pending
-            .iter()
-            .position(|record| record.sequence == acknowledgement.sequence)
-            .ok_or(HookSpoolError::AckConflict)?;
-        let removed = self.pending[index].clone();
         let mut next_meta = self.meta.clone();
-        next_meta.acknowledged.push(AcknowledgedSequenceV1 {
-            sequence: acknowledgement.sequence,
-            receipt_id: acknowledgement.receipt_id,
-            disposition: acknowledgement.disposition,
-        });
+        let mut acknowledged_indices = Vec::new();
+        let outcomes = acknowledgements
+            .iter()
+            .map(|acknowledgement| {
+                if acknowledgement.sequence == 0 || acknowledgement.receipt_id == [0; 16] {
+                    return Err(HookSpoolError::AckConflict);
+                }
+                if acknowledgement.sequence <= self.meta.committed_through {
+                    return Ok(false);
+                }
+                let prior = existing.get(&acknowledgement.sequence).or_else(|| {
+                    next_meta.acknowledged[self.meta.acknowledged.len()..]
+                        .iter()
+                        .find(|prior| prior.sequence == acknowledgement.sequence)
+                });
+                if let Some(prior) = prior {
+                    return if prior.receipt_id == acknowledgement.receipt_id
+                        && prior.disposition == acknowledgement.disposition
+                    {
+                        Ok(false)
+                    } else {
+                        Err(HookSpoolError::AckConflict)
+                    };
+                }
+                let index = self
+                    .pending
+                    .iter()
+                    .position(|record| record.sequence == acknowledgement.sequence)
+                    .ok_or(HookSpoolError::AckConflict)?;
+                next_meta.acknowledged.push(AcknowledgedSequenceV1 {
+                    sequence: acknowledgement.sequence,
+                    receipt_id: acknowledgement.receipt_id,
+                    disposition: acknowledgement.disposition,
+                });
+                acknowledged_indices.push((index, acknowledgement.disposition));
+                Ok(true)
+            })
+            .collect::<Vec<_>>();
+        if acknowledged_indices.is_empty() {
+            return Ok(outcomes);
+        }
         normalize_acknowledgements(&mut next_meta)?;
         write_meta_after_records(&self.root, &next_meta)?;
         self.meta = next_meta;
-        self.pending.remove(index);
-        self.release_usage(&removed);
+        acknowledged_indices.sort_unstable_by_key(|(index, _)| std::cmp::Reverse(*index));
+        for (index, _disposition) in acknowledged_indices {
+            let removed = self.pending.remove(index);
+            self.release_usage(&removed);
+            #[cfg(feature = "hotpath")]
+            {
+                // A tombstone is a delivery that expired or was refused, not a
+                // success; the disposition mix keeps those failures visible.
+                hotpath::gauge!(match _disposition {
+                    HookSpoolAckDispositionV1::Committed => "hooks.spool.ack.committed",
+                    HookSpoolAckDispositionV1::TerminalTombstone => "hooks.spool.ack.tombstoned",
+                })
+                .inc(1);
+                hotpath::gauge!("hooks.spool.ack.frame_bytes").set(u64::from(removed.framed_len));
+                hotpath::gauge!("hooks.spool.queue_wait_micros")
+                    .set(now.0.saturating_sub(removed.queued_at.0));
+            }
+        }
         #[cfg(feature = "hotpath")]
         {
-            // A tombstone is a delivery that expired or was refused, not a
-            // success; the disposition mix keeps those failures visible.
-            hotpath::gauge!(match acknowledgement.disposition {
-                HookSpoolAckDispositionV1::Committed => "hooks.spool.ack.committed",
-                HookSpoolAckDispositionV1::TerminalTombstone => "hooks.spool.ack.tombstoned",
-            })
-            .inc(1);
-            hotpath::gauge!("hooks.spool.ack.frame_bytes").set(u64::from(removed.framed_len));
-            hotpath::gauge!("hooks.spool.queue_wait_micros")
-                .set(now.0.saturating_sub(removed.queued_at.0));
             hotpath::gauge!("hooks.spool.pending.frame_count").set(self.pending.len());
             hotpath::gauge!("hooks.spool.pending.bytes").set(self.pending_bytes());
         }
@@ -788,7 +833,7 @@ impl HookSpoolV1 {
         if self.physical_len > self.pending_bytes().saturating_mul(2) {
             self.compact_pending()?;
         }
-        Ok(true)
+        Ok(outcomes)
     }
 
     fn hydrate(&mut self, index: usize) -> Result<HookSpoolRecordV1, HookSpoolError> {

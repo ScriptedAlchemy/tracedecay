@@ -108,6 +108,15 @@ test-transport = []
     )
     if contaminated_production.returncode == 0:
         raise SystemExit("production test-transport contamination was accepted")
+    if not contaminated_production.stderr.startswith(
+        "production feature directly enables test-transport\n"
+    ):
+        raise SystemExit(
+            "production contamination failed for an unexpected reason: "
+            f"{contaminated_production.stderr}"
+        )
+    if contaminated_production.github_output:
+        raise SystemExit("refused production profile still wrote release outputs")
 
     legacy = run_fixture(
         """[package]

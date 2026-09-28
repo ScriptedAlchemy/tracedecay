@@ -419,3 +419,28 @@ class OldWidget {
         "each AnnotationUsage should have an Annotates unresolved ref"
     );
 }
+
+#[test]
+fn test_dart_calls_inside_closures_and_local_functions_belong_to_the_enclosing_function() {
+    let result = extract(
+        r#"
+void run(List<String> items) {
+  each(items, (item) {
+    handle(item);
+  });
+  void local() {
+    work();
+  }
+  local();
+}
+"#,
+    );
+    let run = result.nodes.iter().find(|n| n.name == "run").expect("run");
+    let calls: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls && r.from_node_id == run.id)
+        .map(|r| r.reference_name.as_str())
+        .collect();
+    assert_eq!(calls, ["each", "handle", "work", "local"]);
+}

@@ -763,12 +763,13 @@ mod tests {
         // retains parser-positioned receiver-call evidence; v14 extracts
         // item-list macro bodies and binds `#[cfg]` variants; v15 qualifies
         // calls through block-scoped `use` declarations; v16 qualifies calls
-        // through inline-module and glob `use` declarations. The revision is
+        // through inline-module and glob `use` declarations; v17 gives
+        // `const`/`static` initializers their calls. The revision is
         // part of the batch identity, so the pinned digest moves with it.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v16");
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v17");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:c65751ab695fe3515b4f3ab0dd32fc119bfab36ea2cc24f60e6b32dd3491f991"
+            "sha256:0e84ff25548b2c5d7139131f0c7d3308158db26dfb6fa6ec5dd636502c252b20"
         );
     }
 

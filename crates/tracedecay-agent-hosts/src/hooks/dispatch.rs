@@ -890,7 +890,7 @@ fn append_for_replay(
     binding: &HookScopeBindingV1,
     now: UtcMicros,
 ) -> SpoolAppendOutcomeV1 {
-    let root = data_root.join("hook-v2-spool").join(host.hook_key());
+    let root = tracedecay_hooks::hook_v2_spool_root(data_root, host);
     let Ok((mut spool, _)) = HookSpoolV1::open_within(
         root,
         HookSpoolConfigV1::stock(host),
@@ -927,7 +927,7 @@ fn replay_envelope_if_pending(
     retry: &HookEventEnvelopeV2,
     now: UtcMicros,
 ) -> PendingEnvelopeV1 {
-    let root = data_root.join("hook-v2-spool").join(host.hook_key());
+    let root = tracedecay_hooks::hook_v2_spool_root(data_root, host);
     let Ok((mut spool, _)) = HookSpoolV1::open_within(
         root,
         HookSpoolConfigV1::stock(host),

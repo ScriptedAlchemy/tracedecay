@@ -227,16 +227,16 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
     state.node_stack.pop();
 }
 
-/// Whether a statement is a named function declaration whose body owns its
-/// own call sites. `extract_call_sites` only skips nested arrow/function
-/// *children*, so a top-level `function_declaration` statement would have
-/// its body walked and double-attributed to the enclosing test. Guard it.
-/// Arrow/function-expression assignments (`const f = () => {}`) are already
-/// skipped by `extract_call_sites` and need no guard here.
+/// Whether a statement becomes graph symbols that own every call site inside
+/// it: a helper function or a class, whose methods and field initializers
+/// own their calls. Attributing them again to the test would double-count.
 fn defines_own_callable(stmt: TsNode<'_>) -> bool {
     matches!(
         stmt.kind(),
-        "function_declaration" | "generator_function_declaration"
+        "function_declaration"
+            | "generator_function_declaration"
+            | "class_declaration"
+            | "abstract_class_declaration"
     )
 }
 
@@ -250,23 +250,20 @@ fn visit_test_body(state: &mut ExtractionState<'_>, body: TsNode<'_>, test_id: &
     }
     loop {
         let stmt = cursor.node();
-        let mut handled = false;
         if stmt.kind() == "expression_statement"
             && let Some(call) = find_direct_child_by_kind(stmt, "call_expression")
             && is_test_framework_call(state, call)
         {
             // Nested describe/it. Recurse as its own test node.
             visit_test_call(state, call);
-            handled = true;
-        }
-        if !handled {
-            // Declarations inside describe (helpers, consts, nested classes)
-            // become their own nodes.
+        } else if matches!(stmt.kind(), "lexical_declaration" | "variable_declaration") {
+            // An arrow helper owns its body's calls; setup initializers
+            // (`const rows = build()`) map the test to what it exercises.
+            TypeScriptExtractor::visit_lexical_declaration(state, stmt, Some(test_id));
+        } else {
+            // Declarations inside describe (helpers, nested classes) become
+            // their own nodes; setup calls and assertions belong to the test.
             TypeScriptExtractor::visit_node(state, stmt);
-            // Statements that define their own callable (a helper function
-            // or arrow) own their call sites; attributing them again to the
-            // test node would double-count. Only attribute non-declaration
-            // statements (setup calls, assertions) to the test node.
             if !defines_own_callable(stmt) {
                 TypeScriptExtractor::extract_call_sites(state, stmt, test_id);
             }

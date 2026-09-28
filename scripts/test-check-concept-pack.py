@@ -21,13 +21,24 @@ class PackTests(unittest.TestCase):
             brief = next(pack.glob('*/final/[0-9]*.md'))
             original = brief.read_text()
             brief.unlink()
-            self.assertTrue(any('missing same-stem brief' in e for e in pack_check.validate(pack)[1]))
+            # Links elsewhere in the real handoff that named the brief also break;
+            # only the plate/brief pairing error is this mutation's own contract.
+            self.assertEqual(
+                pack_check.validate(pack)[1][0],
+                f'{brief.with_suffix(".png")}: missing same-stem brief',
+            )
             brief.write_text(original + '\n[Broken](missing-authority.md)\n')
-            self.assertTrue(any('broken or escaping local link' in e for e in pack_check.validate(pack)[1]))
+            self.assertEqual(
+                pack_check.validate(pack)[1],
+                [f'{brief}: broken or escaping local link missing-authority.md'],
+            )
             brief.write_text(original)
             manifest = brief.parent / 'README.md'
             manifest.write_text(manifest.read_text() + f'\n[Duplicate]({brief.name})\n')
-            self.assertTrue(any('has 2 mappings' in e for e in pack_check.validate(pack)[1]))
+            self.assertEqual(
+                pack_check.validate(pack)[1],
+                [f'{manifest}: {brief.name} has 2 mappings; expected one'],
+            )
 
 
 if __name__ == '__main__':

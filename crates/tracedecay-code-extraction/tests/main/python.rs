@@ -8,6 +8,7 @@ use tracedecay_domain::*;
 include!("support/docstrings.rs");
 
 include!("support/edges.rs");
+include!("support/calls.rs");
 
 #[test]
 fn test_py_function_declaration() {
@@ -515,5 +516,72 @@ class Server:
     assert!(
         methods[0].is_async,
         "async method should have is_async = true"
+    );
+}
+
+#[test]
+fn test_py_calls_inside_nested_defs_and_lambdas_belong_to_the_enclosing_function() {
+    let source = r#"
+def traced(fn):
+    def wrapper(*args):
+        record(fn)
+        return fn(*args)
+    return sorted([wrapper], key=lambda item: rank(item))
+"#;
+    let result = PythonExtractor.extract_artifact("traced.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let traced = result
+        .nodes
+        .iter()
+        .find(|n| n.name == "traced")
+        .expect("traced");
+    let calls: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls && r.from_node_id == traced.id)
+        .map(|r| r.reference_name.as_str())
+        .collect();
+    assert_eq!(calls, ["record", "fn", "sorted", "rank"]);
+}
+
+#[test]
+fn test_py_module_class_and_decorator_calls_have_owners() {
+    let source = r#"import logging
+
+logger = logging.getLogger(__name__)
+MAX_ROWS = compute_limit()
+
+@app.route("/")
+def index():
+    return render()
+
+class Config(Base, metaclass=registry()):
+    rows = field(default_factory=list)
+
+    @cached(ttl=5)
+    def load(self, timeout=default_timeout()):
+        return read(timeout)
+
+if __name__ == "__main__":
+    main()
+"#;
+    let result = PythonExtractor.extract_artifact("app.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    assert_eq!(
+        calls_by_owner(&result),
+        [
+            ("init_block", "<module>", 2, vec!["logging.getLogger"]),
+            ("const", "MAX_ROWS", 3, vec!["compute_limit"]),
+            ("function", "index", 6, vec!["app.route", "render"]),
+            ("class", "Config", 9, vec!["registry", "field"]),
+            (
+                "method",
+                "load",
+                13,
+                vec!["cached", "default_timeout", "read"]
+            ),
+            ("init_block", "<module>", 16, vec!["main"]),
+        ]
     );
 }

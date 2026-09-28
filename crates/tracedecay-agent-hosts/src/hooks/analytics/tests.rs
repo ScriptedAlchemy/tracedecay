@@ -206,13 +206,13 @@ fn payload_bytes_are_length_only_and_omit_forbidden_content() {
             "analytics leaked forbidden content `{forbidden}`: {analytics_jsonl}"
         );
     }
-    for forbidden_field in [
-        "project_root",
-        "event_cwd",
-        "command",
-        "session_id",
-        "tool_name",
-    ] {
+    // The session the payload names is attribution, not content: both rows
+    // carry it so analytics can join a hook to its session.
+    for row in analytics_jsonl.lines() {
+        let row: Value = serde_json::from_str(row).unwrap();
+        assert_eq!(row["session_id"], "s1", "{row}");
+    }
+    for forbidden_field in ["project_root", "event_cwd", "command", "tool_name"] {
         assert!(
             !analytics_jsonl.contains(&format!("\"{forbidden_field}\"")),
             "telemetry persisted forbidden field `{forbidden_field}`: {analytics_jsonl}"
@@ -1239,11 +1239,13 @@ fn two_owner_profiles_record_hook_analytics_into_their_own_stores() {
                 let runtime = crate::ports::hook_runtime::crate_test_runtime(profile.clone());
                 start.wait();
                 for _ in 0..ROWS_PER_OWNER {
-                    drop(record_other_hook_invoked(
+                    drop(record_native_hook_invoked_parsed(
                         &runtime,
                         Some(checkout),
+                        NativeHostIdentityV1::FactoryDroid,
                         hook_name,
                         r#"{"hook_event_name":"Stop"}"#,
+                        &serde_json::json!({"hook_event_name": "Stop"}),
                     ));
                 }
             });

@@ -370,6 +370,11 @@ function Provenance({
         {subject.source_label ?? <span className="text-text-muted">none recorded</span>}
       </Term>
       <Term label="category">{subject.category ?? <span className="text-text-muted">—</span>}</Term>
+      {canonicalRow?.superseded_by ? (
+        <Term label="superseded by">
+          <span className="td-value break-all">{canonicalRow.superseded_by}</span>
+        </Term>
+      ) : null}
       <Term label="tags">
         {subject.tags && subject.tags.length > 0 ? (
           <span className="flex flex-wrap gap-1">
