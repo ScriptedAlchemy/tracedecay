@@ -1782,27 +1782,33 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
 
     let missing_socket = socket_dir.path().join("missing.sock");
     let project_arg = project_path.to_string_lossy().to_string();
-    let output = tracedecay_command_with_home(&home_path)
-        .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
-        .args(["tool", "--project", &project_arg])
-        .args(SCOPE_SET_PROBE)
-        .output()
-        .expect("tracedecay tool should run");
+    // Every typed `tracedecay tool` route resolves the same socket: a
+    // daemon-owned multi-root read and an owner-served graph tool alike.
+    let status_probe: [&str; 2] = ["status", "--json"];
+    for probe in [&SCOPE_SET_PROBE[..], &status_probe[..]] {
+        let output = tracedecay_command_with_home(&home_path)
+            .current_dir(&project_path)
+            .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+            .args(["tool", "--project", &project_arg])
+            .args(probe)
+            .output()
+            .expect("tracedecay tool should run");
 
-    // Scripted callers (the Pi extension) branch on this typed status rather
-    // than on the error text.
-    assert_eq!(
-        output.status.code(),
-        Some(i32::from(
-            tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
-        ))
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
-        "expected explicit daemon-unavailable error, got:\n{stderr}"
-    );
+        // Scripted callers (the Pi extension) branch on this typed status
+        // rather than on the error text.
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(
+                tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+            )),
+            "{probe:?}: {output:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
+            "{probe:?}: expected explicit daemon-unavailable error, got:\n{stderr}"
+        );
+    }
 }
 
 #[test]
