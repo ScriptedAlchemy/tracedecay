@@ -93,23 +93,19 @@ fn hook_v2_admission_ledgers() -> &'static StdMutex<HookV2AdmissionLedgers> {
     LEDGERS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
-fn hook_v2_pending_work_root(
+/// Where producer work lived before the admission ledger owned it. A daemon
+/// imports that spool into the ledger the first time it opens the host's
+/// ledger, then retires it.
+fn legacy_hook_v2_pending_work_root(
     data_root: &Path,
     host: tracedecay_domain::NativeHostIdentityV1,
 ) -> std::path::PathBuf {
     data_root.join("hook-v2-pending-work").join(host.hook_key())
 }
 
-fn hook_v2_pending_work_gate() -> &'static StdMutex<()> {
-    static GATE: OnceLock<StdMutex<()>> = OnceLock::new();
-    GATE.get_or_init(|| StdMutex::new(()))
-}
-
 fn complete_hook_v2_pending_work(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-    sequence: u64,
-    now: UtcMicros,
 ) -> bool {
     let key = hook_v2_admission_ledger_root(data_root, envelope.producer);
     let Some(mut ledgers) = hook_v2_admission_ledgers().lock().ok() else {
@@ -118,120 +114,99 @@ fn complete_hook_v2_pending_work(
     let Some(ledger) = ledgers.get_mut(&key) else {
         return false;
     };
-    if ledger.mark_work_completed(envelope).is_err() {
-        return false;
-    }
+    let commit = match ledger.stage_work_completion(envelope) {
+        Ok(Some(commit)) => commit,
+        Ok(None) => return true,
+        Err(_) => return false,
+    };
     drop(ledgers);
-
-    // Producer completion is the durable effect fence. Pending transport
-    // cleanup may fail or be interrupted after this point; a completed exact
-    // duplicate retries only the acknowledgement and never the producer work.
-    let Some(_gate) = hook_v2_pending_work_gate().lock().ok() else {
-        return false;
-    };
-    let Ok((mut spool, _)) = tracedecay_hooks::HookSpoolV1::open(
-        hook_v2_pending_work_root(data_root, envelope.producer),
-        tracedecay_hooks::HookSpoolConfigV1::stock(envelope.producer),
-        now,
-    ) else {
-        return false;
-    };
-    if spool
-        .acknowledge(
-            tracedecay_hooks::HookSpoolAckV1 {
-                sequence,
-                receipt_id: envelope.event_id,
-                disposition: tracedecay_hooks::HookSpoolAckDispositionV1::Committed,
-            },
-            now,
-        )
-        .is_err()
-    {
-        return false;
-    }
-    true
+    commit.wait().is_ok()
 }
 
-fn retain_hook_v2_pending_work(
+fn hook_v2_work_completion(
     data_root: &Path,
-    pending_envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-    ledger_envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-    binding: &tracedecay_hooks::HookScopeBindingV1,
-    now: UtcMicros,
-) -> Option<Arc<dyn Fn() + Send + Sync + 'static>> {
-    let _gate = hook_v2_pending_work_gate().lock().ok()?;
-    let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
-        hook_v2_pending_work_root(data_root, pending_envelope.producer),
-        tracedecay_hooks::HookSpoolConfigV1::stock(pending_envelope.producer),
-        now,
-    )
-    .ok()?;
-    let record = spool.append(pending_envelope.clone(), binding, now).ok()?;
-    spool.commit().ok()?;
-    drop(_gate);
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+) -> Arc<dyn Fn() + Send + Sync + 'static> {
     let data_root = data_root.to_path_buf();
-    let envelope = ledger_envelope.clone();
-    Some(Arc::new(move || {
-        let _ = complete_hook_v2_pending_work(&data_root, &envelope, record.sequence, hook_now());
-    }))
+    let envelope = envelope.clone();
+    Arc::new(move || {
+        if !complete_hook_v2_pending_work(&data_root, &envelope) {
+            tracing::warn!(
+                event = "hook_v2_work_completion_failed",
+                host = envelope.producer.hook_key(),
+                "hook V2 producer work stays pending for redrive"
+            );
+        }
+    })
 }
 
+/// Provider envelopes whose producer work is still owed, for redrive. Work
+/// past the ledger's age bound is dropped there rather than redriven forever.
 #[hotpath::measure(label = "mcp.hook_runtime.pending_work")]
 pub fn hook_v2_pending_work_envelopes(
     data_root: &Path,
     host: tracedecay_domain::NativeHostIdentityV1,
     now: UtcMicros,
 ) -> Vec<tracedecay_hooks::HookEventEnvelopeV2> {
-    let Some(_gate) = hook_v2_pending_work_gate().lock().ok() else {
+    let ledger_root = hook_v2_admission_ledger_root(data_root, host);
+    if !ledger_root.is_dir() && !legacy_hook_v2_pending_work_root(data_root, host).is_dir() {
         return Vec::new();
-    };
-    let Ok((mut spool, _)) = tracedecay_hooks::HookSpoolV1::open(
-        hook_v2_pending_work_root(data_root, host),
-        tracedecay_hooks::HookSpoolConfigV1::stock(host),
-        now,
-    ) else {
-        return Vec::new();
-    };
-    let Ok(mut records) = spool.expired_records(now) else {
-        return Vec::new();
-    };
-    if let Ok(batches) = spool.claim_replay_batches(now, 4) {
-        for batch in batches {
-            records.extend(batch.records);
-            let _ = spool.release_replay_claim(batch.claim_id);
-        }
     }
-    records.sort_unstable_by_key(|record| record.sequence);
-    records.dedup_by_key(|record| record.sequence);
-    records.into_iter().map(|record| record.envelope).collect()
+    match with_hook_v2_admission_ledger(Some(data_root), ledger_root, host, now, |ledger| {
+        ledger.pending_work_envelopes(now)
+    }) {
+        Some(Ok(pending)) => pending,
+        Some(Err(error)) => {
+            tracing::warn!(
+                event = "hook_v2_pending_work_unavailable",
+                host = host.hook_key(),
+                error = %error,
+                "hook V2 pending producer work could not be read"
+            );
+            Vec::new()
+        }
+        None => Vec::new(),
+    }
 }
 
-/// Durably record one admission identity. `None` means the ledger itself is
-/// unavailable, the caller must not claim an admission it cannot deduplicate.
-pub fn record_hook_v2_admission(
+/// Stage one admission identity, with the producer work it owes. `None`
+/// means the ledger itself is unavailable, the caller must not claim an
+/// admission it cannot deduplicate. Nothing may be acknowledged before the
+/// returned commit is awaited.
+fn stage_hook_v2_admission(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    work: Option<&tracedecay_hooks::HookEventEnvelopeV2>,
     now: UtcMicros,
-) -> Option<tracedecay_hooks::HookAdmissionLedgerReceiptV1> {
+) -> Option<tracedecay_hooks::HookAdmissionStagedV1> {
     with_hook_v2_admission_ledger(
+        Some(data_root),
         hook_v2_admission_ledger_root(data_root, envelope.producer),
         envelope.producer,
         now,
-        |ledger| ledger.admit_with_receipt(envelope, now).ok(),
+        |ledger| ledger.stage_admission(envelope, work, now).ok(),
     )
     .flatten()
 }
 
 /// Runs `operation` on the retained ledger at `ledger_root`, opening it on
-/// first use. `None` means the ledger is unavailable (open failure, poisoned
-/// owner, or the open-ledger bound).
+/// first use and again after a failed write. A project ledger (`data_root`)
+/// adopts its legacy pending work when it opens. `None` means the ledger is
+/// unavailable (open failure, poisoned owner, or the open-ledger bound).
 fn with_hook_v2_admission_ledger<T>(
+    data_root: Option<&Path>,
     ledger_root: std::path::PathBuf,
     host: tracedecay_domain::NativeHostIdentityV1,
     now: UtcMicros,
     operation: impl FnOnce(&mut tracedecay_hooks::HookAdmissionLedgerV1) -> T,
 ) -> Option<T> {
     let mut ledgers = hook_v2_admission_ledgers().lock().ok()?;
+    if ledgers
+        .get(&ledger_root)
+        .is_some_and(tracedecay_hooks::HookAdmissionLedgerV1::needs_reopen)
+    {
+        ledgers.remove(&ledger_root);
+    }
     let open_ledgers = ledgers.len();
     let ledger = match ledgers.entry(ledger_root) {
         Entry::Occupied(retained) => retained.into_mut(),
@@ -239,17 +214,70 @@ fn with_hook_v2_admission_ledger<T>(
             if open_ledgers >= MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS {
                 return None;
             }
-            let (ledger, _report) = tracedecay_hooks::HookAdmissionLedgerV1::open(
+            let (mut ledger, _report) = tracedecay_hooks::HookAdmissionLedgerV1::open(
                 unopened.key().clone(),
                 host,
                 tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
                 now,
             )
             .ok()?;
+            if let Some(data_root) = data_root {
+                import_legacy_hook_v2_pending_work(data_root, &mut ledger, now);
+            }
             unopened.insert(ledger)
         }
     };
     Some(operation(ledger))
+}
+
+/// Adopt the producer work a pre-ledger daemon left in its pending-work spool,
+/// then retire that spool. A failure leaves the spool for the next open.
+fn import_legacy_hook_v2_pending_work(
+    data_root: &Path,
+    ledger: &mut tracedecay_hooks::HookAdmissionLedgerV1,
+    now: UtcMicros,
+) {
+    let host = ledger.host();
+    let root = legacy_hook_v2_pending_work_root(data_root, host);
+    if !root.is_dir() {
+        return;
+    }
+    if let Err(error) = adopt_legacy_hook_v2_pending_work(&root, ledger, now) {
+        tracing::warn!(
+            event = "hook_v2_legacy_pending_work_import_failed",
+            host = host.hook_key(),
+            error = %error,
+            "legacy hook V2 pending work stays in place for the next ledger open"
+        );
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LegacyPendingWorkImportError {
+    #[error("legacy pending-work spool: {0}")]
+    Spool(#[from] tracedecay_hooks::HookSpoolError),
+    #[error("admission ledger: {0}")]
+    Ledger(#[from] tracedecay_hooks::HookAdmissionLedgerError),
+}
+
+fn adopt_legacy_hook_v2_pending_work(
+    root: &Path,
+    ledger: &mut tracedecay_hooks::HookAdmissionLedgerV1,
+    now: UtcMicros,
+) -> std::result::Result<(), LegacyPendingWorkImportError> {
+    let config = tracedecay_hooks::HookSpoolConfigV1::stock(ledger.host());
+    let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(root, config, now)?;
+    let records = spool.pending_records()?;
+    drop(spool);
+    for record in records {
+        let canonical = daemon_mint_hook_v2_envelope(&record.envelope);
+        ledger
+            .stage_admission(&canonical, Some(&record.envelope), now)?
+            .commit
+            .wait()?;
+    }
+    tracedecay_hooks::HookSpoolV1::remove(root, config, now)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -460,13 +488,29 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
     };
     let canonical_envelope = daemon_mint_hook_v2_envelope(envelope);
     let envelope = &canonical_envelope;
-    // The durable ledger supplies stable daemon order when the provider has no
-    // native sequence. Exact-duplicate retries reuse that order and retry only
-    // the lifecycle prerequisite before suppressing downstream effects.
-    let Some(receipt) = record_hook_v2_admission(&cg.hook_store_layout().data_root, envelope, now)
-    else {
+    let data_root = &cg.hook_store_layout().data_root;
+    let requires_producer_work = hook_v2_requires_producer_work(envelope);
+    // One ledger commit makes the admission and the producer work it owes
+    // durable together, shared with concurrent admissions. The ledger supplies
+    // stable daemon order when the provider has no native sequence.
+    // Exact-duplicate retries reuse that order and retry only the lifecycle
+    // prerequisite before suppressing downstream effects.
+    let Some(staged) = stage_hook_v2_admission(
+        data_root,
+        envelope,
+        requires_producer_work.then_some(provider_envelope),
+        now,
+    ) else {
         return HookV2AdmissionOutcomeV1::Backpressured;
     };
+    let receipt = staged.receipt;
+    let commit = staged.commit;
+    if !matches!(
+        tokio::task::spawn_blocking(move || commit.wait()).await,
+        Ok(Ok(()))
+    ) {
+        return HookV2AdmissionOutcomeV1::Backpressured;
+    }
     match receipt.decision {
         tracedecay_hooks::HookAdmissionDecisionV1::Admitted
         | tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate => {}
@@ -474,20 +518,9 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
             return HookV2AdmissionOutcomeV1::Conflict;
         }
     }
-    let requires_producer_work = hook_v2_requires_producer_work(envelope);
     if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
         && receipt.work_completed
     {
-        let Some(cleanup) = retain_hook_v2_pending_work(
-            &cg.hook_store_layout().data_root,
-            provider_envelope,
-            envelope,
-            &snapshot.binding,
-            now,
-        ) else {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        };
-        cleanup();
         let retained_claim = host_response_available
             .then(|| {
                 lookup_hook_v2_delivery_claim_for_event(envelope.project_id, envelope.event_id, now)
@@ -590,20 +623,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
             ready_guidance: Value::Null,
         };
     }
-    let completion = if requires_producer_work {
-        let Some(completion) = retain_hook_v2_pending_work(
-            &cg.hook_store_layout().data_root,
-            provider_envelope,
-            envelope,
-            &snapshot.binding,
-            now,
-        ) else {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        };
-        Some(completion)
-    } else {
-        None
-    };
+    let completion = requires_producer_work.then(|| hook_v2_work_completion(data_root, envelope));
     let first_admission = receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::Admitted;
     // Live-activity tap: a bound hook-v2 envelope reaching admission IS an agent
     // working in this project, the primary live hook path for every v2-bound
@@ -844,9 +864,10 @@ pub(super) fn hook_v2_profile_admit(
         .join("hook-v2-profile-admissions")
         .join(binding.host.hook_key());
     let now = hook_now();
-    let outcome = with_hook_v2_admission_ledger(ledger_root, binding.host, now, |ledger| {
-        ledger.admit(&envelope, now)
-    });
+    let outcome = with_hook_v2_admission_ledger(None, ledger_root, binding.host, now, |ledger| {
+        ledger.stage_admission(&envelope, None, now)
+    })
+    .map(|staged| staged.and_then(|staged| staged.commit.wait().map(|()| staged.receipt.decision)));
     Ok(match outcome {
         Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)) => {
             HookV2ProfileAdmissionResultV1::Accepted {
