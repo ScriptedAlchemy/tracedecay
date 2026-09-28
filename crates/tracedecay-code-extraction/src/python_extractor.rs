@@ -7,6 +7,9 @@ use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::local_node_id;
 use crate::complexity::{PYTHON_COMPLEXITY, count_complexity};
+use crate::extraction_artifact::{
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportBindingV1, ImportNamespaceV1,
+};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
@@ -25,6 +28,7 @@ struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
+    imports: Vec<ExtractedImportEvidenceV1>,
     errors: Vec<String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
@@ -42,6 +46,7 @@ impl<'s> ExtractionState<'s> {
             nodes: Vec::new(),
             edges: Vec::new(),
             unresolved_refs: Vec::new(),
+            imports: Vec::new(),
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
@@ -85,7 +90,7 @@ impl PythonExtractor {
         source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
@@ -121,15 +126,113 @@ impl PythonExtractor {
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit_node(&mut state, child);
+            Self::collect_import_evidence(&mut state, child);
         });
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        let imports = std::mem::take(&mut state.imports);
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            ExtractionArtifactV1::with_imports(Self::build_result(state, start), imports),
             scope,
             metrics,
         )
+    }
+
+    /// Record the binding evidence of every import statement in `node`,
+    /// including imports nested in functions, classes, and `if`/`try`
+    /// blocks: each binds its names for the calls that follow it.
+    fn collect_import_evidence(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
+        match node.kind() {
+            "import_statement" => Self::import_statement_evidence(state, node),
+            "import_from_statement" => Self::import_from_evidence(state, node),
+            _ => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    Self::collect_import_evidence(state, child);
+                }
+            }
+        }
+    }
+
+    /// `import a.b` binds the dotted path `a.b`; `import a.b as c` binds `c`.
+    fn import_statement_evidence(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
+        let mut cursor = node.walk();
+        for child in node.children_by_field_name("name", &mut cursor) {
+            let (module, local) = match child.kind() {
+                "dotted_name" => {
+                    let module = state.node_text(child);
+                    (module, module)
+                }
+                "aliased_import" => {
+                    let (Some(name), Some(alias)) = (
+                        child.child_by_field_name("name"),
+                        child.child_by_field_name("alias"),
+                    ) else {
+                        continue;
+                    };
+                    (state.node_text(name), state.node_text(alias))
+                }
+                _ => continue,
+            };
+            Self::push_import(state, module, ImportBindingV1::Namespace { local }, child);
+        }
+    }
+
+    /// `from m import a, b as c` binds `a` and `c`; `from m import *` is a glob.
+    fn import_from_evidence(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
+        let Some(module) = node.child_by_field_name("module_name") else {
+            return;
+        };
+        let module = state.node_text(module);
+        if find_direct_child_by_kind(node, "wildcard_import").is_some() {
+            Self::push_import(state, module, ImportBindingV1::Glob, node);
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children_by_field_name("name", &mut cursor) {
+            let (imported, local) = match child.kind() {
+                "dotted_name" => {
+                    let name = state.node_text(child);
+                    (name, name)
+                }
+                "aliased_import" => {
+                    let (Some(name), Some(alias)) = (
+                        child.child_by_field_name("name"),
+                        child.child_by_field_name("alias"),
+                    ) else {
+                        continue;
+                    };
+                    (state.node_text(name), state.node_text(alias))
+                }
+                _ => continue,
+            };
+            Self::push_import(
+                state,
+                module,
+                ImportBindingV1::Named { imported, local },
+                child,
+            );
+        }
+    }
+
+    fn push_import(
+        state: &mut ExtractionState<'_>,
+        module: &str,
+        binding: ImportBindingV1<'_>,
+        evidence: TsNode<'_>,
+    ) {
+        match ExtractedImportEvidenceV1::private_binding(
+            &state.file_path,
+            "python",
+            module,
+            binding,
+            ImportNamespaceV1::Value,
+            evidence,
+        ) {
+            Ok(row) => state.imports.push(row),
+            Err(error) => state.errors.push(error),
+        }
     }
 
     /// Visit all children of a node.
@@ -900,8 +1003,6 @@ impl crate::LanguageExtractor for PythonExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(
-            PythonExtractor::extract_tree(file_path, source, tree, scope),
-        )
+        PythonExtractor::extract_tree(file_path, source, tree, scope)
     }
 }

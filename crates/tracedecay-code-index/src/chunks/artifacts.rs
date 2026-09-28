@@ -145,7 +145,8 @@ impl CodeIndexImportEvidenceV1 {
 /// Retained as typed evidence so generation sealing can resolve it against
 /// the whole generation's symbol set, where a cross-file target may live.
 /// Unqualified ubiquitous names are excluded. Rust receiver-dotted calls
-/// remain as limitation evidence even when their receiver type cannot bind.
+/// remain as limitation evidence even when their receiver type cannot bind,
+/// as do Python, Go, Java, and Ruby qualified calls the seal cannot bind.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct CodeIndexUnresolvedReferenceV1 {
