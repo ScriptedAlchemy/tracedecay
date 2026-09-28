@@ -5,7 +5,7 @@ import type {
   WorkProductMutationReceiptV1,
   WorkProductMutationRequestV1,
   WorkProductSelectionScopeV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
 import type { WorkResult } from './workApi.ts';

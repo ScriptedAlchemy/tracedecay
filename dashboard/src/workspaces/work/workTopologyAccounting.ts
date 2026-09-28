@@ -3,7 +3,7 @@ import type {
   ExecutionTopologyViewV1,
   WorkAttemptListV1,
   WorkAttemptTopologyBindingV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { WorkResult } from './workApi.ts';
 import { workAttemptReading } from './workAttemptModel.ts';
 import type { WorkGraphReading } from './workGraphModel.ts';

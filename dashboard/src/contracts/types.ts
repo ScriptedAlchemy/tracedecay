@@ -7361,4 +7361,3 @@ export type WorkWorkloadProjectionV1 = {
   running_effort: number | null;
   total_effort: number;
 };
-

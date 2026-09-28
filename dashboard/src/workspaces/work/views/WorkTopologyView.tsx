@@ -6,7 +6,7 @@ import type {
   WorkAttemptListV1,
   WorkPlacementV1,
   WorkTopologyPlacementLaneV1,
-} from '../../../contracts/index.ts';
+} from '../../../contracts/generated.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Panel } from '../../../ui/instrument.tsx';
 import type { WorkResult } from '../workApi.ts';

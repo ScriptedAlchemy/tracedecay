@@ -180,11 +180,6 @@ describe("contracts generator", () => {
     expect(generated).not.toContain("export const DoctorEffectReceiptSchema =");
   });
 
-  it("emits the live index that re-exports the generated contract", () => {
-    const { files } = generateContracts(bundles);
-    expect(files[OUTPUT_FILES.INDEX_FILE]!).toContain('export * from "./generated";');
-  });
-
   it("maps a synthetic tagged union without inventing variants", () => {
     const bundle: JsonSchema = {
       schemaRevision: "test.1",
@@ -264,6 +259,7 @@ describe("contracts generator", () => {
     const consumerPath = join(directory, "consumer.ts");
     try {
       writeFileSync(typesPath, files[OUTPUT_FILES.TYPES_FILE]!);
+      writeFileSync(join(directory, "generated.ts"), files[OUTPUT_FILES.GENERATED_FILE]!);
       // Production dashboard checks skip decoder expressions. This fixture
       // removes that skip so an annotation/initializer mismatch fails here.
       writeFileSync(
@@ -274,14 +270,6 @@ describe("contracts generator", () => {
 import { z } from "zod";
 import {
   assertNever,
-  type Choice,
-  type ClosedReading,
-  type Node,
-  type OpenReading,
-  type Result,
-  type Status,
-} from "./types.ts";
-import {
   ChoiceSchema,
   ClosedReadingSchema,
   DashboardDomainStateV1Schema,
@@ -289,7 +277,13 @@ import {
   OpenReadingSchema,
   ResultSchema,
   StatusSchema,
-} from "./decoders.ts";
+  type Choice,
+  type ClosedReading,
+  type Node,
+  type OpenReading,
+  type Result,
+  type Status,
+} from "./generated.ts";
 
 const catchInput: z.input<typeof DashboardDomainStateV1Schema> = 42;
 const valid: Node = { id: "root", label: null, child: { id: "leaf", label: "ok" } };
