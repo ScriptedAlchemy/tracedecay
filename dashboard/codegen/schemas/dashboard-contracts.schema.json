@@ -3887,15 +3887,24 @@
     },
     "CodeIndexBuildPhaseV1": {
       "description": "The durable build phase whose committed boundary the dashboard is reading.\n\nA phase is not inferred from scheduler state. The mounted registry publishes\nthe exact phase that owns the active generation.",
-      "enum": [
-        "source_scan",
-        "relational_preparation",
-        "bulk_commit",
-        "index_build",
-        "verification",
-        "ready"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "source_scan",
+            "relational_preparation",
+            "bulk_commit",
+            "index_build",
+            "verification",
+            "ready"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "graph_publication",
+          "description": "Text serving is built and the pass that sealed the generation is\nstill publishing its native graph.",
+          "type": "string"
+        }
+      ]
     },
     "CodeIndexBuildProgressV1": {
       "description": "The latest committed progress boundary for one active code-index generation.\n\nEvery count is scoped to `generation_id`. The snapshot never includes a\nstaged page: work is reported only after the batch that owns it commits.",
