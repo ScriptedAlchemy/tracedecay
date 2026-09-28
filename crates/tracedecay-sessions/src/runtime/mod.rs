@@ -5,6 +5,8 @@ pub use tracedecay_store::{SessionMessageRecord, SessionRecord};
 // Runtime modules are public because the root composition crate mounts these
 // concrete provider and storage authorities directly.
 pub mod git_correlation;
+mod host_coverage;
+pub use host_coverage::HostCoverageReason;
 mod host_scan;
 pub mod hosts;
 pub mod ingest;

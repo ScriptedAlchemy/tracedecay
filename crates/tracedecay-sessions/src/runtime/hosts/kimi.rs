@@ -836,7 +836,7 @@ mod tests {
     use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
     use crate::observation::ObservationCancellation;
     use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
-    use crate::runtime::source::{HostProviderCoverage, TranscriptDiscoveryBounds};
+    use crate::runtime::source::TranscriptDiscoveryBounds;
 
     use super::{KimiSource, capture_kimi_observations};
 
@@ -955,7 +955,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(coverage.file_id, HostProviderCoverage::Complete as u64);
+        assert_eq!(coverage.file_id, 1);
     }
 
     #[tokio::test]
