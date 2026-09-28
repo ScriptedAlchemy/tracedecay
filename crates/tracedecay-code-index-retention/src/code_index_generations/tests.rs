@@ -520,83 +520,11 @@ fn single_pass_sweep_accounting_is_linear_on_thousands_of_shared_artifact_entrie
     );
 }
 
-#[derive(Clone)]
-struct FixtureGeneration {
-    id: CodeGenerationId,
-    file: String,
-    state_digest: String,
-    size_bytes: u64,
-}
+type FixtureGeneration = super::fixture::GenerationStoreFixtureV1;
 
 fn fixture_store(count: usize) -> (tempfile::TempDir, Vec<FixtureGeneration>) {
     let store = tempfile::TempDir::new().expect("create generation store");
-    let generations_root = store.path().join(GENERATIONS_DIRECTORY);
-    std::fs::create_dir_all(&generations_root).expect("create generation directory");
-    let mut generations = Vec::with_capacity(count);
-
-    for sequence in 0..count {
-        let generation_id = CodeGenerationId::new(format!("generation.v1.fixture.{sequence:08}"))
-            .expect("valid generation id");
-        let sealed_at = i64::try_from(sequence).expect("fixture sequence fits i64");
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
-            "manifest": {
-                "generation_id": generation_id.as_str(),
-                "seal": { "sealed_at": sealed_at },
-            },
-            "chunks": [],
-        }))
-        .expect("serialize generation fixture");
-        let state_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
-        let file = format!(
-            "generation-{}.json",
-            sha256_hex_suffix(&state_digest).expect("digest prefix")
-        );
-        let size_bytes = u64::try_from(bytes.len()).expect("fixture size fits u64");
-        std::fs::write(generations_root.join(&file), bytes).expect("write generation fixture");
-        generations.push(FixtureGeneration {
-            id: generation_id,
-            file,
-            state_digest,
-            size_bytes,
-        });
-    }
-
-    let active = generations.last().expect("at least one generation");
-    let active_entry = DurableGenerationIndexEntryV1 {
-        generation_id: active.id.as_str().to_owned(),
-        snapshot_content_identity: "snapshot.fixture".to_owned(),
-        sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
-        size_bytes: active.size_bytes,
-        segment_bytes: 0,
-        generation_file: active.file.clone(),
-        state_digest: active.state_digest.clone(),
-        source_reference: None,
-        source_revision: None,
-        source_tree: None,
-        cardinality: None,
-        text_artifact: None,
-    };
-    let generation_index = vec![active_entry];
-    let generation_index_digest =
-        durable_generation_index_digest(&generation_index, true).expect("index digest");
-    let pointer = DurablePublicationPointerV1 {
-        generation_id: active.id.as_str().to_owned(),
-        snapshot_content_identity: "snapshot.fixture".to_owned(),
-        publication_digest: "sha256:publication".to_owned(),
-        sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
-        generation_file: active.file.clone(),
-        state_digest: active.state_digest.clone(),
-        generation_index,
-        generation_index_truncated: true,
-        generation_index_digest: Some(generation_index_digest),
-    };
-    std::fs::write(
-        store.path().join(ACTIVE_POINTER_FILE),
-        serde_json::to_vec(&pointer).expect("serialize active pointer"),
-    )
-    .expect("write active pointer");
-
+    let generations = super::fixture::write_generation_store_fixture(store.path(), count);
     (store, generations)
 }
 
@@ -1408,7 +1336,7 @@ fn pad_generation_file(
 }
 
 #[test]
-fn next_retention_plan_limits_collection_to_one_generation() {
+fn next_retention_plan_batches_every_collectable_generation() {
     let (store, _generations) = fixture_store(8);
 
     let plan = prepare_next_code_generation_retention_cancellable(
@@ -1417,18 +1345,262 @@ fn next_retention_plan_limits_collection_to_one_generation() {
         &|| false,
         None,
     )
-    .expect("plan one retention unit");
+    .expect("plan one retention batch");
 
-    assert_eq!(plan.collectable_generations.len(), 1);
+    assert_eq!(plan.collectable_generations.len(), 7);
     assert_eq!(plan.superseded_generations.len(), 7);
 }
 
-/// The bounded collection unit must name the OLDEST collectable generation.
+/// A superseded backlog drains in batch-count passes: one full digest
+/// verification per batch, never one per generation.
+#[test]
+fn superseded_backlog_drains_in_batch_count_passes() {
+    let (store, generations) = fixture_store(MAX_CODE_GENERATION_RETENTION_BATCH_V1 + 6);
+    let mut collected_per_pass = Vec::new();
+    loop {
+        let plan = prepare_next_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            &|| false,
+            None,
+        )
+        .expect("plan retention batch");
+        if !plan.has_collectable_work() {
+            break;
+        }
+        let report = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(20),
+            None,
+        )
+        .expect("apply retention batch");
+        collected_per_pass.push(report.deleted_generations.len());
+    }
+
+    assert_eq!(collected_per_pass, vec![32, 5]);
+    let remaining = std::fs::read_dir(store.path().join(GENERATIONS_DIRECTORY))
+        .expect("list generations")
+        .map(|entry| entry.expect("generation entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining,
+        vec![std::ffi::OsString::from(
+            &generations.last().expect("active generation").file
+        )],
+        "only the active generation survives the drained backlog"
+    );
+}
+
+/// A kill after part of a batch was quarantined leaves no half-collected
+/// batch: recovery restores every member and the durable index, and the next
+/// pass collects the whole batch again.
+#[test]
+fn a_batch_interrupted_mid_quarantine_recovers_whole_and_the_next_pass_converges() {
+    let (store, generations) = fixture_store(5);
+    let original = index_every_fixture_generation(&store, &generations);
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("plan retention batch");
+    assert_eq!(plan.collectable_generations.len(), 4);
+    let collected = plan.collectable_generations.clone();
+    let receipt =
+        build_receipt(&plan, collected.clone(), UtcMicros(30)).expect("build retention receipt");
+    let transaction = CodeGenerationRetentionTransactionV1 {
+        schema: TRANSACTION_SCHEMA.to_owned(),
+        active_pointer: Some(original.clone()),
+        receipt,
+    };
+    let rewritten = transaction
+        .rewritten_pointer()
+        .expect("rewrite the durable index")
+        .expect("the fixture index names the batch");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("journal the batch");
+    write_active_pointer(store.path(), RETENTION_POINTER_WRITE_CONTEXT, &rewritten)
+        .expect("publish the rewritten index");
+    // The kill lands after the second of four quarantine renames.
+    let mut partial = transaction.clone();
+    partial.receipt.deleted_generations.truncate(2);
+    stage_collectable_generations(store.path(), &partial).expect("quarantine half the batch");
+    let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+    let present = |batch: &[CodeGenerationRetentionGenerationV1]| {
+        batch
+            .iter()
+            .filter(|generation| generations_root.join(&generation.generation_file).is_file())
+            .count()
+    };
+    assert_eq!(present(&collected), 2);
+
+    let replanned = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("recover the interrupted batch and plan again");
+
+    assert_eq!(
+        present(&collected),
+        4,
+        "recovery restores every batch member"
+    );
+    assert_eq!(
+        read_active_pointer(store.path()).expect("read pointer"),
+        original,
+        "recovery restores the index entries the batch dropped"
+    );
+    assert!(!transaction_path(store.path()).exists());
+    assert_eq!(replanned.collectable_generations, collected);
+
+    let report = execute_code_generation_retention(
+        store.path(),
+        replanned,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(31),
+        None,
+    )
+    .expect("apply the replanned batch");
+    assert_eq!(report.deleted_generations.len(), 4);
+    assert_eq!(present(&collected), 0);
+    assert!(
+        !prepare_next_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            &|| false,
+            None,
+        )
+        .expect("plan the converged store")
+        .has_collectable_work()
+    );
+}
+
+fn receipt_count(store: &Path, directory: &str) -> usize {
+    match std::fs::read_dir(store.join(directory)) {
+        Ok(entries) => entries
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .expect("receipt entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("receipt-")
+            })
+            .count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("list receipts: {error}"),
+    }
+}
+
+/// A generation receipt is read by pending-journal recovery and by the queued
+/// graph-replay releases it names; once the graph has consumed every one of
+/// them, the next pass removes it.
+#[test]
+fn generation_receipt_is_pruned_once_the_release_queue_no_longer_names_it() {
+    let (store, _) = fixture_store(3);
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("plan retention");
+    execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(40),
+        None,
+    )
+    .expect("apply retention");
+    let releases = code_generation_graph_replay_release_page(store.path(), None)
+        .expect("read queued releases")
+        .releases;
+    assert_eq!(releases.len(), 2);
+    assert_eq!(receipt_count(store.path(), RECEIPTS_DIRECTORY), 1);
+
+    complete_code_generation_graph_replay_release(store.path(), &releases[0])
+        .expect("consume one release");
+    prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("pass with one release still queued");
+    assert_eq!(
+        receipt_count(store.path(), RECEIPTS_DIRECTORY),
+        1,
+        "a queued release still reads its receipt"
+    );
+
+    complete_code_generation_graph_replay_release(store.path(), &releases[1])
+        .expect("consume the last release");
+    prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("pass after the queue drained");
+    assert_eq!(receipt_count(store.path(), RECEIPTS_DIRECTORY), 0);
+}
+
+/// A text-artifact receipt is read only by recovery of its own journal, so a
+/// committed sweep's receipt is removed by the next pass.
+#[test]
+fn text_artifact_receipt_is_pruned_after_its_sweep_commits() {
+    let (store, generations) = fixture_store(1);
+    let active = generations.last().expect("active generation");
+    attach_fixture_text_artifact(&store, active, b"durably referenced");
+    let orphan = text_artifact_for_bytes(&active.id, b"unreferenced completed bytes");
+    let orphan_path = write_text_artifact(&store, &orphan, b"unreferenced completed bytes");
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("plan artifact retention");
+    execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(50),
+        None,
+    )
+    .expect("collect the orphan artifact");
+    assert!(!orphan_path.exists());
+    assert_eq!(
+        receipt_count(store.path(), TEXT_ARTIFACT_RECEIPTS_DIRECTORY),
+        1
+    );
+
+    prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("next pass");
+    assert_eq!(
+        receipt_count(store.path(), TEXT_ARTIFACT_RECEIPTS_DIRECTORY),
+        0
+    );
+}
+
+/// The bounded collection batch must start at the OLDEST collectable
+/// generation.
 ///
 /// Planning newest-first meant a store that publishes at least as fast as
-/// maintenance collects never reclaimed its floor: every single-unit plan
-/// named the generation sealed a moment ago, and the first generation ever
-/// sealed stayed on disk forever.
+/// maintenance collects never reclaimed its floor: every bounded plan named
+/// the generation sealed a moment ago, and the first generation ever sealed
+/// stayed on disk forever.
 #[test]
 fn next_retention_plan_collects_the_oldest_superseded_generation_first() {
     let (store, generations) = fixture_store(5);
@@ -1439,15 +1611,18 @@ fn next_retention_plan_collects_the_oldest_superseded_generation_first() {
         &|| false,
         None,
     )
-    .expect("plan one retention unit");
+    .expect("plan one retention batch");
 
     assert_eq!(
         plan.collectable_generations
             .iter()
             .map(|generation| generation.generation_id.clone())
             .collect::<Vec<_>>(),
-        vec![generations[0].id.clone()],
-        "the bounded unit must reclaim the oldest superseded generation"
+        generations[..4]
+            .iter()
+            .map(|generation| generation.id.clone())
+            .collect::<Vec<_>>(),
+        "the batch reclaims oldest first"
     );
 }
 
@@ -1681,10 +1856,10 @@ fn collectable_maintenance_preparation_escalates_to_full_verification() {
         &|| false,
         None,
     )
-    .expect("prepare collectable retention unit");
+    .expect("prepare collectable retention batch");
 
     assert!(plan.has_collectable_work());
-    assert_eq!(plan.collectable_generations.len(), 1);
+    assert_eq!(plan.collectable_generations.len(), 7);
     assert_eq!(plan.verification, GenerationDigestVerificationV1::Full);
 }
 
@@ -1709,7 +1884,7 @@ fn cancellable_maintenance_preparation_stops_during_generation_verification() {
 }
 
 #[test]
-fn executing_a_prevalidated_unit_collects_only_that_generation() {
+fn executing_a_prevalidated_batch_collects_exactly_its_generations() {
     let (store, _generations) = fixture_store(8);
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
@@ -1717,7 +1892,7 @@ fn executing_a_prevalidated_unit_collects_only_that_generation() {
         &|| false,
         None,
     )
-    .expect("plan one retention unit");
+    .expect("plan one retention batch");
 
     let report = execute_code_generation_retention(
         store.path(),
@@ -1726,14 +1901,14 @@ fn executing_a_prevalidated_unit_collects_only_that_generation() {
         UtcMicros(99),
         None,
     )
-    .expect("execute one retention unit");
+    .expect("execute one retention batch");
 
-    assert_eq!(report.deleted_generations.len(), 1);
+    assert_eq!(report.deleted_generations.len(), 7);
     assert_eq!(
         std::fs::read_dir(store.path().join(GENERATIONS_DIRECTORY))
             .expect("generation directory")
             .count(),
-        7
+        1
     );
 }
 

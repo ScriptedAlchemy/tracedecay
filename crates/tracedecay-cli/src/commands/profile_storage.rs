@@ -403,7 +403,7 @@ async fn handle_storage_report(
                     &profile_root,
                     project_id,
                     project_root,
-                    None,
+                    Err(tracedecay_maintenance::retention::storage_report::RETENTION_PROTECTION_UNRESOLVED),
                 )
             }
             (None, None) => {
@@ -463,6 +463,23 @@ async fn handle_storage_report(
             store.canonical_root,
             format_bytes(store.total_bytes),
         );
+        let kinds = &store.kinds;
+        for (family, bytes) in [
+            ("graph database", kinds.graph_database),
+            ("sealed graph", kinds.sealed_graph),
+            ("text artifacts", kinds.text_artifacts),
+            ("generation artifacts", kinds.generation_artifacts),
+            ("sessions", kinds.sessions),
+            ("other", kinds.other),
+        ] {
+            println!("      {family}: {}", format_bytes(bytes));
+        }
+        if store.unavailable_entry_count > 0 {
+            println!(
+                "      not sized: {} unreadable or non-regular entries",
+                store.unavailable_entry_count
+            );
+        }
     }
     for retention in &report.code_generation_retention {
         println!(
