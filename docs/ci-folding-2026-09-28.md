@@ -92,9 +92,9 @@ additional service needs installing.
 
 Manual dispatch retains the optional OS, host, profiling and full-workspace
 inputs. The trusted close workflow shares the PR's CI concurrency group,
-so GitHub cancels its CI before allocating the cache-cleanup runner. GitHub
-removes run-to-PR associations after merging, so the run-list API cannot own
-this cancellation. Cleanup checks that the PR remains closed and that the
+so GitHub cancels its CI before allocating the cache-cleanup runner. Merged
+runs can return empty PR associations, making API-based identification
+unreliable. Cleanup checks that the PR remains closed and that the
 event still names its current closure before deleting merge-ref caches.
 Manual dispatches remain under the operator's control.
 
