@@ -533,10 +533,12 @@ pub fn unavailable_daemon_socket_advice(
                 "TraceDecay daemon unit is installed but socket '{}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
                 socket_path.display()
             ),
-            Ok(false) | Err(_) => {
+            Ok(false) => {
                 "No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
                     .to_string()
             }
+            Err(_) => "This client cannot see whether a managed TraceDecay daemon service is installed. Check `tracedecay daemon status` before starting or installing a daemon."
+                .to_string(),
         },
     }
 }
