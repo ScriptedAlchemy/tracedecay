@@ -490,6 +490,7 @@ fn additional_reservations_share_identity_but_charge_and_release_independently()
                 Some(ProcessResidentSampleV1 {
                     resident_bytes: 0,
                     unreclaimable_bytes: 0,
+                    cgroup_committed_bytes: None,
                 })
             }),
         )),
@@ -1141,11 +1142,69 @@ fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
         Some(super::ProcessResidentSampleV1 {
             resident_bytes: 3_355_444 * 1024,
             unreclaimable_bytes: 2_548_172 * 1024,
+            cgroup_committed_bytes: None,
         })
     );
     assert_eq!(
         super::process_resident_sample_from_status_v1("VmRSS:\t 1024 kB\n"),
         None,
         "a kernel without split RSS counters is unobserved, not zero"
+    );
+}
+
+#[test]
+fn cgroup_committed_bytes_refuse_growth_that_unreclaimable_bytes_would_admit() {
+    let limit_bytes = 100 * 1024 * 1024;
+    let limit = bytes(limit_bytes);
+    let decide = |memory_max: &str, inactive_file: u64| {
+        let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+            Some("0::/trace.slice/daemon.scope\n"),
+            Some(memory_max),
+            None,
+        );
+        let cgroup = cgroup_root.join("trace.slice/daemon.scope");
+        fs::write(cgroup.join("memory.current"), format!("{limit_bytes}\n")).expect("current");
+        fs::write(
+            cgroup.join("memory.stat"),
+            format!("inactive_file {inactive_file}\n"),
+        )
+        .expect("stat");
+        let committed = super::cgroup_committed_bytes_v1(&proc_self_cgroup, &cgroup_root);
+        let sample = Arc::new(Mutex::new(super::ProcessResidentSampleV1 {
+            resident_bytes: 10,
+            unreclaimable_bytes: 10,
+            cgroup_committed_bytes: committed,
+        }));
+        let sampled = Arc::clone(&sample);
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(move || Some(*sampled.lock().expect("sample"))),
+        ));
+        pressure.sample_and_publish();
+        Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure)).reserve(
+            key(
+                "project-a",
+                "worktree-a",
+                "generation-a",
+                "sealed-graph-build",
+            ),
+            bytes(16 * 1024 * 1024),
+        )
+    };
+
+    assert!(
+        matches!(
+            decide(&format!("{limit_bytes}\n"), 0),
+            Err(ResidentMemoryAdmissionFailureV1::ObservedOverBudget { .. })
+        ),
+        "committed bytes at a finite memory.max refuse growth while anonymous bytes are small"
+    );
+    assert!(
+        decide(&format!("{limit_bytes}\n"), limit_bytes).is_ok(),
+        "inactive file cache is not a reason to refuse the same growth"
+    );
+    assert!(
+        decide("max\n", 0).is_ok(),
+        "an unlimited cgroup does not treat memory.current as a kill line"
     );
 }

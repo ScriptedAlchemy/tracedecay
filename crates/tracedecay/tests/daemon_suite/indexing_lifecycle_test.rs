@@ -142,6 +142,27 @@ fn write_cancellation_batch(project: &Path, scratch: &Path) {
         .expect("atomically install cancellation batch");
 }
 
+/// A multi-file corpus large enough that replaying every file through
+/// `bulk_commit` stays visible to a status poll. The file count is not an
+/// expected result; the restart assertion compares against whatever bound the
+/// ready index actually published.
+fn write_restart_resume_corpus(project: &Path) {
+    let root = project.join("src/resume_corpus");
+    fs::create_dir_all(&root).expect("resume corpus directory");
+    for file_index in 0..96_u32 {
+        let mut source = String::new();
+        for symbol_index in 0..8_u32 {
+            writeln!(
+                source,
+                "pub fn resume_anchor_{file_index:04}_{symbol_index:03}(input: u32) -> u32 {{ input + {symbol_index} }}"
+            )
+            .expect("format resume source");
+        }
+        fs::write(root.join(format!("file_{file_index:04}.rs")), source)
+            .expect("write resume source");
+    }
+}
+
 async fn wait_for_refreshing_old_generation(
     socket: &Path,
     handshake: &DaemonHandshake,
@@ -926,4 +947,159 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         exit.success(),
         "restarted daemon did not stop cleanly: {exit}"
     );
+}
+
+#[tokio::test]
+async fn restart_after_sigterm_rebuilds_only_changed_files() {
+    let (environment, project) = IsolatedHome::new();
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
+    initialize_repository(&project);
+    write_restart_resume_corpus(&project);
+    let revision = commit_all(&project, "resume corpus");
+    let socket = daemon_socket_path(environment.home());
+    let log_path = environment.scratch().join("restart-resume-daemon.log");
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
+    let project_id = initialize_tracedecay(environment.home(), &project);
+    let identity = exact_identity(&project, project_id);
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
+
+    let indexed = wait_for_terminal_generation(
+        &socket,
+        &handshake,
+        &project,
+        &identity,
+        "refs/heads/main",
+        Some(&revision),
+        None,
+        "resume_anchor_0001_000",
+        Some("src/resume_corpus/file_0001.rs"),
+    )
+    .await;
+    let retained_files =
+        indexed.status["code_index_freshness"]["worktree"]["progress"]["total_files"]
+            .as_u64()
+            .expect("a ready index publishes the file bound it built");
+    assert!(
+        retained_files > 1,
+        "restart replay is only observable when the retained corpus has more than one file: {}",
+        indexed.status
+    );
+
+    let edited = project.join("src/resume_corpus/file_0000.rs");
+    let mut source = fs::read_to_string(&edited).expect("read corpus file");
+    source.push_str("pub fn restart_resume_probe() -> u32 { 7 }\n");
+    fs::write(&edited, source).expect("edit one corpus file");
+    deliver_save(
+        environment.profile(),
+        &project,
+        &["src/resume_corpus/file_0000.rs"],
+    )
+    .await;
+    // The serving generation is still the committed corpus. A dirty edit does
+    // not rewrite that generation's source revision until the successor seals.
+    let _refreshing = wait_for_refreshing_old_generation(
+        &socket,
+        &handshake,
+        &project,
+        &identity,
+        "refs/heads/main",
+        Some(&revision),
+        &indexed.generation_id,
+    )
+    .await;
+
+    let signal_result = unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "send graceful cancellation to daemon");
+    let exit = daemon
+        .wait_for_exit(RECEIPT_TIMEOUT)
+        .expect("wait for cancelled daemon")
+        .expect("daemon must exit after SIGTERM");
+    assert!(
+        exit.success(),
+        "daemon cancellation was not graceful: {exit}"
+    );
+
+    daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
+    let mut last = Value::Null;
+    let mut replayed_retained_corpus = false;
+    let mut successor_text_files = std::collections::BTreeSet::new();
+    tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            last = status(&socket, &handshake).await;
+            let progress = &last["code_index_freshness"]["worktree"]["progress"];
+            let same_corpus = progress["total_files"].as_u64() == Some(retained_files);
+            let unfinished = progress["completed_files"]
+                .as_u64()
+                .is_some_and(|completed| completed < retained_files);
+            let successor = progress["generation_id"]
+                .as_str()
+                .is_some_and(|generation| generation != indexed.generation_id);
+            if progress["phase"] == "bulk_commit" && successor && same_corpus && unfinished {
+                replayed_retained_corpus = true;
+            }
+            // A source scan reports a zero bound before the text build knows
+            // its files.
+            if successor
+                && let Some(total) = progress["total_files"].as_u64().filter(|total| *total > 0)
+            {
+                successor_text_files.insert(total);
+            }
+            let worktree = &last["code_index_freshness"]["worktree"];
+            if last["code_index_freshness"]["status"] == "current"
+                && worktree["latest_generation_id"]
+                    .as_str()
+                    .is_some_and(|generation| generation != indexed.generation_id)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "restart never became current on a new generation: {last}; daemon_log={}",
+            daemon_log_for_failure()
+        )
+    });
+    assert!(
+        !replayed_retained_corpus,
+        "restart bulk-committed the retained corpus instead of the changed file: {last}"
+    );
+    assert_eq!(
+        successor_text_files,
+        std::collections::BTreeSet::from([1]),
+        "every progress report of the restarted text build must name only the edited file \
+         (the retained corpus has {retained_files}): {last}"
+    );
+
+    let changed = search(&socket, &handshake, "restart_resume_probe").await;
+    assert_eq!(
+        changed["code_generation"].as_str(),
+        last["code_index_freshness"]["worktree"]["latest_generation_id"].as_str(),
+        "edited symbol was not served from the restarted generation: {changed}"
+    );
+    assert!(
+        result_paths(&changed).contains(&"src/resume_corpus/file_0000.rs"),
+        "edited symbol was not found in the changed file: {changed}"
+    );
+    let unchanged = search(&socket, &handshake, "resume_anchor_0001_000").await;
+    assert!(
+        result_paths(&unchanged).contains(&"src/resume_corpus/file_0001.rs"),
+        "unchanged file stopped being searchable after restart: {unchanged}"
+    );
+    let phrase = search(&socket, &handshake, "fn resume_anchor_0001_000").await;
+    assert!(
+        result_paths(&phrase).contains(&"src/resume_corpus/file_0001.rs"),
+        "unchanged file dropped out of phrase search after restart: {phrase}"
+    );
+    stop_daemon_gracefully(&mut daemon);
 }
