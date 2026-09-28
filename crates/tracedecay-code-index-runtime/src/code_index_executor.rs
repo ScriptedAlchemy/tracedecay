@@ -693,13 +693,15 @@ where
                 if exact_source_bound {
                     let authority_mounted = || async {
                         schedulers.query_authority_for_scope(&scope).await.is_some()
-                            || schedulers
-                                .mount_query_authority_from_project_peer(
-                                    &request.project_root,
-                                    &scope,
-                                )
-                                .await
-                                .is_ok()
+                            || matches!(
+                                schedulers
+                                    .mount_query_authority_from_project_peer(
+                                        &request.project_root,
+                                        &scope,
+                                    )
+                                    .await,
+                                Ok(true)
+                            )
                     };
                     match bounded_by_settlement(
                         request.deadline.as_ref(),
