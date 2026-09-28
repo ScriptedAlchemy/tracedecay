@@ -3,26 +3,11 @@ use tracedecay_domain::{
 };
 
 use tracedecay_privacy::{
-    CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, CodeSourceShapeV1,
+    CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, declared_code_source_shape,
     sanitize_code_source_bytes, verify_sanitized_json_payload,
 };
 
 use super::CodeIndexSchedulerErrorV1;
-
-/// The sanitizer shape a captured file's registry-declared language implies.
-///
-/// Only declared structured data formats get whole-document field semantics
-/// (and the fail-closed quarantine of an ambiguous parse). Everything else in
-/// the language registry is code or prose and takes the bounded raw
-/// credential scan: sniffing the shape out of the bytes misread markdown
-/// frontmatter and shell assignments as malformed structured documents and
-/// withheld hundreds of ordinary sources from indexing.
-pub fn declared_code_source_shape(language: &LanguageId) -> CodeSourceShapeV1 {
-    match language.as_str() {
-        "json" | "toml" | "yaml" => CodeSourceShapeV1::StructuredData,
-        _ => CodeSourceShapeV1::CodeOrProse,
-    }
-}
 
 pub fn sanitize_code_file(
     language: &LanguageId,
