@@ -265,6 +265,7 @@ mod tests {
                 Some(ProcessResidentSampleV1 {
                     resident_bytes: bytes,
                     unreclaimable_bytes: bytes,
+                    swapped_bytes: 0,
                     cgroup_committed_bytes: None,
                 })
             }),
