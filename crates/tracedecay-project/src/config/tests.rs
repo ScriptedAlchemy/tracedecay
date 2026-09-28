@@ -456,8 +456,8 @@ mod runtime_configuration_cutover {
         .await
         .expect("open runtime configuration")
         .into_parts();
-        let (runtime, startup) = ProjectConfigurationRuntime::open(opened, profile.path())
-            .expect("open project configuration runtime");
+        let (runtime, startup) =
+            ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
         let mutation = DirectConfigurationMutation::Set {
             layer: ConfigurationLayerIdV1::Project {
                 project_id: project_id.clone(),
@@ -546,8 +546,8 @@ mod runtime_configuration_cutover {
         .await
         .expect("open runtime configuration")
         .into_parts();
-        let (runtime, startup) = ProjectConfigurationRuntime::open(opened, profile.path())
-            .expect("open project configuration runtime");
+        let (runtime, startup) =
+            ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
         assert!(!config.diagnostics_prewarm);
         assert_eq!(config.max_file_size, startup.config().max_file_size);
 

@@ -952,6 +952,10 @@ Disable it again at any time:
 tracedecay disable-upload-counter
 ```
 
+The setting belongs to your profile, not to a project: it applies everywhere
+and can be changed or read (`tracedecay tool configuration_get --args
+'{"key":"user.upload_enabled.v1"}'`) from any directory.
+
 ### Version check
 
 TraceDecay checks GitHub release endpoints to show an upgrade notice. GitHub

@@ -331,39 +331,6 @@ fn a_mounting_project_runtime_is_the_typed_mounting_state() {
         super::canonical_daemon_doctor_report(&status).unwrap(),
         super::CanonicalDoctorReport::Mounting
     );
-    let refusal = |problem| {
-        tracedecay_contracts::ApplicationProblemEnvelope::new(
-            tracedecay_contracts::ResultContractRef::new(
-                tracedecay_tool_catalog::SchemaId::new("schema.doctor.configuration").unwrap(),
-                1,
-            )
-            .unwrap(),
-            tracedecay_contracts::RequestId::new("request.doctor.configuration").unwrap(),
-            problem,
-        )
-        .unwrap()
-        .problem
-    };
-    assert_eq!(
-        super::upload_setting_refusal(&refusal(
-            tracedecay_contracts::ApplicationProblem::runtime_mounting()
-        ))
-        .unwrap(),
-        super::UploadSetting::Mounting
-    );
-    let unavailable = tracedecay_contracts::ApplicationProblem::unavailable(
-        tracedecay_contracts::SafeDiagnostic::new(
-            "application.configuration.unavailable",
-            "The configuration store is unavailable",
-        )
-        .unwrap(),
-    );
-    assert_eq!(
-        super::upload_setting_refusal(&refusal(unavailable))
-            .unwrap_err()
-            .to_string(),
-        "config error: application.configuration.unavailable: The configuration store is unavailable"
-    );
 }
 
 #[test]

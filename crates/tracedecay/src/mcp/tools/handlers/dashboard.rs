@@ -891,6 +891,7 @@ pub(super) async fn compute_dashboard(
             let retained_cg = Arc::new(crate::dashboard::dashboard_project_context(
                 &retained_graph,
                 daemon_profile.as_ref(),
+                retained_server.profile_session_db(),
             )?);
             let dashboard_project_graph_resolver = retained_project_server_resolver
                 .clone()
