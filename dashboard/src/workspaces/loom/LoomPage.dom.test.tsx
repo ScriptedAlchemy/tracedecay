@@ -303,6 +303,7 @@ const TEMPORAL = {
         source: 'transcript',
       },
     ],
+    events: [] as Record<string, unknown>[],
     temporal_refresh: {
       state: 'ready',
       active_generations: 1,
@@ -677,6 +678,61 @@ describe('LoomPage', () => {
     // The commit still exists in the exact evidence once its session is opened.
     await userEvent.click(screen.getByRole('button', { name: 'Select session Deliver Git primitive runtime' }));
     expect(await screen.findByText('abc123def456')).toBeTruthy();
+  });
+
+  it('draws recorded tool calls and pull requests on every lane at their recorded time', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.events = [
+      { provider: 'claude', session_id: 'sess-closed', kind: 'tool_call', message_id: 'c-bash', ordinal: 4, recorded_at: NOW - 10_000, label: 'Bash' },
+      { provider: 'cursor', session_id: 'sess-open', kind: 'tool_call', message_id: 'm1', ordinal: 1, recorded_at: NOW - 6_500, label: 'Read', tool_use_id: 'toolu_read' },
+      { provider: 'cursor', session_id: 'sess-open', kind: 'pull_request', message_id: 'o-pr', ordinal: 9, recorded_at: NOW - 5_500, label: 'https://github.com/acme/app/pull/7' },
+    ];
+    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal }, '/api/plugins/hermes-lcm/session/': { status: 200, body: readyEnvelope(CHAIN) } });
+    const user = userEvent.setup();
+    await screen.findByRole('button', { name: 'Select session Deliver Git primitive runtime' });
+    const lane = LANE('cursor', 'sess-open').replace(/"/g, '\\"');
+    // No session is selected, and the recorded stream still sits on both lanes.
+    expect(document.querySelectorAll('[data-event][data-kind="tool_call"]')).toHaveLength(2);
+    expect(document.querySelector(`[data-event="msg:${LANE('claude', 'sess-closed').replace(/"/g, '\\"')}:c-bash"]`)).not.toBeNull();
+    expect(document.querySelectorAll(`[data-event="msg:${lane}:o-pr"][data-kind="pull_request"]`)).toHaveLength(1);
+    expect(screen.getByRole('checkbox', { name: 'Show pull request events' })).toBeTruthy();
+
+    // The selected transcript carries m1 undated; the recorded stream owns it,
+    // so it is drawn once, at its recorded time.
+    await user.click(screen.getByRole('button', { name: 'Select session Deliver Git primitive runtime' }));
+    await screen.findByText('stored ordinal 2');
+    const m1 = document.querySelectorAll(`[data-event="msg:${lane}:m1"]`);
+    expect(m1).toHaveLength(1);
+    expect(m1[0]!.getAttribute('data-x-basis')).toBe('time');
+    expect(document.querySelector(`[data-event="msg:${lane}:m2"]`)!.getAttribute('data-x-basis')).toBe('sequence');
+  });
+
+  it('states that no recorded test-run authority is bound to a session', async () => {
+    const reason = 'daemon-managed test runs carry no session attribution';
+    const testRuns = {
+      id: 'session_test',
+      label: 'Session → test run',
+      state: 'unsupported',
+      authority: null,
+      granularity: 'recorded test outcome',
+      providers: [],
+      item_count: null,
+      reason,
+      required_authority: 'a session-attributed test-run recording authority',
+      coverage: { completeness: 'unknown', eligible: null, examined: null, matched: null, omitted: null, unit: null, reason },
+    };
+    const temporal = {
+      ...TEMPORAL,
+      payload: { ...TEMPORAL.payload, source_statuses: [...TEMPORAL.payload.source_statuses, testRuns] },
+    };
+    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } });
+    await screen.findByRole('button', { name: 'Select session Deliver Git primitive runtime' });
+    expect(screen.getByText('Session → test run')).toBeTruthy();
+    expect(
+      screen.getByText(
+        '· requires a session-attributed test-run recording authority · daemon-managed test runs carry no session attribution',
+      ),
+    ).toBeTruthy();
   });
 
   it('uses the Loom temporal read for recorded ends and causal relations', async () => {

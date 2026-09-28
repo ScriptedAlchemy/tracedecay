@@ -30,9 +30,9 @@ import type { WorkDagReading } from './workViewsModel.ts';
  * proposal is not an admitted execution, and a command that the daemon has
  * not prepared is not a command.
  *
- * Every row names its grade. Fields the concept plate pictures but no Work
- * authority publishes, priority, an owner field, are printed as the typed
- * absences they are rather than filled from a neighbouring field.
+ * Every row names its grade. An owner the concept plate pictures but no Work
+ * authority publishes is printed as the typed absence it is rather than
+ * filled from a neighbouring field.
  */
 
 export function WorkInspector({
@@ -211,9 +211,6 @@ function SelectedTask({
             {task.effort}
           </span>{' '}
           <span className="text-text-muted">declared effort · an integer, not a duration</span>
-        </Row>
-        <Row term="priority" grade="unavailable" source="GRAPH" muted>
-          the Work graph declares no priority field for a task
         </Row>
         {actors.length === 0 ? (
           <Row term="owners" grade="unavailable" source="GRAPH" muted>

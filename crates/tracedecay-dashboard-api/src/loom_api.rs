@@ -1,8 +1,9 @@
 //! Authorized Loom temporal projection over the retained project session store.
 //!
 //! The endpoint composes existing authorities; it does not collect new data.
-//! `sessions`/`lcm_raw_messages` provide thread bounds and
-//! `sessions.metadata_json` provides provider-native edited-file rollups. Git
+//! `sessions`/`lcm_raw_messages` provide thread bounds and the page's recorded
+//! tool-call and pull-request events, and `sessions.metadata_json` provides
+//! provider-native edited-file rollups. Git
 //! correlation is read through [`DashboardGitCorrelationReadPortV1`], the
 //! daemon-owned typed read over the session Git evidence rows; a state composed without that authority reports the git
 //! sources unavailable instead of inferring relationships from session rows.
@@ -132,6 +133,54 @@ const PAGE_EDITED_FILES_SQL: &str = "
     ) AS file
     WHERE json_type(file.value, '$.path') = 'text'
     ORDER BY s.provider, s.session_id, path";
+
+/// Recorded events per page kind: every row, and the rows whose host recorded
+/// a timestamp. Undated rows are counted, never placed. `git_pull_request` and
+/// `pr_link` are the stored kinds of a host-recorded pull-request link (Claude
+/// `pr-link` records, Cursor composer PR links); any other row naming a tool
+/// is a recorded tool call.
+const PAGE_EVENT_COUNTS_SQL: &str = "
+    SELECT CASE WHEN m.kind IN ('git_pull_request', 'pr_link')
+                THEN 'pull_request' ELSE 'tool_call' END AS event_kind,
+           COUNT(*) AS recorded,
+           COUNT(m.timestamp) AS dated
+    FROM json_each(?1) page
+    CROSS JOIN sessions s ON s.rowid = page.value
+    CROSS JOIN lcm_raw_messages m ON m.provider = s.provider AND m.session_id = s.session_id
+    WHERE m.kind IN ('git_pull_request', 'pr_link')
+       OR (m.tool_names IS NOT NULL AND TRIM(m.tool_names) != '')
+    GROUP BY event_kind";
+
+/// The newest `?2` dated events of the page, served oldest first. Only the
+/// row identity rides the sort; content and metadata are read for the kept
+/// rows alone.
+const PAGE_EVENTS_SQL: &str = "
+    WITH kept AS (
+        SELECT m.store_id
+        FROM json_each(?1) page
+        CROSS JOIN sessions s ON s.rowid = page.value
+        CROSS JOIN lcm_raw_messages m ON m.provider = s.provider AND m.session_id = s.session_id
+        WHERE m.timestamp IS NOT NULL
+          AND (m.kind IN ('git_pull_request', 'pr_link')
+               OR (m.tool_names IS NOT NULL AND TRIM(m.tool_names) != ''))
+        ORDER BY m.timestamp DESC, m.provider DESC, m.session_id DESC, m.ordinal DESC,
+                 m.message_id DESC
+        LIMIT ?2
+    )
+    SELECT m.provider, m.session_id, m.message_id, m.ordinal, m.timestamp AS recorded_at,
+           CASE WHEN m.kind IN ('git_pull_request', 'pr_link') THEN 1 ELSE 0 END
+               AS is_pull_request,
+           m.tool_names,
+           CASE WHEN m.kind IN ('git_pull_request', 'pr_link') THEN m.content END
+               AS pull_request_content,
+           CASE WHEN json_valid(m.metadata_json)
+                THEN json_extract(m.metadata_json, '$.tool_use_id') END AS tool_use_id
+    FROM kept
+    JOIN lcm_raw_messages m ON m.store_id = kept.store_id
+    ORDER BY m.timestamp, m.provider, m.session_id, m.ordinal, m.message_id";
+
+/// Newest recorded events one page serves; older ones are counted as omitted.
+const EVENT_LIMIT: i64 = 2_000;
 
 const PAGE_GENERATIONS_SQL: &str = "
     SELECT COUNT(*) AS active_generations, MAX(generation.activated_at) AS latest_activated_at
@@ -289,6 +338,37 @@ struct LoomBranchSpanV1 {
     source: String,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum LoomEventKindV1 {
+    ToolCall,
+    PullRequest,
+}
+
+/// One event a host transcript recorded for a displayed session.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+struct LoomEventV1 {
+    provider: String,
+    session_id: String,
+    kind: LoomEventKindV1,
+    /// The stored message that recorded the event, the id the session's
+    /// transcript page serves for the same row.
+    message_id: String,
+    /// Position in the session's recorded order.
+    ordinal: i64,
+    /// Epoch seconds the host recorded for the event. A row the host recorded
+    /// without one is not served; the source status counts it.
+    recorded_at: i64,
+    /// Tool names for a tool call; the recorded link or number for a pull
+    /// request. Absent when the row carries neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    /// The host's own identifier of the tool invocation, the value a child
+    /// session's `parent_tool_use_id` names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_use_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(super) struct LoomTemporalPayloadV1 {
     available: bool,
@@ -298,6 +378,8 @@ pub(super) struct LoomTemporalPayloadV1 {
     commits: Vec<LoomCommitV1>,
     edited_files: Vec<LoomEditedFileV1>,
     branch_spans: Vec<LoomBranchSpanV1>,
+    /// Recorded tool-call and pull-request events, oldest first.
+    events: Vec<LoomEventV1>,
     temporal_refresh: LoomTemporalRefreshV1,
 }
 
@@ -535,6 +617,8 @@ async fn read_temporal(
     }
 
     let edited_files = query_rows(conn, PAGE_EDITED_FILES_SQL, params![page.as_str()]).await?;
+    let event_counts = query_rows(conn, PAGE_EVENT_COUNTS_SQL, params![page.as_str()]).await?;
+    let event_rows = query_rows(conn, PAGE_EVENTS_SQL, params![page.as_str(), EVENT_LIMIT]).await?;
     let generation_rows = query_rows(conn, PAGE_GENERATIONS_SQL, params![page.as_str()]).await?;
     let generation = generation_rows
         .first()
@@ -558,9 +642,17 @@ async fn read_temporal(
     let git = resolve_git_sources(git_correlation, &page_keys, examined_sessions)
         .map_err(LoomReadFailureV1::Failed)?;
     let spawn_calls = spawn_call_status(&sessions)?;
+    let events = event_rows
+        .iter()
+        .map(loom_event)
+        .collect::<Result<Vec<_>, _>>()?;
+    let (tool_status, pull_request_status) = event_statuses(&event_counts, &events)?;
 
     let statuses = vec![
         spawn_calls,
+        tool_status,
+        pull_request_status,
+        test_run_status(),
         git.session_commit,
         source_status(SourceStatusInput {
             id: "session_file",
@@ -605,6 +697,7 @@ async fn read_temporal(
             commits: git.commits,
             edited_files: decode_rows(edited_files, "Loom edited files")?,
             branch_spans: git.branch_spans,
+            events,
             temporal_refresh: LoomTemporalRefreshV1 {
                 state: refresh_state,
                 active_generations,
@@ -679,6 +772,167 @@ fn spawn_call_status(sessions: &[Value]) -> Result<LoomSourceStatusV1, LoomReadF
             reason,
         },
     })
+}
+
+fn loom_event(row: &Value) -> Result<LoomEventV1, LoomReadFailureV1> {
+    let optional = |field: &str| {
+        row.get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let (kind, label) = if required_i64(row, "is_pull_request")? != 0 {
+        (
+            LoomEventKindV1::PullRequest,
+            optional("pull_request_content").and_then(pull_request_label),
+        )
+    } else {
+        (
+            LoomEventKindV1::ToolCall,
+            optional("tool_names").map(str::to_owned),
+        )
+    };
+    Ok(LoomEventV1 {
+        provider: required_str(row, "provider")?.to_owned(),
+        session_id: required_str(row, "session_id")?.to_owned(),
+        kind,
+        message_id: required_str(row, "message_id")?.to_owned(),
+        ordinal: required_i64(row, "ordinal")?,
+        recorded_at: required_i64(row, "recorded_at")?,
+        label,
+        tool_use_id: optional("tool_use_id").map(str::to_owned),
+    })
+}
+
+/// The printable reference of a stored pull-request link: the native record's
+/// URL or number, or the stored text itself when it is not a record.
+fn pull_request_label(content: &str) -> Option<String> {
+    match serde_json::from_str::<Value>(content) {
+        Ok(Value::Object(record)) => {
+            ["prUrl", "url", "prNumber"]
+                .iter()
+                .find_map(|key| match record.get(*key) {
+                    Some(Value::String(text)) if !text.trim().is_empty() => {
+                        Some(text.trim().to_owned())
+                    }
+                    Some(Value::Number(number)) => Some(number.to_string()),
+                    _ => None,
+                })
+        }
+        _ => Some(content.to_owned()),
+    }
+}
+
+/// Coverage of the served tool-call and pull-request events: every recorded
+/// row is eligible, and the ones not served are named as undated or beyond
+/// the page's event bound.
+fn event_statuses(
+    counts: &[Value],
+    events: &[LoomEventV1],
+) -> Result<(LoomSourceStatusV1, LoomSourceStatusV1), LoomReadFailureV1> {
+    let mut recorded: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+    for row in counts {
+        recorded.insert(
+            required_str(row, "event_kind")?,
+            (required_u64(row, "recorded")?, required_u64(row, "dated")?),
+        );
+    }
+    let status = |kind: LoomEventKindV1, token: &str| {
+        let (eligible, dated) = recorded.get(token).copied().unwrap_or((0, 0));
+        let served: Vec<&LoomEventV1> = events.iter().filter(|event| event.kind == kind).collect();
+        let served_count = served.len() as u64;
+        let undated = eligible.saturating_sub(dated);
+        let beyond_bound = dated.saturating_sub(served_count);
+        let omitted = undated + beyond_bound;
+        let coverage_reason = format!(
+            "{served_count} of {eligible} recorded events served at their host-recorded time; \
+             {undated} recorded without a timestamp are not placed; {beyond_bound} older than \
+             the newest {EVENT_LIMIT} page events are omitted"
+        );
+        let providers = distinct_strings(served.iter().map(|event| &event.provider));
+        (
+            served_count,
+            omitted,
+            providers,
+            LoomSourceCoverageV1 {
+                completeness: if omitted == 0 { "complete" } else { "partial" },
+                eligible: Some(eligible),
+                examined: Some(eligible),
+                matched: Some(served_count),
+                omitted: Some(omitted),
+                unit: Some("recorded events"),
+                reason: coverage_reason,
+            },
+        )
+    };
+    let (tool_served, tool_omitted, tool_providers, tool_coverage) =
+        status(LoomEventKindV1::ToolCall, "tool_call");
+    let (pr_served, _, pr_providers, pr_coverage) =
+        status(LoomEventKindV1::PullRequest, "pull_request");
+    Ok((
+        LoomSourceStatusV1 {
+            id: "session_tool",
+            label: "Session → tool call",
+            state: if tool_omitted == 0 {
+                DashboardDomainStateV1::Ready
+            } else {
+                DashboardDomainStateV1::Partial
+            },
+            authority: Some("lcm_raw_messages.tool_names at the host-recorded timestamp"),
+            granularity: "recorded tool invocation",
+            providers: tool_providers,
+            item_count: Some(tool_served),
+            reason: Some(tool_coverage.reason.clone()),
+            required_authority: None,
+            coverage: tool_coverage,
+        },
+        LoomSourceStatusV1 {
+            id: "session_pull_request",
+            label: "Session → pull request",
+            state: DashboardDomainStateV1::Partial,
+            authority: Some(
+                "lcm_raw_messages kind git_pull_request | pr_link at the host-recorded timestamp",
+            ),
+            granularity: "host-recorded pull-request link",
+            providers: pr_providers,
+            item_count: Some(pr_served),
+            reason: Some(
+                "only hosts whose transcripts record pull-request links (Claude Code pr-link \
+                 records, Cursor composer) contribute; a session without one is not proof that \
+                 no pull request was opened"
+                    .to_owned(),
+            ),
+            required_authority: None,
+            coverage: pr_coverage,
+        },
+    ))
+}
+
+const TEST_RUN_REASON: &str = "host transcripts record a test command only as a tool call \
+with no typed outcome, and daemon-managed test runs are in-memory operations with no session \
+attribution; no recorded test event can be placed on a session";
+
+fn test_run_status() -> LoomSourceStatusV1 {
+    LoomSourceStatusV1 {
+        id: "session_test",
+        label: "Session → test run",
+        state: DashboardDomainStateV1::Unsupported,
+        authority: None,
+        granularity: "recorded test outcome",
+        providers: Vec::new(),
+        item_count: None,
+        reason: Some(TEST_RUN_REASON.to_owned()),
+        required_authority: Some("a session-attributed test-run recording authority"),
+        coverage: LoomSourceCoverageV1 {
+            completeness: "unknown",
+            eligible: None,
+            examined: None,
+            matched: None,
+            omitted: None,
+            unit: None,
+            reason: TEST_RUN_REASON.to_owned(),
+        },
+    }
 }
 
 struct LoomGitSourcesV1 {
@@ -1139,6 +1393,19 @@ fn unavailable_payload(reason: &str) -> LoomTemporalPayloadV1 {
                 "sessions.parent_tool_use_id",
                 "host tool-use id",
             ),
+            unavailable(
+                "session_tool",
+                "Session → tool call",
+                "lcm_raw_messages.tool_names at the host-recorded timestamp",
+                "recorded tool invocation",
+            ),
+            unavailable(
+                "session_pull_request",
+                "Session → pull request",
+                "lcm_raw_messages kind git_pull_request | pr_link at the host-recorded timestamp",
+                "host-recorded pull-request link",
+            ),
+            test_run_status(),
             unavailable_required(
                 "session_commit",
                 "Session ↔ commit",
@@ -1161,6 +1428,7 @@ fn unavailable_payload(reason: &str) -> LoomTemporalPayloadV1 {
         commits: Vec::new(),
         edited_files: Vec::new(),
         branch_spans: Vec::new(),
+        events: Vec::new(),
         temporal_refresh: LoomTemporalRefreshV1 {
             state: DashboardDomainStateV1::Unknown,
             active_generations: 0,

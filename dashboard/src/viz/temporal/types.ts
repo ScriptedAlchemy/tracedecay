@@ -34,6 +34,7 @@ export type SourceClass =
   | 'commit'
   | 'git_span'
   | 'file_rollup'
+  | 'recorded_event'
   | 'proximity';
 
 /* -------------------------------------------------------------------------
@@ -82,7 +83,8 @@ export type JourneyEventKind =
   | 'tool_call'
   | 'spawn'
   | 'commit'
-  | 'file_edit';
+  | 'file_edit'
+  | 'pull_request';
 
 export const JOURNEY_EVENT_KINDS: readonly JourneyEventKind[] = [
   'session_start',
@@ -94,6 +96,7 @@ export const JOURNEY_EVENT_KINDS: readonly JourneyEventKind[] = [
   'spawn',
   'commit',
   'file_edit',
+  'pull_request',
 ];
 
 /** One drawable record on a lane. */

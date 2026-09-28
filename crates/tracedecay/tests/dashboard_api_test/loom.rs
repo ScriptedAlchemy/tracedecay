@@ -202,7 +202,218 @@ fn loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities() {
         assert_eq!(source("branch_worktree")["state"], "ready");
         assert_eq!(source("subagent_spawn")["state"], "ready");
         assert_eq!(source("subagent_spawn")["coverage"]["matched"], 1);
-        assert_eq!(statuses.len(), 4);
+        assert_eq!(source("session_tool")["state"], "ready");
+        assert_eq!(source("session_test")["state"], "unsupported");
+        assert_eq!(statuses.len(), 7);
+    });
+}
+
+fn loom_message(
+    session_id: &str,
+    message_id: &str,
+    ordinal: i64,
+    timestamp: Option<i64>,
+    kind: &str,
+    tool_names: Option<&str>,
+    text: &str,
+) -> SessionMessageRecord {
+    SessionMessageRecord {
+        provider: "cursor".to_string(),
+        message_id: message_id.to_string(),
+        session_id: session_id.to_string(),
+        role: "assistant".to_string(),
+        timestamp,
+        ordinal,
+        text: text.to_string(),
+        kind: Some(kind.to_string()),
+        model: None,
+        tool_names: tool_names.map(str::to_string),
+        source_path: None,
+        source_offset: None,
+        metadata_json: None,
+    }
+}
+
+fn loom_source<'a>(envelope: &'a Value, id: &str) -> &'a Value {
+    envelope["payload"]["source_statuses"]
+        .as_array()
+        .and_then(|statuses| statuses.iter().find(|status| status["id"] == id))
+        .unwrap_or_else(|| panic!("missing Loom source {id}: {envelope}"))
+}
+
+/// The page's tool-call and pull-request events are served at the time the
+/// host recorded them, oldest first across sessions whatever their stored
+/// order, and a row recorded without a time is counted, never placed.
+#[test]
+fn loom_temporal_serves_recorded_tool_and_pull_request_events_in_recorded_time_order() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let session = |id: &str, started_at: i64| SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: id.to_string(),
+            project_key: fixture.host_runtime.project_id().as_str().to_string(),
+            project_path: fixture.project_root.display().to_string(),
+            title: Some(id.to_string()),
+            started_at: Some(started_at),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        let worker = session("sess-events-worker", 1_700_100_000);
+        let reviewer = session("sess-events-reviewer", 1_700_100_050);
+        let batches = [
+            (
+                &worker,
+                vec![
+                    // Stored first, recorded last.
+                    loom_message(&worker.session_id, "w-edit", 1, Some(1_700_100_300), "tool_call", Some("Edit"), "edit lib.rs"),
+                    loom_message(&worker.session_id, "w-read", 2, Some(1_700_100_010), "message", Some("Read,Grep"), "read"),
+                    loom_message(&worker.session_id, "w-undated", 3, None, "tool_call", Some("Bash"), "cargo test"),
+                    loom_message(&worker.session_id, "w-chat", 4, Some(1_700_100_020), "message", None, "plain turn"),
+                ],
+            ),
+            (
+                &reviewer,
+                vec![
+                    loom_message(
+                        &reviewer.session_id,
+                        "r-pr",
+                        1,
+                        Some(1_700_100_200),
+                        "git_pull_request",
+                        None,
+                        r#"{"type":"pr-link","prNumber":42,"prUrl":"https://github.com/acme/app/pull/42"}"#,
+                    ),
+                    loom_message(&reviewer.session_id, "r-link", 2, Some(1_700_100_250), "pr_link", None, "https://github.com/acme/app/pull/43"),
+                    loom_message(&reviewer.session_id, "r-bash", 3, Some(1_700_100_100), "tool_call", Some("Bash"), "gh pr view"),
+                ],
+            ),
+        ];
+        for (record, messages) in batches {
+            fixture
+                .host_runtime
+                .upsert_transcript_batch_for_test(
+                    HostAdmissionScope::Project,
+                    record,
+                    &messages,
+                    &format!("loom-events:{}", record.session_id),
+                    ParseOffset::default(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("seed {}: {error}", record.session_id));
+        }
+
+        let agent = http_agent();
+        let (status, envelope) = get_json(
+            &agent,
+            &format!("{}/api/loom/temporal?limit=200", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{envelope}");
+        assert_eq!(
+            envelope["payload"]["events"],
+            json!([
+                {"provider": "cursor", "session_id": "sess-events-worker", "kind": "tool_call",
+                 "message_id": "w-read", "ordinal": 2, "recorded_at": 1_700_100_010, "label": "Read,Grep"},
+                {"provider": "cursor", "session_id": "sess-events-reviewer", "kind": "tool_call",
+                 "message_id": "r-bash", "ordinal": 3, "recorded_at": 1_700_100_100, "label": "Bash"},
+                {"provider": "cursor", "session_id": "sess-events-reviewer", "kind": "pull_request",
+                 "message_id": "r-pr", "ordinal": 1, "recorded_at": 1_700_100_200,
+                 "label": "https://github.com/acme/app/pull/42"},
+                {"provider": "cursor", "session_id": "sess-events-reviewer", "kind": "pull_request",
+                 "message_id": "r-link", "ordinal": 2, "recorded_at": 1_700_100_250,
+                 "label": "https://github.com/acme/app/pull/43"},
+                {"provider": "cursor", "session_id": "sess-events-worker", "kind": "tool_call",
+                 "message_id": "w-edit", "ordinal": 1, "recorded_at": 1_700_100_300, "label": "Edit"},
+            ])
+        );
+
+        let tools = loom_source(&envelope, "session_tool");
+        assert_eq!(tools["state"], "partial", "{tools}");
+        assert_eq!(tools["item_count"], 3);
+        assert_eq!(tools["coverage"]["eligible"], 4);
+        assert_eq!(tools["coverage"]["matched"], 3);
+        assert_eq!(tools["coverage"]["omitted"], 1);
+        let pull_requests = loom_source(&envelope, "session_pull_request");
+        assert_eq!(pull_requests["state"], "partial", "{pull_requests}");
+        assert_eq!(pull_requests["item_count"], 2);
+        assert_eq!(pull_requests["coverage"]["eligible"], 2);
+        assert_eq!(pull_requests["coverage"]["omitted"], 0);
+        let tests = loom_source(&envelope, "session_test");
+        assert_eq!(tests["state"], "unsupported");
+        assert_eq!(tests["item_count"], Value::Null);
+        assert_eq!(
+            tests["required_authority"],
+            "a session-attributed test-run recording authority"
+        );
+    });
+}
+
+/// A page whose sessions recorded no tool call or pull request answers an
+/// empty event list with complete zero coverage, not an unavailable source.
+#[test]
+fn loom_temporal_serves_an_empty_event_stream_as_complete_zero_coverage() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let quiet = SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "sess-quiet".to_string(),
+            project_key: fixture.host_runtime.project_id().as_str().to_string(),
+            project_path: fixture.project_root.display().to_string(),
+            title: Some("Quiet session".to_string()),
+            started_at: Some(1_700_200_000),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        fixture
+            .host_runtime
+            .upsert_transcript_batch_for_test(
+                HostAdmissionScope::Project,
+                &quiet,
+                &[loom_message(
+                    &quiet.session_id,
+                    "q-chat",
+                    1,
+                    Some(1_700_200_010),
+                    "message",
+                    None,
+                    "hello",
+                )],
+                "loom-events:quiet",
+                ParseOffset::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("seed quiet session: {error}"));
+
+        let agent = http_agent();
+        let (status, envelope) = get_json(
+            &agent,
+            &format!("{}/api/loom/temporal?limit=200", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{envelope}");
+        assert_eq!(
+            envelope["payload"]["sessions"][0]["session_id"],
+            "sess-quiet"
+        );
+        assert_eq!(envelope["payload"]["sessions"][0]["messages"], 1);
+        assert_eq!(envelope["payload"]["events"], json!([]));
+        for id in ["session_tool", "session_pull_request"] {
+            let source = loom_source(&envelope, id);
+            assert_eq!(source["item_count"], 0, "{source}");
+            assert_eq!(source["coverage"]["eligible"], 0, "{source}");
+            assert_eq!(source["coverage"]["completeness"], "complete", "{source}");
+        }
+        assert_eq!(loom_source(&envelope, "session_tool")["state"], "ready");
     });
 }
 
@@ -322,6 +533,20 @@ fn loom_forks_bind_to_the_spawning_call_recorded_by_the_parent_transcript() {
         assert_eq!(spawn_status["coverage"]["eligible"], 2);
         assert_eq!(spawn_status["coverage"]["matched"], 1);
         assert_eq!(spawn_status["coverage"]["omitted"], 1);
+        // The spawning call is on the temporal read itself, at the time the
+        // parent rollout recorded it, so every lane binds its fork without
+        // loading the parent transcript.
+        let spawn_events: Vec<&serde_json::Value> = envelope["payload"]["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("Loom events: {envelope}"))
+            .iter()
+            .filter(|event| event["tool_use_id"] == "call_loom_spawn")
+            .collect();
+        assert_eq!(spawn_events.len(), 1, "{envelope}");
+        assert_eq!(spawn_events[0]["session_id"], parent);
+        assert_eq!(spawn_events[0]["kind"], "tool_call");
+        assert_eq!(spawn_events[0]["label"], "spawn_agent");
+        assert_eq!(spawn_events[0]["recorded_at"], 1_788_307_210);
 
         let (status, page) = get_json(
             &agent,

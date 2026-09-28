@@ -3683,6 +3683,22 @@ export const LoomEditedFileV1Schema = z.object({
 });
 export type LoomEditedFileV1 = z.infer<typeof LoomEditedFileV1Schema>;
 
+export const LoomEventKindV1Schema = z.enum(["pull_request", "tool_call"]);
+export type LoomEventKindV1 = z.infer<typeof LoomEventKindV1Schema>;
+
+/** One event a host transcript recorded for a displayed session. */
+export const LoomEventV1Schema = z.object({
+  kind: z.lazy(() => LoomEventKindV1Schema),
+  label: z.string().nullable().optional(),
+  message_id: z.string(),
+  ordinal: z.number().int().safe(),
+  provider: z.string(),
+  recorded_at: z.number().int().safe(),
+  session_id: z.string(),
+  tool_use_id: z.string().nullable().optional(),
+});
+export type LoomEventV1 = z.infer<typeof LoomEventV1Schema>;
+
 export const LoomFileSessionProjectionV1Schema = z.object({
   authority: z.string(),
   eligible_sessions: z.number().int().safe().min(0),
@@ -3744,6 +3760,7 @@ export const LoomTemporalPayloadV1Schema = z.object({
   branch_spans: z.array(z.lazy(() => LoomBranchSpanV1Schema)),
   commits: z.array(z.lazy(() => LoomCommitV1Schema)),
   edited_files: z.array(z.lazy(() => LoomEditedFileV1Schema)),
+  events: z.array(z.lazy(() => LoomEventV1Schema)),
   sessions: z.array(z.lazy(() => LoomSessionRowV1Schema)),
   source_statuses: z.array(z.lazy(() => LoomSourceStatusV1Schema)),
   temporal_refresh: z.lazy(() => LoomTemporalRefreshV1Schema),

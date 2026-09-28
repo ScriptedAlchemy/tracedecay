@@ -310,6 +310,10 @@ function TemporalBody({
       case 'message_assistant':
       case 'message_other':
       case 'tool_call': {
+        if (node.laneId !== selectedLane?.id) {
+          onSelect(node.laneId);
+          return;
+        }
         const index = playback.frames.findIndex((frame) => frame.id === node.ref);
         if (index >= 0) {
           playback.setState({ ...playback.state, cursor: index, playing: false, followLive: false });
@@ -323,6 +327,7 @@ function TemporalBody({
       case 'session_end':
       case 'commit':
       case 'file_edit':
+      case 'pull_request':
         if (node.laneId !== selectedLane?.id) onSelect(node.laneId);
         return;
       default: {
@@ -450,9 +455,10 @@ function TemporalBody({
                 : !hierarchy?.available || hierarchy.error
                   ? 'unavailable'
                   : `${hierarchy.truncated ? 'partial' : 'loaded'} · ${hierarchy.missing_parent_count} missing parents · ${hierarchy.cycle_count} cycles`}
-              . A fork leaves the parent on its spawning tool call, graded exact, when the
-              host recorded that call and the parent&apos;s transcript is selected; otherwise
-              it leaves at the child session&apos;s recorded start, graded inferred. A
+              . Tool calls and pull requests sit on every lane at the time their host
+              recorded them. A fork leaves the parent on its spawning tool call, graded
+              exact, when the host recorded that call; otherwise it leaves at the child
+              session&apos;s recorded start, graded inferred. A
               session row and the subagent tree that disagree are both drawn, ambiguous.
               A join is inferred only where a child ends inside its parent&apos;s measured
               extent; no handoff or result authority serves one. Only this temporal page
@@ -692,7 +698,9 @@ function TemporalBoundary({
 }
 
 function sourceDetail(source: LoomSourceStatusV1): string {
-  if (source.required_authority) return source.required_authority;
+  if (source.required_authority) {
+    return [`requires ${source.required_authority}`, source.reason].filter(Boolean).join(' · ');
+  }
   const parts = [
     source.authority,
     source.providers.length > 0 ? `providers: ${source.providers.join(', ')}` : null,
@@ -704,7 +712,7 @@ function sourceDetail(source: LoomSourceStatusV1): string {
       : null,
     source.coverage.reason,
   ];
-  return parts.filter((part): part is string => part != null && part.length > 0).join(' · ');
+  return [...new Set(parts)].filter((part): part is string => part != null && part.length > 0).join(' · ');
 }
 
 function coverageDetail(envelope: DashboardEnvelopeV1<LoomTemporalPayloadV1>): string {
@@ -797,7 +805,7 @@ function fieldDescription(projection: JourneyProjection, model: TemporalSceneMod
   const providers = projection.stats.providers
     .map((provider) => `${provider.lanes} on ${provider.id}`)
     .join(', ');
-  return `Temporal execution field: ${projection.stats.lanes} sessions as horizontal lanes, time running left to right, hierarchy down by provider rail and recorded parent; providers ${providers || 'none'}. ${projection.stats.openEnded} have no recorded extent and are drawn open. ${projection.relations.filter((relation) => relation.kind === 'spawn').length} recorded forks are drawn on the spawning tool call when the loaded parent transcript carries it, otherwise at the child's start, and ${projection.relations.filter((relation) => relation.kind === 'rejoin').length} inferred joins where a child ends inside its parent; handoff and result remain unavailable. ${model.counts.lanesCollapsed} branches are collapsed into bundles. The branch navigator table below is the accessible equivalent.`;
+  return `Temporal execution field: ${projection.stats.lanes} sessions as horizontal lanes, time running left to right, hierarchy down by provider rail and recorded parent; providers ${providers || 'none'}. ${projection.stats.openEnded} have no recorded extent and are drawn open. ${projection.relations.filter((relation) => relation.kind === 'spawn').length} recorded forks are drawn on the spawning tool call when the parent recorded it, otherwise at the child's start, and ${projection.relations.filter((relation) => relation.kind === 'rejoin').length} inferred joins where a child ends inside its parent; handoff and result remain unavailable. ${model.counts.lanesCollapsed} branches are collapsed into bundles. The branch navigator table below is the accessible equivalent.`;
 }
 
 /** Composed empty state: the frame stays, so an empty field reads as an
