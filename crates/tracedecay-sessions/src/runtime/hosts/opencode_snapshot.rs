@@ -16,7 +16,7 @@ pub(super) struct OpenCodeDatabase {
 }
 
 pub(super) enum OpenedOpenCodeDatabase {
-    Ready(OpenCodeDatabase),
+    Ready(Box<OpenCodeDatabase>),
     Refused(HostCoverageReason),
     /// The open budget ended before a source decision (cancellation or deadline).
     Stopped,
@@ -95,11 +95,11 @@ fn inspect_database(
     let generation =
         ObservationSourceGenerationV1::new(identity).map_err(TranscriptIngestError::from)?;
     Ok((
-        OpenedOpenCodeDatabase::Ready(OpenCodeDatabase {
+        OpenedOpenCodeDatabase::Ready(Box::new(OpenCodeDatabase {
             reader,
             generation,
             source_file_identity: identity,
-        }),
+        })),
         budget,
     ))
 }

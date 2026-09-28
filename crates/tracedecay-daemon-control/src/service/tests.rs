@@ -1698,6 +1698,10 @@ fn post_update_rejects_reachable_unmanaged_daemon() {
     let profile = ProfileRoot::new(&data_dir).with_xdg_config_home(&config_home);
     let socket_path = super::default_socket_path(profile.data_dir()).expect("default socket");
     let _listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
+    let fake_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    fake_service_program(&fake_bin, "systemctl", "#!/bin/sh\nexit 1\n");
+    let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
 
     let error = super::quiesce_installed_service_before_lease(&profile, TEST_BUILD_VERSION)
         .expect_err("unmanaged daemon must block post-update mutations");
@@ -2395,6 +2399,10 @@ fn refresh_preserves_persistent_systemd_mask_symlink() {
     let config_home = dir.path().join("config");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let fake_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    fake_service_program(&fake_bin, "systemctl", "#!/bin/sh\nexit 1\n");
+    let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
     let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
