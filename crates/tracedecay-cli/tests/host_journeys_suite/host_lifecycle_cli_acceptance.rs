@@ -13,6 +13,9 @@ use tracedecay_agent_hosts::agents::host_bundle::{
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
 use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
 
+#[cfg(unix)]
+#[path = "host_lifecycle_cli_acceptance/kimi_web_refresh.rs"]
+mod kimi_web_refresh;
 #[path = "host_lifecycle_cli_acceptance/native_plugin_fixture.rs"]
 mod native_plugin_fixture;
 #[path = "host_lifecycle_cli_acceptance/sweep_outcomes.rs"]
