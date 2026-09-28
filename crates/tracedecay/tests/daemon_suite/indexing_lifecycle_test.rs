@@ -1030,6 +1030,7 @@ async fn restart_after_sigterm_rebuilds_only_changed_files() {
     daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
     let mut last = Value::Null;
     let mut replayed_retained_corpus = false;
+    let mut successor_text_files = std::collections::BTreeSet::new();
     tokio::time::timeout(RECEIPT_TIMEOUT, async {
         loop {
             last = status(&socket, &handshake).await;
@@ -1043,6 +1044,13 @@ async fn restart_after_sigterm_rebuilds_only_changed_files() {
                 .is_some_and(|generation| generation != indexed.generation_id);
             if progress["phase"] == "bulk_commit" && successor && same_corpus && unfinished {
                 replayed_retained_corpus = true;
+            }
+            // A source scan reports a zero bound before the text build knows
+            // its files.
+            if successor
+                && let Some(total) = progress["total_files"].as_u64().filter(|total| *total > 0)
+            {
+                successor_text_files.insert(total);
             }
             let worktree = &last["code_index_freshness"]["worktree"];
             if last["code_index_freshness"]["status"] == "current"
@@ -1066,14 +1074,11 @@ async fn restart_after_sigterm_rebuilds_only_changed_files() {
         !replayed_retained_corpus,
         "restart bulk-committed the retained corpus instead of the changed file: {last}"
     );
-    let restarted_progress = &last["code_index_freshness"]["worktree"]["progress"];
     assert_eq!(
-        (
-            restarted_progress["total_files"].as_u64(),
-            restarted_progress["completed_files"].as_u64(),
-        ),
-        (Some(1), Some(1)),
-        "the restarted text build must name only the edited file: {last}"
+        successor_text_files,
+        std::collections::BTreeSet::from([1]),
+        "every progress report of the restarted text build must name only the edited file \
+         (the retained corpus has {retained_files}): {last}"
     );
 
     let changed = search(&socket, &handshake, "restart_resume_probe").await;
