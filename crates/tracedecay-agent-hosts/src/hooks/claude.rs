@@ -99,7 +99,11 @@ pub async fn hook_claude_session_start(runtime: &HookRuntimeV1) -> i32 {
 /// transcript or summary state.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.post_compact")]
 pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
+        "PostCompact"
+    );
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
@@ -137,7 +141,11 @@ pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.post_tool_use")]
 pub async fn hook_claude_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
+        "PostToolUse"
+    );
     let (root, response) = claude_post_tool_use_response(runtime, &event, started).await;
     if let Some(response) = response
         && !super::write_hook_output(
@@ -201,7 +209,11 @@ pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
 /// resolved once and reused for both dispatch and stdout delivery.
 async fn claude_guidance_hook(runtime: &HookRuntimeV1, hook_name: &'static str) -> i32 {
     let started = Instant::now();
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
+        hook_name
+    );
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
