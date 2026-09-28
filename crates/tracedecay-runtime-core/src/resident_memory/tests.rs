@@ -490,6 +490,7 @@ fn additional_reservations_share_identity_but_charge_and_release_independently()
                 Some(ProcessResidentSampleV1 {
                     resident_bytes: 0,
                     unreclaimable_bytes: 0,
+                    cgroup_committed_bytes: None,
                 })
             }),
         )),
