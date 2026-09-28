@@ -62,6 +62,15 @@ const HEADER = [
   "// Deterministic output (stable ordering, no timestamps).",
 ].join("\n");
 
+const GENERATED_HEADER = [
+  "// @ts-nocheck",
+  HEADER,
+  "//",
+  "// Decoder expressions are not checked. Inferring this zod graph dominated a",
+  "// cold `tsc` of the dashboard. The annotations and type aliases are the",
+  "// checker contract; decoder behavior is owned by the codegen tests.",
+].join("\n");
+
 /** Return the `$defs`/`definitions` map from a bundle, sorted by key. */
 function collectDefs(bundle: JsonSchema): Array<[string, JsonSchema]> {
   const defs = bundle.$defs ?? bundle.definitions ?? {};
@@ -142,7 +151,8 @@ function isTaggedUnion(schema: JsonSchema): boolean {
 
 // ---------------------------------------------------------------------------
 // Type/decoder resolution for a single (possibly nested) schema.
-// Returns TS type text and Zod expression text.
+// Returns the structural type, the decoder expression, and a shallow
+// annotation so checkers do not infer the expression.
 // `generic` supplies the payload param name + schema identifier when inside a
 // generic type (DashboardEnvelope<TPayload>).
 // ---------------------------------------------------------------------------
@@ -152,21 +162,39 @@ interface ResolveCtx {
   genericSchemaVar?: string;
 }
 
-function resolveType(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: string } {
+interface Resolved {
+  ts: string;
+  zod: string;
+  /**
+   * Shallow type of `zod`. Objects, enums, and literal unions keep the methods
+   * callers use (`.extend`, `.shape`, `.options`); everything else is
+   * `z.ZodType<…>` so the checker never infers the expression.
+   */
+  ann: string;
+}
+
+function typeAnn(ts: string): string {
+  return `z.ZodType<${ts}>`;
+}
+
+function resolveType(schema: JsonSchema, ctx: ResolveCtx): Resolved {
   if (schema["x-generic-ref"]) {
+    const ts = ctx.genericParam ?? schema["x-generic-ref"];
     return {
-      ts: ctx.genericParam ?? schema["x-generic-ref"],
+      ts,
       zod: ctx.genericSchemaVar ?? "z.unknown()",
+      ann: typeAnn(ts),
     };
   }
 
   if (schema.$ref) {
     const name = refName(schema.$ref);
-    return { ts: name, zod: `z.lazy(() => ${name}Schema)` };
+    return { ts: name, zod: `z.lazy(() => ${name}Schema)`, ann: typeAnn(name) };
   }
 
   if (schema.const !== undefined) {
-    return { ts: literal(schema.const), zod: `z.literal(${literal(schema.const)})` };
+    const value = literal(schema.const);
+    return { ts: value, zod: `z.literal(${value})`, ann: `z.ZodLiteral<${value}>` };
   }
 
   if (Array.isArray(schema.enum)) {
@@ -175,10 +203,11 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: st
       const sorted = [...strings].sort();
       const tsUnion = sorted.map(literal).join(" | ");
       if (sorted.length === 1) {
-        return { ts: literal(sorted[0] as string), zod: `z.literal(${literal(sorted[0] as string)})` };
+        const value = literal(sorted[0] as string);
+        return { ts: value, zod: `z.literal(${value})`, ann: `z.ZodLiteral<${value}>` };
       }
       const zodList = sorted.map(literal).join(", ");
-      return { ts: tsUnion, zod: `z.enum([${zodList}])` };
+      return { ts: tsUnion, zod: `z.enum([${zodList}])`, ann: `z.ZodEnum<[${zodList}]>` };
     }
   }
 
@@ -188,19 +217,13 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: st
 
   if (Array.isArray(schema.oneOf)) {
     const parts = schema.oneOf.map((s) => resolveType(s, ctx));
-    if (parts.length === 1) return parts[0] as { ts: string; zod: string };
-    return {
-      ts: parts.map((p) => p.ts).join(" | "),
-      zod: `z.union([${parts.map((p) => p.zod).join(", ")}])`,
-    };
+    if (parts.length === 1) return parts[0] as Resolved;
+    return unionResolved(parts);
   }
 
   if (Array.isArray(schema.anyOf)) {
     const parts = schema.anyOf.map((s) => resolveType(s, ctx));
-    return {
-      ts: parts.map((p) => p.ts).join(" | "),
-      zod: `z.union([${parts.map((p) => p.zod).join(", ")}])`,
-    };
+    return unionResolved(parts);
   }
 
   const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
@@ -213,35 +236,50 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: st
   }
   if (primary === "array") {
     const inner = resolveType(schema.items ?? {}, ctx);
-    return applyNullable({ ts: `Array<${inner.ts}>`, zod: `z.array(${inner.zod})` }, nullable);
+    const ts = `Array<${inner.ts}>`;
+    return applyNullable({ ts, zod: `z.array(${inner.zod})`, ann: typeAnn(ts) }, nullable);
   }
   if (primary === "string") {
-    return applyNullable({ ts: "string", zod: "z.string()" }, nullable);
+    return applyNullable({ ts: "string", zod: "z.string()", ann: typeAnn("string") }, nullable);
   }
   if (primary === "integer") {
     return applyNullable(
       {
         ts: "number",
         zod: applyNumericBounds(applySafeIntegerFormat("z.number().int()", schema), schema),
+        ann: typeAnn("number"),
       },
       nullable,
     );
   }
   if (primary === "number") {
     return applyNullable(
-      { ts: "number", zod: applyNumericBounds("z.number()", schema) },
+      {
+        ts: "number",
+        zod: applyNumericBounds("z.number()", schema),
+        ann: typeAnn("number"),
+      },
       nullable,
     );
   }
   if (primary === "boolean") {
-    return applyNullable({ ts: "boolean", zod: "z.boolean()" }, nullable);
+    return applyNullable({ ts: "boolean", zod: "z.boolean()", ann: typeAnn("boolean") }, nullable);
   }
   if (nullable && !primary) {
     // A null-only schema (e.g. the `{ "type": "null" }` arm of a nullable ref).
-    return { ts: "null", zod: "z.null()" };
+    return { ts: "null", zod: "z.null()", ann: typeAnn("null") };
   }
 
-  return { ts: "unknown", zod: "z.unknown()" };
+  return { ts: "unknown", zod: "z.unknown()", ann: typeAnn("unknown") };
+}
+
+function unionResolved(parts: Resolved[]): Resolved {
+  const ts = parts.map((part) => part.ts).join(" | ");
+  const zod = `z.union([${parts.map((part) => part.zod).join(", ")}])`;
+  if (parts.length > 0 && parts.every((part) => part.ann.startsWith("z.ZodLiteral<"))) {
+    return { ts, zod, ann: `z.ZodUnion<[${parts.map((part) => part.ann).join(", ")}]>` };
+  }
+  return { ts, zod, ann: typeAnn(ts) };
 }
 
 function applySafeIntegerFormat(zod: string, schema: JsonSchema): string {
@@ -265,12 +303,13 @@ function applyNumericBounds(zod: string, schema: JsonSchema): string {
   return `${zod}${minimum}${maximum}${exclusiveMinimum}${exclusiveMaximum}`;
 }
 
-function applyNullable(t: { ts: string; zod: string }, nullable: boolean): { ts: string; zod: string } {
-  if (!nullable) return t;
-  return { ts: `${t.ts} | null`, zod: `${t.zod}.nullable()` };
+function applyNullable(resolved: Resolved, nullable: boolean): Resolved {
+  if (!nullable) return resolved;
+  const ts = `${resolved.ts} | null`;
+  return { ts, zod: `${resolved.zod}.nullable()`, ann: typeAnn(ts) };
 }
 
-function resolveObject(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: string } {
+function resolveObject(schema: JsonSchema, ctx: ResolveCtx): Resolved {
   const props = schema.properties ?? {};
   const required = new Set(schema.required ?? []);
   const keys = Object.keys(props).sort();
@@ -282,30 +321,46 @@ function resolveObject(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: 
   // empty map that is indistinguishable from one the daemon really sent empty.
   const extra = schema.additionalProperties;
   if (keys.length === 0 && extra !== undefined && extra !== false) {
-    const value = extra === true ? { ts: "unknown", zod: "z.unknown()" } : resolveType(extra, ctx);
-    return { ts: `Record<string, ${value.ts}>`, zod: `z.record(${value.zod})` };
+    const value = extra === true ? { ts: "unknown", zod: "z.unknown()", ann: typeAnn("unknown") } : resolveType(extra, ctx);
+    const ts = `Record<string, ${value.ts}>`;
+    return { ts, zod: `z.record(${value.zod})`, ann: typeAnn(ts) };
   }
 
   const tsFields: string[] = [];
   const zodFields: string[] = [];
+  const annFields: string[] = [];
   for (const key of keys) {
     const resolved = resolveType(props[key] as JsonSchema, ctx);
     const optional = !required.has(key);
-    tsFields.push(`  ${key}${optional ? "?" : ""}: ${resolved.ts};`);
+    // `z.infer` of a required `z.unknown()` / `z.any()` still makes the key
+    // optional, because `undefined` extends those outputs. Match that, or a
+    // decoder result is not assignable to the alias.
+    const unknownOutput = resolved.ts === "unknown" || resolved.ts === "any";
+    const optionalKey = optional || unknownOutput;
+    // Optional decoder output includes `undefined`, which is what `z.infer`
+    // of `.optional()` produces. `unknown` already contains it.
+    const value = optional && !unknownOutput ? `${resolved.ts} | undefined` : resolved.ts;
+    tsFields.push(`  ${key}${optionalKey ? "?" : ""}: ${value};`);
     zodFields.push(`  ${key}: ${optional ? `${resolved.zod}.optional()` : resolved.zod},`);
+    const field = typeAnn(resolved.ts);
+    annFields.push(`  ${key}: ${optional ? `z.ZodOptional<${field}>` : field};`);
   }
 
-  const ts = tsFields.length ? `{\n${tsFields.join("\n")}\n}` : "Record<string, never>";
+  // An empty object infers as `{}`. `Record<string, never>` would reject
+  // assignments the decoder accepts.
+  const ts = tsFields.length ? `{\n${tsFields.join("\n")}\n}` : "{}";
   const object = zodFields.length ? `z.object({\n${zodFields.join("\n")}\n})` : "z.object({})";
   const zod = extra === false ? `${object}.strict()` : object;
-  return { ts, zod };
+  const shape = annFields.length ? `{\n${annFields.join("\n")}\n}` : "{}";
+  const ann = extra === false ? `z.ZodObject<${shape}, "strict">` : `z.ZodObject<${shape}>`;
+  return { ts, zod, ann };
 }
 
 // ---------------------------------------------------------------------------
 // Tagged union: discriminated + exhaustive.
 // ---------------------------------------------------------------------------
 
-function resolveTaggedUnion(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: string } {
+function resolveTaggedUnion(schema: JsonSchema, ctx: ResolveCtx): Resolved {
   const variants = (schema.oneOf ?? [])
     .flatMap((variant) => {
       const disc = discriminantOf(variant);
@@ -321,7 +376,9 @@ function resolveTaggedUnion(schema: JsonSchema, ctx: ResolveCtx): { ts: string; 
     .map((variant) => variant.resolved.zod)
     .join(", ")}])`;
 
-  return { ts, zod };
+  // The named alias is the checker contract. Inlining the union here would
+  // duplicate it, and callers parse through `z.ZodType<Name>`.
+  return { ts, zod, ann: "" };
 }
 
 // ---------------------------------------------------------------------------
@@ -353,20 +410,23 @@ function emitNamedDef(name: string, schema: JsonSchema): string {
   if (isTaggedUnion(schema)) {
     const union = resolveTaggedUnion(schema, ctx);
     const desc = schema.description ? `/** ${schema.description} */\n` : "";
-    return [
-      `${desc}export const ${name}Schema = ${union.zod};`,
-      `export type ${name} = z.infer<typeof ${name}Schema>;`,
-    ].join("\n");
+    return emitAlias(desc, name, `z.ZodType<${name}>`, union.zod, union.ts);
   }
 
   const resolved = resolveType(schema, ctx);
   if (name === "DashboardDomainStateV1") {
     resolved.zod = `${resolved.zod}.catch("unsupported_schema")`;
+    // `.catch` wraps the enum, so the value is no longer a `ZodEnum`.
+    resolved.ann = `z.ZodType<${name}>`;
   }
   const desc = schema.description ? `/** ${schema.description} */\n` : "";
+  return emitAlias(desc, name, resolved.ann, resolved.zod, resolved.ts);
+}
+
+function emitAlias(desc: string, name: string, ann: string, zod: string, ts: string): string {
   return [
-    `${desc}export const ${name}Schema = ${resolved.zod};`,
-    `export type ${name} = z.infer<typeof ${name}Schema>;`,
+    `${desc}export const ${name}Schema: ${ann} = ${zod};`,
+    `export type ${name} = ${ts};`,
   ].join("\n");
 }
 
@@ -413,7 +473,7 @@ export function generateContracts(bundles: JsonSchema[]): GeneratedContracts {
   }
 
   const blocks: string[] = [];
-  blocks.push(HEADER);
+  blocks.push(GENERATED_HEADER);
   blocks.push(`import { z } from "zod";`);
   blocks.push(
     [

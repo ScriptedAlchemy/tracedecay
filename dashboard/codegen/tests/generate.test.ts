@@ -200,10 +200,38 @@ describe("contracts generator", () => {
 
     const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
     expect(generated).toContain(
-      "export const ClosedReadingSchema = z.object({\n  status: z.string(),\n}).strict();",
+      "export const ClosedReadingSchema: z.ZodObject<{\n  status: z.ZodType<string>;\n}, \"strict\"> = z.object({\n  status: z.string(),\n}).strict();",
+    );
+    expect(generated).toContain("export type ClosedReading = {\n  status: string;\n};");
+    expect(generated).toContain(
+      "export const OpenReadingSchema: z.ZodObject<{\n  status: z.ZodType<string>;\n}> = z.object({\n  status: z.string(),\n});",
+    );
+    expect(generated).toContain("export type OpenReading = {\n  status: string;\n};");
+  });
+
+  it("publishes structural types so a checker does not infer them from the decoder", () => {
+    const bundle: JsonSchema = {
+      schemaRevision: "test.1",
+      $defs: {
+        Node: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string" },
+            child: { $ref: "#/$defs/Node" },
+          },
+          required: ["id"],
+        },
+      },
+    };
+    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    expect(generated.startsWith("// @ts-nocheck\n")).toBe(true);
+    expect(generated).not.toContain("z.infer<");
+    expect(generated).toContain(
+      "export const NodeSchema: z.ZodObject<{\n  child: z.ZodOptional<z.ZodType<Node>>;\n  id: z.ZodType<string>;\n}, \"strict\"> = z.object({\n  child: z.lazy(() => NodeSchema).optional(),\n  id: z.string(),\n}).strict();",
     );
     expect(generated).toContain(
-      "export const OpenReadingSchema = z.object({\n  status: z.string(),\n});",
+      "export type Node = {\n  child?: Node | undefined;\n  id: string;\n};",
     );
   });
 
