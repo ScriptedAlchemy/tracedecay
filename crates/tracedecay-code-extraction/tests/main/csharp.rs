@@ -535,3 +535,36 @@ namespace MyApp
         methods[0].qualified_name
     );
 }
+
+#[test]
+fn csharp_declaration_line_is_past_its_attributes() {
+    let source = "[Serializable]\n\
+public class Circle {\n\
+    [Obsolete]\n\
+    private double r;\n\
+\n\
+    [Obsolete]\n\
+    [Pure]\n\
+    public double Area() { return r; }\n\
+\n\
+    public string Name() { return \"c\"; }\n\
+}\n";
+    let result = CSharpExtractor.extract_artifact("Circle.cs", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let lines: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| ["Circle", "r", "Area", "Name"].contains(&n.name.as_str()))
+        .filter(|n| n.kind != NodeKind::AnnotationUsage)
+        .map(|n| (n.name.as_str(), n.start_line, n.attrs_start_line))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            ("Circle", 1, 0),
+            ("r", 3, 2),
+            ("Area", 7, 5),
+            ("Name", 9, 9)
+        ]
+    );
+}

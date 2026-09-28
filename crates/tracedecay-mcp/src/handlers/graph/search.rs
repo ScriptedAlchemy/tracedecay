@@ -240,6 +240,13 @@ where
                         None
                     };
                     let display = complete.display_by_anchor.get(&ranked.candidate.anchor_id);
+                    let display_unavailable = match display {
+                        Some(_) => None,
+                        None => complete
+                            .display_unavailable_by_anchor
+                            .get(&ranked.candidate.anchor_id)
+                            .copied(),
+                    };
                     if include_graph_node_ids
                         && node_id.is_none()
                         && let Some(display) = display
@@ -256,6 +263,7 @@ where
                             kind: display.kind.clone(),
                             path: display.path.clone(),
                         }),
+                        display_unavailable,
                         lexical_routes: None,
                     });
                 }
@@ -411,6 +419,14 @@ pub(super) fn append_coverage_md(md: &mut Md, value: &Value) {
     }
 }
 
+/// The typed reason a result row carries no display, as a bullet suffix.
+fn display_unavailable_suffix(row: &Value) -> String {
+    row.get("display_unavailable")
+        .and_then(Value::as_str)
+        .map(|reason| format!(" · display unavailable: {reason}"))
+        .unwrap_or_default()
+}
+
 fn render_search_md(value: &Value) -> String {
     let items = if value.is_array() {
         value.as_array()
@@ -443,8 +459,9 @@ fn render_search_md(value: &Value) -> String {
                         ));
                         md.line(&format!("  anchor_id: `{anchor}`"));
                     } else {
+                        let omitted = display_unavailable_suffix(it);
                         md.bullet(&format!(
-                            "**{anchor}** ({exact_class}), rank {} · utility {utility}{via}",
+                            "**{anchor}** ({exact_class}), rank {} · utility {utility}{via}{omitted}",
                             ordinal.saturating_add(1)
                         ));
                     }
@@ -603,6 +620,34 @@ mod tests {
             "candidate": {"anchor_id": "code-chunk:chunk.fixture"}
         }]}));
         assert!(!chunk.contains("tracedecay_source_body"));
+    }
+
+    #[test]
+    fn search_renders_the_typed_reason_a_row_has_no_display() {
+        let rendered = render_search_md(&json!({"results": [
+            {
+                "candidate": {"anchor_id": "code-symbol:a", "exact_class": "approximate", "utility_micros": 7},
+                "final_ordinal": 0,
+                "display_unavailable": "stale",
+            },
+            {
+                "candidate": {"anchor_id": "code-symbol:b", "exact_class": "approximate", "utility_micros": 5},
+                "final_ordinal": 1,
+                "display": {"name": "clamp", "kind": "function"},
+            },
+        ]}));
+        let bullets = rendered
+            .lines()
+            .filter(|line| line.starts_with("- **"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bullets,
+            vec![
+                "- **code-symbol:a** (approximate), rank 1 · utility 7 · display unavailable: stale",
+                "- **clamp** (function, approximate), rank 2 · utility 5",
+            ],
+            "{rendered}"
+        );
     }
 
     #[tokio::test]

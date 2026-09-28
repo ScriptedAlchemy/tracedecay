@@ -400,6 +400,12 @@ pub struct CodeIndexSearchCompletedV1 {
     /// Authorized generation-bound display metadata, kept outside the
     /// canonical bytes so presentation cannot mutate ranking identity.
     pub display_by_anchor: HashMap<tracedecay_domain::RetrievalAnchorId, CodeIndexSearchDisplayV1>,
+    /// Why each served candidate absent from `display_by_anchor` has no
+    /// display.
+    pub display_unavailable_by_anchor: HashMap<
+        tracedecay_domain::RetrievalAnchorId,
+        tracedecay_contracts::retrieval::SearchDisplayUnavailableV1,
+    >,
     pub next_cursor: Option<tracedecay_domain::RetrievalCursor>,
     /// Which lanes actually answered. Additive metadata only: it never
     /// participates in ranking identity, so a warm response carries the same

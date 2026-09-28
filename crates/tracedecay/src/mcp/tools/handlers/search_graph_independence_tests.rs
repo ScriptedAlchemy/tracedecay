@@ -94,6 +94,7 @@ fn completed_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchO
                     path: "src/lib.rs".to_owned(),
                 },
             )]),
+            display_unavailable_by_anchor: HashMap::new(),
             coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::warm(),
             next_cursor: None,
             lexical_routes: tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1 {

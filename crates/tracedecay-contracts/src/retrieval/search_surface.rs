@@ -203,6 +203,9 @@ pub struct SearchResultRowV1 {
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<SearchResultDisplayV1>,
+    /// Why `display` is absent from this ranked candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_unavailable: Option<SearchDisplayUnavailableV1>,
     /// The lexical routes that ranked this candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lexical_routes: Option<Vec<SearchRouteMatchV1>>,
@@ -215,6 +218,22 @@ pub struct SearchResultDisplayV1 {
     pub qualified_name: String,
     pub kind: String,
     pub path: String,
+}
+
+/// Why a ranked candidate's display metadata was not hydrated: the answering
+/// generation no longer matches the request (`stale`), its record is
+/// incompatible or does not bind the candidate (`incompatible`, `invalid`),
+/// the read failed (`internal`), the hydration budget was spent
+/// (`budget_exceeded`), or the request was cancelled (`cancelled`).
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchDisplayUnavailableV1 {
+    Stale,
+    Incompatible,
+    Invalid,
+    Internal,
+    BudgetExceeded,
+    Cancelled,
 }
 
 /// One route that ranked a candidate, named by its route label.
