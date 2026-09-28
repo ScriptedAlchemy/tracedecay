@@ -53,10 +53,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(project_root);
-        if let Some(gate) = gate {
-            let _ = gate.entered.send(());
-            let _ = gate.release.await;
-        }
+        Self::pass_worker_step_gate(gate).await;
     }
 
     /// Hold the next graph tail of the worker for `project_root` right before
