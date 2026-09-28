@@ -86,7 +86,7 @@ use records::{
 use crate::runtime::jsonl_observation_admission::{
     SharedJsonlPathPin, install_shared_jsonl_preparation_authority,
     namespace_replacement_message_ids, pin_shared_jsonl_paths, preflight_and_parse_new,
-    reserve_shared_jsonl_bytes, shared_jsonl_preparation_capacity,
+    reserve_shared_jsonl_bytes,
 };
 use crate::runtime::shared::{
     ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptScopeMatcher,
@@ -687,14 +687,10 @@ impl CodexDiscoveryHub {
                 } => (state, frontier, Some(generation), Some(source_key)),
             };
             let shared = replay_generation.is_none();
-            let bounds = if shared {
-                TranscriptDiscoveryBounds {
-                    max_files: bounds.max_files.min(shared_jsonl_preparation_capacity()),
-                    ..bounds
-                }
-            } else {
-                bounds
-            };
+            // Page-preparation capacity limits concurrent JSONL parses. It is
+            // not a filesystem walk bound: shrinking this pass to that slot
+            // count makes a dated rollout tree spend every pass on directory
+            // entries and emit no sessions.
             let result = source.discover_transcript_paths_with_state(bounds, base, &mut discovery);
             let mut inner = self.inner.lock().map_err(|_| {
                 TranscriptIngestError::InvalidCodexDiscoveryFrontier {
@@ -2105,7 +2101,6 @@ fn retained_scan_step(
                 )?;
                 match listed.next() {
                     Some(entry) => {
-                        directory_work += 1;
                         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
                             operation: "read Codex transcript directory entry",
                             path: dir.clone(),
@@ -2119,7 +2114,12 @@ fn retained_scan_step(
                                     path: entry.path(),
                                     source,
                                 })?;
+                        // Rollout files are not structural work. Charging them
+                        // here spends the pass on names that are not child
+                        // directories, so the newest sessions are not emitted
+                        // until every older day has been listed.
                         if file_type.is_dir() && !file_type.is_symlink() {
+                            directory_work += 1;
                             if *depth >= MAX_SCAN_DEPTH {
                                 return Err(TranscriptIngestError::ScanIo {
                                     operation: "traverse Codex transcript directory depth",
