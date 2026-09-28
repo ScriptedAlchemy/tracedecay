@@ -135,11 +135,9 @@ requirement.
 
 TraceDecay respects `.gitignore` by default and skips common generated, vendored, and cache directories such as `node_modules`, `vendor`, `dist`, `build`, `coverage`, `.next`, `.turbo`, `.cache`, virtualenvs, and `__pycache__`.
 
-If there are additional directories you never want indexed for a run, pass `--skip-folder`:
-
-```bash
-tracedecay sync --skip-folder generated-fixtures  # explicit administrative refresh
-```
+Indexing covers tracked files and untracked files that `.gitignore` does not
+ignore, minus those generated directories. There is no per-run folder
+exclusion; `init` and `sync` take no folder flags.
 
 ### Seeing what changed
 
@@ -151,27 +149,26 @@ operation with its own preview and receipt.
 ### Diagnosing slow daemon convergence
 
 If status reports warming or a backlog, inspect the daemon's typed coverage
-first. An operator may request explicit per-operation diagnostics with `--verbose`
-(`-v`) when the daemon reports that an administrative refresh is appropriate:
+first. When the daemon reports that an administrative refresh is appropriate,
+request one; `--verbose` (`-v`) also prints the daemon's admission receipt:
 
 ```bash
-tracedecay sync --verbose  # explicit administrative diagnostics
+tracedecay sync --verbose
 ```
 
 Example output:
 
 ```
-  [verbose] scanned 10432 files in 2.3s
-  [verbose] stat-checked 10432 files in 0.1s
-  [verbose] changes: 3 new, 847 stat-changed, 0 removed, 9582 unchanged
-  [verbose] hashed 850 files in 1.2s (0 read errors)
-  [verbose] content check: 12 modified, 838 mtime-only
-  [verbose] indexed 15 files (204 nodes, 189 edges) in 0.3s
-  [verbose] resolved 39841 references in 0.5s
-✔ sync done, 3 added, 12 modified, 0 removed in 4412ms
+{
+  "reconcile_scope": "authoritative_project",
+  "status": "queued",
+  "project_root": "/path/to/repo"
+}
+code-index reconciliation queued via daemon for /path/to/repo
 ```
 
-This also accepts the `--force` compatibility flag, with the same diagnostics.
+The request only queues the reconcile; follow its progress with
+`tracedecay status`.
 
 ### Respecting .gitignore
 

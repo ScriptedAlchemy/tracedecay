@@ -1267,8 +1267,6 @@ async fn dispatch_project_command(
         Commands::Init {
             path,
             path_flag,
-            skip_folders,
-            include_folders,
             adopt_project,
             fresh,
         } => {
@@ -1276,30 +1274,14 @@ async fn dispatch_project_command(
             commands::handle_init(
                 profile,
                 path.or(path_flag),
-                skip_folders,
-                include_folders,
                 adopt_project,
                 fresh,
                 assume_yes,
             )
             .await?;
         }
-        Commands::Sync {
-            path,
-            skip_folders,
-            include_folders,
-            doctor,
-            verbose,
-        } => {
-            commands::handle_sync(
-                profile,
-                path,
-                skip_folders,
-                include_folders,
-                doctor,
-                verbose,
-            )
-            .await?;
+        Commands::Sync { path, verbose } => {
+            commands::handle_sync(profile, path, verbose).await?;
         }
         Commands::Status {
             path,

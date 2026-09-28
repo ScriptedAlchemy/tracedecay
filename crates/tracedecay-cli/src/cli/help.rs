@@ -42,8 +42,6 @@ Examples:
   tracedecay daemon install-service              Start the daemon init brokers through
   tracedecay init                                Index the current directory
   tracedecay init /path/to/repo                  Index another repository
-  tracedecay init --skip-folder vendor --skip-folder dist
-  tracedecay init --include-folder dist/generated
   tracedecay init /new/path --adopt-project proj_abc123
   tracedecay init /new/path --yes                Adopt the unique moved non-git store
   tracedecay init /new/path --fresh              Mint a new identity, never adopt
@@ -53,17 +51,16 @@ Related: tracedecay daemon (the daemon init requires), tracedecay sync
 tracedecay wipe (delete local stores).";
 
 pub(crate) const SYNC_LONG_ABOUT: &str = "\
-Re-parses only files that changed since the last index and updates the code \
-graph in place. Use after editing, switching branches, or pulling; agent \
-hooks usually run it automatically. Incompatible derived lexical staging is \
-replaced automatically. `--doctor`/`--verbose` explain what a sync actually \
-did.";
+Asks the daemon to reconcile the project's code index and returns once the \
+request is queued; indexing continues in the background. The daemon already \
+converges after edits, branch switches, and pulls on its own, so this is an \
+administrative refresh for diagnostics or offline workflows. Check the \
+result with `tracedecay status`.";
 
 pub(crate) const SYNC_AFTER_HELP: &str = "\
 Examples:
-  tracedecay sync                                Incremental refresh from cwd
-  tracedecay sync --doctor                       List added/modified/removed files
-  tracedecay sync --verbose                      Per-phase timings for slow syncs
+  tracedecay sync                                Request a refresh for the cwd project
+  tracedecay sync --verbose                      Also print the admission receipt
 
 Related: tracedecay init (first index), tracedecay status (freshness check).";
 
@@ -440,8 +437,7 @@ Related: tracedecay disable-upload-counter, tracedecay gain.";
 pub(crate) const GITIGNORE_LONG_ABOUT: &str = "\
 Shows or toggles whether indexing respects .gitignore rules for this project. \
 Turning it off indexes ignored folders too (generated code, vendored deps); \
-re-run `tracedecay sync` afterwards so the change takes effect. \
-Prefer --include-folder on init/sync to whitelist single folders instead.";
+re-run `tracedecay sync` afterwards so the change takes effect.";
 
 pub(crate) const GITIGNORE_AFTER_HELP: &str = "\
 Examples:
@@ -449,8 +445,7 @@ Examples:
   tracedecay gitignore off                       Index ignored files too
   tracedecay gitignore on                        Respect .gitignore again
 
-Related: tracedecay sync (apply the change), tracedecay init
---include-folder (targeted alternative).";
+Related: tracedecay sync (apply the change).";
 
 pub(crate) const DOCTOR_LONG_ABOUT: &str = "\
 Checks the binary, PATH, daemon service, project index, and every agent \

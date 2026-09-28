@@ -169,12 +169,6 @@ pub enum Commands {
             conflicts_with = "path"
         )]
         path_flag: Option<String>,
-        /// Folders to skip during indexing (can be repeated)
-        #[arg(long = "skip-folder", num_args = 1..)]
-        skip_folders: Vec<String>,
-        /// Folders to include even when ignored by default skips or .gitignore (can be repeated)
-        #[arg(long = "include-folder", num_args = 1..)]
-        include_folders: Vec<String>,
         /// Adopt this registered project id onto the new path when its moved
         /// non-git store no longer resolves at its recorded root. Adoption
         /// never happens without this flag or `--yes`; a root that already
@@ -191,16 +185,7 @@ pub enum Commands {
     Sync {
         /// Project path (default: current directory)
         path: Option<String>,
-        /// Folders to skip during indexing (can be repeated)
-        #[arg(long = "skip-folder", num_args = 1..)]
-        skip_folders: Vec<String>,
-        /// Folders to include even when ignored by default skips or .gitignore (can be repeated)
-        #[arg(long = "include-folder", num_args = 1..)]
-        include_folders: Vec<String>,
-        /// List added, modified, and removed files after sync
-        #[arg(long)]
-        doctor: bool,
-        /// Print per-phase diagnostics (file counts, timings) to help debug slow syncs
+        /// Print the daemon's sync admission receipt as JSON
         #[arg(short, long)]
         verbose: bool,
     },
@@ -1263,7 +1248,11 @@ pub enum ProfileStorageAction {
         /// Project root whose refused store should be reset; identity
         /// resolves through the same durable enrollment and repository
         /// markers the daemon consults.
-        #[arg(long = "project-root", conflicts_with = "project_id")]
+        #[arg(
+            long = "project-root",
+            conflicts_with = "project_id",
+            required_unless_present = "project_id"
+        )]
         project_root: Option<String>,
         /// Exact registered project id (proj_...) whose refused store should
         /// be reset, for a root that is no longer reachable.
