@@ -1,12 +1,15 @@
 use std::cell::Cell;
 use std::fs;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
     CgroupMemoryCeilingV1, ProcessResidentMemoryV1, ProcessResidentSampleV1,
+    RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1,
     RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
     ResidentMemoryPressureV1, cgroup_service_ceiling_bytes, cgroup_v2_memory_ceiling_v1,
@@ -1283,4 +1286,55 @@ fn admission_counts_swapped_anonymous_pages() {
         Some(2 * resident),
         "the cgroup's swapped pages are committed to it"
     );
+/// A checkpoint polled from a per-row loop reads the process at most once per
+/// interval: a sealed graph build that sampled `/proc` and the cgroup files on
+/// every row spent its whole budget in those reads (#2505). Once the interval
+/// has passed, the next checkpoint reads a fresh sample and sees the growth.
+#[test]
+fn checkpoints_read_the_process_once_per_interval_and_then_see_growth() {
+    let limit = bytes(1024 * 1024 * 1024);
+    let reads = Arc::new(AtomicU64::new(0));
+    let observed = Arc::new(AtomicU64::new(1));
+    let (counted, bytes_now) = (Arc::clone(&reads), Arc::clone(&observed));
+    let pressure = ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+            let resident = bytes_now.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: resident,
+                unreclaimable_bytes: resident,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    );
+
+    let started = Instant::now();
+    for _ in 0..200_000 {
+        assert!(
+            !pressure
+                .sample_for_checkpoint()
+                .expect("checkpoint state")
+                .is_over_budget()
+        );
+    }
+    let elapsed = started.elapsed();
+    let reads_taken = reads.load(Ordering::Acquire);
+    let ceiling =
+        1 + elapsed.as_micros() / RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1.as_micros();
+    assert!(
+        u128::from(reads_taken) <= ceiling,
+        "200000 checkpoints in {elapsed:?} read the process {reads_taken} times; at most {ceiling} fit the interval"
+    );
+
+    observed.store(limit.get(), Ordering::Release);
+    std::thread::sleep(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1);
+    assert!(
+        pressure
+            .sample_for_checkpoint()
+            .expect("checkpoint state")
+            .is_over_budget(),
+        "a checkpoint past the interval must read the grown process"
+    );
+    assert_eq!(reads.load(Ordering::Acquire), reads_taken + 1);
 }
