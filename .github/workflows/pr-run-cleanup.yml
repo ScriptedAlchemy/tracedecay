@@ -1,27 +1,14 @@
-# Releases what a closed or merged pull request still holds.
-#
-# GitHub does not do this itself: a merged PR's queued CI, profiling and
-# validation runs keep their place in the account's FIFO runner queue and
-# their concurrency-group slots, so an afternoon of merges leaves dozens of
-# runs that can never be acted on ahead of the integration branch's own run
-# (measured 2026-09-18: 61 queued runs, the release tagging run pending 70
-# minutes behind profiles of merged branches). The same event drops all of
-# the pull request's Actions caches, which nothing can restore any more
-# (measured 2026-09-07: 4.6 GB held by seven merged child PRs while the
-# Linux lane's live cache had been evicted).
-#
-# Per-push cache pruning lives in CI's scope-gate job, which already holds a
-# runner for every push; this workflow spends one only on close.
 name: Pull request run hygiene
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
 
+# This workflow runs trusted inline API calls only. It never checks out PR code.
 permissions:
   actions: write
+  pull-requests: read
 
-# A reopen-and-close pair must not leave two of these racing each other.
 concurrency:
   group: pr-run-hygiene-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -31,45 +18,57 @@ jobs:
     name: Cancel superseded runs
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_URL: ${{ github.event.pull_request.url }}
+      CLOSED_AT: ${{ github.event.pull_request.closed_at }}
+      OWN_RUN: ${{ github.run_id }}
     steps:
-      - name: Cancel queued and in-progress runs for the closed head
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          OWN_RUN: ${{ github.run_id }}
+      - name: Release runs and caches owned by the closed pull request
         run: |
           set -euo pipefail
+          require_same_closure() {
+            local current
+            current=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '[.state, .closed_at] | @tsv')
+            if [[ "$current" != $'closed\t'"$CLOSED_AT" ]]; then
+              echo "PR $PR_NUMBER has reopened or closed again; this event owns no further cleanup."
+              exit 0
+            fi
+          }
+          require_same_closure
           cancelled=0
+          failed=0
           for status in queued in_progress waiting pending; do
-            # Every workflow that ran for this head, not only CI: profiling,
-            # plugin validation and SDK conformance queue per push too.
-            for run in $(gh api "repos/$REPO/actions/runs?branch=$HEAD_REF&status=$status&per_page=100" \
-                           --jq '.workflow_runs[].id'); do
-              if [ "$run" = "$OWN_RUN" ]; then
-                continue
-              fi
-              if gh api -X POST "repos/$REPO/actions/runs/$run/cancel" >/dev/null 2>&1; then
-                echo "cancelled run $run ($status) for $HEAD_REF@${HEAD_SHA:0:9}"
+            runs=$(gh api --paginate "repos/$REPO/actions/runs?event=pull_request&status=$status&per_page=100" |
+              jq -r --argjson pr "$PR_NUMBER" --arg url "$PR_URL" --arg closed "$CLOSED_AT" --argjson own "$OWN_RUN" '
+                .workflow_runs[]
+                | select(.event == "pull_request" and .id != $own)
+                | select((.created_at | fromdateiso8601) <= ($closed | fromdateiso8601))
+                | select(any(.pull_requests[]?; .number == $pr and .url == $url))
+                | .id')
+            for run in $runs; do
+              require_same_closure
+              if gh api -X POST "repos/$REPO/actions/runs/$run/cancel" >/dev/null; then
+                echo "cancelled run $run ($status) for PR $PR_NUMBER"
                 cancelled=$((cancelled + 1))
+              else
+                failed=1
               fi
             done
           done
-          echo "cancelled $cancelled run(s) for closed head $HEAD_REF"
-
-      - name: Delete the closed pull request's Actions caches
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          MERGE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
-        run: |
-          set -euo pipefail
+          require_same_closure
+          merge_ref="refs/pull/$PR_NUMBER/merge"
+          caches=$(gh api --paginate "repos/$REPO/actions/caches?ref=$merge_ref&per_page=100" --jq '.actions_caches[].id')
           deleted=0
-          for cache in $(gh api "repos/$REPO/actions/caches?ref=$MERGE_REF&per_page=100" \
-                           --jq '.actions_caches[].id'); do
-            if gh api -X DELETE "repos/$REPO/actions/caches/$cache" >/dev/null 2>&1; then
+          for cache in $caches; do
+            require_same_closure
+            if gh api -X DELETE "repos/$REPO/actions/caches/$cache" >/dev/null; then
               deleted=$((deleted + 1))
+            else
+              failed=1
             fi
           done
-          echo "deleted $deleted cache entry(ies) for $MERGE_REF"
+          echo "cancelled $cancelled run(s) and deleted $deleted cache entry(ies) for PR $PR_NUMBER"
+          exit "$failed"

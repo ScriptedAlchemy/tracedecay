@@ -175,10 +175,12 @@ class CommitRangeLintTests(unittest.TestCase):
         *,
         event: str,
         head: str,
+        base: str | None = None,
         before: str | None = None,
         default_branch: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
+        environment.pop("BASE_SHA", None)
         environment.update(
             {
                 "EVENT_NAME": event,
@@ -188,6 +190,8 @@ class CommitRangeLintTests(unittest.TestCase):
         )
         if before is not None:
             environment["BEFORE_SHA"] = before
+        if base is not None:
+            environment["BASE_SHA"] = base
         if default_branch is not None:
             environment["DEFAULT_BRANCH"] = default_branch
         return run(
@@ -196,6 +200,45 @@ class CommitRangeLintTests(unittest.TestCase):
             env=environment,
             check=False,
         )
+
+    def test_pr_accepts_valid_commits_without_rejudging_base_history(self) -> None:
+        published = self.commit("already published invalid header")
+        base = self.commit("fix(test): establish the PR base", published)
+        head = self.commit("fix(test): propose a valid change", base)
+
+        result = self.lint_ci(event="pull_request", head=head, base=base)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(published, result.stdout + result.stderr)
+
+    def test_pr_rejects_invalid_proposed_commits(self) -> None:
+        base = self.commit("chore(test): establish the PR base")
+        head = self.commit("invalid proposed header", base)
+
+        result = self.lint_ci(event="pull_request", head=head, base=base)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(head, result.stderr)
+        self.assertIn("type-empty", result.stderr)
+
+    def test_pr_uses_supplied_base_when_the_default_branch_has_moved(self) -> None:
+        base = self.commit("chore(test): establish the PR base")
+        head = self.commit("invalid proposed header", base)
+        master = self.commit("fix(test): merge the proposal elsewhere", head)
+        run(["git", "branch", "master", master], cwd=self.root)
+
+        result = self.lint_ci(event="pull_request", head=head, base=base, default_branch="master")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(head, result.stderr)
+
+    def test_pr_requires_its_event_base(self) -> None:
+        head = self.commit("fix(test): propose a valid change")
+
+        result = self.lint_ci(event="pull_request", head=head)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("pull_request requires BASE_SHA", result.stderr)
 
     def test_dispatch_rejects_batch_followup_headers_over_the_maximum(self) -> None:
         base = self.commit("chore(test): establish fixture base")

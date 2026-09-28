@@ -23,8 +23,8 @@ Explicit memberships live beside the original Cargo selections in
 `.github/linux-test-partitions.json`. Each selection still runs separately
 with the same features and nextest policies, through Hauler.
 
-The current run finishes while GitHub keeps the newest pending run for the
-same ref. Linux workers start after the inexpensive repository gates pass.
+Master finishes its current run while GitHub keeps the newest pending run for
+that ref. Linux workers start after the inexpensive repository gates pass.
 Group timeout ceilings sum the previous member budgets. That preserves
 headroom but is not a prediction of group duration.
 
@@ -68,6 +68,33 @@ separate experiment.
 
 [PR #2443](https://github.com/ScriptedAlchemy/tracedecay/pull/2443) records the
 independent review and rollout, with manual hosted probe results when available.
+
+## Automatic PR CI
+
+Ready pull requests run the six Hauler-backed Linux test groups, Clippy,
+feature checks, the shipped CLI build and dashboard checks. Drafts run the
+repository gates and benchmark-harness tests. Opening, updating, reopening or
+changing draft status triggers CI. A newer PR event cancels that PR's older
+run. Commit lint checks the proposed commits against the event's base SHA.
+
+Each Linux group and each of the four other ordinary heavy jobs has one
+repository-wide concurrency group shared by PRs, pushes and dispatches. GitHub queues these jobs before
+allocating runners. This permits at most ten ordinary heavy jobs at once.
+Cheap gates and optional OS, host, profiling and full-workspace jobs are outside that bound.
+Passing repository gates is required before entering the heavy queues.
+
+The native [`queue: max` setting](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idconcurrency)
+keeps up to 100 pending jobs per group. Excess demand is cancelled by GitHub,
+never reported as a passing test. Master shares these queues and can wait
+behind PR jobs. This does not reserve release capacity or guarantee dispatch
+order. The Actions page shows the waiting and running jobs; no GitHub App or
+additional service needs installing.
+
+Manual dispatch retains the optional OS, host, profiling and full-workspace
+inputs. Closing a PR cancels only automatic runs associated with that PR
+from before the close event. Cleanup checks that the PR remains closed and
+that the event still names its current closure before deleting merge-ref
+caches. Manual dispatches remain under the operator's control.
 
 ## What was measured
 
@@ -126,8 +153,8 @@ For completed, allocated jobs belonging to runs created September 26 onward:
 
 The low combined TraceDecay median conceals a sharp change: its CI jobs on
 September 26 had a **129-minute median and 276-minute p95**; on September 27
-the median was four seconds and p95 five seconds. The checked-out workflows
-already removed automatic PR CI and moved expensive opt-ins to manual dispatch.
+the median was four seconds and p95 five seconds. At the baseline, the workflows
+had removed automatic PR CI and moved expensive opt-ins to manual dispatch.
 The data does not support claiming that today's remaining problem is still
 uniformly a multi-hour runner queue.
 
@@ -182,8 +209,8 @@ figures do not separate compilation from execution.
 There are real failures too. [Run 36372853178](https://github.com/ScriptedAlchemy/tracedecay/actions/runs/36372853178)
 failed commit-message lint, Clippy, and tests; its transport partition ran 646
 tests and reported two failures. Folding must preserve those failures. A cheap
-lint failure currently does not stop the independent heavy jobs from starting;
-putting cheap rejection checks before heavy admission is another concrete cut.
+lint failure did not stop independent heavy jobs at the baseline. The rollout
+now requires successful repository gates before ordinary heavy admission.
 
 ## What the proposed Hauler CI service does
 

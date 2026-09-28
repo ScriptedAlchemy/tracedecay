@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [master, feature/holographic-memory]
   workflow_dispatch:
@@ -25,11 +27,11 @@ on:
 permissions:
   contents: read
 
-# Finish the current snapshot and retain only the newest pending run per ref.
-# Cancelling each master push discards the warm build before it yields a verdict.
+# PR updates supersede their own run. Master finishes its current snapshot
+# and retains only the newest pending run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: false
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,13 +41,8 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Manual dispatch is the only PR-head entry point. GitHub queues a
-  # pull_request workflow before evaluating job conditions, and automation
-  # applied every opt-in label to 173 PRs; only removing the trigger prevents
-  # that volume from occupying the account FIFO. A dispatch runs the Linux
-  # lane and may add OS, host, perf, or full-workspace work through explicit
-  # inputs. A master push runs the Linux lane only so release jobs retain
-  # runner slots.
+  # Draft PRs run cheap gates. Ready PRs and pushes run the ordinary Linux
+  # lane; dispatch can additionally request OS, host and profiling work.
   scope-gate:
     name: Scope gate
     runs-on: ubuntu-latest
@@ -63,11 +60,15 @@ jobs:
         id: decide
         env:
           EVENT: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft || false }}
           RUN_OS: ${{ inputs.run_os || false }}
           RUN_HOSTS: ${{ inputs.run_hosts || false }}
           RUN_PERF: ${{ inputs.run_perf || false }}
         run: |
           heavy=true
+          if [[ $EVENT == pull_request && $DRAFT == true ]]; then
+            heavy=false
+          fi
           os=false
           hosts=false
           perf=false
@@ -216,11 +217,9 @@ jobs:
           bash scripts/test-check-distribution-reuse.sh
           bash tests/macos_stable_codesign_test.sh
 
-      # Release guards: drift, safety, installer, PR integrity, bundle check.
-      # Pull requests only; the release PR itself is exempt because it is
-      # the one change allowed to move the version authorities.
+      # Exercise the release guard scripts when admitting proposed changes.
       - name: Check the release guards
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
         run: |
           bash tests/release_drift_check_test.sh
           bash tests/release_safety_test.sh
@@ -244,15 +243,14 @@ jobs:
           python3 scripts/test-check-dev-skill-mirrors.py
           python3 scripts/check-dev-skill-mirrors.py check
 
-      # Dispatch admits an integration branch. Judge the commits a merge onto
-      # the default branch would introduce, with the same linter a push uses.
-      # A push still uses the before SHA, so published history is not rejudged.
+      # Lint proposed commits without rejudging already-published history.
       - name: Validate commit messages
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         env:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: scripts/lint-ci-commits.sh
 
@@ -442,6 +440,10 @@ jobs:
     name: Test Linux ${{ matrix.group }}
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    concurrency:
+      group: ci-linux-${{ matrix.group }}
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04-arm
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -936,12 +938,16 @@ jobs:
 
   clippy:
     name: Clippy
-    needs: scope-gate
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     # The free 4-vCPU Arm runner (Cobalt 100), as a measured comparison
     # against the x64 `ubuntu-latest` this lane took 19 minutes on: same
     # workload, same cache shape, different core. Public repositories get it
     # at no cost; the result decides whether the partitioned test jobs move.
+    concurrency:
+      group: ci-clippy
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -1005,8 +1011,12 @@ jobs:
   # already evicted from.
   feature-gates:
     name: Feature gates
-    needs: scope-gate
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    concurrency:
+      group: ci-feature-gates
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -1051,8 +1061,12 @@ jobs:
   # of it, and that workflow keeps its own cache lineage.
   shipped-cli:
     name: Shipped CLI build (x86_64-linux)
-    needs: scope-gate
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    concurrency:
+      group: ci-shipped-cli
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -1125,8 +1139,12 @@ jobs:
 
   dashboard:
     name: Dashboard
-    needs: scope-gate
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    concurrency:
+      group: ci-dashboard
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

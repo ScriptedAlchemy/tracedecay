@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# Lint the commits a CI event is admitting.
-#
-# A master push lints github.event.before..HEAD, which is how an integration
-# merge is judged after it lands. workflow_dispatch is the admission path for
-# that integration branch, so it lints the same not-yet-on-the-default-branch
-# range. Already published history is not rejudged: a dispatch of the default
-# branch has an empty range.
+# Lint only the commits admitted by this event's base and head.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -16,7 +10,7 @@ head=${HEAD_SHA:-}
 zero_sha=0000000000000000000000000000000000000000
 
 if [[ -z $event || -z $head ]]; then
-  echo "usage: EVENT_NAME=<push|workflow_dispatch> HEAD_SHA=<sha> [BEFORE_SHA=<sha>] [DEFAULT_BRANCH=<name>] [REPOSITORY=<path>] $0" >&2
+  echo "usage: EVENT_NAME=<push|pull_request|workflow_dispatch> HEAD_SHA=<sha> [BASE_SHA=<sha>] [BEFORE_SHA=<sha>] [DEFAULT_BRANCH=<name>] [REPOSITORY=<path>] $0" >&2
   exit 2
 fi
 
@@ -52,6 +46,14 @@ resolve_default_branch() {
 }
 
 case "$event" in
+  pull_request)
+    base=${BASE_SHA:-}
+    if [[ -z $base ]]; then
+      echo "commit lint: pull_request requires BASE_SHA" >&2
+      exit 2
+    fi
+    lint_range "$base"
+    ;;
   push)
     before=${BEFORE_SHA:-}
     if [[ -z $before ]]; then
