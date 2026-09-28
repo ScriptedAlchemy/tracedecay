@@ -14,12 +14,13 @@ use tracedecay_contracts::code_index_freshness::{
 use tracedecay_contracts::ResolvedScope;
 
 use super::{
-    CodeIndexCadenceTriggerV1, CodeIndexOwnerActivityV1, CodeIndexSchedulerRegistryV1,
-    unique_mounted_for_scope,
+    CodeIndexCadenceTriggerV1, CodeIndexOwnerActivityV1, CodeIndexReconcileAdmissionV1,
+    CodeIndexSchedulerRegistryV1, unique_mounted_for_scope,
 };
 use crate::code_index_scheduler::reconcile::FreshnessProbeVerdictV1;
 use crate::code_index_scheduler::{
-    CodeIndexCadenceTelemetryV1, CodeIndexWorktreeSchedulerV1, LatestCodeTextGenerationV1,
+    CodeIndexCadenceTelemetryV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
+    LatestCodeTextGenerationV1,
 };
 
 /// Why the source could not be proven current before waiting.
@@ -29,6 +30,21 @@ enum CodeIndexFreshSweepRefusedV1 {
     PublicationParked,
     /// The blocking sweep did not complete.
     SweepFailed,
+}
+
+/// How a read's wait for a restart's retained generation to seat ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexRetainedSeatWaitV1 {
+    /// A published generation's code graph serves.
+    Seated,
+    /// The mounted worktree has no durable publication: a first index, with
+    /// nothing retained to wait for.
+    Unpublished,
+    /// The budget elapsed while the retained generation was still seating.
+    Warming,
+    /// Waiting cannot seat it: convergence parked, graph serving refused,
+    /// the publication read failed, or the registry closed.
+    Unreachable,
 }
 
 /// The registry that owns these channels is gone.
@@ -349,5 +365,105 @@ impl CodeIndexSchedulerRegistryV1 {
                 Ok(Ok(())) => {}
             }
         }
+    }
+
+    /// Wait, for at most `budget`, until the generation a restart retained
+    /// for `project_root` serves graph and search reads for `scope` again.
+    ///
+    /// A restarted worktree answers reads only after its worker re-seats the
+    /// durable publication, and a read that arrives first would otherwise see
+    /// no authority at all. The wait follows the mount, then reads the
+    /// durable publication pointer once: without one there is nothing
+    /// retained to seat, so a first index returns at once instead of waiting
+    /// out its build.
+    pub async fn wait_for_retained_graph_seat(
+        &self,
+        project_root: &Path,
+        scope: &ResolvedScope,
+        budget: Duration,
+    ) -> CodeIndexRetainedSeatWaitV1 {
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
+        loop {
+            match self.has_active_publication(project_root).await {
+                Some(Ok(true)) => break,
+                Some(Ok(false)) => return CodeIndexRetainedSeatWaitV1::Unpublished,
+                Some(Err(_)) => return CodeIndexRetainedSeatWaitV1::Unreachable,
+                None => {}
+            }
+            match tokio::time::timeout_at(deadline, signals.changed()).await {
+                Err(_) => return CodeIndexRetainedSeatWaitV1::Warming,
+                Ok(Err(CodeIndexOwnerSignalsClosedV1)) => {
+                    return CodeIndexRetainedSeatWaitV1::Unreachable;
+                }
+                Ok(Ok(())) => {}
+            }
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match self
+            .wait_for_readiness(
+                project_root,
+                CodeIndexReadinessTargetV1::GraphReady,
+                remaining,
+            )
+            .await
+        {
+            Ok(CodeIndexReadinessWaitReadV1::Reached { .. }) => {}
+            Ok(CodeIndexReadinessWaitReadV1::TimedOut { .. }) => {
+                return CodeIndexRetainedSeatWaitV1::Warming;
+            }
+            Ok(CodeIndexReadinessWaitReadV1::Unreachable { .. }) | Err(_) => {
+                return CodeIndexRetainedSeatWaitV1::Unreachable;
+            }
+        }
+        // The graph seats before the retained text owners reopen their query
+        // owners, and search serves only from those.
+        let mut reconcile_requested = false;
+        loop {
+            if self
+                .latest_text_serving_freshness_for_scope(scope)
+                .await
+                .is_some()
+            {
+                return CodeIndexRetainedSeatWaitV1::Seated;
+            }
+            if !reconcile_requested {
+                reconcile_requested = true;
+                if let CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) =
+                    self.request_query_background_reconcile(scope).await
+                {
+                    return CodeIndexRetainedSeatWaitV1::Unreachable;
+                }
+            }
+            match tokio::time::timeout_at(deadline, signals.changed()).await {
+                Err(_) => return CodeIndexRetainedSeatWaitV1::Warming,
+                Ok(Err(CodeIndexOwnerSignalsClosedV1)) => {
+                    return CodeIndexRetainedSeatWaitV1::Unreachable;
+                }
+                Ok(Ok(())) => {}
+            }
+        }
+    }
+
+    /// Whether the mounted worktree's durable publication names a sealed
+    /// generation; `None` while `project_root` is not mounted.
+    async fn has_active_publication(
+        &self,
+        project_root: &Path,
+    ) -> Option<Result<bool, CodeIndexSchedulerErrorV1>> {
+        let canonical = canonical_existing_identity(project_root).ok()?;
+        let owner = {
+            let mounted = self.mounted.lock().await;
+            mounted.get(&canonical)?.historical_generation_owner.clone()
+        };
+        Some(
+            tokio::task::spawn_blocking(move || owner.has_active_publication())
+                .await
+                .unwrap_or_else(|error| {
+                    Err(CodeIndexSchedulerErrorV1::Identity(format!(
+                        "publication pointer read task failed: {error}"
+                    )))
+                }),
+        )
     }
 }

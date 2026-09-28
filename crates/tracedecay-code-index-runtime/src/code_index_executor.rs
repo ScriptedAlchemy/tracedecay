@@ -174,6 +174,22 @@ pub(crate) async fn acquire_execution_permit(
     }
 }
 
+/// How long a search may wait for a restart's retained generation to seat:
+/// half of what its deadline leaves, so the retrieval that runs on the seat
+/// keeps the other half. A request without a deadline declared no wait
+/// budget.
+fn retained_seat_wait_budget(
+    deadline: Option<&tracedecay_contracts::Deadline>,
+) -> std::time::Duration {
+    deadline.map_or(std::time::Duration::ZERO, |deadline| {
+        let remaining_micros = deadline
+            .expires_at
+            .0
+            .saturating_sub(tracedecay_contracts::clock::now_micros().0);
+        std::time::Duration::from_micros(u64::try_from(remaining_micros).unwrap_or(0) / 2)
+    })
+}
+
 pub fn mcp_search_request_termination(
     deadline: Option<&tracedecay_contracts::Deadline>,
     cancellation: Option<&tracedecay_contracts::CancellationSignal>,
@@ -675,30 +691,67 @@ where
                     );
                 }
                 if exact_source_bound {
+                    let authority_mounted = || async {
+                        schedulers.query_authority_for_scope(&scope).await.is_some()
+                            || schedulers
+                                .mount_query_authority_from_project_peer(
+                                    &request.project_root,
+                                    &scope,
+                                )
+                                .await
+                                .is_ok()
+                    };
                     match bounded_by_settlement(
                         request.deadline.as_ref(),
                         request.cancellation.as_ref(),
                         async {
-                            schedulers.query_authority_for_scope(&scope).await.is_none()
+                            if authority_mounted().await
                                 && schedulers
-                                    .mount_query_authority_from_project_peer(
-                                        &request.project_root,
-                                        &scope,
-                                    )
+                                    .latest_text_serving_freshness_for_scope(&scope)
                                     .await
-                                    .is_err()
+                                    .is_some()
+                            {
+                                return None;
+                            }
+                            // A restart mounts the authority and reopens its
+                            // query owners only once its retained generation
+                            // seats; wait for that seat rather than answer as
+                            // if nothing were indexed.
+                            let seat = schedulers
+                                .wait_for_retained_graph_seat(
+                                    &request.project_root,
+                                    &scope,
+                                    retained_seat_wait_budget(request.deadline.as_ref()),
+                                )
+                                .await;
+                            // Once the authority is mounted, search reports
+                            // its own generation state.
+                            if authority_mounted().await {
+                                return None;
+                            }
+                            match seat {
+                                code_index_scheduler::CodeIndexRetainedSeatWaitV1::Seated
+                                | code_index_scheduler::CodeIndexRetainedSeatWaitV1::Warming => {
+                                    Some(code_index_search_unavailable(
+                                        code_search::CodeIndexSearchUnavailableReasonV1::GraphWarming,
+                                        code_search::CodeIndexSearchUnavailableReasonV1::GraphWarming
+                                            .as_str(),
+                                    ))
+                                }
+                                code_index_scheduler::CodeIndexRetainedSeatWaitV1::Unpublished
+                                | code_index_scheduler::CodeIndexRetainedSeatWaitV1::Unreachable => {
+                                    Some(code_index_search_unavailable(
+                                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                                        "query_authority_unavailable",
+                                    ))
+                                }
+                            }
                         },
                     )
                     .await
                     {
-                        Ok(false) => (),
-                        Ok(true) => {
-                            return code_index_search_unavailable(
-                                code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                                "query_authority_unavailable",
-                            );
-                        }
-                        Err(outcome) => return outcome,
+                        Ok(None) => (),
+                        Ok(Some(outcome)) | Err(outcome) => return outcome,
                     }
                 }
                 let admission = match admission_provider.admit_current(&scope) {

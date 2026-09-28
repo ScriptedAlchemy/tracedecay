@@ -946,14 +946,46 @@ impl ProductionProjectCompositionHarnessV1 {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<JsonRpcResponse> {
+        self.call_tool_with_params(
+            project_root,
+            tool_name,
+            json!({"name": tool_name, "arguments": arguments}),
+        )
+        .await
+    }
+
+    /// [`Self::call_tool`] under a caller deadline, as an MCP client that
+    /// bounds its own call declares it in `_meta`.
+    pub async fn call_tool_with_deadline(
+        &self,
+        project_root: impl AsRef<Path>,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        expires_at: tracedecay_domain::UtcMicros,
+    ) -> Result<JsonRpcResponse> {
+        self.call_tool_with_params(
+            project_root,
+            tool_name,
+            json!({
+                "name": tool_name,
+                "arguments": arguments,
+                "_meta": tracedecay_mcp::tool_call_deadline_meta(expires_at),
+            }),
+        )
+        .await
+    }
+
+    async fn call_tool_with_params(
+        &self,
+        project_root: impl AsRef<Path>,
+        tool_name: &str,
+        params: serde_json::Value,
+    ) -> Result<JsonRpcResponse> {
         let request = serde_json::from_value::<JsonRpcRequest>(json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments,
-            },
+            "params": params,
         }))
         .map_err(|error| TraceDecayError::Config {
             message: format!("failed to construct production-composition tool request: {error}"),

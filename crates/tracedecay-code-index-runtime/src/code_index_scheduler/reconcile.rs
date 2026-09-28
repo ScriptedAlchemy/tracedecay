@@ -1071,6 +1071,16 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             }))
     }
 
+    /// Whether a durable publication pointer names a sealed generation, read
+    /// without decoding or binding it.
+    pub(crate) fn has_active_publication(&self) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        Ok(self
+            .publication
+            .read_publication_pointer()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+            .is_some())
+    }
+
     /// The manifest and snapshot of the active durable publication, without
     /// binding a text owner. A seal moves the pointer before its text
     /// projection and serving swap, so this names the newest generation well

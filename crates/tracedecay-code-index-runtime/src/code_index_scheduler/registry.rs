@@ -455,7 +455,9 @@ mod resident_memory;
 #[cfg(test)]
 mod test_gates;
 pub mod watch_ingress;
-pub use owner_signals::{CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1};
+pub use owner_signals::{
+    CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1, CodeIndexRetainedSeatWaitV1,
+};
 
 /// At most two distinct worktrees may reconcile concurrently. Each reconcile
 /// already saturates the shared indexing pool during extraction; the second
