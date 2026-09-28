@@ -16,8 +16,9 @@ selection, nextest-policy or setup-action differences from the controller. The
 controller comes from the dispatched `master` commit. The worker rechecks each
 PR's open/ready/current-head state before work, and a fresh reporting job checks
 it again before reporting. Changed, closed or draft heads receive a cancelled
-check on the old SHA; the trial never advances to a replacement head. Reopening
-requires a new dispatch. Moving `master` alone does not invalidate this
+check on the old SHA; the trial never advances to a replacement head. A batch
+that has skipped a closed PR does not resume when it reopens; dispatch a new
+batch. Moving `master` alone does not invalidate this
 **head-only** experiment: it does not test GitHub's synthetic merge commit.
 
 One standard `ubuntu-24.04-arm` worker installs the shared dependency graph and
