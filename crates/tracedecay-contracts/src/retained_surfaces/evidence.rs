@@ -328,23 +328,23 @@ impl RetainedSurfaceResultV1 {
     ) -> Result<RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1> {
         match self {
             Self::FactStoreSearch(value) => {
-                fact_search_collection(value.hits.len(), value.next_after.as_ref())
+                fact_page_collection(value.hits.len(), value.next_after.as_deref())
             }
             Self::FactStoreProbe(value) => {
-                fact_search_collection(value.hits.len(), value.next_after.as_ref())
+                fact_page_collection(value.hits.len(), value.next_after.as_deref())
             }
             Self::FactStoreRelated(value) => {
-                fact_search_collection(value.hits.len(), value.next_after.as_ref())
+                fact_page_collection(value.hits.len(), value.next_after.as_deref())
             }
             Self::FactStoreReason(value) => {
-                fact_search_collection(value.hits.len(), value.next_after.as_ref())
+                fact_page_collection(value.hits.len(), value.next_after.as_deref())
             }
             Self::FactStoreContradict(value) => fact_collection(value.contradictions.len()),
             Self::FactStoreGet(_) => {
                 RetainedSurfaceEvidenceFactsV1::unknown(EvidenceDomain::Operational, 1)
             }
             Self::FactStoreList(value) => {
-                fact_list_collection(value.facts.len(), value.next_after_fact_id.as_ref())
+                fact_page_collection(value.facts.len(), value.next_after.as_deref())
             }
             Self::MemoryStatus(_) => {
                 RetainedSurfaceEvidenceFactsV1::unknown_singleton(EvidenceDomain::Operational, true)
@@ -453,25 +453,12 @@ fn fact_collection(
     RetainedSurfaceEvidenceFactsV1::unknown(EvidenceDomain::Operational, returned)
 }
 
-fn fact_search_collection(
+fn fact_page_collection(
     returned: usize,
-    next_after: Option<&crate::memory::FactSearchCursorV1>,
+    next_after: Option<&str>,
 ) -> Result<RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1> {
     let mut facts = fact_collection(returned)?;
-    facts.next_cursor = next_after
-        .cloned()
-        .map(|cursor| PageCursor::FactSearch { cursor });
-    Ok(facts)
-}
-
-fn fact_list_collection(
-    returned: usize,
-    next_after_fact_id: Option<&tracedecay_domain::FactId>,
-) -> Result<RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1> {
-    let mut facts = fact_collection(returned)?;
-    facts.next_cursor = next_after_fact_id
-        .cloned()
-        .map(|fact_id| PageCursor::FactListAfter { fact_id });
+    facts.next_cursor = opaque_page_cursor(next_after)?;
     Ok(facts)
 }
 
@@ -579,25 +566,14 @@ const fn omission_reason(value: HydrationStateResultV1) -> Option<OmissionReason
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{FactRetrievalTelemetryV1, FactSearchCursorV1, FactSearchGraphCoverageV1};
+    use crate::memory::{FactRetrievalTelemetryV1, FactSearchGraphCoverageV1};
     use crate::result::PageCursor;
     use crate::retained_surfaces::{
         FactCommitOwnerV1, FactStoreListResultV1, FactStoreSearchResultV1, MessageSearchHitV1,
         MessageSearchResultV1, RetainedNextActionV1, RetrievalWorkerStatusV1,
         SessionRefreshFrontierResultV1, SessionRefreshReceiptV1, TemporalCoverageV1,
     };
-    use tracedecay_domain::{FactId, UtcMicros};
-
-    fn fact_id(identity_byte: char) -> FactId {
-        FactId::new(format!(
-            "fact.v1.{}.{}",
-            "0".repeat(64),
-            identity_byte.to_string().repeat(64)
-        ))
-        .expect("canonical fact id")
-    }
-
-    fn search_result(next_after: Option<FactSearchCursorV1>) -> FactStoreSearchResultV1 {
+    fn search_result(next_after: Option<String>) -> FactStoreSearchResultV1 {
         FactStoreSearchResultV1 {
             owner: FactCommitOwnerV1::Profile,
             hits: Vec::new(),
@@ -691,26 +667,27 @@ mod tests {
     }
 
     #[test]
-    fn fact_search_evidence_preserves_structural_cursor() {
-        let cursor = FactSearchCursorV1 {
-            score_millionths: 750_000,
-            updated_at: UtcMicros(42),
-            fact_id: fact_id('1'),
-        };
-        let facts = RetainedSurfaceResultV1::FactStoreSearch(search_result(Some(cursor.clone())))
-            .evidence_facts()
-            .expect("search evidence");
+    fn fact_search_evidence_carries_the_opaque_cursor() {
+        let facts = RetainedSurfaceResultV1::FactStoreSearch(search_result(Some(
+            "bc1.search-page".to_owned(),
+        )))
+        .evidence_facts()
+        .expect("search evidence");
 
-        assert_eq!(facts.next_cursor, Some(PageCursor::FactSearch { cursor }));
+        assert_eq!(
+            facts.next_cursor,
+            Some(PageCursor::Opaque {
+                cursor: OpaqueCursor::new("bc1.search-page").expect("opaque cursor")
+            })
+        );
     }
 
     #[test]
-    fn fact_list_evidence_preserves_structural_cursor() {
-        let fact_id = fact_id('2');
+    fn fact_list_evidence_carries_the_opaque_cursor() {
         let result = FactStoreListResultV1 {
             owner: FactCommitOwnerV1::Profile,
             facts: Vec::new(),
-            next_after_fact_id: Some(fact_id.clone()),
+            next_after: Some("bc1.list-page".to_owned()),
         };
         let facts = RetainedSurfaceResultV1::FactStoreList(result)
             .evidence_facts()
@@ -718,7 +695,9 @@ mod tests {
 
         assert_eq!(
             facts.next_cursor,
-            Some(PageCursor::FactListAfter { fact_id })
+            Some(PageCursor::Opaque {
+                cursor: OpaqueCursor::new("bc1.list-page").expect("opaque cursor")
+            })
         );
     }
 

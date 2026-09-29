@@ -21,7 +21,7 @@
 //! so adding or retiring a provider is a change to this descriptor rather than
 //! a search for string comparisons inside the reducer.
 
-use tracedecay_domain::{CanonicalObservationFactV1, ObservationContractError};
+use tracedecay_domain::{CanonicalObservationFactV1, ObservationContractError, ObservationId};
 
 use crate::{
     ProjectionStoreError, ProjectionStoreResult, codex_goal_context_from_text,
@@ -94,11 +94,20 @@ pub(crate) fn provider_message_semantics(
 
 /// Normalizes a provider's tool invocations into the cross-provider message
 /// metadata shape. Selected by capture source, then applied to the merged
-/// metadata map and the record's canonical facts.
+/// metadata map and the record's canonical facts. `serves_id` answers whether
+/// an invocation id may be served as the host's own.
 pub type ToolMetadataNormalizer = fn(
     &mut serde_json::Map<String, serde_json::Value>,
     &[CanonicalObservationFactV1],
+    &dyn Fn(&ObservationId) -> bool,
 ) -> ProjectionStoreResult<()>;
+
+/// Message-metadata key naming why a record's tool calls carry no ids.
+pub const TOOL_CALL_ID_COVERAGE_KEY: &str = "tool_call_id_coverage";
+
+/// [`TOOL_CALL_ID_COVERAGE_KEY`] value: the host wrote no id for at least one
+/// of the record's tool calls, so that call is served without one.
+pub const TOOL_CALL_IDS_HOST_UNRECORDED: &str = "host_unrecorded";
 
 /// Whether `provider` synthesizes its own stable record id.
 ///
@@ -125,12 +134,18 @@ pub fn tool_metadata_normalizer(source: Option<&str>) -> Option<ToolMetadataNorm
 /// Restates a Cursor transcript record's tool invocations as the canonical
 /// cross-provider `tool_calls` and `tool_events` fields. The record's
 /// `tool_use_id` is provider-neutral and written by the reducer itself.
+///
+/// Cursor's transcript JSONL writes no tool-call ids, so its calls are served
+/// without `id`/`call_id` and the record says so rather than carrying the
+/// capture's record-rooted fallback, which every call on the record shares.
 fn normalize_cursor_tool_metadata(
     metadata: &mut serde_json::Map<String, serde_json::Value>,
     facts: &[CanonicalObservationFactV1],
+    serves_id: &dyn Fn(&ObservationId) -> bool,
 ) -> ProjectionStoreResult<()> {
     let mut tool_calls = Vec::new();
     let mut tool_events = Vec::new();
+    let mut host_unrecorded = false;
     for fact in facts {
         let CanonicalObservationFactV1::ToolInvocation {
             invocation_id,
@@ -140,29 +155,41 @@ fn normalize_cursor_tool_metadata(
         else {
             continue;
         };
-        tool_calls.push(serde_json::json!({
-            "id": invocation_id.as_str(),
+        let mut tool_call = serde_json::json!({
             "type": "function",
             "function": {
                 "name": name,
                 "arguments": arguments,
             },
-        }));
+        });
         let input_bytes = serde_json::to_vec(arguments)
             .map_err(|_| {
                 ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding)
             })?
             .len();
-        tool_events.push(serde_json::json!({
+        let mut tool_event = serde_json::json!({
             "type": "tool_use",
             "tool_name": name,
-            "call_id": invocation_id.as_str(),
             "input_bytes": input_bytes,
-        }));
+        });
+        if serves_id(invocation_id) {
+            tool_call["id"] = invocation_id.as_str().into();
+            tool_event["call_id"] = invocation_id.as_str().into();
+        } else {
+            host_unrecorded = true;
+        }
+        tool_calls.push(tool_call);
+        tool_events.push(tool_event);
     }
     if !tool_calls.is_empty() {
         metadata.insert("tool_calls".to_owned(), tool_calls.into());
         metadata.insert("tool_events".to_owned(), tool_events.into());
+    }
+    if host_unrecorded {
+        metadata.insert(
+            TOOL_CALL_ID_COVERAGE_KEY.to_owned(),
+            TOOL_CALL_IDS_HOST_UNRECORDED.into(),
+        );
     }
     Ok(())
 }

@@ -15,6 +15,7 @@ use tracedecay_domain::{
     WorkFilesystemPolicy, WorkOrdinalBandV1, WorkProviderBackendV1, WorkRouteCandidateV1,
     WorkRouteExecutionProfileV1, WorkSandboxPolicy,
 };
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 async fn call_envelope(server: &tracedecay::mcp::McpServer, tool: &str, arguments: Value) -> Value {
     let result = handle_real_server_tool_call(server, tool, arguments).await;
@@ -47,18 +48,8 @@ async fn configure_attempt_provider(production: &ProductionCompositionFixture) {
         .parent()
         .expect("production fixture isolation root");
     let executable_path = isolation_root.join("work-attempt-provider");
-    std::fs::write(&executable_path, executable_bytes).expect("write Work provider executable");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = std::fs::metadata(&executable_path)
-            .expect("Work provider executable metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&executable_path, permissions)
-            .expect("Work provider executable permissions");
-    }
+    write_executable_script(&executable_path, executable_bytes)
+        .expect("write Work provider executable");
     let executable_path = executable_path
         .canonicalize()
         .expect("canonical Work provider executable");
@@ -495,6 +486,23 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
     assert!(
         duplicate["evidence"]["topology_generation"].is_string(),
         "{duplicate}"
+    );
+    let mut fabricated = duplicate.clone();
+    fabricated["command_id"] = json!("request.mcp-attempt-read.fabricated-evidence");
+    fabricated["evidence"]["work_generation"] =
+        json!(format!("work-product-projection.sha256:{}", "0".repeat(64)));
+    let refused = call(&server, "tracedecay_work_adjudicate_duplicate", fabricated).await;
+    assert_eq!(
+        refused.pointer("/value/problem/code"),
+        Some(&json!(
+            "application.work.duplicate-adjudication.evidence-stale"
+        )),
+        "{refused}"
+    );
+    assert_eq!(
+        refused.pointer("/value/problem/legal_actions"),
+        Some(&json!(["refresh"])),
+        "{refused}"
     );
     let adjudicated = call(
         &server,

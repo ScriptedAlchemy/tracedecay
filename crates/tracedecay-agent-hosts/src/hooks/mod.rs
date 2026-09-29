@@ -49,11 +49,10 @@ pub use claude::{
     hook_claude_session_start, hook_stop,
 };
 pub use codex::{
-    codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
-    codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
-    codex_workspace_status_from_event, evaluate_codex_subagent_start, hook_codex_post_compact,
-    hook_codex_post_tool_use, hook_codex_session_start, hook_codex_user_prompt_submit,
-    record_codex_subagent_start,
+    codex_apply_patch_rel_paths, codex_project_root_from_event, codex_subagent_start_log_line,
+    codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
+    evaluate_codex_subagent_start, hook_codex_post_compact, hook_codex_post_tool_use,
+    hook_codex_session_start, hook_codex_user_prompt_submit, record_codex_subagent_start,
 };
 pub use cursor::{
     CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_project_root_from_event, cursor_session_start_json,
@@ -75,8 +74,9 @@ pub use analytics::{
     measure_host_event_payload_bytes,
 };
 use analytics::{
-    record_hint_analytics, record_hint_emitted, record_hook_analytics, record_hook_invoked,
-    record_hook_invoked_parsed, record_other_hook_invoked, record_workspace_status_analytics,
+    HookStdinRefusal, record_hint_analytics, record_hint_emitted, record_hook_analytics,
+    record_hook_invoked, record_hook_invoked_parsed, record_hook_stdin_refused,
+    record_native_hook_invoked_parsed, record_workspace_status_analytics,
 };
 
 pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadinessDistributions {
@@ -94,8 +94,12 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadin
 /// read the way the Hermes terminal-receipt handler reads it, so a capture
 /// row is indistinguishable from the response row the same event produces.
 ///
-/// `hook_name` overrides that read for the one surface whose payload carries no
-/// event name (Claude's `TOOL_INPUT`-driven `preToolUse`).
+/// `hook_name` is the event the subcommand itself names. It wins over the
+/// payload's own event name, so an empty, malformed, or nameless payload (and
+/// Claude's `TOOL_INPUT`-driven `preToolUse`) still records the host event.
+///
+/// The returned span writes `hook_completed` when dropped; the caller notes
+/// the capture outcome on it first.
 #[hotpath::measure(label = "agent_hosts.hooks.record_native_capture")]
 pub fn record_native_capture_invoked(
     runtime: &HookRuntimeV1,
@@ -103,54 +107,112 @@ pub fn record_native_capture_invoked(
     host: NativeHostIdentityV1,
     hook_name: Option<&str>,
     event_json: &str,
+) -> NativeCaptureTelemetryV1 {
+    NativeCaptureTelemetryV1(record_native_hook_invoked(
+        runtime,
+        project_root,
+        host,
+        hook_name,
+        event_json,
+    ))
+}
+
+/// Records a stdin refusal for a native callback, attributed to the host and
+/// the event its subcommand names.
+pub fn record_native_capture_stdin_refused(
+    runtime: &HookRuntimeV1,
+    project_root: Option<&Path>,
+    host: NativeHostIdentityV1,
+    hook_name: Option<&str>,
+    oversized: bool,
 ) {
-    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let hook_name = hook_name
-        .or_else(|| {
-            parsed
-                .get("hook_event_name")
-                .or_else(|| parsed.get("type"))
-                .or_else(|| parsed.get("event"))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or("nativeCallback");
-    match native_capture_agent(host) {
-        Some(agent) => {
-            record_hook_invoked_parsed(
-                runtime,
-                project_root,
-                agent,
-                hook_name,
-                event_json,
-                &parsed,
-            );
-        }
-        None => {
-            record_other_hook_invoked(runtime, project_root, hook_name, event_json);
-        }
+    record_hook_stdin_refused(
+        runtime,
+        project_root,
+        host,
+        hook_name.unwrap_or(NATIVE_CALLBACK_HOOK_NAME),
+        if oversized {
+            HookStdinRefusal::Oversized
+        } else {
+            HookStdinRefusal::Unreadable
+        },
+    );
+}
+
+/// The `hook_completed` half of a capture-path invocation.
+pub struct NativeCaptureTelemetryV1(analytics::HookTimingSpan);
+
+impl NativeCaptureTelemetryV1 {
+    /// Notes where the capture landed. A delivery receipt the hook could not
+    /// retain after the event spooled is recorded here, not as a lost event.
+    pub fn note_capture_outcome(
+        &self,
+        outcome: &tracedecay_hooks::NativeHookCaptureOutcomeV1,
+        delivery_receipt_retained: bool,
+    ) {
+        use tracedecay_hooks::NativeHookCaptureOutcomeV1 as Outcome;
+        use tracedecay_sessions::admission::{
+            HostAdmissionStatus as Status, HostAdmissionTelemetryDisposition as Disposition,
+        };
+        let (status, retryable, reason) = match outcome {
+            Outcome::Captured if delivery_receipt_retained => {
+                (Status::AcceptedForReplay, true, "hook_v2_spooled")
+            }
+            Outcome::Captured => (
+                Status::AcceptedForReplay,
+                true,
+                "hook_v2_spooled_delivery_receipt_unavailable",
+            ),
+            Outcome::Unsupported => (Status::Degraded, false, "native_capture_unsupported"),
+            Outcome::Unbound => (Status::Unavailable, true, "native_capture_unbound"),
+            Outcome::Rejected => (Status::Unavailable, false, "native_capture_rejected"),
+            Outcome::Full => (Status::Backpressured, true, "native_capture_spool_full"),
+            Outcome::ResetRequired(_) => {
+                (Status::Unavailable, false, "native_capture_reset_required")
+            }
+            Outcome::Unavailable(_) => (Status::Unavailable, true, "native_capture_unavailable"),
+            Outcome::ScopeUnavailable => (
+                Status::Unavailable,
+                true,
+                "native_capture_scope_unavailable",
+            ),
+            Outcome::AdmissionTimedOut => {
+                self.0
+                    .note_disposition(Disposition::timeout("native_capture_admission_timed_out"));
+                return;
+            }
+        };
+        self.0.note_disposition(Disposition::from_parts(
+            status,
+            Some(retryable),
+            Some(reason.to_owned()),
+        ));
     }
 }
 
-/// Analytics agent key for a native host. Hosts outside the typed
-/// integrations record under the shared `other` key, matching the OpenCode and
-/// Kimi dispatchers below.
-const fn native_capture_agent(host: NativeHostIdentityV1) -> Option<HostIntegrationIdV1> {
-    match host {
-        NativeHostIdentityV1::ClaudeCode => Some(HostIntegrationIdV1::Claude),
-        NativeHostIdentityV1::Codex => Some(HostIntegrationIdV1::Codex),
-        NativeHostIdentityV1::CursorDesktop | NativeHostIdentityV1::CursorCloud => {
-            Some(HostIntegrationIdV1::Cursor)
-        }
-        NativeHostIdentityV1::Hermes => Some(HostIntegrationIdV1::Hermes),
-        NativeHostIdentityV1::Kiro => Some(HostIntegrationIdV1::Kiro),
-        NativeHostIdentityV1::Pi => Some(HostIntegrationIdV1::Pi),
-        NativeHostIdentityV1::Cline
-        | NativeHostIdentityV1::RooCode
-        | NativeHostIdentityV1::Kilo
-        | NativeHostIdentityV1::KimiCode
-        | NativeHostIdentityV1::OpenCode
-        | NativeHostIdentityV1::FactoryDroid => None,
-    }
+const NATIVE_CALLBACK_HOOK_NAME: &str = "nativeCallback";
+
+/// The event name a host puts in its own payload.
+fn payload_event_name(parsed: &Value) -> Option<&str> {
+    parsed
+        .get("hook_event_name")
+        .or_else(|| parsed.get("type"))
+        .or_else(|| parsed.get("event"))
+        .and_then(Value::as_str)
+}
+
+fn record_native_hook_invoked(
+    runtime: &HookRuntimeV1,
+    project_root: Option<&Path>,
+    host: NativeHostIdentityV1,
+    hook_name: Option<&str>,
+    event_json: &str,
+) -> analytics::HookTimingSpan {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let hook_name = hook_name
+        .or_else(|| payload_event_name(&parsed))
+        .unwrap_or(NATIVE_CALLBACK_HOOK_NAME);
+    record_native_hook_invoked_parsed(runtime, project_root, host, hook_name, event_json, &parsed)
 }
 
 use tool_hints::ToolHint;
@@ -158,24 +220,23 @@ use tracedecay_domain::{HostIntegrationIdV1, NativeHostIdentityV1};
 use tracedecay_policy::hint_delivery::HintDeliveryDecisionV1;
 
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_kimi_event")]
-pub async fn dispatch_kimi_event(
+async fn dispatch_kimi_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
     started: Instant,
 ) -> Option<String> {
-    let telemetry =
-        record_other_hook_invoked(runtime, Some(project_root), "kimi_event", event_json);
     dispatch::dispatch(
         runtime,
         NativeHostIdentityV1::KimiCode,
         event_json,
         project_root,
-        Some(&telemetry),
+        Some(telemetry),
         started,
     )
     .await
-    .into_recorded_guidance(&telemetry)
+    .into_recorded_guidance(telemetry)
     .flatten()
 }
 
@@ -186,37 +247,29 @@ const PI_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
 /// each session boundary lands that session's transcript through the
 /// canonical Pi source so recall reflects the session the event names.
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_pi_event")]
-pub async fn dispatch_pi_event(
+async fn dispatch_pi_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
     started: Instant,
 ) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let hook_name = parsed
-        .get("hook_event_name")
-        .and_then(Value::as_str)
-        .unwrap_or("nativeCallback");
-    let telemetry = record_hook_invoked_parsed(
-        runtime,
-        Some(project_root),
-        HostIntegrationIdV1::Pi,
-        hook_name,
-        event_json,
-        &parsed,
-    );
     let guidance = dispatch::dispatch(
         runtime,
         NativeHostIdentityV1::Pi,
         event_json,
         project_root,
-        Some(&telemetry),
+        Some(telemetry),
         started,
     )
     .await
-    .into_recorded_guidance(&telemetry)
+    .into_recorded_guidance(telemetry)
     .flatten();
-    if matches!(hook_name, "session_start" | "agent_end") {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    if matches!(
+        parsed.get("hook_event_name").and_then(Value::as_str),
+        Some("session_start" | "agent_end")
+    ) {
         ingest_transcript_for_event(
             runtime,
             "pi",
@@ -224,7 +277,7 @@ pub async fn dispatch_pi_event(
             Some(project_root),
             Some(PI_HOT_INGEST_MAX_BYTES),
             PI_HOT_INGEST_BUDGET,
-            Some(&telemetry),
+            Some(telemetry),
         )
         .await;
     }
@@ -232,38 +285,36 @@ pub async fn dispatch_pi_event(
 }
 
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_droid_event")]
-pub async fn dispatch_droid_event(
+async fn dispatch_droid_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
     started: Instant,
 ) -> Option<String> {
-    let telemetry =
-        record_other_hook_invoked(runtime, Some(project_root), "droid_event", event_json);
     dispatch::dispatch(
         runtime,
         NativeHostIdentityV1::FactoryDroid,
         event_json,
         project_root,
-        Some(&telemetry),
+        Some(telemetry),
         started,
     )
     .await
-    .into_recorded_guidance(&telemetry)
+    .into_recorded_guidance(telemetry)
     .flatten()
 }
 
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_opencode_event")]
-pub async fn dispatch_opencode_event(
+async fn dispatch_opencode_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
     started: Instant,
 ) -> Option<String> {
-    let telemetry =
-        record_other_hook_invoked(runtime, Some(project_root), "opencode_event", event_json);
     let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
-        dispatch::dispatch_opencode_lsp_updated(runtime, event_json, project_root, Some(&telemetry))
+        dispatch::dispatch_opencode_lsp_updated(runtime, event_json, project_root, Some(telemetry))
             .await
     } else {
         dispatch::dispatch(
@@ -271,39 +322,34 @@ pub async fn dispatch_opencode_event(
             NativeHostIdentityV1::OpenCode,
             event_json,
             project_root,
-            Some(&telemetry),
+            Some(telemetry),
             started,
         )
         .await
     };
-    dispatch.into_recorded_guidance(&telemetry).flatten()
+    dispatch.into_recorded_guidance(telemetry).flatten()
 }
 
 #[hotpath::measure(
     future = true,
     label = "agent_hosts.hooks.dispatch_opencode_tool_after"
 )]
-pub async fn dispatch_opencode_tool_after(
+async fn dispatch_opencode_tool_after(
     runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
     started: Instant,
 ) -> Option<String> {
-    let telemetry = record_other_hook_invoked(
-        runtime,
-        Some(project_root),
-        "opencode_tool_after",
-        event_json,
-    );
     dispatch::dispatch_opencode_tool_after(
         runtime,
         event_json,
         project_root,
-        Some(&telemetry),
+        Some(telemetry),
         started,
     )
     .await
-    .into_recorded_guidance(&telemetry)
+    .into_recorded_guidance(telemetry)
     .flatten()
 }
 
@@ -448,29 +494,64 @@ fn hook_output_owner_event_id(
     ))
 }
 
+/// Reads the bounded hook event, or records the refusal against `host` and
+/// the event the subcommand names and returns the handler's exit code.
 macro_rules! read_hook_event {
-    () => {{
+    ($runtime:expr, $host:expr, $hook_name:expr) => {{
         match $crate::hooks::take_hook_event($crate::hooks::read_stdin_bounded()) {
             Ok(event) => event,
-            Err(code) => return code,
+            Err(refusal) => {
+                return $crate::hooks::refuse_hook_stdin($runtime, $host, $hook_name, refusal);
+            }
         }
     }};
 }
 pub(crate) use read_hook_event;
 
+pub(crate) fn refuse_hook_stdin(
+    runtime: &HookRuntimeV1,
+    host: NativeHostIdentityV1,
+    hook_name: &str,
+    refusal: HookStdinAdmission,
+) -> i32 {
+    let refused = match refusal {
+        HookStdinAdmission::Oversized => HookStdinRefusal::Oversized,
+        HookStdinAdmission::ReadFailed(_) => HookStdinRefusal::Unreadable,
+        HookStdinAdmission::Event(_) => return 0,
+    };
+    let cwd = std::env::current_dir().ok();
+    record_hook_stdin_refused(runtime, cwd.as_deref(), host, hook_name, refused);
+    report_rejected_hook_stdin(&refusal);
+    hook_stdin_exit_code(&refusal).unwrap_or(1)
+}
+
 /// Shared native-event handler body: read the bounded event, resolve the
-/// project root, dispatch, and deliver any guidance for `host`.
+/// project root, record the invocation (profile-level when no enrolled
+/// project owns the event), dispatch, and deliver any guidance for `host`.
 async fn hook_native_event(
     runtime: &HookRuntimeV1,
     host: NativeHostIdentityV1,
-    dispatch: impl AsyncFnOnce(&HookRuntimeV1, &str, &Path, Instant) -> Option<String>,
+    hook_name: Option<&'static str>,
+    dispatch: impl AsyncFnOnce(
+        &HookRuntimeV1,
+        &str,
+        &Path,
+        &analytics::HookTimingSpan,
+        Instant,
+    ) -> Option<String>,
 ) -> i32 {
     let started = Instant::now();
-    let event = read_hook_event!();
-    let Some(root) = native_event_project_root(runtime, &event).await else {
+    let event = read_hook_event!(
+        runtime,
+        host,
+        hook_name.unwrap_or(NATIVE_CALLBACK_HOOK_NAME)
+    );
+    let root = native_event_project_root(runtime, &event).await;
+    let telemetry = record_native_hook_invoked(runtime, root.as_deref(), host, hook_name, &event);
+    let Some(root) = root else {
         return 0;
     };
-    if let Some(guidance) = dispatch(runtime, &event, &root, started).await
+    if let Some(guidance) = dispatch(runtime, &event, &root, &telemetry, started).await
         && !write_hook_output(&runtime.profile, Some(&root), host, &event, &guidance).await
     {
         return 1;
@@ -480,12 +561,18 @@ async fn hook_native_event(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.kimi_event")]
 pub async fn hook_kimi_event(runtime: &HookRuntimeV1) -> i32 {
-    hook_native_event(runtime, NativeHostIdentityV1::KimiCode, dispatch_kimi_event).await
+    hook_native_event(
+        runtime,
+        NativeHostIdentityV1::KimiCode,
+        None,
+        dispatch_kimi_event,
+    )
+    .await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.pi_event")]
 pub async fn hook_pi_event(runtime: &HookRuntimeV1) -> i32 {
-    hook_native_event(runtime, NativeHostIdentityV1::Pi, dispatch_pi_event).await
+    hook_native_event(runtime, NativeHostIdentityV1::Pi, None, dispatch_pi_event).await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.droid_event")]
@@ -493,6 +580,7 @@ pub async fn hook_droid_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
         runtime,
         NativeHostIdentityV1::FactoryDroid,
+        None,
         dispatch_droid_event,
     )
     .await
@@ -503,16 +591,22 @@ pub async fn hook_opencode_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
         runtime,
         NativeHostIdentityV1::OpenCode,
+        None,
         dispatch_opencode_event,
     )
     .await
 }
+
+/// OpenCode's direct tool callback payload (`{input, output}`) carries no
+/// event name; the plugin hook it answers is the name.
+pub const OPENCODE_TOOL_EXECUTE_AFTER_HOOK_NAME: &str = "tool.execute.after";
 
 #[hotpath::measure(future = true, label = "hosts.hooks.opencode_tool_after")]
 pub async fn hook_opencode_tool_after(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
         runtime,
         NativeHostIdentityV1::OpenCode,
+        Some(OPENCODE_TOOL_EXECUTE_AFTER_HOOK_NAME),
         dispatch_opencode_tool_after,
     )
     .await
@@ -767,7 +861,11 @@ pub(crate) async fn notify_hook_event_with_telemetry(
 #[hotpath::measure(future = true, label = "hosts.hooks.hermes_terminal_receipt")]
 pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
-    let event_json = read_hook_event!();
+    let event_json = read_hook_event!(
+        runtime,
+        NativeHostIdentityV1::Hermes,
+        NATIVE_CALLBACK_HOOK_NAME
+    );
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event_json) else {
         return 0;
     };
@@ -1288,13 +1386,12 @@ fn report_rejected_hook_stdin(admission: &HookStdinAdmission) {
     }
 }
 
-pub(crate) fn take_hook_event(read: std::io::Result<HookStdinRead>) -> Result<String, i32> {
+pub(crate) fn take_hook_event(
+    read: std::io::Result<HookStdinRead>,
+) -> Result<String, HookStdinAdmission> {
     match classify_hook_stdin(read) {
         HookStdinAdmission::Event(event) => Ok(event),
-        admission => {
-            report_rejected_hook_stdin(&admission);
-            Err(hook_stdin_exit_code(&admission).unwrap_or(1))
-        }
+        admission => Err(admission),
     }
 }
 

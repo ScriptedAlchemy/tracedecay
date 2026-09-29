@@ -74,7 +74,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::retrieval::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use tracedecay_daemon_service::logging::StderrTracingDefault;
-use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::config::{ProfileRoot, admit_process_host_program_search_path};
 
 pub(crate) fn current_unix_timestamp() -> i64 {
     tracedecay_runtime_core::tracedecay::current_timestamp()
@@ -581,6 +581,7 @@ impl Drop for ProcessHotpathGuard {
 }
 
 fn main() -> ExitCode {
+    admit_process_host_program_search_path();
     let args = std::env::args_os().collect::<Vec<_>>();
     #[cfg(feature = "hotpath")]
     if let Err(message) = configure_hotpath_output(&args) {
@@ -1097,7 +1098,7 @@ impl CommandFamily {
             | Commands::DisableUploadCounter
             | Commands::EnableUploadCounter
             | Commands::Gitignore { .. } => Self::Configuration,
-            Commands::Doctor
+            Commands::Doctor { .. }
             | Commands::Cost { .. }
             | Commands::Bench { .. }
             | Commands::Gain { .. }
@@ -1903,9 +1904,13 @@ async fn dispatch_diagnostics_command(
     command: Commands,
 ) -> tracedecay_domain::errors::Result<CommandOutcome> {
     match command {
-        Commands::Doctor => {
+        Commands::Doctor { json } => {
             let completion = hotpath::future!(
-                tracedecay::doctor::run_doctor(profile, crate::cloud::doctor_network_probes(),),
+                tracedecay::doctor::run_doctor(
+                    profile,
+                    crate::cloud::doctor_network_probes(),
+                    json
+                ),
                 label = "cli.doctor.run"
             )
             .await?;
@@ -2017,7 +2022,7 @@ impl CommandStartupPolicy {
             | Commands::PackageHook { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
-            | Commands::Doctor
+            | Commands::Doctor { .. }
             | Commands::Analytics { .. }
             | Commands::Sessions {
                 action:

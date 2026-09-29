@@ -16,12 +16,13 @@ use tracedecay_contracts::retrieval::{
     StatusCodeIndexFreshnessV1, StatusGitStalenessUnavailableV1, StatusGitStalenessV1,
     StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1,
     StatusRetrievalServingV1, StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1,
-    StatusServingConditionV1, StatusServingFreshnessV1, StatusSurfaceRequestV1,
+    StatusServingConditionV1, StatusServingFreshnessV1, StatusSessionGitEvidenceUnavailableV1,
+    StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::Result;
-use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
+use tracedecay_global_db::{GlobalDbGitCorrelationStore, RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::resident_memory::{
     RESIDENT_OWNER_SHED_ORDER_V1, ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
     ResidentOwnerKindV1, ResidentOwnersV1, process_resident_memory_pressure_v1,
@@ -29,6 +30,9 @@ use tracedecay_runtime_core::resident_memory::{
 };
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
+use tracedecay_session_runtime::retained::lcm_doctor_projection;
+use tracedecay_sessions::runtime::git_correlation::CorrelationIndexHealth;
+use tracedecay_sessions::serving::SessionProjectionServingStatus;
 
 use crate::McpToolContext;
 use crate::handlers::workflow::current_head_commit_id;
@@ -399,7 +403,8 @@ fn git_staleness(
 }
 
 /// Computes `tracedecay_status`. `server_stats` is the serving MCP server's
-/// request counters; `wait` is the readiness wait the owner held the read
+/// request counters; `session_projection` is the project refresh worker's
+/// serving status; `wait` is the readiness wait the owner held the read
 /// for, when the request asked for one, and `reached_freshness` the reading
 /// that satisfied it, which the payload reports instead of a later reading.
 #[hotpath::measure(label = "mcp.info.status.total")]
@@ -407,6 +412,7 @@ pub async fn compute_status(
     ctx: &McpToolContext<'_>,
     request: &StatusSurfaceRequestV1,
     server_stats: Option<Value>,
+    session_projection: SessionProjectionServingStatus,
     scope_prefix: Option<&str>,
     wait: Option<CodeIndexReadinessWaitOutcomeV1>,
     reached_freshness: Option<CodeIndexWorktreeFreshnessV1>,
@@ -492,6 +498,12 @@ pub async fn compute_status(
         branch_warnings: None,
         session_ingest: None,
         session_history_catch_up: None,
+        session_projection: lcm_doctor_projection(session_projection),
+        session_git_evidence: hotpath::future!(
+            session_git_evidence(ctx),
+            label = "mcp.info.status.session_git_evidence"
+        )
+        .await,
         git_staleness: request
             .include_staleness
             .then(|| git_staleness(freshness_payload.as_ref(), ctx.project_root())),
@@ -637,13 +649,12 @@ fn code_index_freshness_projection(
     if authoritative {
         (FreshnessLabelV1::Current, None)
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
-        (
-            FreshnessLabelV1::Restoring,
-            Some(
-                "the sealed lexical artifact is completing bounded authentication before serving"
-                    .to_owned(),
-            ),
-        )
+        let warning = if freshness.restore_progress.is_some() {
+            "the sealed lexical artifact is completing bounded authentication before serving"
+        } else {
+            "the sealed generation is restoring its serving seats before serving"
+        };
+        (FreshnessLabelV1::Restoring, Some(warning.to_owned()))
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Verifying) {
         (
             FreshnessLabelV1::Stale,
@@ -660,6 +671,42 @@ fn code_index_freshness_projection(
                     .to_owned(),
             ),
         )
+    }
+}
+
+async fn session_git_evidence(ctx: &McpToolContext<'_>) -> StatusSessionGitEvidenceV1 {
+    let Some((lease, _)) = ctx.authorized_project_session_db() else {
+        return StatusSessionGitEvidenceV1::Unavailable {
+            reason: StatusSessionGitEvidenceUnavailableV1::SessionStoreDenied,
+            message: None,
+        };
+    };
+    match GlobalDbGitCorrelationStore::new(lease.as_ref())
+        .correlation_index_health()
+        .await
+    {
+        Ok(health) => session_git_evidence_state(health),
+        Err(error) => StatusSessionGitEvidenceV1::Unavailable {
+            reason: StatusSessionGitEvidenceUnavailableV1::ReadFailed,
+            message: Some(error.to_string()),
+        },
+    }
+}
+
+fn session_git_evidence_state(health: CorrelationIndexHealth) -> StatusSessionGitEvidenceV1 {
+    match (health.generation, health.source_watermark) {
+        (Some(generation), Some(source_watermark)) if health.projection_available => {
+            StatusSessionGitEvidenceV1::Recorded {
+                generation,
+                source_watermark,
+                span_count: health.span_count,
+                commit_count: health.commit_count,
+                backfill_watermark: health.backfill_watermark,
+            }
+        }
+        _ => StatusSessionGitEvidenceV1::Unrecorded {
+            backfill_watermark: health.backfill_watermark,
+        },
     }
 }
 
@@ -793,6 +840,13 @@ pub(crate) fn render_status_md(value: &Value) -> String {
                         }
                     }
                 }
+                Value::Object(o) if k == "session_projection" => {
+                    let state = o.get("state").and_then(Value::as_str).unwrap_or_default();
+                    match o.get("reason").and_then(Value::as_str) {
+                        Some(reason) => md.field(k, &format!("{state} ({reason})")),
+                        None => md.field(k, state),
+                    };
+                }
                 Value::Object(o) if k == "wait" => {
                     let outcome = o.get("outcome").and_then(Value::as_str).unwrap_or_default();
                     match o
@@ -907,9 +961,10 @@ mod tests {
     };
 
     use super::{
-        CodeIndexReadinessWaitReadV1, FreshnessLabelV1, code_index_freshness_projection,
-        git_staleness, graph_statistics_value, historical_session_catch_up_state,
-        readiness_wait_outcome, render_status_md, schema_convergence_status,
+        CodeIndexReadinessWaitReadV1, CorrelationIndexHealth, FreshnessLabelV1,
+        code_index_freshness_projection, git_staleness, graph_statistics_value,
+        historical_session_catch_up_state, readiness_wait_outcome, render_status_md,
+        schema_convergence_status, session_git_evidence_state,
     };
     use tracedecay_contracts::code_index_freshness::{
         CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
@@ -918,6 +973,51 @@ mod tests {
         SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
         SchemaConvergenceStateV1,
     };
+
+    #[test]
+    fn session_git_evidence_reports_the_installed_generation_or_its_absence() {
+        let recorded = session_git_evidence_state(CorrelationIndexHealth {
+            projection_available: true,
+            generation: Some("git-evidence:3".to_owned()),
+            source_watermark: Some("1790000000:42".to_owned()),
+            span_count: 4,
+            commit_count: 2,
+            backfill_watermark: Some(1_790_000_000),
+        });
+        let unrecorded = session_git_evidence_state(CorrelationIndexHealth {
+            projection_available: false,
+            generation: None,
+            source_watermark: None,
+            span_count: 0,
+            commit_count: 0,
+            backfill_watermark: None,
+        });
+
+        assert_eq!(
+            serde_json::to_value(recorded).unwrap(),
+            serde_json::json!({
+                "status": "recorded",
+                "generation": "git-evidence:3",
+                "source_watermark": "1790000000:42",
+                "span_count": 4,
+                "commit_count": 2,
+                "backfill_watermark": 1_790_000_000,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(unrecorded).unwrap(),
+            serde_json::json!({ "status": "unrecorded", "backfill_watermark": null })
+        );
+        assert_eq!(
+            render_status_md(&serde_json::json!({
+                "session_git_evidence": { "status": "recorded" },
+                "session_projection": { "state": "stale", "reason": "historical_convergence" },
+            })),
+            "## Project Status\n\
+             **session_git_evidence.status:** recorded\n\
+             **session_projection:** stale (historical_convergence)\n"
+        );
+    }
 
     struct HeldDecode;
 
@@ -1334,6 +1434,21 @@ mod tests {
             warning
                 .expect("restore names its bounded work")
                 .contains("bounded authentication")
+        );
+
+        let reseating = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            restore_progress: None,
+            ..freshness
+        };
+        assert_eq!(
+            code_index_freshness_projection(&reseating),
+            (
+                FreshnessLabelV1::Restoring,
+                Some(
+                    "the sealed generation is restoring its serving seats before serving"
+                        .to_owned()
+                )
+            )
         );
     }
 

@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1;
 use tracedecay_domain::configuration::{
-    ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
-    ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationReceiptId,
-    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, ProtectedChange,
-    RestartRequirementV1, RollbackModeV1, SettingKey, SettingSensitivityV1,
+    ChangePlanId, ConfigurationAuditEvent, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
+    ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
+    ConfigurationSnapshotId, ConfigurationValueV1, ProtectedChange, RestartRequirementV1,
+    RollbackModeV1, SettingKey, SettingSensitivityV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -36,6 +36,7 @@ use crate::result::ResultContractRef;
 use crate::retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 
 /// Typed input for the configuration list read through the daemon
 /// invocation boundary.
@@ -122,8 +123,9 @@ pub struct ConfigurationRollbackPreviewRequestV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationAuditRequestV1 {
+    /// The previous page's `next_cursor`, valid only with the same `limit`.
     #[serde(default)]
-    pub after_event_id: Option<ConfigurationAuditEventId>,
+    pub cursor: Option<String>,
     pub limit: usize,
 }
 
@@ -182,7 +184,8 @@ pub struct ConfigurationMutationReceipt {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ConfigurationAuditPage {
     pub events: Vec<ConfigurationAuditEvent>,
-    pub next_after_event_id: Option<ConfigurationAuditEventId>,
+    /// Opaque continuation, bound to this operation and request.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -394,6 +397,12 @@ pub fn configuration_surface_operation_names() -> impl ExactSizeIterator<Item = 
 
 pub fn configuration_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
+    configuration_surface_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn configuration_surface_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(CONFIGURATION_SPECS.len());
     let mut bindings = Vec::with_capacity(CONFIGURATION_SPECS.len() * CONFIGURATION_SURFACES.len());
 
@@ -416,8 +425,7 @@ pub fn configuration_surface_catalog_contribution()
         capabilities,
         bindings,
     ))?;
-    let schemas = configuration_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(contribution, materialize, configuration_executable_schemas)
 }
 
 fn configuration_executable_schemas(

@@ -11,7 +11,7 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_domain::canonical_sha256;
 use tracedecay_query::code_search::{CodeIndexRedundancyQueryV1, CodeIndexRedundancyScopeV1};
 use tracedecay_query::retrieval::lexical::{
-    CloneArtifactCursorV1, CloneExactArtifactMemberV1, CodeLexicalArtifactErrorV1,
+    CloneExactArtifactMemberV1, CodeLexicalArtifactErrorV1,
 };
 
 use super::{ProductionCodeIndexQueryOwnersV1, checkpoint_text_artifact_control};
@@ -123,12 +123,6 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 CloneNormalizationClassV1::Conservative => SimilarMatchClassV1::ConservativeExact,
                 CloneNormalizationClassV1::Rename => SimilarMatchClassV1::RenameNormalizedExact,
             };
-            let next_cursor = read
-                .next_cursor
-                .as_ref()
-                .map(CloneArtifactCursorV1::encode)
-                .transpose()
-                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
             let complete = read.complete && members.len() == candidate.member_count;
             let generated_members = members
                 .iter()
@@ -144,7 +138,11 @@ impl ProductionCodeIndexQueryOwnersV1 {
                     member_count: members.len(),
                     members,
                     complete,
-                    next_cursor,
+                    // The members were read under this report's path and
+                    // generated-path filters, which no member continuation
+                    // could carry; a caller pages a whole family through
+                    // `tracedecay_similar` from its representative.
+                    next_cursor: None,
                 },
                 total_member_count: candidate.member_count,
                 reviewable_source_bytes: candidate.reviewable_source_bytes,
@@ -192,7 +190,6 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 return Ok(RedundancyMemberReadV1 {
                     members,
                     complete: false,
-                    next_cursor: cursor,
                     work_spent,
                     work_exhausted: false,
                 });
@@ -201,7 +198,6 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 return Ok(RedundancyMemberReadV1 {
                     members,
                     complete: false,
-                    next_cursor: cursor,
                     work_spent,
                     work_exhausted: true,
                 });
@@ -241,7 +237,6 @@ impl ProductionCodeIndexQueryOwnersV1 {
                     return Ok(RedundancyMemberReadV1 {
                         members,
                         complete: true,
-                        next_cursor: None,
                         work_spent,
                         work_exhausted: false,
                     });
@@ -271,7 +266,6 @@ pub(super) fn clone_artifact_error(error: CodeLexicalArtifactErrorV1) -> Retriev
 struct RedundancyMemberReadV1 {
     members: Vec<CloneExactArtifactMemberV1>,
     complete: bool,
-    next_cursor: Option<CloneArtifactCursorV1>,
     work_spent: usize,
     work_exhausted: bool,
 }

@@ -699,7 +699,12 @@ fn crafted_json_cannot_deserialize_a_cyclic_graph_snapshot() {
     let mut encoded = serde_json::to_value(graph).unwrap();
     encoded["items"][0]["input"]["dependencies"] = serde_json::json!(["task.b"]);
 
-    assert!(serde_json::from_value::<WorkProductGraphV1>(encoded).is_err());
+    assert_eq!(
+        serde_json::from_value::<WorkProductGraphV1>(encoded)
+            .unwrap_err()
+            .to_string(),
+        "Work product gating dependencies contain a cycle"
+    );
 }
 
 #[test]

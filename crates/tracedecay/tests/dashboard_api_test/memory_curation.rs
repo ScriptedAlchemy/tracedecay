@@ -211,6 +211,68 @@ fn retained_admin_journey_commits_add_update_feedback_and_remove() {
 }
 
 #[test]
+fn fact_detail_keeps_a_superseded_fact_readable_by_id() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_retained_memory_fixture().await;
+        let agent = http_agent();
+        let add = |content: &str| {
+            let (status, added) = post_json_body(
+                &agent,
+                &retained_url(&fixture, "fact_store_add"),
+                &serde_json::json!({ "content": content, "category": "decision" }),
+            );
+            assert_eq!(status, 200, "fact add failed: {added}");
+            retained_effect_payload(&added, "fact_store_add")["result"]["fact"]["fact"]["fact_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("add must return a fact id: {added}"))
+                .to_owned()
+        };
+        let retired = add("Dashboard detail reads the retired wording");
+        let successor = add("Dashboard detail reads the corrected wording");
+        let (status, superseded) = post_json_body(
+            &agent,
+            &retained_url(&fixture, "fact_store_supersede"),
+            &serde_json::json!({ "fact_id": retired, "superseded_by": successor }),
+        );
+        assert_eq!(status, 200, "supersede failed: {superseded}");
+        retained_effect_payload(&superseded, "fact_store_supersede");
+
+        let detail = |fact_id: &str| {
+            let (status, detail) = get_json(
+                &agent,
+                &format!(
+                    "{}/api/plugins/holographic/fact/{fact_id}",
+                    fixture.base_url
+                ),
+            );
+            assert_eq!(status, 200, "{detail}");
+            detail
+        };
+        let retired_detail = detail(&retired);
+        assert_eq!(retired_detail["domain_state"], "ready", "{retired_detail}");
+        let retired_row = &retired_detail["payload"]["fact"];
+        assert_eq!(
+            retired_row["content"],
+            "Dashboard detail reads the retired wording"
+        );
+        assert_eq!(retired_row["superseded_by"], successor.as_str());
+
+        let successor_detail = detail(&successor);
+        assert_eq!(
+            successor_detail["domain_state"], "ready",
+            "{successor_detail}"
+        );
+        let successor_row = &successor_detail["payload"]["fact"];
+        assert_eq!(
+            successor_row["content"],
+            "Dashboard detail reads the corrected wording"
+        );
+        assert_eq!(successor_row.get("superseded_by"), None);
+    });
+}
+
+#[test]
 fn retained_mutations_deny_foreign_project_scope_without_a_receipt() {
     let runtime = create_runtime();
     runtime.block_on(async {

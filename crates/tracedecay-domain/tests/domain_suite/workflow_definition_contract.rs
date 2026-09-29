@@ -300,20 +300,40 @@ fn wire_definitions_are_revalidated_during_deserialization() {
         .as_object_mut()
         .unwrap()
         .insert("scheduler".to_owned(), json!("must not exist"));
-    assert!(serde_json::from_value::<WorkflowDefinition>(unknown_field).is_err());
+    assert!(
+        serde_json::from_value::<WorkflowDefinition>(unknown_field)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `scheduler`")
+    );
 
     let mut zero_version = valid.clone();
     zero_version["definition_version"] = json!(0);
-    assert!(serde_json::from_value::<WorkflowDefinition>(zero_version).is_err());
+    assert_eq!(
+        serde_json::from_value::<WorkflowDefinition>(zero_version)
+            .unwrap_err()
+            .to_string(),
+        "workflow definition version must be non-zero"
+    );
 
     let mut unbounded_fan_out = valid.clone();
     unbounded_fan_out["steps"][0]["fan_out"] = json!({ "max_width": MAX_WORKFLOW_FAN_OUT + 1 });
-    assert!(serde_json::from_value::<WorkflowDefinition>(unbounded_fan_out).is_err());
+    assert_eq!(
+        serde_json::from_value::<WorkflowDefinition>(unbounded_fan_out)
+            .unwrap_err()
+            .to_string(),
+        "workflow step prepare has invalid fan-out width 257"
+    );
 
     let mut unbounded_fan_in = valid;
     unbounded_fan_in["steps"][0]["predecessors"] =
         json!(names("producer", MAX_WORKFLOW_PREDECESSORS + 1));
-    assert!(serde_json::from_value::<WorkflowDefinition>(unbounded_fan_in).is_err());
+    assert_eq!(
+        serde_json::from_value::<WorkflowDefinition>(unbounded_fan_in)
+            .unwrap_err()
+            .to_string(),
+        "workflow step prepare has too many predecessors"
+    );
 }
 
 #[test]

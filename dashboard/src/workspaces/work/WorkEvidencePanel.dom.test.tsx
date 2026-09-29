@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { WorkGraphReadV1Schema, type WorkGraphReadV1 } from '../../contracts/index.ts';
+import { WorkGraphReadV1Schema, type WorkGraphReadV1 } from '../../contracts/generated.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
 import type { WorkResult } from './workApi.ts';
 import { WorkEvidencePanel } from './WorkEvidencePanel.tsx';
@@ -19,6 +19,7 @@ const CONTINUATION = {
   kind: 'task_session' as const,
   continuation: {
     attempt: ATTEMPT,
+    binding: 'bc1.binding',
     participant_epoch: 'digest.participants',
     ranking_cursor: 'ranking.cursor',
     source: { provider: 'codex', session_id: 'session.1' },

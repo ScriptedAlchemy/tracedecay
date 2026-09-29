@@ -6,7 +6,7 @@ import {
   WorkGraphReadV1Schema,
   type ExecutionTopologyMetricsV1,
   type WorkAttemptListV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { workAttempt as attempt, workAttemptList } from '../../test/workAttemptFixture.ts';
 import { workGraphRead, type WorkGraphVersionSpec } from '../../test/workGraphFixture.ts';
 import {
@@ -385,10 +385,7 @@ describe('the rerun census', () => {
           coverage: 'capped',
           returned: 1,
           remaining: 41,
-          resume: {
-            generation: 'generation-7',
-            start_after: { attempt_id: 'a-1', run_id: 'run-1', task_id: 'alpha' },
-          },
+          resume: 'bc1.resume',
         }),
       ),
     };

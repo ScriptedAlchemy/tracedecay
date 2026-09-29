@@ -1,6 +1,8 @@
 use super::super::{load_json_file_strict, safe_write_json_file, safe_write_text_file};
 use super::*;
 use serde_json::json;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 /// Writes the rendered marketplace source exactly where the component
 /// catalog deploys it.
@@ -259,6 +261,13 @@ fn claude_md_ownership_is_the_sentinel_not_prose() {
         owned_claude_md_ranges(&dangling).is_empty(),
         "a start sentinel without its end is not an owned block"
     );
+    let prefix = "Operator notes.\n\n";
+    let block = CLAUDE_MD_SENTINELS.render("owned body");
+    let owned = format!("{prefix}{block}");
+    assert_eq!(
+        owned_claude_md_ranges(&owned),
+        vec![prefix.len()..prefix.len() + block.len()]
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -376,9 +385,16 @@ fn claude_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
     assert_eq!(std::fs::read(&nonempty).unwrap(), b"operator rules\n");
 
     let empty = root.path().join("empty.md");
-    install_claude_md_rules(&empty).unwrap();
+    let mut facts = Vec::new();
+    crate::agents::recorded_lifecycle(root.path(), &mut facts, false, || {
+        install_claude_md_rules(&empty)
+    })
+    .unwrap();
 
-    uninstall_claude_md_rules(&empty).unwrap();
+    crate::agents::recorded_lifecycle(root.path(), &mut facts, true, || {
+        uninstall_claude_md_rules(&empty)
+    })
+    .unwrap();
 
     assert!(!empty.exists());
 }
@@ -398,15 +414,11 @@ fn claude_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
 /// the real CLI would).
 #[cfg(unix)]
 fn fake_claude_cli(bin: &Path, log: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
         log = shell_single_quote(&log.to_string_lossy()),
     );
-    std::fs::write(bin, script).unwrap();
-    let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(bin, permissions).unwrap();
+    write_executable_script(bin, script).unwrap();
 }
 
 #[cfg(unix)]
@@ -721,22 +733,29 @@ fn deactivation_removes_the_wildcard_permission_activation_added() {
         })
     );
 
-    safe_write_json_file(
-        &settings_path,
-        &json!({
-            "theme": "dark",
-            "permissions": { "allow": ["mcp__plugin_tracedecay_graph__*"] }
-        }),
-    )
-    .unwrap();
-    ClaudeIntegration
-        .deactivate_deployed_host_registration(&ctx)
+    // Containers the recorded install added go with the wildcard, byte for
+    // byte; the same containers the operator already had stay.
+    for original in [
+        "{\n  \"theme\": \"dark\"\n}\n",
+        "{\n  \"theme\": \"dark\",\n  \"permissions\": { \"allow\": [] }\n}\n",
+    ] {
+        std::fs::write(&settings_path, original).unwrap();
+        let mut facts = Vec::new();
+        crate::agents::recorded_lifecycle(home.path(), &mut facts, false, || {
+            super::ensure_claude_plugin_permission(home.path())
+        })
         .unwrap();
-    assert_eq!(
-        load_json_file_strict(&settings_path).unwrap(),
-        json!({ "theme": "dark" }),
-        "containers that held only the wildcard go with it"
-    );
+        assert!(
+            std::fs::read_to_string(&settings_path)
+                .unwrap()
+                .contains("mcp__plugin_tracedecay_graph__*")
+        );
+        crate::agents::recorded_lifecycle(home.path(), &mut facts, true, || {
+            super::remove_claude_plugin_permission(home.path())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&settings_path).unwrap(), original);
+    }
 }
 
 #[test]

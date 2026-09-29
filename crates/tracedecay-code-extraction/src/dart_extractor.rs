@@ -1674,11 +1674,9 @@ impl DartExtractor {
                     }
                     Self::extract_call_sites(state, child, fn_node_id);
                 }
-                "argument_part" => {
-                    Self::extract_call_sites(state, child, fn_node_id);
-                }
-                // Skip nested function expressions to avoid polluting call sites.
-                "function_expression" | "lambda_expression" => {}
+                // Closures (`function_expression`) and local functions
+                // (`lambda_expression`) are not graph symbols, so their calls
+                // belong to the enclosing function.
                 _ => {
                     Self::extract_call_sites(state, child, fn_node_id);
                 }

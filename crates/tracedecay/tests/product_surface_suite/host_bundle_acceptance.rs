@@ -26,8 +26,8 @@ use tracedecay_agent_hosts::agents::host_component_registration::CatalogHostComp
 use tracedecay_agent_hosts::agents::{HealthcheckContext, inspect_receipt_backed_host_components};
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_hooks::{
-    OpenCodePluginSurfaceV1, decode_native_hook_event, decode_opencode_lsp_event,
-    decode_opencode_plugin_event,
+    NativeHookDecodeError, OpenCodePluginSurfaceV1, decode_native_hook_event,
+    decode_opencode_lsp_event, decode_opencode_plugin_event,
 };
 
 /// Generator commit passed to both bundle staging and doctor inspection so
@@ -142,6 +142,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
             })
             .collect(),
         created_directories: Vec::new(),
+        created_config: Some(Vec::new()),
     };
     let control = lifecycle_root.path().join(".tracedecay-host-bundle-v1");
     fs::create_dir_all(&control).unwrap();
@@ -246,6 +247,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
             })
             .collect(),
         created_directories: Vec::new(),
+        created_config: Some(Vec::new()),
     };
     let extension_prefix = format!(
         ".cursor/extensions/tracedecay.cursor-native-{}/",
@@ -1318,12 +1320,17 @@ fn corrupted_host_identity_fails_typed_decoder() {
     let mut fixture = parse_fixture(include_str!(
         "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
     ));
+    decode_native_hook_event(
+        NativeHostIdentityV1::ClaudeCode,
+        serde_json::to_vec(&fixture).unwrap().as_slice(),
+    )
+    .expect("the authentic Stop fixture decodes");
     fixture["hook_event_name"] = json!("NotARealEvent");
-    assert!(
+    assert!(matches!(
         decode_native_hook_event(
             NativeHostIdentityV1::ClaudeCode,
             serde_json::to_vec(&fixture).unwrap().as_slice(),
-        )
-        .is_err()
-    );
+        ),
+        Err(NativeHookDecodeError::UnsupportedNativeEvent)
+    ));
 }

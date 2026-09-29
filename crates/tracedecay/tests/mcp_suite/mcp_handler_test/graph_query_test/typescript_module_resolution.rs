@@ -270,6 +270,153 @@ async fn typescript_monorepo_callers_and_file_dependents_bind_across_packages() 
 }
 
 #[tokio::test]
+async fn typescript_calls_inside_callbacks_and_jsx_bind_their_enclosing_symbol() {
+    let fixture =
+        graph_query_fixture_with_sources(|project| copy_fixture(Path::new(FIXTURE_ROOT), project))
+            .await;
+
+    for (qualified_name, expected_callers) in [
+        // A `.map` callback inside JSX, a named function expression in a
+        // module-scope initializer, a class field arrow, and the module-scope
+        // statements of `bootstrap.tsx`.
+        (
+            "apps/web/src/observatory/storageModel.ts::formatBytes",
+            vec!["<module>", "TelemetryBody", "sizeLabel", "summaryLabels"],
+        ),
+        // A callback nested in a callback, and a JSX `onClick` prop.
+        (
+            "apps/web/src/observatory/storageModel.ts::storageFindingLabel",
+            vec!["FindingButton", "FindingRows"],
+        ),
+        // `<StoreBadge />` renders the component.
+        (
+            "apps/web/src/observatory/storageModel.ts::StoreBadge",
+            vec!["<module>", "FindingButton"],
+        ),
+    ] {
+        let (names, evidence) = callers_evidence(&fixture, qualified_name).await;
+        assert_eq!(names, expected_callers, "{qualified_name}: {evidence:#}");
+        assert_eq!(
+            evidence["coverage"]["completeness"], "complete",
+            "{qualified_name}: {evidence:#}"
+        );
+    }
+
+    let evidence =
+        file_dependents_evidence(&fixture, "apps/web/src/observatory/storageModel.ts").await;
+    assert_eq!(
+        evidence["payload"]["dependent_files"],
+        json!([
+            "apps/web/src/observatory/EvidenceSummaries.tsx",
+            "apps/web/src/observatory/bootstrap.tsx"
+        ]),
+        "{evidence:#}"
+    );
+    assert_eq!(
+        evidence["coverage"]["completeness"], "complete",
+        "{evidence:#}"
+    );
+
+    shutdown_graph_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn typescript_module_scope_calls_bind_to_module_init_blocks() {
+    let fixture =
+        graph_query_fixture_with_sources(|project| copy_fixture(Path::new(FIXTURE_ROOT), project))
+            .await;
+
+    // `bootstrap.tsx` calls `formatBytes` in a bare expression statement and
+    // in `export default defineReport(...)`, and renders `<StoreBadge />`
+    // inside a module-scope `if`.
+    let (names, evidence) = callers_evidence(
+        &fixture,
+        "apps/web/src/observatory/storageModel.ts::formatBytes",
+    )
+    .await;
+    assert_eq!(
+        names,
+        ["<module>", "TelemetryBody", "sizeLabel", "summaryLabels"],
+        "{evidence:#}"
+    );
+    assert_eq!(
+        evidence["coverage"]["completeness"], "complete",
+        "{evidence:#}"
+    );
+    let mut module_sites = evidence["payload"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["symbol"]["name"] == "<module>")
+        .map(|item| {
+            (
+                item["symbol"]["kind"].as_str().unwrap(),
+                item["symbol"]["file"].as_str().unwrap(),
+                item["symbol"]["line"].as_u64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    module_sites.sort_unstable();
+    assert_eq!(
+        module_sites,
+        [
+            ("init_block", "apps/web/src/observatory/bootstrap.tsx", 3),
+            ("init_block", "apps/web/src/observatory/bootstrap.tsx", 9),
+        ],
+        "{evidence:#}"
+    );
+
+    let (names, evidence) = callers_evidence(
+        &fixture,
+        "apps/web/src/observatory/storageModel.ts::StoreBadge",
+    )
+    .await;
+    assert_eq!(names, ["<module>", "FindingButton"], "{evidence:#}");
+    let dev_block = evidence["payload"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["symbol"]["name"] == "<module>")
+        .unwrap()["symbol"]["node_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let result = call_production_tool(
+        &fixture,
+        "tracedecay_callees",
+        json!({
+            "node_id": dev_block,
+            "maximum_depth": 1,
+            "resolve_trait_dispatch": false,
+            "format": "json",
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("callees");
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let callees = payload["outcome"]["value"]["payload"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("callee evidence missing: {payload:#}"))
+        .iter()
+        .map(|item| {
+            (
+                item["symbol"]["name"].as_str().unwrap(),
+                item["symbol"]["file"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        callees,
+        [("StoreBadge", "apps/web/src/observatory/storageModel.ts")],
+        "{payload:#}"
+    );
+
+    shutdown_graph_fixture(fixture).await;
+}
+
+#[tokio::test]
 async fn typescript_same_module_exports_and_test_shadowing_bind_callers() {
     let fixture =
         graph_query_fixture_with_sources(|project| copy_fixture(Path::new(FIXTURE_ROOT), project))

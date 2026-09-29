@@ -31,6 +31,9 @@ use tracedecay_runtime_core::storage::{
     default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
     profile_sharded_layout,
 };
+#[cfg(target_os = "linux")]
+use tracedecay_runtime_core::test_executable::write_executable_script;
+
 /// Bound for waits that depend on spawning and running the real `tracedecay`
 /// CLI as a child process: connecting to the fake daemon socket and forwarding
 /// the observed request back to the test thread. Under nextest's
@@ -1010,18 +1013,320 @@ fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
     );
 }
 
+fn run_native_hook_with_stdin(home: &Path, cwd: &Path, command_arg: &str, stdin: &[u8]) -> Output {
+    tracedecay_command_with_home(home)
+        .env_remove("RUST_LOG")
+        .current_dir(cwd)
+        .arg(command_arg)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            let mut stdin_pipe = child.stdin.take().expect("stdin should be piped");
+            // An oversized payload may be refused before it is fully read;
+            // the refusal, not the write, is what the test observes.
+            let _ = stdin_pipe.write_all(stdin);
+            drop(stdin_pipe);
+            child.wait_with_output()
+        })
+        .expect("hook command should run")
+}
+
+fn hook_analytics_rows(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("analytics row is JSON"))
+        .collect()
+}
+
+/// The `(event, agent, hook_name, session_id, disposition.reason_code)` of
+/// every row, the attribution a reader of `hook_analytics.jsonl` sees.
+fn hook_row_attribution(rows: &[Value]) -> Vec<(String, String, String, Value, Value)> {
+    rows.iter()
+        .filter(|row| {
+            matches!(
+                row["event"].as_str(),
+                Some("hook_invoked" | "hook_completed")
+            )
+        })
+        .map(|row| {
+            (
+                row["event"].as_str().unwrap_or_default().to_owned(),
+                row["agent"].as_str().unwrap_or_default().to_owned(),
+                row["hook_name"].as_str().unwrap_or_default().to_owned(),
+                row["session_id"].clone(),
+                row["disposition"]["reason_code"].clone(),
+            )
+        })
+        .collect()
+}
+
+fn attribution(
+    event: &str,
+    agent: &str,
+    hook_name: &str,
+    session_id: Value,
+    reason_code: Value,
+) -> (String, String, String, Value, Value) {
+    (
+        event.to_owned(),
+        agent.to_owned(),
+        hook_name.to_owned(),
+        session_id,
+        reason_code,
+    )
+}
+
 #[test]
-fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
+fn capture_hook_rows_name_host_event_and_session_whatever_the_payload() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_capture_attribution");
+    let analytics = data_root.join("hook_analytics.jsonl");
 
-    let socket_path = common::daemon_socket_path(&home_path);
-    common::stop_managed_daemon(&home_path);
-    let mut daemon = spawn_tracedecay_daemon(&home_path);
+    let stop = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-stop",
+        &json!({
+            "conversation_id": "conv-attribution",
+            "generation_id": "gen-attribution",
+            "hook_event_name": "stop",
+            "model": "auto",
+            "status": "completed",
+            "loop_count": 0,
+            "workspace_roots": [project_path],
+        }),
+    );
+    assert_capture_transport_response("cursor stop", &stop, 0);
+    let empty = run_native_hook_with_stdin(&home_path, &project_path, "hook-cursor-stop", b"");
+    assert_eq!(empty.status.code(), Some(1), "{empty:?}");
+    let oversized = run_native_hook_with_stdin(
+        &home_path,
+        &project_path,
+        "hook-codex-subagent-start",
+        &vec![b' '; tracedecay_framing::MAX_WIRE_MESSAGE_BYTES + 1],
+    );
+    assert_eq!(oversized.status.code(), Some(1), "{oversized:?}");
 
+    assert_eq!(
+        hook_row_attribution(&hook_analytics_rows(&analytics)),
+        vec![
+            attribution(
+                "hook_invoked",
+                "cursor",
+                "stop",
+                json!("conv-attribution"),
+                Value::Null
+            ),
+            attribution(
+                "hook_completed",
+                "cursor",
+                "stop",
+                json!("conv-attribution"),
+                json!("hook_v2_spooled"),
+            ),
+            attribution("hook_invoked", "cursor", "stop", Value::Null, Value::Null),
+            attribution(
+                "hook_completed",
+                "cursor",
+                "stop",
+                Value::Null,
+                json!("native_capture_rejected"),
+            ),
+            attribution(
+                "hook_invoked",
+                "codex",
+                "SubagentStart",
+                Value::Null,
+                Value::Null
+            ),
+            attribution(
+                "hook_completed",
+                "codex",
+                "SubagentStart",
+                Value::Null,
+                json!("hook_stdin_oversized"),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn unenrolled_kimi_and_opencode_hooks_record_their_host_event_and_session() {
+    let home = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let workspace_path = canonical_existing_path(workspace.path());
+    let profile_root = home_path.join(".tracedecay");
+    tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("install fixture profile identity");
+
+    let kimi = run_native_capture_hook(
+        &home_path,
+        &workspace_path,
+        "hook-kimi-event",
+        &json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "kimi-session",
+            "cwd": workspace_path,
+            "tool_name": "WriteFile",
+        }),
+    );
+    assert_eq!(kimi.status.code(), Some(0), "{kimi:?}");
+    let opencode = run_native_capture_hook(
+        &home_path,
+        &workspace_path,
+        "hook-opencode-event",
+        &json!({
+            "type": "session.idle",
+            "properties": {"sessionID": "ses_opencode"},
+        }),
+    );
+    assert_eq!(opencode.status.code(), Some(0), "{opencode:?}");
+    let tool_after = run_native_capture_hook(
+        &home_path,
+        &workspace_path,
+        "hook-opencode-tool-after",
+        &json!({
+            "input": {"tool": "edit", "sessionID": "ses_tool", "callID": "call-1"},
+            "output": {"title": "edit"},
+        }),
+    );
+    assert_eq!(tool_after.status.code(), Some(0), "{tool_after:?}");
+
+    let invoked = hook_row_attribution(&hook_analytics_rows(
+        &profile_root.join("hook_analytics.jsonl"),
+    ))
+    .into_iter()
+    .filter(|row| row.0 == "hook_invoked")
+    .collect::<Vec<_>>();
+    assert_eq!(
+        invoked,
+        vec![
+            attribution(
+                "hook_invoked",
+                "kimi",
+                "PostToolUse",
+                json!("kimi-session"),
+                Value::Null
+            ),
+            attribution(
+                "hook_invoked",
+                "opencode",
+                "session.idle",
+                json!("ses_opencode"),
+                Value::Null
+            ),
+            attribution(
+                "hook_invoked",
+                "opencode",
+                "tool.execute.after",
+                json!("ses_tool"),
+                Value::Null,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn capture_spool_refusal_names_its_typed_cause_on_stderr() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = NativeHostIdentityV1::CursorDesktop;
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_capture_typed_cause");
+    // A directory where the spool's records file belongs is a spool the hook
+    // must refuse; the refusal must say which spool fault it hit.
+    std::fs::create_dir_all(native_capture_spool_root(&data_root, host).join("records.v1.bin"))
+        .unwrap();
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-stop",
+        &json!({
+            "conversation_id": "conv-typed-cause",
+            "generation_id": "gen-typed-cause",
+            "hook_event_name": "stop",
+            "model": "auto",
+            "status": "completed",
+            "loop_count": 0,
+            "workspace_roots": [project_path],
+        }),
+    );
+
+    assert_capture_transport_response("stop refused", &output, 1);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "tracedecay hook: native capture did not land: \
+         Unavailable(UnsafePath: hook spool root or member path is unsafe)\n"
+    );
+}
+
+#[test]
+fn delivery_receipt_refusal_after_the_event_spooled_is_not_a_failed_capture() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = NativeHostIdentityV1::CursorDesktop;
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_capture_receipt_refused");
+    // The receipt spool root is a regular file, so its writer cannot open.
+    let receipt_root = tracedecay_hooks::hook_delivery_receipt_spool_root(&data_root, host);
+    if receipt_root.exists() {
+        std::fs::remove_dir_all(&receipt_root).unwrap();
+    }
+    std::fs::create_dir_all(receipt_root.parent().unwrap()).unwrap();
+    std::fs::write(&receipt_root, b"not a spool").unwrap();
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-stop",
+        &json!({
+            "conversation_id": "conv-receipt",
+            "generation_id": "gen-receipt",
+            "hook_event_name": "stop",
+            "model": "auto",
+            "status": "completed",
+            "loop_count": 0,
+            "workspace_roots": [project_path],
+        }),
+    );
+
+    assert_capture_transport_response("stop spooled without receipt", &output, 0);
+    assert_eq!(native_capture_pending_records(&data_root, host), 1);
+    let completed = hook_row_attribution(&hook_analytics_rows(
+        &data_root.join("hook_analytics.jsonl"),
+    ))
+    .into_iter()
+    .filter(|row| row.0 == "hook_completed")
+    .collect::<Vec<_>>();
+    assert_eq!(
+        completed,
+        vec![attribution(
+            "hook_completed",
+            "cursor",
+            "stop",
+            json!("conv-receipt"),
+            json!("hook_v2_spooled_delivery_receipt_unavailable"),
+        )]
+    );
+}
+
+/// Connects an authenticated project client and completes `initialize`,
+/// which starts the project open in the background.
+fn connect_initialized_project_client(home_path: &Path, project_path: &Path) -> UnixStream {
+    let socket_path = common::daemon_socket_path(home_path);
     let mut client = UnixStream::connect(&socket_path).expect("client should connect to daemon");
     let mut reader = BufReader::new(client.try_clone().expect("clone daemon client stream"));
     let authority: Value = serde_json::from_slice(
@@ -1071,13 +1376,31 @@ fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
         response.contains("\"id\":1"),
         "daemon should answer initialize before SIGTERM, got: {response}"
     );
+    client
+}
 
+fn send_sigterm(daemon: &common::DaemonProcess) {
     let pid = daemon.id().to_string();
     let status = std::process::Command::new("kill")
         .args(["-TERM", pid.as_str()])
         .status()
         .expect("send SIGTERM to daemon");
     assert!(status.success(), "kill -TERM should succeed");
+}
+
+#[test]
+fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    common::stop_managed_daemon(&home_path);
+    let mut daemon = spawn_tracedecay_daemon(&home_path);
+    let _client = connect_initialized_project_client(&home_path, &project_path);
+
+    send_sigterm(&daemon);
 
     assert!(
         daemon
@@ -1085,6 +1408,69 @@ fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
             .expect("daemon status should be readable")
             .is_some(),
         "daemon should exit on SIGTERM even with a connected project client"
+    );
+}
+
+/// A draining daemon waits only for the store mount an in-flight open is
+/// inside. Once that mount returns, the open stops before opening the
+/// project graph instead of running on to its next composition phase.
+#[test]
+fn daemon_sigterm_stops_an_in_flight_open_at_the_next_store_boundary() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    common::stop_managed_daemon(&home_path);
+    let hold = home_path.join("hold-after-project-sessions");
+    std::fs::write(&hold, b"hold").unwrap();
+    let entered = PathBuf::from(format!("{}.entered", hold.display()));
+    let log = home_path.join("daemon.log");
+    let mut daemon = common::spawn_tracedecay_daemon_logged(&home_path, &log, {
+        let hold = hold.clone();
+        move |command| {
+            command.env("TRACEDECAY_TEST_HOLD_AFTER_PROJECT_SESSIONS", &hold);
+        }
+    });
+    let _client = connect_initialized_project_client(&home_path, &project_path);
+    common::poll_until(
+        Instant::now() + Duration::from_secs(30),
+        Duration::from_millis(20),
+        || entered.is_file().then_some(()),
+        || "the project open never mounted its session database".to_owned(),
+    );
+
+    send_sigterm(&daemon);
+    // Shutdown cancels every admitted open before it starts draining clients.
+    common::poll_until(
+        Instant::now() + Duration::from_secs(10),
+        Duration::from_millis(20),
+        || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("outcome=client_drain_start")
+                .then_some(())
+        },
+        || "the daemon never started draining".to_owned(),
+    );
+    std::fs::remove_file(&hold).unwrap();
+
+    assert!(
+        daemon
+            .wait_for_exit(Duration::from_secs(3))
+            .expect("daemon status should be readable")
+            .is_some(),
+        "daemon should exit once the held store mount returns"
+    );
+    let log = std::fs::read_to_string(&log).expect("read daemon log");
+    assert!(
+        log.contains("event=project_server_warmup outcome=cancelled"),
+        "the open must end cancelled: {log}"
+    );
+    assert!(
+        !log.contains("phase=graph_admitted"),
+        "a cancelled open must not go on to open the project graph: {log}"
     );
 }
 
@@ -1620,6 +2006,240 @@ fn doctor_reports_an_unenrolled_project_without_recovery_guidance() {
     );
 }
 
+const INGEST_COVERAGE_FINDING: &str = "observability: durable ingest coverage records no refused \
+     source records (observability.ingest-coverage.converged)";
+const PROFILE_AUTHORITY_FINDING: &str = "storage_runtime: the exact registered profile and \
+     profile-session authorities are attached (profile.authority.registered)";
+
+fn doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
+    let output = tracedecay_command_with_home(home)
+        .args(["doctor", "--json"])
+        .current_dir(project)
+        .output()
+        .expect("doctor --json should run");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let document = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "doctor --json stdout is not one JSON document ({error}):\n{}\nstderr:\n{stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    (output.status.code(), document, stderr)
+}
+
+/// The identity of each projected finding: family, state, and evidence.
+/// Statements carry live measurements (resident MiB), so equality across two
+/// reads is judged on identity plus the surrounding coverage record.
+fn doctor_finding_identities(payload: &Value) -> Vec<Value> {
+    payload["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("findings payload has no entries array: {payload}"))
+        .iter()
+        .map(|entry| {
+            json!([
+                entry["finding"]["family"],
+                entry["finding"]["state"],
+                entry["finding"]["evidence"],
+            ])
+        })
+        .collect()
+}
+
+fn doctor_route_findings(url: &str) -> Value {
+    ureq::get(url)
+        .call()
+        .unwrap_or_else(|error| panic!("GET {url} failed: {error}"))
+        .into_body()
+        .read_json()
+        .unwrap_or_else(|error| panic!("GET {url} returned no JSON envelope: {error}"))
+}
+
+/// One doctor: the CLI asks the running daemon for its canonical findings and
+/// renders them with the daemon's own statements, and `--json` carries the
+/// findings `/api/doctor/findings` serves, projected by the same authority.
+#[test]
+fn doctor_renders_the_daemon_canonical_findings_the_dashboard_serves() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_committed_git_project_with_cli(&home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    // A freshly started daemon answers Doctor with the typed mounting state
+    // until the project runtime that owns the report has mounted.
+    wait_for_tool_status_server_tool_calls(&home_path, &project_path);
+
+    let doctor = tracedecay_command_with_home(&home_path)
+        .arg("doctor")
+        .current_dir(&project_path)
+        .output()
+        .expect("doctor should run");
+    let stderr = String::from_utf8_lossy(&doctor.stderr);
+    assert_eq!(doctor.status.code(), Some(0), "doctor exit:\n{stderr}");
+    for statement in [INGEST_COVERAGE_FINDING, PROFILE_AUTHORITY_FINDING] {
+        assert!(
+            stderr.contains(statement),
+            "doctor omitted the daemon finding `{statement}`:\n{stderr}"
+        );
+    }
+    assert!(
+        stderr.contains(" language_server: "),
+        "doctor omitted the daemon's language-server finding:\n{stderr}"
+    );
+
+    // `lsp servers` takes the same runtime read Doctor does, so it resolves
+    // analyzer availability through the daemon instead of this shell's PATH.
+    let lsp = tracedecay_command_with_home(&home_path)
+        .args(["lsp", "servers", "--json"])
+        .current_dir(&project_path)
+        .output()
+        .expect("lsp servers should run");
+    let lsp_inventory: Value = serde_json::from_slice(&lsp.stdout).unwrap_or_else(|error| {
+        panic!(
+            "lsp servers --json printed no JSON ({error}):\n{}",
+            String::from_utf8_lossy(&lsp.stderr)
+        )
+    });
+    assert_eq!(
+        (
+            &lsp_inventory["resolution"],
+            &lsp_inventory["daemon_unavailable"]
+        ),
+        (&json!("daemon"), &Value::Null),
+        "{lsp_inventory}"
+    );
+
+    let dashboard = tracedecay_command_with_home(&home_path)
+        .args(["dashboard", "--host", "127.0.0.1", "--port", "0"])
+        .current_dir(&project_path)
+        .output()
+        .expect("dashboard should start");
+    let stdout = String::from_utf8_lossy(&dashboard.stdout);
+    let launch_url = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("tracedecay dashboard listening on "))
+        .unwrap_or_else(|| {
+            panic!(
+                "dashboard announced no URL:\n{stdout}\n{}",
+                String::from_utf8_lossy(&dashboard.stderr)
+            )
+        });
+    // The launch URL (`http://ADDR/?token=T`) carries the API token; as
+    // userinfo, ureq sends it as the Basic password.
+    let (origin, token) = launch_url
+        .trim()
+        .split_once("/?token=")
+        .unwrap_or_else(|| panic!("dashboard launch URL carries no token: {launch_url}"));
+    let authority = origin
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("dashboard launch URL is not loopback HTTP: {launch_url}"));
+    let findings_url = format!("http://tracedecay:{token}@{authority}/api/doctor/findings");
+
+    // Live producers (table-growth sampling) may settle between reads, so the
+    // comparison is taken once the route answers the same identity on both
+    // sides of the CLI read.
+    for _ in 0..3 {
+        let before = doctor_route_findings(&findings_url);
+        let (code, document, stderr) = doctor_json(&home_path, &project_path);
+        let after = doctor_route_findings(&findings_url);
+        if doctor_finding_identities(&before["payload"])
+            != doctor_finding_identities(&after["payload"])
+        {
+            continue;
+        }
+        assert_eq!(code, Some(0), "doctor --json exit:\n{stderr}");
+        assert_eq!(document["outcome"], "healthy", "{document}");
+        let findings = &document["daemon_findings"];
+        assert_eq!(findings["state"], "observed", "{document}");
+        assert_eq!(findings["domain_state"], before["domain_state"]);
+        assert_eq!(findings["coverage"], before["coverage"]);
+        let (cli, route) = (&findings["payload"], &before["payload"]);
+        assert_eq!(
+            doctor_finding_identities(cli),
+            doctor_finding_identities(route)
+        );
+        for field in [
+            "family_filter",
+            "report_coverage",
+            "known_families",
+            "schema_convergences",
+            "storage_kind_statuses",
+            "note",
+        ] {
+            assert_eq!(cli[field], route[field], "`{field}` differs");
+        }
+        let ingest_statement = |payload: &Value| {
+            payload["entries"]
+                .as_array()
+                .and_then(|entries| {
+                    entries.iter().find(|entry| {
+                        entry["finding"]["evidence"][0]["reference"]
+                            == "observability.ingest-coverage.converged"
+                    })
+                })
+                .map(|entry| entry["finding"]["coverage"]["statement"].clone())
+        };
+        assert_eq!(
+            ingest_statement(cli),
+            Some(json!(
+                "durable ingest coverage records no refused source records"
+            ))
+        );
+        assert_eq!(ingest_statement(cli), ingest_statement(route));
+        assert!(
+            document["checks"]
+                .as_array()
+                .is_some_and(|checks| checks.contains(&json!({
+                    "level": "pass",
+                    "message": INGEST_COVERAGE_FINDING,
+                }))),
+            "{document}"
+        );
+        return;
+    }
+    panic!("/api/doctor/findings never answered the same findings twice in a row");
+}
+
+/// With no daemon listening, Doctor still runs its binary-local checks and
+/// names the typed `daemon_unavailable` state as the operator's pending step.
+#[test]
+fn doctor_without_a_daemon_reports_daemon_unavailable_as_pending() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+
+    let output = tracedecay_command_with_home(&home_path)
+        .arg("doctor")
+        .current_dir(&project_path)
+        .output()
+        .expect("doctor should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(75), "doctor exit:\n{stderr}");
+    assert!(
+        stderr.contains(
+            "daemon_unavailable: no TraceDecay daemon is listening for this profile, so the \
+             daemon's canonical Doctor findings were not read and only binary-local checks ran. \
+             Pending operator action: start the daemon (`tracedecay daemon start` for the \
+             managed service, or `tracedecay daemon run`), then re-run `tracedecay doctor`"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Version: "),
+        "binary-local checks must still run:\n{stderr}"
+    );
+
+    let (code, document, stderr) = doctor_json(&home_path, &project_path);
+    assert_eq!(code, Some(75), "doctor --json exit:\n{stderr}");
+    assert_eq!(document["outcome"], "pending_operator_action");
+    assert_eq!(
+        document["daemon_findings"],
+        json!({"state": "daemon_unavailable"})
+    );
+    assert_eq!(document["issues"], 0, "{document}");
+}
+
 #[test]
 fn daemon_project_handshake_uses_client_profile_identity() {
     let daemon_home = TempDir::new().unwrap();
@@ -1908,6 +2528,192 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
             "{probe:?}: expected explicit daemon-unavailable error, got:\n{stderr}"
         );
     }
+}
+
+/// A project-routed client reads the managed unit from the caller's own home,
+/// so a held daemon is named as held and a missing unit as not installed.
+#[cfg(target_os = "linux")]
+#[test]
+fn project_routed_tool_names_a_held_managed_daemon() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    std::fs::write(
+        project_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    // The test command names the profile socket through TRACEDECAY_DAEMON_SOCKET.
+    let socket = home_path.join(".tracedecay/daemon.sock");
+    let socket = socket.display();
+    let not_installed = format!(
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+    );
+    let unit_dir = home_path.join(".config/systemd/user");
+    let held = format!(
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+        unit_dir.join("tracedecay.service").display()
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let search_probe = [
+        "tool",
+        "--project",
+        &project_arg,
+        "search",
+        "--args",
+        r#"{"query":"answer"}"#,
+    ];
+    let status_probe = ["tool", "--project", &project_arg, "status", "--json"];
+
+    assert_unreachable_advice_follows_the_unit(
+        &home_path,
+        &project_path,
+        &[&search_probe, &status_probe],
+        &not_installed,
+        &held,
+    );
+}
+
+/// Runs each probe with no daemon, first without and then with a managed unit
+/// file, and requires the matching unreachable-daemon advice on stderr.
+#[cfg(target_os = "linux")]
+fn assert_unreachable_advice_follows_the_unit(
+    home_path: &Path,
+    project_path: &Path,
+    probes: &[&[&str]],
+    not_installed: &str,
+    held: &str,
+) {
+    let unit_dir = home_path.join(".config/systemd/user");
+    for (unit_installed, expected) in [(false, not_installed), (true, held)] {
+        if unit_installed {
+            std::fs::create_dir_all(&unit_dir).unwrap();
+            std::fs::write(
+                unit_dir.join("tracedecay.service"),
+                "[Service]\nExecStart=/bin/false\n",
+            )
+            .unwrap();
+        }
+        for probe in probes {
+            let output = tracedecay_command_with_home(home_path)
+                .current_dir(project_path)
+                .args(*probe)
+                .stdin(Stdio::null())
+                .output()
+                .expect("tracedecay client should run");
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(
+                    tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+                )),
+                "{probe:?}: {output:?}"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(expected),
+                "{probe:?} (unit installed: {unit_installed}): expected\n{expected}\ngot:\n{stderr}"
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn authority_routed_clients_name_a_held_managed_daemon() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let work_request = project_path.join("work-request.json");
+    std::fs::write(&work_request, r#"{"page_size":10}"#).unwrap();
+    let workflow_request = project_path.join("workflow-request.json");
+    std::fs::write(&workflow_request, "{}").unwrap();
+    let record = home_path.join(".tracedecay/daemon-authority.json");
+    let record = record.display();
+    let not_installed = format!(
+        "TraceDecay daemon is not available: no authority record at '{record}'. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+    );
+    let held = format!(
+        "TraceDecay daemon is not available: no authority record at '{record}'. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+        home_path
+            .join(".config/systemd/user/tracedecay.service")
+            .display()
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let work_request_arg = work_request.to_string_lossy().to_string();
+    let workflow_request_arg = workflow_request.to_string_lossy().to_string();
+    let lsp_probe = ["lsp", "bridge", "--stdio", "--project", &project_arg];
+    let work_probe = [
+        "work",
+        "list-attempts",
+        "--request-file",
+        &work_request_arg,
+        "--project",
+        &project_arg,
+    ];
+    let workflow_probe = [
+        "workflow",
+        "list-definitions",
+        "--request-file",
+        &workflow_request_arg,
+        "--project",
+        &project_arg,
+    ];
+    assert_unreachable_advice_follows_the_unit(
+        &home_path,
+        &project_path,
+        &[&lsp_probe, &work_probe, &workflow_probe],
+        &not_installed,
+        &held,
+    );
+}
+
+/// A missing `TRACEDECAY_DAEMON_SOCKET` is reported as that socket being
+/// unavailable, and the installed managed service is reported as observed
+/// beside it rather than denied.
+#[cfg(target_os = "linux")]
+#[test]
+fn tool_cli_reports_a_missing_override_socket_apart_from_the_installed_service() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let unit = home_path.join(".config/systemd/user/tracedecay.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(
+        &unit,
+        "[Service]\nExecStart=/usr/local/bin/tracedecay daemon run\n",
+    )
+    .unwrap();
+    let missing_socket = socket_dir.path().join("missing.sock");
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+        .args(["tool", "status", "--json"])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(
+            tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+        )),
+        "{output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected = format!(
+        "TraceDecay daemon socket '{}' named by TRACEDECAY_DAEMON_SOCKET is not available. \
+         The managed TraceDecay daemon service is installed at '{}' and serves '{}', not this \
+         socket.",
+        missing_socket.display(),
+        unit.display(),
+        home_path.join(".tracedecay/daemon.sock").display(),
+    );
+    assert!(stderr.contains(&expected), "{stderr}");
 }
 
 #[test]
@@ -2619,12 +3425,11 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
     let fake_bin = home_path.join("fake-bin");
     std::fs::create_dir_all(&fake_bin).unwrap();
     let systemctl = fake_bin.join("systemctl");
-    std::fs::write(
+    write_executable_script(
         &systemctl,
         "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
     )
     .unwrap();
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let output = tracedecay_command_with_home(&home_path)
         .args(["daemon", "status"])

@@ -309,6 +309,16 @@ pub(crate) fn retire_verified_head_replay_in_transaction(
 /// Tombstone one replay whose retirement guards already passed: the durable
 /// retired identity, its dependency closure moved to the tombstone ledger,
 /// and the live dependency edges removed, in the caller's transaction.
+///
+/// Tombstones are permanent for the life of the store. Append, verified-head
+/// compare-and-swap, and retirement all consult them: a key that was retired
+/// answers `RetiredReplayConflict`/`RetiredReplay` instead of being appended or
+/// seated again, and a crash-retried retirement answers `ExactReplay` instead
+/// of `Missing`. Deleting one would let a restarted publisher resurrect a
+/// retired replay under its old key. The bound is one row per retired graph
+/// replay, about one per code-index publication: a sweep profile measured 47
+/// rows in 86 KB plus a 28 KB index after about 30 publications (about 2.4 KB
+/// per retirement).
 fn tombstone_retired_replay(
     transaction: &ExactSqlTransaction,
     encoded: EncodedProjection,

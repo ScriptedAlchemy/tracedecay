@@ -430,6 +430,7 @@ mod tests {
     #[test]
     fn empty_queries_produce_no_candidates() {
         assert!(plan_candidates(" \t\n").clauses().is_empty());
+        assert!(plan_candidates(" \tworkflow\n").contains(CandidateChannel::Lexical, "workflow"));
     }
 
     #[test]

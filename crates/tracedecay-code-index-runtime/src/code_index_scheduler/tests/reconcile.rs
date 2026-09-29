@@ -9,9 +9,10 @@ use std::{
 
 use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
-    CodeIndexStalenessStateV1,
+    CodeIndexBuildBlockedReasonV1, CodeIndexReadinessTargetV1, CodeIndexReadinessV1,
+    CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, Deadline,
@@ -41,7 +42,7 @@ use super::{
     settled_owner_with_idle_admission, test_project_id, wait_for_dashboard_ready,
     wait_for_event_to_ready, wait_for_generation_change, wait_for_initial_generation,
     wait_for_live_complete_generation, wait_for_live_complete_generation_by_polling,
-    wait_for_owner_pass, wait_for_queryable_text_generation,
+    wait_for_owner, wait_for_owner_pass, wait_for_queryable_text_generation,
     wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
     wait_for_quiescent_owner_pass, wait_for_settled_owner, wait_for_worker_phase,
     wait_until_serving_seat, write,
@@ -1158,7 +1159,7 @@ fn retained_stale_rust_extractor_generation_is_refused_and_rebuilt() {
             .iter()
             .find(|(language, _)| language.as_str() == "rust")
             .map(|(_, revision)| revision.as_str()),
-        Some("extractor.rust.v16")
+        Some("extractor.rust.v17")
     );
 }
 
@@ -2582,6 +2583,87 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
     registry.shutdown().await;
 }
 
+/// A restarted owner has no verified proof for a watcher frontier to move
+/// from. The frontier wakes the verifying pass but must not mint an observed
+/// change: that overflow turned the restart's verification into a rescan and
+/// status reported it as a rebuild.
+#[tokio::test]
+async fn restart_watcher_frontier_before_verification_does_not_mint_a_change() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::super::scoped_code_index_store_root(store.path(), fixture.path());
+    let seeded = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation")).generation_id
+    };
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount the retained generation");
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical_root)
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(identity) =
+        tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded(
+            fixture.path(),
+        )
+    else {
+        panic!("the fixture checkout resolves a repository identity");
+    };
+    assert_eq!(
+        registry.request_for_root(&identity).await,
+        super::super::GitStateChangeRequestV1::Accepted
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_hint_count(),
+        Some(0),
+        "a frontier before the first verification must not fabricate overflow evidence"
+    );
+
+    drop(admission);
+    let receipt = wait_for_event_to_ready(&registry).await;
+    assert_eq!(
+        (receipt.is_noop(), receipt.overflow_reconciled),
+        (true, false),
+        "the restart must verify the unchanged tree, not rescan it: {receipt:?}"
+    );
+    assert_eq!(
+        registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("dashboard freshness")
+            .latest_generation_id
+            .as_deref(),
+        Some(seeded.as_str())
+    );
+    registry.shutdown().await;
+}
+
 /// The live outage this covers: a background reconcile owns the scheduler
 /// mutex for its whole pass, sealing a production-scale corpus holds it for
 /// minutes per generation, while the seated serving generation stays fully
@@ -3286,6 +3368,234 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
     assert_eq!(
         &serving.metadata().manifest().generation_id,
         sealed.generation_id()
+    );
+    registry.shutdown().await;
+}
+
+async fn wait_for_ready_generation(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+) -> Result<String, CodeIndexReadinessWaitReadV1> {
+    let reached = registry
+        .wait_for_readiness(
+            path,
+            CodeIndexReadinessTargetV1::Ready,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("readiness wait");
+    match reached {
+        CodeIndexReadinessWaitReadV1::Reached { reading } => {
+            assert_eq!(
+                reading.staleness_state,
+                Some(CodeIndexStalenessStateV1::Fresh)
+            );
+            Ok(reading
+                .latest_generation_id
+                .expect("a ready reading names its generation"))
+        }
+        other => Err(other),
+    }
+}
+
+/// A second publication held at its serving decode, after its text owner
+/// already serves it.
+struct HeldPublicationDecode {
+    scoped_store: PathBuf,
+    second: String,
+    release_decode: tokio::sync::oneshot::Sender<()>,
+    after_decode: tokio::sync::oneshot::Receiver<()>,
+    release_after_decode: tokio::sync::oneshot::Sender<()>,
+}
+
+impl HeldPublicationDecode {
+    /// Let the held decode run and wait until it returned.
+    async fn decode(self) -> (String, tokio::sync::oneshot::Sender<()>) {
+        self.release_decode.send(()).expect("release the decode");
+        tokio::time::timeout(Duration::from_secs(10), self.after_decode)
+            .await
+            .expect("the decode returns")
+            .expect("decode gate stays armed");
+        (self.second, self.release_after_decode)
+    }
+}
+
+async fn hold_second_publication_at_decode(
+    registry: &CodeIndexSchedulerRegistryV1,
+    fixture: &GitFixture,
+    store: &TempDir,
+) -> HeldPublicationDecode {
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let first = wait_for_ready_generation(registry, fixture.path())
+        .await
+        .expect("the first generation reaches ready");
+    assert_eq!(first.split('.').nth(3), Some("00000001"), "{first}");
+
+    let [
+        (before_decode, release_decode),
+        (after_decode, release_after_decode),
+    ] = registry.pause_around_next_graph_decode(canonical_root.clone());
+    fixture.edit("src/lib.rs", "pub fn changed_before_the_seat() {}\n");
+    assert!(matches!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    tokio::time::timeout(Duration::from_secs(10), before_decode)
+        .await
+        .expect("the publication reaches its serving decode")
+        .expect("decode gate stays armed");
+    // The publication's own text projection runs beside graph prepare; wait
+    // for it so what the test does to the store reaches only the decode.
+    let root = fixture.path();
+    let first = first.as_str();
+    let text = wait_until_serving_seat(registry, root, Duration::from_secs(10), || async move {
+        registry
+            .latest_text_serving_for_root(root)
+            .await
+            .filter(|text| text.metadata().manifest().generation_id.as_str() != first)
+    })
+    .await;
+    let second = text.metadata().manifest().generation_id.as_str().to_owned();
+    assert_eq!(second.split('.').nth(3), Some("00000002"), "{second}");
+    HeldPublicationDecode {
+        scoped_store: super::super::scoped_code_index_store_root(store.path(), &canonical_root),
+        second,
+        release_decode,
+        after_decode,
+        release_after_decode,
+    }
+}
+
+/// A publication's serving decode can meet another holder of the
+/// code-generation store lock. That holder releases without waking the
+/// worktree, so the refusal itself must re-arm the seat: once the lock is
+/// free the new generation seats and reads `ready`, instead of staying
+/// `indexing` on a sealed generation nothing retries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let held = hold_second_publication_at_decode(&registry, &fixture, &store).await;
+
+    let holder = acquire_code_generation_store_lock(&held.scoped_store)
+        .expect("hold the code-generation store lock");
+    let (second, release_after_decode) = held.decode().await;
+    drop(holder);
+    release_after_decode
+        .send(())
+        .expect("release graph prepare");
+
+    let ready = wait_for_ready_generation(&registry, fixture.path())
+        .await
+        .unwrap_or_else(|stalled| panic!("the new generation never seated: {stalled:?}"));
+    assert_eq!(ready, second);
+    assert_eq!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .map(|seat| seat
+                .generation()
+                .manifest()
+                .generation_id
+                .as_str()
+                .to_owned()),
+        Some(second),
+        "ready names the generation the serving slot holds"
+    );
+    registry.shutdown().await;
+}
+
+/// A serving decode that fails for a reason no holder will release parks
+/// typed, so status names the failure instead of an eternal `indexing`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_decode_failure_parks_typed_instead_of_indexing() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let held = hold_second_publication_at_decode(&registry, &fixture, &store).await;
+
+    let pointer: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(held.scoped_store.join("active-code-generation-v1.json"))
+            .expect("read durable pointer"),
+    )
+    .expect("parse durable pointer");
+    let generation_path = held.scoped_store.join("code-generations-v1").join(
+        pointer["generation_file"]
+            .as_str()
+            .expect("sealed generation file"),
+    );
+    let sealed_len = std::fs::metadata(&generation_path)
+        .expect("sealed generation metadata")
+        .len();
+    let mut permissions = std::fs::metadata(&generation_path)
+        .expect("sealed generation metadata")
+        .permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&generation_path, permissions).expect("make the seal writable");
+    std::fs::write(
+        &generation_path,
+        vec![b'x'; usize::try_from(sealed_len).expect("seal length fits usize")],
+    )
+    .expect("corrupt the sealed generation");
+    let (second, release_after_decode) = held.decode().await;
+    release_after_decode
+        .send(())
+        .expect("release graph prepare");
+
+    let parked = wait_for_owner(
+        &registry,
+        fixture.path(),
+        Duration::from_secs(10),
+        "a typed convergence park",
+        || async {
+            registry
+                .dashboard_freshness_read(fixture.path())
+                .await
+                .expect("freshness read")
+                .expect("mounted worktree")
+                .parked
+        },
+    )
+    .await;
+    assert_eq!(
+        parked.blocked_reason,
+        Some(CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable),
+        "{parked:?}"
+    );
+    assert!(
+        parked
+            .reason
+            .starts_with("the publication authority is corrupt"),
+        "{parked:?}"
+    );
+    let freshness = registry
+        .dashboard_freshness_read(fixture.path())
+        .await
+        .expect("freshness read")
+        .expect("mounted worktree");
+    assert_eq!(
+        freshness.latest_generation_id.as_deref(),
+        Some(second.as_str())
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none_or(|seat| seat.generation().manifest().generation_id.as_str() != second),
+        "a corrupt generation never seats"
     );
     registry.shutdown().await;
 }
@@ -4060,12 +4370,12 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
         .is_retryable_activation(),
         "cancellation mid-publication is typed and must resume from the journaled replay"
     );
+    let deadline = super::super::CodeIndexSchedulerErrorV1::GraphProjection(
+        CodeGraphProjectionError::DeadlineExceeded,
+    );
     assert!(
-        super::super::CodeIndexSchedulerErrorV1::GraphProjection(
-            CodeGraphProjectionError::DeadlineExceeded
-        )
-        .is_retryable_activation(),
-        "a deadline mid-publication is typed and must resume from the journaled replay"
+        !deadline.is_retryable_activation() && deadline.is_graph_activation_refusal(),
+        "a spent publication budget is a typed refusal: a retry replays the identical build"
     );
     assert!(
         !super::super::CodeIndexSchedulerErrorV1::GraphProjection(
@@ -6228,6 +6538,10 @@ async fn shutdown_timeout_retains_blocked_worker_owner_until_retry_joins_it() {
         .await
         .expect("mount worktree");
     wait_for_initial_generation(&registry, fixture.path()).await;
+    // The initial pass's graph tail runs after its text seat. Only an idle
+    // worker takes the edit's wake at once, so the admission bound below
+    // measures the edit's pass and not the rest of the mount.
+    wait_for_settled_owner(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
@@ -6286,6 +6600,10 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
         .await
         .expect("mount worktree");
     wait_for_initial_generation(&registry, fixture.path()).await;
+    // The initial pass's graph tail runs after its text seat. Only an idle
+    // worker takes the edit's wake at once, so the admission bound below
+    // measures the edit's pass and not the rest of the mount.
+    wait_for_settled_owner(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
@@ -8129,7 +8447,7 @@ async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
 /// be observed. The old helper (`wait_for_live_complete_generation` before
 /// #1206) asserted `"live generation"` once `Instant` passed that bound;
 /// the registry seating signal has no such wall-clock cut-off.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serving_seat_signal_observes_a_seat_that_misses_the_poll_deadline() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
@@ -8893,9 +9211,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         .to_string();
     let projection = DiagnosticsStoreLspFeedbackProjection::new(
         Arc::new(
-            tracedecay_application::feedback::diagnostics::DatabaseDiagnosticStore::new(
-                database.clone(),
-            ),
+            tracedecay_application::diagnostics_store::DiagnosticsStore::new(database.clone()),
         ),
         Arc::new(FixedDocument(source.to_owned())),
     );
@@ -9296,7 +9612,7 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
 
 /// A mount whose restored generation is proved current by its freshness witness
 /// activates that generation without rebuilding it.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn witness_verified_mount_activates_without_rebuild() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");

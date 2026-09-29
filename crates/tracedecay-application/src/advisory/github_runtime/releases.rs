@@ -26,6 +26,7 @@ use super::{
     RegisteredGitHubReadOnlyCredentialV1, mount_profile_github_read_only_credential_authority_v1,
     resolve_registered_github_read_only_credential_v1,
 };
+use crate::http_agent::http_agent;
 
 const GITHUB_RELEASE_PAGE_SIZE_V1: usize = 100;
 const MAX_GITHUB_RELEASE_PAGES_V1: u32 = 20;
@@ -472,7 +473,7 @@ fn release_agent(
             .https_only(true)
             .max_redirects(0)
             .http_status_as_error(false);
-        super::instrument_github_ureq_agent(builder).build().into()
+        http_agent(super::instrument_github_ureq_agent(builder).build())
     })
 }
 

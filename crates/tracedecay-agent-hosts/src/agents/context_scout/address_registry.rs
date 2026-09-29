@@ -1460,6 +1460,10 @@ mod tests {
     fn native_envelope_binding_mismatch_fails_closed() {
         let binding = binding();
         let mut envelope = admitted_hook().envelope;
+        assert_eq!(
+            AdmittedContextScoutHookV1::new(envelope.clone(), &binding).map(|hook| hook.envelope),
+            Some(envelope.clone())
+        );
         envelope.worktree_id = [99; 16];
         assert!(AdmittedContextScoutHookV1::new(envelope, &binding).is_none());
     }

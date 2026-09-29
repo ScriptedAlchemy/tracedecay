@@ -695,19 +695,23 @@ mod tests {
 
     #[test]
     fn ignores_tool_names_buried_in_metadata() {
-        let events = infer_usage_events(
-            None,
-            Some(
-                r#"{
-                    "tool_calls": [{"function": {"name": "tracedecay_search"}}],
-                    "tools": [{"tool_name": "apply_patch"}]
-                }"#,
-            ),
-            None,
-        );
+        let metadata = r#"{
+            "tool_calls": [{"function": {"name": "tracedecay_search"}}],
+            "tools": [{"tool_name": "apply_patch"}]
+        }"#;
+        let events = infer_usage_events(None, Some(metadata), None);
         assert!(
             events.is_empty(),
             "tool usage should come from explicit tool fields, got {events:#?}"
+        );
+        let explicit = infer_usage_events(Some("tracedecay_search"), Some(metadata), None);
+        assert_eq!(
+            explicit
+                .iter()
+                .map(|event| (event.kind, event.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(UsageKind::Tool, "tracedecay_search")],
+            "{explicit:#?}"
         );
     }
 
@@ -824,6 +828,17 @@ mod tests {
                 }"#,
             ),
             Some("Aspect ratio 16:9, script bench:full, and tool MCP:browser_navigate."),
+        );
+        let anchored = infer_usage_events(
+            None,
+            None,
+            Some("Aspect ratio 16:9, using `build-web-apps:react-best-practices`."),
+        );
+        assert_usage_event(
+            &anchored,
+            UsageKind::Skill,
+            "build-web-apps:react-best-practices",
+            UsageCategory::WorkflowSkill,
         );
         assert!(
             events.is_empty(),

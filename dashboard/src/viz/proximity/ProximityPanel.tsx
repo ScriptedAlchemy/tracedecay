@@ -3,7 +3,7 @@ import type {
   FeedbackProximityReadResultV1,
   FeedbackProximityRelationV1,
   ProximityCoverageV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
 import type { WorkResult } from '../../workspaces/work/workApi.ts';

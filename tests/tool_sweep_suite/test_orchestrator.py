@@ -74,9 +74,23 @@ class WholeRunDeadlineTests(unittest.TestCase):
             report = orchestrator.load_report(out / "results.json")
             junit = (out / "junit.xml").read_text()
 
+        fatal = (
+            "whole run deadline exceeded before catalog discovery; "
+            "reads phase was cancelled: whole_run_deadline_exceeded"
+        )
         self.assertEqual(status, 1)
-        self.assertIn("fatal", report)
-        self.assertIn("mcp-catalog-sweep", junit)
+        self.assertEqual(report["fatal"], fatal)
+        self.assertEqual(report["fatal_problem_code"], "tool_sweep.phase_execution_failed")
+        self.assertEqual(report["entries"], [])
+        self.assertEqual(
+            [phase["outcome"]["reason"] for phase in report["phases"]],
+            ["whole_run_deadline_exceeded"],
+        )
+        self.assertIn(
+            f'<error message="tool_sweep.phase_execution_failed: {fatal}" '
+            'type="tool_sweep.phase_execution_failed" />',
+            junit,
+        )
 
     def test_deadline_cancels_phase_and_emits_an_aggregate_artifact(self) -> None:
         """A stalled isolated phase must never leave CI without a final report."""

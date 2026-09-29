@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WorkGraphReadV1Schema } from '../../contracts/index.ts';
+import { WorkGraphReadV1Schema } from '../../contracts/generated.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
 import { workTaskView } from '../../test/workTaskViewFixture.ts';
 import { absentChannel, channelGap, type WorkChannelGap } from './workChannel.ts';

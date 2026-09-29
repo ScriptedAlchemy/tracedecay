@@ -8,9 +8,11 @@ use crate::code_index::{
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphProjectionError,
 };
+use tracedecay_contracts::ApplicationProblemDetailV1;
 use tracedecay_contracts::retrieval::{
     PrimitiveFailure, PrimitiveFailureKind, SymbolGraphPortContext, SymbolGraphScope,
 };
+use tracedecay_domain::CursorBindingV1;
 use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
 
 use super::{
@@ -74,7 +76,7 @@ pub(super) fn validate_claim_generation(
 }
 
 pub(super) struct IgnoredDependencyRequest<'a> {
-    pub(super) lane: &'a str,
+    pub(super) binding: &'a CursorBindingV1,
     pub(super) claim: &'a SymbolGraphPageClaim,
     pub(super) normal_results_empty: bool,
     pub(super) requested: bool,
@@ -114,7 +116,7 @@ pub(super) async fn admit_ignored_dependency(
     cursors
         .finish_page(
             context.request,
-            request.lane,
+            request.binding,
             request.claim,
             request.claim.offset(),
             0,
@@ -216,6 +218,18 @@ fn admission_failure(error: CodeIndexIgnoredDependencyAdmissionErrorV1) -> Primi
             "application.symbol-graph.ignored-dependency-generation-stale",
             "ignored dependency indexing rejected a stale source generation",
         ),
+        CodeIndexIgnoredDependencyAdmissionErrorV1::Parked(parked) => {
+            let detail = ApplicationProblemDetailV1::Parked {
+                cause: parked.reason,
+                remedy: parked.remediation,
+                retries_on_wake: parked.retries_on_wake,
+            };
+            PrimitiveFailure {
+                kind: PrimitiveFailureKind::Unavailable,
+                code: detail.code().to_owned(),
+                message: detail.message(),
+            }
+        }
     }
 }
 

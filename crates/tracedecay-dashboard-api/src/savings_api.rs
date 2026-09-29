@@ -1489,7 +1489,7 @@ mod tests {
 
     #[test]
     fn partial_provider_usage_never_becomes_an_actual_zero_token_block() {
-        let aggregate = ProviderUsageAggregateV1 {
+        let mut aggregate = ProviderUsageAggregateV1 {
             coverage: ProviderUsageCoverageV1::Partial,
             observations_seen: 1,
             totals: AggregatedProviderUsageCountersV1 {
@@ -1503,6 +1503,17 @@ mod tests {
         };
 
         assert!(actual_tokens(&aggregate).is_none());
+
+        aggregate.coverage = ProviderUsageCoverageV1::Complete;
+        assert_eq!(
+            serde_json::to_value(actual_tokens(&aggregate)).expect("encode"),
+            serde_json::json!({
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cache_read_tokens": null,
+                "cache_write_tokens": null,
+            })
+        );
     }
 
     #[test]

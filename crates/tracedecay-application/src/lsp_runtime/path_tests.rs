@@ -35,17 +35,16 @@ fn document_paths_reject_parent_and_encoded_traversal() {
         "src/%2e/lib.rs",
     ] {
         let uri = format!("{}{suffix}", root_url.as_str());
-        assert!(
-            validated_document_path(
-                &root,
-                &canonical_root_identity(&root),
-                &root_url,
-                &root_dir,
-                &uri
-            )
-            .is_err(),
-            "accepted noncanonical URI path {uri}"
-        );
+        let Err(error) = validated_document_path(
+            &root,
+            &canonical_root_identity(&root),
+            &root_url,
+            &root_dir,
+            &uri,
+        ) else {
+            panic!("accepted noncanonical URI path {uri}");
+        };
+        assert_eq!(error.class(), "document-uri-invalid", "{uri}");
     }
 }
 
@@ -59,17 +58,16 @@ fn document_paths_reject_encoded_separators_and_nul() {
         "src%00lib.rs",
     ] {
         let uri = format!("{}{suffix}", root_url.as_str());
-        assert!(
-            validated_document_path(
-                &root,
-                &canonical_root_identity(&root),
-                &root_url,
-                &root_dir,
-                &uri
-            )
-            .is_err(),
-            "accepted encoded separator or NUL in {uri}"
-        );
+        let Err(error) = validated_document_path(
+            &root,
+            &canonical_root_identity(&root),
+            &root_url,
+            &root_dir,
+            &uri,
+        ) else {
+            panic!("accepted encoded separator or NUL in {uri}");
+        };
+        assert_eq!(error.class(), "document-uri-invalid", "{uri}");
     }
 }
 
@@ -78,16 +76,16 @@ fn document_paths_reject_sibling_prefixes_before_join() {
     let (temp, root, root_url, root_dir) = admitted_root();
     let sibling = temp.path().join("root-sibling").join("src").join("lib.rs");
     let sibling_uri = Url::from_file_path(sibling).expect("sibling file URI");
-    assert!(
-        validated_document_path(
-            &root,
-            &canonical_root_identity(&root),
-            &root_url,
-            &root_dir,
-            sibling_uri.as_str()
-        )
-        .is_err()
-    );
+    let Err(error) = validated_document_path(
+        &root,
+        &canonical_root_identity(&root),
+        &root_url,
+        &root_dir,
+        sibling_uri.as_str(),
+    ) else {
+        panic!("accepted a sibling-prefixed root path");
+    };
+    assert_eq!(error.class(), "document-outside-registered-root");
 }
 
 #[test]
@@ -228,5 +226,8 @@ fn disk_document_open_rejects_symlink_escape() {
     std::fs::write(&outside, "fn outside() {}\n").expect("write outside document");
     symlink(&outside, temp.path().join("root").join("escape.rs")).expect("create escape");
 
-    assert!(open_project_file(&root_dir, Path::new("escape.rs")).is_err());
+    let Err(error) = open_project_file(&root_dir, Path::new("escape.rs")) else {
+        panic!("a symlink escaping the root must not open");
+    };
+    assert_eq!(error.class(), "document-outside-registered-root");
 }

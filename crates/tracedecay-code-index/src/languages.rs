@@ -229,6 +229,7 @@ impl StaticLanguageRegistry {
             // Rust v16 does the same for a `use` in an inline `mod` body and
             // rewrites a call under a block or inline-module glob into the
             // glob's module, marking it so an unbound one stays a caller gap.
+            // Rust v17 gives `const`/`static` initializers their calls.
             // TypeScript v7 records `export … from` forwarding as public
             // import evidence and retains explicitly imported ubiquitous names
             // as cross-file candidates, so barrels and workspace packages bind.
@@ -237,21 +238,38 @@ impl StaticLanguageRegistry {
             // to test titles or to declarations outside the scope that shadows
             // an import. TypeScript v9 records `export default <name>` the same
             // way and retains member calls on imported names, so default and
-            // namespace imports bind.
+            // namespace imports bind. TypeScript v10 attributes calls inside
+            // nested arrows, function expressions, and local functions to the
+            // enclosing symbol, records JSX component elements as calls, and
+            // gives module-scope initializers, class fields, static blocks,
+            // decorators, default parameters, enum initializers, and
+            // namespace bodies their calls. Other module-scope
+            // statements' calls belong to a `<module>` init block, and
+            // abstract classes are extracted like classes. Svelte and Astro
+            // scripts go through it, so they move to v6.
             // The C-comment docstring languages moved one revision when a
             // docstring stopped absorbing trailing or blank-line-detached
             // comments and `///` lost its stray `/`; QBasic dialects moved when
             // CONST names stopped losing their text before an underscore.
             // Ruby v6 names a receiver call `recv.m`, so `x.clamp` inside
-            // `clamp` is no longer bound as recursion.
+            // `clamp` is no longer bound as recursion. Python v6, Go v7, Java
+            // v6, and Ruby v7 record parser-backed import evidence (Go also
+            // indexes `go.mod` module paths), so their cross-file calls bind
+            // at sealing and unbound qualified calls stay disclosed gaps.
+            // Go v8, Python v7, and Dart v6 attribute calls inside function
+            // literals, nested defs, and closures to the enclosing function
+            // instead of dropping them. Go v8 also extracts grouped
+            // `var ( … )` specs and gives package `var` initializers their
+            // calls; Python v7 gives constants, class bodies and arguments,
+            // decorators, and default values theirs and module-scope
+            // statements a `<module>` init block.
             let extractor_revision = match language.as_str() {
-                "rust" => 16,
-                "ruby" => 6,
-                "typescript" => 9,
-                "protobuf" => 7,
-                "sql" => 6,
-                "c" | "cpp" | "metal" | "objc" | "go" | "glsl" | "pascal" | "qbasic"
-                | "quickbasic" => 6,
+                "rust" => 17,
+                "typescript" => 10,
+                "go" => 8,
+                "ruby" | "protobuf" | "python" => 7,
+                "sql" | "java" | "dart" | "svelte" | "astro" => 6,
+                "c" | "cpp" | "metal" | "objc" | "glsl" | "pascal" | "qbasic" | "quickbasic" => 6,
                 _ => 5,
             };
             let descriptor = LanguageDescriptorV1 {
@@ -451,7 +469,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v16");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v17");
 
         assert_eq!(
             registry

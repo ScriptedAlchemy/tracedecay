@@ -592,7 +592,12 @@ mod tests {
         let second = canonical_store_locator_digest(&second_path).expect("absolute locator");
 
         assert_ne!(first, second);
-        assert!(canonical_store_locator_digest(Path::new("relative/graph-store")).is_err());
+        assert_eq!(
+            canonical_store_locator_digest(Path::new("relative/graph-store"))
+                .unwrap_err()
+                .to_string(),
+            "store locator path is not canonical"
+        );
     }
 
     #[test]

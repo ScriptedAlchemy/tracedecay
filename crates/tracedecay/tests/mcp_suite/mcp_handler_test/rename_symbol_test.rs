@@ -484,6 +484,46 @@ async fn test_rename_symbol_apply_rewrites_declaration_and_callers() {
     );
 }
 
+/// A reference link the code-source sanitizer redacts (from the anyhow README),
+/// so capture seals different bytes than the file holds on disk.
+const REDACTED_NOTES: &str =
+    "[RFC 2504]: https://github.com/rust-lang/rfcs/blob/master/text/2504-fix-error.md\n";
+
+#[tokio::test]
+async fn test_rename_symbol_is_not_blocked_by_an_unrelated_redacted_file() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    rename_fixture(project).await;
+    fs::write(project.join("NOTES.md"), REDACTED_NOTES).unwrap();
+    let cg = init_test_project(project).await;
+
+    let node = preview_node(&cg, "compute_grand_total").await;
+    let preview = preview_rename(&cg, &node, "calculate_total_cents").await;
+    assert_eq!(visible_hazards(&preview), json!([]), "{preview}");
+    let applied = call_json(
+        &cg,
+        "tracedecay_rename_symbol",
+        accepted_apply_args(
+            &node,
+            "calculate_total_cents",
+            &preview,
+            "rename.redacted-neighbour",
+        ),
+    )
+    .await;
+    assert_eq!(applied["success"], true, "payload: {applied}");
+    assert_eq!(applied["message"], "rename applied", "payload: {applied}");
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        PRICING_AFTER
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("NOTES.md")).unwrap(),
+        REDACTED_NOTES
+    );
+}
+
 #[tokio::test]
 async fn test_rename_symbol_stale_tree_refuses_before_writing() {
     let dir = test_temp_dir();

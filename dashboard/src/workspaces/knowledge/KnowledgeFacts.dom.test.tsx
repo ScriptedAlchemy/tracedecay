@@ -379,7 +379,10 @@ describe('Facts camera: inspect, select, and the address', () => {
     stub();
     renderPage();
     await ledgerRow(/alpha fact content/);
-    await userEvent.selectOptions(screen.getByLabelText('Sort loaded facts'), 'content');
+    await userEvent.selectOptions(
+      screen.getByLabelText('Sort loaded facts'),
+      screen.getByRole('option', { name: 'content, A to Z' }),
+    );
     expect(lastSearch).toContain('sort=content');
     expect(screen.getByTestId('fact-ledger-bound').textContent).toMatch(/Sorted within this slice only/);
     expect(screen.getByTestId('fact-ledger-bound').textContent).toMatch(/4,125 more facts lie beyond it/);

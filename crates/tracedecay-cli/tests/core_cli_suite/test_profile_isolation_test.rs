@@ -14,17 +14,20 @@ use tracedecay_runtime_core::config::{ProfileRoot, USER_DATA_DIR_ENV};
 use crate::common::{
     hermetic_path, in_child_test, rerun_test_in_child, tracedecay_command_with_home,
 };
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 /// Host CLIs the operator really has installed; a fixture child must never
 /// reach one of them through the test process's `PATH`.
 #[cfg(unix)]
-const REAL_HOST_CLIS: [&str; 4] = ["kimi", "kiro-cli", "codex", "cursor-agent"];
+const REAL_HOST_CLIS: [&str; 5] = ["kimi", "kiro-cli", "droid", "codex", "cursor-agent"];
 
-/// Lifecycle commands that launch host CLIs: Kiro and Codex install through
-/// their own CLIs.
+/// Lifecycle commands: Droid and Codex install through their own CLIs, and
+/// Kiro, which edits its documented config file, must launch no CLI at all.
 #[cfg(unix)]
-const HOST_LIFECYCLE_COMMANDS: [&[&str]; 2] = [
+const HOST_LIFECYCLE_COMMANDS: [&[&str]; 3] = [
     &["install", "--agent", "kiro"],
+    &["install", "--agent", "droid"],
     &["install", "--agent", "codex"],
 ];
 
@@ -34,12 +37,10 @@ const SENTINEL_DIR_ENV: &str = "TRACEDECAY_TEST_AMBIENT_HOST_SENTINELS";
 /// Writes an executable per host name that appends its own name to `log`.
 #[cfg(unix)]
 fn write_host_recorders(dir: &Path, log: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
     std::fs::create_dir_all(dir).unwrap();
     for name in REAL_HOST_CLIS {
         let path = dir.join(name);
-        std::fs::write(
+        write_executable_script(
             &path,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"${{0##*/}}\" >> '{}'\nexit 1\n",
@@ -47,7 +48,6 @@ fn write_host_recorders(dir: &Path, log: &Path) {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 
@@ -117,7 +117,7 @@ fn fixture_children_run_only_admitted_fake_hosts_never_ambient_ones() {
             .output()
             .unwrap();
     }
-    assert_eq!(recorded_hosts(&fake_log), ["codex", "kiro-cli"]);
+    assert_eq!(recorded_hosts(&fake_log), ["codex", "droid"]);
     assert_eq!(
         recorded_hosts(&sentinel_dir.join("ran.log")),
         Vec::<String>::new(),

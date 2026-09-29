@@ -149,7 +149,7 @@ describe('the Work page over mounted routes', () => {
     const { container } = renderPage();
     await waitFor(() => expect(screen.getByText(/Work runtime is unavailable/)).toBeTruthy());
     expect(container.querySelector('[data-work-board]')).toBeNull();
-    expect(container.getAttribute('data-work-authority')).not.toBe('read');
+    expect(screen.getByTestId('work-page').getAttribute('data-work-authority')).toBe('unread');
   });
 
   it('reports a denial as denied rather than as an empty board', async () => {
@@ -369,11 +369,21 @@ describe('the Work page over mounted routes', () => {
   it('gives every stage table a caption and column headers', async () => {
     const { container } = renderPage();
     await screen.findByText('Alpha task');
-    const tables = [...container.querySelectorAll('table')];
-    expect(tables.length).toBeGreaterThan(0);
-    for (const table of tables) {
-      expect(table.querySelector('caption')?.textContent ?? '').not.toBe('');
-      expect(table.querySelectorAll('th[scope="col"]').length).toBeGreaterThan(0);
-    }
+    const tables = [...container.querySelectorAll('table')].map((table) => ({
+      caption: /^Tasks whose furthest recorded gate is ([a-z ]+),|^(Admitted task-activity frames)/
+        .exec(table.querySelector('caption')?.textContent ?? '')
+        ?.slice(1)
+        .find(Boolean),
+      columns: [...table.querySelectorAll('th[scope="col"]')].map((th) => th.textContent),
+    }));
+    const stage = ['Task', 'Identity', 'Version', 'Deps', 'History', 'Attempts'];
+    expect(tables).toEqual([
+      { caption: 'proposal open', columns: stage },
+      { caption: 'proposal accepted', columns: stage },
+      { caption: 'task accepted', columns: stage },
+      { caption: 'execution admitted', columns: stage },
+      { caption: 'terminal evidence', columns: stage },
+      { caption: 'Admitted task-activity frames', columns: ['Observed (UTC)', 'Project', 'Event', 'Frame'] },
+    ]);
   });
 });

@@ -17,6 +17,7 @@ use super::{
     GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
     GitHubRepositoryTargetV1,
 };
+use crate::http_agent::http_agent;
 
 const GITHUB_DISCOVERY_PAGE_SIZE_V1: usize = 100;
 const MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1: usize = 1024 * 1024;
@@ -308,7 +309,7 @@ pub fn discover_exact_commit_pull_request_v1(
         .https_only(true)
         .max_redirects(0)
         .http_status_as_error(false);
-    let agent: ureq::Agent = super::instrument_github_ureq_agent(builder).build().into();
+    let agent = http_agent(super::instrument_github_ureq_agent(builder).build());
     discover_with_agent(
         &agent,
         &DiscoveryRequestV1 {

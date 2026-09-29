@@ -10,7 +10,10 @@ use tracedecay_domain::configuration::{
     ConfigurationMutationGrantReceiptV1, ConfigurationRevisionId, ConfigurationValueV1,
     ProtectedChange, RedactedConfigurationChangeV1, RollbackModeV1, SettingKey,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, canonical_sha256};
+use tracedecay_domain::{
+    ActorId, CursorBindingMismatchV1, CursorBindingV1, ManifestDigest, canonical_sha256,
+    decode_bound_cursor,
+};
 
 pub use tracedecay_contracts::configuration::{
     ActivationDriftV1, ComponentConfigurationState, ConfigurationAuditPage,
@@ -158,6 +161,31 @@ pub fn configuration_layer_scope_digest(
 pub struct ConfigurationAuditQuery {
     pub after_event_id: Option<ConfigurationAuditEventId>,
     pub limit: usize,
+    /// The binding the page's continuation is minted under.
+    pub binding: CursorBindingV1,
+}
+
+impl ConfigurationAuditQuery {
+    /// The query a `configuration_audit` request names, resuming after the
+    /// event its `cursor` was minted at; a cursor minted for another
+    /// operation or `limit` is the inner refusal.
+    pub fn from_request(
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Result<Self, CursorBindingMismatchV1>, ConfigurationError> {
+        let binding = CursorBindingV1::builder("configuration_audit")
+            .parameter("limit", &limit)
+            .build()
+            .map_err(ConfigurationError::validation)?;
+        Ok(cursor
+            .map(|cursor| decode_bound_cursor::<ConfigurationAuditEventId>(&binding, cursor))
+            .transpose()
+            .map(|after_event_id| Self {
+                after_event_id,
+                limit,
+                binding,
+            }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

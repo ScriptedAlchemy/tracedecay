@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
 use tracedecay_code_index::production::{
-    CodeIndexExecutionControlV1, VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
+    CodeIndexExecutionControlV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactTechnicalTermV1,
@@ -34,7 +35,7 @@ use super::format::{
     BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, PostingListDecoderV1,
     PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES, SERVING_INDEX_STEP_COUNT_V11,
     STATISTICS_STEP_COUNT_V11, VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt,
-    content_metadata_bytes, contract_number, decode_fingerprint_postings, decode_padded_receipt,
+    content_metadata_bytes, contract_number, decode_fingerprint_postings,
     decode_padded_receipt_with_control, decode_page_base_sections_receipt,
     encode_fingerprint_postings, encode_term_lists, finish_base_section_receipt_fold, hash_bytes,
     initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
@@ -1027,6 +1028,10 @@ pub struct CodeLexicalArtifactBuilderV1 {
     metadata_digest: ManifestDigest,
     memory_budget_bytes: usize,
     fixed_ledger_charge_bytes: usize,
+    /// Added to source chunk ordinals when this staging file already holds a
+    /// parent artifact's documents. Zero keeps a full build's document ids
+    /// identical to source ordinals.
+    document_id_shift: u64,
 }
 
 /// One source-prefix decision whose fresh relational values were prepared
@@ -1093,7 +1098,20 @@ impl CodeLexicalArtifactBuilderV1 {
             metadata_digest,
             memory_budget_bytes,
             fixed_ledger_charge_bytes,
+            document_id_shift: 0,
         })
+    }
+
+    /// Copy a published parent artifact into `staging` when the child still
+    /// shares occurrence ids with it. Returns false when nothing can be
+    /// carried; `staging` is absent in that case.
+    pub fn stage_carried_parent(
+        parent_artifact: &Path,
+        staging: &Path,
+        metadata: &CodeLexicalProjectionMetadataV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, CodeLexicalArtifactErrorV1> {
+        super::delta::stage_carried_parent(parent_artifact, staging, metadata, control)
     }
 
     /// Reopen only the staged artifact authority while applying the caller's
@@ -1165,6 +1183,7 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         validate_contiguous_pages(&connection, control)?;
+        let document_id_shift = super::delta::read_carried_document_shift(&connection)?;
         checkpoint(control)?;
         crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
         Ok(Self {
@@ -1177,15 +1196,26 @@ impl CodeLexicalArtifactBuilderV1 {
             metadata_digest: expected_digest,
             memory_budget_bytes,
             fixed_ledger_charge_bytes,
+            document_id_shift,
         })
+    }
+
+    /// Occurrences this carried staging still has to append. `None` when the
+    /// staging file is a full build.
+    pub fn carried_rebuild_occurrences(
+        &self,
+    ) -> Result<Option<std::collections::BTreeSet<FileOccurrenceId>>, CodeLexicalArtifactErrorV1>
+    {
+        super::delta::read_carried_rebuild_occurrences(&self.connection)
     }
 
     #[hotpath::skip]
     pub fn progress(
         &self,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         self.verify_path_binding()?;
-        progress(&self.connection)
+        progress(&self.connection, control)
     }
 
     /// The receipt of a staging file that finished finalization and awaits
@@ -1194,9 +1224,10 @@ impl CodeLexicalArtifactBuilderV1 {
     #[hotpath::skip]
     pub fn sealed_receipt(
         &self,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
         self.verify_path_binding()?;
-        read_receipt(&self.connection)
+        read_receipt_with_control(&self.connection, control)
     }
 
     /// The ledger bytes charged regardless of page content: the SQLite
@@ -1435,7 +1466,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact page batches must be non-empty".to_owned(),
             ));
         }
-        if read_receipt(&self.connection)?.is_some() {
+        if read_receipt_with_control(&self.connection, control)?.is_some() {
             return Err(CodeLexicalArtifactErrorV1::Contract(
                 "finalized lexical artifacts do not accept more source pages".to_owned(),
             ));
@@ -1454,6 +1485,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 self.fixed_ledger_charge_bytes,
                 self.memory_budget_bytes,
                 pages,
+                control,
             )
         })?;
         let fresh_pages = &pages[fresh_start..];
@@ -1476,6 +1508,7 @@ impl CodeLexicalArtifactBuilderV1 {
             .map(|page| page_transient_peak_bytes(&self.metadata, page, usize::MAX))
             .collect::<Result<Vec<_>, _>>()?;
         let metadata = &self.metadata;
+        let document_id_shift = self.document_id_shift;
         let prepared = hotpath::measure_block!("query.artifact.batch.parallel_prepare", {
             tracedecay_code_index::parallelism::install(|| {
                 fresh_pages
@@ -1491,6 +1524,7 @@ impl CodeLexicalArtifactBuilderV1 {
                                     page,
                                     previous_cursor,
                                     scratch_bytes,
+                                    document_id_shift,
                                     control,
                                 )
                             }))
@@ -1533,7 +1567,7 @@ impl CodeLexicalArtifactBuilderV1 {
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         self.verify_path_binding()?;
-        if read_receipt(&self.connection)?.is_some() {
+        if read_receipt_with_control(&self.connection, control)?.is_some() {
             return Err(CodeLexicalArtifactErrorV1::Contract(
                 "finalized lexical artifacts do not accept more source pages".to_owned(),
             ));
@@ -1543,12 +1577,12 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact finalization has started; source pages are immutable".to_owned(),
             ));
         }
-        let current = progress(&self.connection)?;
+        let current = progress(&self.connection, control)?;
         if pages.is_empty() {
             record_artifact_progress(&current);
             return Ok(current);
         }
-        validate_prepared_page_batch(&current, pages)?;
+        validate_prepared_page_batch(&current, pages, self.document_id_shift)?;
         admit_prepared_page_batch(
             self.fixed_ledger_charge_bytes,
             self.memory_budget_bytes,
@@ -1634,7 +1668,7 @@ impl CodeLexicalArtifactBuilderV1 {
         // Do not observe cancellation between durable COMMIT and publishing
         // its exact progress. The source callback must be able to advance its
         // cursor once the whole batch has committed.
-        let progress = progress(&self.connection)?;
+        let progress = progress(&self.connection, &UninterruptibleCodeIndexControlV1)?;
         #[cfg(feature = "hotpath")]
         {
             hotpath::gauge!("query.artifact.batch.committed_pages_total")
@@ -1681,12 +1715,15 @@ impl CodeLexicalArtifactBuilderV1 {
             &self.metadata_digest,
             control,
         )?;
-        if let Some(receipt) = read_receipt(&self.connection)? {
+        if let Some(receipt) = read_receipt_with_control(&self.connection, control)? {
             verify_sealed_receipt_header(&receipt, &self.metadata_digest, source)?;
             self.canonicalize_sealed_header()?;
             let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
             record_finalization_step(&step);
             return Ok(step);
+        }
+        if super::delta::carried_delta_pending(&self.connection)? {
+            return self.advance_carried_finalization(source, control);
         }
         enter_resumable_journal(&self.connection)?;
 
@@ -1910,6 +1947,93 @@ impl CodeLexicalArtifactBuilderV1 {
         Ok(step)
     }
 
+    /// Seal a staging file that already holds its parent's unchanged rows.
+    ///
+    /// The consumed source is only the changed files. Section digests still
+    /// fold that source's page receipts; the carried rows stay authenticated
+    /// by the artifact file digest written at publication.
+    fn advance_carried_finalization(
+        &mut self,
+        source: &VerifiedSealedLexicalSourceReceiptV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactErrorV1> {
+        checkpoint(control)?;
+        enter_resumable_journal(&self.connection)?;
+        let transaction = self.connection.transaction().map_err(sqlite_error)?;
+        let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
+        super::delta::merge_carried_staging(&transaction, &self.mutation_gate, control)?;
+        transaction
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS immutable_ngram_postings_update;
+                 DROP TRIGGER IF EXISTS immutable_ngram_postings_delete;",
+            )
+            .map_err(sqlite_error)?;
+        if super::delta::carried_ngram_patch_fits(&transaction)? {
+            let _guard = BuilderMutationGuardV1::enter(&self.mutation_gate)?;
+            super::delta::patch_carried_ngram_postings(
+                &transaction,
+                &self.metadata.generation,
+                control,
+            )?;
+            transaction
+                .execute_batch(
+                    "CREATE TRIGGER frozen_ngram_postings_insert BEFORE INSERT ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;",
+                )
+                .map_err(sqlite_error)?;
+        } else {
+            transaction
+                .execute_batch("DELETE FROM ngram_postings;")
+                .map_err(sqlite_error)?;
+            derive_ngram_postings(
+                &transaction,
+                &ServingIndexStepAuthorityV1 {
+                    mutation_gate: &self.mutation_gate,
+                    generation: &self.metadata.generation,
+                    ngram_memory_bytes: self.memory_budget_bytes / 4,
+                },
+                control,
+            )?;
+        }
+        super::delta::discard_carried_ngram_plan(&transaction)?;
+        ensure_carried_builder_triggers(&transaction)?;
+        let sections = compute_section_digests(&transaction, control)?;
+        verify_final_sections_against_source(&sections, source)?;
+        let clone_index_census = read_clone_index_census(
+            &transaction,
+            CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
+            control,
+        )?;
+        release_free_pages(&transaction, control)?;
+        let file_size_bytes = sqlite_file_size(&transaction)?;
+        let receipt = new_verified_receipt(
+            self.metadata_digest.clone(),
+            source,
+            sections,
+            clone_index_census,
+            file_size_bytes,
+        )?;
+        transaction
+            .execute(
+                "UPDATE artifact_state SET receipt = ?1 WHERE singleton = 1",
+                params![padded_receipt(&receipt)?],
+            )
+            .map_err(sqlite_error)?;
+        checkpoint(control)?;
+        commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+        self.canonicalize_sealed_header()?;
+        verify_finalized_artifact(
+            &self.connection,
+            &self.path,
+            &self.metadata_digest,
+            source,
+            &receipt,
+            control,
+        )?;
+        let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
+        record_finalization_step(&step);
+        Ok(step)
+    }
+
     /// Rewrite the staging file from its content alone.
     ///
     /// Under the builder's rollback journal an in-place `VACUUM` writes the
@@ -2004,7 +2128,7 @@ impl CodeLexicalArtifactBuilderV1 {
     ) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         self.verify_path_binding()?;
-        if let Some(receipt) = read_receipt(&self.connection)? {
+        if let Some(receipt) = read_receipt_with_control(&self.connection, control)? {
             verify_finalized_artifact(
                 &self.connection,
                 &self.path,
@@ -2112,7 +2236,10 @@ fn compacting_staging_sibling(path: &Path) -> Result<PathBuf, CodeLexicalArtifac
     staging_sibling(path, "-compacting")
 }
 
-fn staging_sibling(path: &Path, suffix: &str) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
+pub(super) fn staging_sibling(
+    path: &Path,
+    suffix: &str,
+) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
     let mut name = path
         .file_name()
         .ok_or_else(|| {
@@ -2908,6 +3035,7 @@ fn prepare_page_batch_admission(
     fixed_ledger_charge_bytes: usize,
     memory_budget_bytes: usize,
     pages: &[VerifiedSealedLexicalPageV1],
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(CodeLexicalArtifactBuildProgressV1, usize), CodeLexicalArtifactErrorV1> {
     admit_page_batch_within_memory_budget(
         metadata,
@@ -2915,7 +3043,7 @@ fn prepare_page_batch_admission(
         memory_budget_bytes,
         pages,
     )?;
-    let current = progress(connection)?;
+    let current = progress(connection, control)?;
     let persisted_previous = pages
         .first()
         .map(|page| cursor_before_page(connection, page.page_ordinal()))
@@ -3315,6 +3443,7 @@ fn anchor_owned_bytes(anchor: &CodeSearchChunkAnchorV1) -> usize {
 fn validate_prepared_page_batch(
     current: &CodeLexicalArtifactBuildProgressV1,
     pages: &[PreparedCodeLexicalArtifactPageV1],
+    document_id_shift: u64,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut expected_ordinal = current.next_page_ordinal;
     let mut expected_document = current.completed_chunks;
@@ -3345,7 +3474,14 @@ fn validate_prepared_page_batch(
             })?;
         let mut next_document = expected_document;
         for document in &page.documents {
-            let document_id = u64::try_from(document.document_id).map_err(contract_number)?;
+            let document_id = u64::try_from(document.document_id)
+                .map_err(contract_number)?
+                .checked_sub(document_id_shift)
+                .ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "prepared lexical document id is below its carried shift".to_owned(),
+                    )
+                })?;
             if document_id < next_document || document_id >= page_end {
                 return Err(CodeLexicalArtifactErrorV1::Corrupt(
                     "prepared lexical document ids leave their page or repeat".to_owned(),
@@ -4397,6 +4533,159 @@ type GateTriggerLayoutV1 = (&'static str, &'static str, &'static str);
 /// trigger.
 type ImmutableTriggerLayoutV1 = (&'static str, &'static str, &'static str, &'static str);
 
+pub(super) fn drop_seal_triggers(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut statement = connection
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND (name LIKE 'frozen_%' OR name LIKE 'immutable_%')",
+        )
+        .map_err(sqlite_error)?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(sqlite_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_error)?;
+    drop(statement);
+    for name in names {
+        if !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
+                "lexical artifact trigger name {name} is not a seal trigger"
+            )));
+        }
+        connection
+            .execute_batch(&format!("DROP TRIGGER {name}"))
+            .map_err(sqlite_error)?;
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_carried_builder_triggers(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let has_exact_vocabulary = table_exists(connection, "exact_vocabulary")?;
+    let has_row_dictionary_pages = table_exists(connection, "row_dictionary_pages")?;
+    let has_field_stats_staging = table_exists(connection, "field_stats_staging")?;
+    let has_row_chunk_pages = table_exists(connection, "row_chunk_pages")?;
+    let has_term_posting_runs = table_exists(connection, "term_posting_runs")?;
+    let has_exact_posting_runs = table_exists(connection, "exact_posting_runs")?;
+    let has_clone_index = table_exists(connection, "clone_body_payloads")?;
+    let has_clone_fingerprints = table_exists(connection, "clone_fingerprint_postings")?;
+    let has_clone_fingerprint_pages = table_exists(connection, "clone_fingerprint_postings_pages")?;
+    let has_source_page_cursors = table_exists(connection, "source_page_cursors")?;
+    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 10] = [
+        (
+            has_source_page_cursors,
+            &SOURCE_PAGE_CURSORS_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_row_chunk_pages,
+            &ROW_CHUNK_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_exact_vocabulary,
+            &EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_row_dictionary_pages,
+            &ROW_DICTIONARY_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_field_stats_staging,
+            &FIELD_STATS_STAGING_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_term_posting_runs,
+            &TERM_POSTING_RUNS_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_exact_posting_runs,
+            &EXACT_POSTING_RUNS_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+        (has_clone_index, &CLONE_BUILDER_GATE_TRIGGER_LAYOUT),
+        (
+            has_clone_fingerprints,
+            &CLONE_FINGERPRINT_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_clone_fingerprint_pages,
+            &CLONE_FINGERPRINT_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+    ];
+    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 7] = [
+        (true, &IMMUTABLE_TRIGGER_LAYOUT),
+        (
+            has_source_page_cursors,
+            &SOURCE_PAGE_CURSORS_IMMUTABLE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_exact_vocabulary,
+            &EXACT_VOCABULARY_IMMUTABLE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_row_dictionary_pages,
+            &ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT,
+        ),
+        (has_clone_index, &CLONE_IMMUTABLE_TRIGGER_LAYOUT),
+        (
+            has_clone_fingerprints,
+            &CLONE_FINGERPRINT_IMMUTABLE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_clone_fingerprint_pages,
+            &CLONE_FINGERPRINT_PAGES_IMMUTABLE_TRIGGER_LAYOUT,
+        ),
+    ];
+    for (present, layout) in gated_layouts {
+        if !present {
+            continue;
+        }
+        for (name, table, operation) in layout {
+            ensure_trigger(connection, name, table, operation, None)?;
+        }
+    }
+    for (present, layout) in immutable_layouts {
+        if !present {
+            continue;
+        }
+        for (name, table, operation, message) in layout {
+            ensure_trigger(connection, name, table, operation, Some(message))?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_trigger(
+    connection: &Connection,
+    name: &str,
+    table: &str,
+    operation: &str,
+    message: Option<&str>,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if exists {
+        return Ok(());
+    }
+    let sql = match message {
+        Some(message) => format!(
+            "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
+        ),
+        None => format!(
+            "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN {BUILDER_MUTATION_GATE_FUNCTION}() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END"
+        ),
+    };
+    connection.execute_batch(&sql).map_err(sqlite_error)
+}
+
 fn verify_trigger_schema(
     connection: &Connection,
     name: &str,
@@ -5086,7 +5375,7 @@ fn derive_exact_postings(
 
 /// Append one staged run to its key's list; a run must be non-empty and
 /// continue strictly after the documents already merged.
-fn append_staged_run(
+pub(super) fn append_staged_run(
     encoder: &mut PostingListEncoderV1,
     staged: &[u8],
     frequencies: bool,
@@ -6216,8 +6505,9 @@ type StoredSourcePageRowV1 = (String, String, i64, i64, i64, i64, String, Vec<u8
 
 fn progress(
     connection: &Connection,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-    if read_receipt(connection)?.is_some() {
+    if read_receipt_with_control(connection, control)?.is_some() {
         return Err(CodeLexicalArtifactErrorV1::Contract(
             "a sealed lexical artifact keeps no source progress; publish it".to_owned(),
         ));
@@ -6521,19 +6811,6 @@ fn hash_value(hasher: &mut Sha256, value: ValueRef<'_>) -> Result<(), CodeLexica
         }
     }
     Ok(())
-}
-
-fn read_receipt(
-    connection: &Connection,
-) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
-    let bytes: Vec<u8> = connection
-        .query_row(
-            "SELECT receipt FROM artifact_state WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(sqlite_corrupt)?;
-    decode_padded_receipt(&bytes)
 }
 
 fn read_receipt_with_control(
@@ -7105,6 +7382,36 @@ mod tests {
                 "sealing the statistics must drop the staging totals"
             );
         }
+    }
+
+    /// SQLite's Unix VFS cannot open a full name of 512 bytes or more and
+    /// says only "unable to open database file", which the scheduler kept
+    /// retrying as an unavailable store. The builder names the limit as a
+    /// contract failure, which ends the build.
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_a_staging_path_sqlite_cannot_address() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let mut parent = directory.path().to_path_buf();
+        while parent.as_os_str().len() < 520 {
+            parent.push("d".repeat(64));
+        }
+        std::fs::create_dir_all(&parent).expect("deep staging parent");
+        let path = parent.join("staging.sqlite");
+
+        let error = match CodeLexicalArtifactBuilderV1::create(&path, test_metadata()) {
+            Ok(_) => panic!("SQLite cannot open a staging path this long"),
+            Err(error) => error,
+        };
+
+        let CodeLexicalArtifactErrorV1::Contract(detail) = error else {
+            panic!("expected a contract refusal naming the SQLite limit, got {error:?}");
+        };
+        assert!(
+            detail.starts_with(&format!("SQLite database path '{}", path.display()))
+                && detail.ends_with("SQLite's default VFS opens names shorter than 512 bytes"),
+            "{detail}"
+        );
     }
 
     #[test]

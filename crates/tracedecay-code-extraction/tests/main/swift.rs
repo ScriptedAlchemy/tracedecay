@@ -223,8 +223,9 @@ protocol Serializable {
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Method)
+        .map(|n| n.name.as_str())
         .collect();
-    assert_eq!(methods.len(), 2);
+    assert_eq!(methods, ["toJson", "toJsonString"]);
 }
 
 #[test]

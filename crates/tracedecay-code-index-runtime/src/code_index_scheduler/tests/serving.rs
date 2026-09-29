@@ -40,10 +40,11 @@ use tracedecay_query::retrieval::{
     exact::{CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest},
     lexical::{
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-        CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-        CodeLexicalArtifactRestoreWitnessV1, LexicalLaneRequest, LexicalRouteKindV1,
-        LexicalRoutingV1,
+        CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1,
+        CodeLexicalArtifactReaderV1, CodeLexicalArtifactRestoreWitnessV1, LexicalLaneRequest,
+        LexicalRouteKindV1, LexicalRoutingV1,
     },
 };
 use tracedecay_runtime_core::resident_memory::{
@@ -253,9 +254,11 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .path()
         .join("code-text-artifact-restore-witnesses-v1")
         .join(artifact_file.replace(".bin", ".json"));
-    assert!(
+    assert_eq!(
         witness_path.is_file(),
-        "the fully verified publication open must persist its bounded restart witness"
+        cfg!(unix),
+        "the fully verified publication open persists its bounded restart witness \
+         only where native file state proves the artifact unchanged"
     );
 
     // Simulated restart: a fresh scheduler over the same store must reopen
@@ -282,33 +285,35 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .find(|entry| entry.generation_id == active_generation)
         .and_then(|entry| entry.text_artifact())
         .expect("restart artifact descriptor");
-    let witness = CodeLexicalArtifactRestoreWitnessV1::decode(
-        &std::fs::read(&witness_path).expect("read bounded restore witness"),
-    )
-    .expect("decode bounded restore witness");
-    let mut authentication_progress = Vec::new();
-    let directly_restored = CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
-        &artifact_path,
-        &descriptor.artifact_digest,
-        descriptor.artifact_size_bytes,
-        &witness,
-        &latest
-            .text_projection_metadata()
-            .expect("restart projection metadata"),
-        &UninterruptibleCodeIndexControlV1,
-        |completed, total| authentication_progress.push((completed, total)),
-    )
-    .expect("bounded content-addressed restore");
-    assert_eq!(
-        authentication_progress,
-        (0..=6).map(|completed| (completed, 6)).collect::<Vec<_>>(),
-        "bounded restore must publish every fixed authentication boundary"
-    );
-    assert_eq!(
-        directly_restored.metadata().generation,
-        latest.metadata().manifest().generation_id
-    );
-    drop(directly_restored);
+    if cfg!(unix) {
+        let witness = CodeLexicalArtifactRestoreWitnessV1::decode(
+            &std::fs::read(&witness_path).expect("read bounded restore witness"),
+        )
+        .expect("decode bounded restore witness");
+        let mut authentication_progress = Vec::new();
+        let directly_restored =
+            CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
+                &artifact_path,
+                &descriptor.artifact_digest,
+                descriptor.artifact_size_bytes,
+                &witness,
+                &latest
+                    .text_projection_metadata()
+                    .expect("restart projection metadata"),
+                &UninterruptibleCodeIndexControlV1,
+                |completed, total| authentication_progress.push((completed, total)),
+            )
+            .expect("bounded content-addressed restore");
+        assert_eq!(
+            authentication_progress,
+            (0..=6).map(|completed| (completed, 6)).collect::<Vec<_>>(),
+            "bounded restore must publish every fixed authentication boundary"
+        );
+        assert_eq!(
+            directly_restored.metadata().generation,
+            latest.metadata().manifest().generation_id
+        );
+    }
     assert!(
         latest
             .advance_text_serving(1)
@@ -916,7 +921,8 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
         "positional fingerprints cover both eligible bodies at the first seal"
     );
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
-    let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+    let artifact_path = active_text_artifact_path(store.path());
+    let revision: u32 = rusqlite::Connection::open(&artifact_path)
         .expect("open sealed artifact")
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
@@ -924,7 +930,52 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
             |row| row.get(0),
         )
         .expect("read sealed revision");
-    assert_eq!(revision, 29);
+    assert_eq!(
+        observation.artifact_format_revision,
+        Some(revision),
+        "clone readiness reports the revision the first seal wrote"
+    );
+    let metadata = latest
+        .text_projection_metadata()
+        .expect("projection metadata");
+    let control = UninterruptibleCodeIndexControlV1;
+    CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("the current artifact revision opens");
+    let previous = i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1) - 1;
+    {
+        let connection = rusqlite::Connection::open(&artifact_path).expect("open sealed artifact");
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE artifact_state SET format_revision = ?1 WHERE singleton = 1",
+                    [previous],
+                )
+                .expect("write the previous format revision"),
+            1
+        );
+    }
+    let opened = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    );
+    let Err(error) = opened else {
+        panic!("the previous artifact revision is refused");
+    };
+    assert!(
+        matches!(
+            error,
+            CodeLexicalArtifactErrorV1::Incompatible(ref message)
+                if message == &format!("format revision {previous} is unsupported")
+        ),
+        "previous revision reached the wrong rejection: {error}"
+    );
     let staging = std::fs::read_dir(code_text_artifact_staging_root(store.path()))
         .expect("artifacts root")
         .map(|entry| entry.expect("artifact entry").file_name())
@@ -1534,7 +1585,10 @@ fn incompatible_published_text_artifact_is_withdrawn_and_rebuilt() {
             .expect("build current-format text artifact")
         {}
     }
-    let incompatible_path = rewrite_active_text_artifact_format_revision(store.path(), 1);
+    let incompatible_path = rewrite_active_text_artifact_format_revision(
+        store.path(),
+        u64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1 - 1),
+    );
 
     let scheduler = scheduler(
         &fixture,
@@ -1770,7 +1824,10 @@ fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
             rusqlite::Connection::open(&staging_path).expect("open partial staging database");
         assert_eq!(
             connection
-                .execute("UPDATE artifact_state SET format_revision = 1", [],)
+                .execute(
+                    "UPDATE artifact_state SET format_revision = ?1",
+                    [i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1 - 1)],
+                )
                 .expect("rewrite staging format revision"),
             1
         );
@@ -2416,7 +2473,10 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
         let super::super::CodeTextProjectionSlotV1::Building(build) = &mut *slot else {
             panic!("partial text build");
         };
-        let progress = build.builder.progress().unwrap();
+        let progress = build
+            .builder
+            .progress(&UninterruptibleCodeIndexControlV1)
+            .unwrap();
         assert!(progress.next_page_ordinal > 0);
         build.builder =
             CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
@@ -2454,7 +2514,13 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
         let super::super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
             panic!("refusal keeps resumable build");
         };
-        assert_eq!(build.builder.progress().unwrap(), before);
+        assert_eq!(
+            build
+                .builder
+                .progress(&UninterruptibleCodeIndexControlV1)
+                .unwrap(),
+            before
+        );
         assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
     }
     assert!(
@@ -2465,7 +2531,13 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
     let super::super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
         panic!("indivisible refusal keeps durable prefix");
     };
-    assert_eq!(build.builder.progress().unwrap(), before);
+    assert_eq!(
+        build
+            .builder
+            .progress(&UninterruptibleCodeIndexControlV1)
+            .unwrap(),
+        before
+    );
     assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
 }
 
@@ -2704,7 +2776,10 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         let super::super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
             panic!("partial build");
         };
-        build.builder.progress().expect("durable progress")
+        build
+            .builder
+            .progress(&UninterruptibleCodeIndexControlV1)
+            .expect("durable progress")
     };
     let dashboard_before = build_progress_snapshot(&scheduler);
     assert_eq!(
@@ -2744,7 +2819,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         };
         build
             .builder
-            .progress()
+            .progress(&UninterruptibleCodeIndexControlV1)
             .expect("durable progress after cancellation")
     };
     assert_eq!(progress_after, progress_before);
@@ -5780,7 +5855,7 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         refusal
             .diagnostic()
             .map(|diagnostic| diagnostic.code.as_str()),
-        Some("callable_code.cursor_invalid"),
+        Some("cursor.invalid"),
         "MAC verification must precede expiry and other binding diagnostics"
     );
 
@@ -6137,7 +6212,7 @@ async fn pinned_query_bypasses_freshness_resolution() {
     registry.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generation_read_callers_install_exact_affected_test_attribution() {
     let fixture = GitFixture::new(&[(
         "tests/production.rs",

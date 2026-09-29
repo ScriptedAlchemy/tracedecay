@@ -327,14 +327,16 @@ mod tests {
 
     #[test]
     fn invalid_lifecycle_times_are_rejected_before_storage() {
-        assert!(
+        assert_eq!(
             WorkAttemptEffectHolderV1::dispatched(
                 identity(),
                 WorkEffectStateV1::CompoundNonRepeatable,
                 UtcMicros(20),
                 UtcMicros(20),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "Work attempt effect holder has an invalid lifecycle time"
         );
         let holder = WorkAttemptEffectHolderV1::dispatched(
             identity(),
@@ -343,10 +345,12 @@ mod tests {
             UtcMicros(30),
         )
         .expect("valid dispatch receipt");
-        assert!(
+        assert_eq!(
             holder
                 .with_resolution(WorkAttemptEffectResolutionV1::Unknown, UtcMicros(19))
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "Work attempt effect holder has an invalid lifecycle time"
         );
     }
 }

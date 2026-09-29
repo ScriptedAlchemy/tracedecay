@@ -154,13 +154,28 @@ fn rejects_invalid_opaque_identities() {
 
 #[test]
 fn opaque_identity_deserialization_reuses_constructor_validation() {
-    for invalid in [
-        "\"\"".to_owned(),
-        "\"__tracedecay_graph_db_forbidden\"".to_owned(),
-        format!("\"{}\"", "x".repeat(1025)),
+    for (invalid, refusal) in [
+        ("\"\"".to_owned(), "GraphNamespace must not be empty"),
+        (
+            "\"__tracedecay_graph_db_forbidden\"".to_owned(),
+            "GraphNamespace uses the reserved graph database prefix",
+        ),
+        (
+            format!("\"{}\"", "x".repeat(1025)),
+            "GraphNamespace exceeds 1024 bytes",
+        ),
     ] {
-        assert!(serde_json::from_str::<GraphNamespace>(&invalid).is_err());
+        assert_eq!(
+            serde_json::from_str::<GraphNamespace>(&invalid)
+                .unwrap_err()
+                .to_string(),
+            format!("invalid graph database request: {refusal}")
+        );
     }
+    assert_eq!(
+        serde_json::from_str::<GraphNamespace>("\"workspace\"").unwrap(),
+        GraphNamespace::new("workspace").unwrap()
+    );
 }
 
 #[test]

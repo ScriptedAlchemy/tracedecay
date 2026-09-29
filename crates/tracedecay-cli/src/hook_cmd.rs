@@ -82,9 +82,9 @@ fn handle_hook_command_inner(
         if let Some(code) = native_response_code {
             return Ok(code);
         }
-        if let Some(source) = crate::hook_capture_cmd::capture_source_for_command(&command) {
+        if let Some((source, hook_name)) = crate::hook_capture_cmd::capture_command_for(&command) {
             return Ok(crate::hook_capture_cmd::run_native_capture(
-                &profile, source,
+                &profile, source, hook_name,
             ));
         }
         if matches!(command, Commands::HookPreToolUse) {

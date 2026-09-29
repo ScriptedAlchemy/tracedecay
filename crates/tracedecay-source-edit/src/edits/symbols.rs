@@ -71,7 +71,19 @@ impl EditSymbolV1 {
                 "symbol source span disagrees with its extraction-attested line bounds",
             ));
         }
-        Ok((start_line, attested_end))
+        // A blank line ends the docs and attributes attached to the
+        // declaration. Leading lines the span carries above it, such as a
+        // license header or a section banner, belong to the file.
+        let lines = source.lines().collect::<Vec<_>>();
+        let mut edit_start = attested_start;
+        while edit_start > start_line
+            && lines
+                .get(edit_start - 1)
+                .is_some_and(|line| !line.trim().is_empty())
+        {
+            edit_start -= 1;
+        }
+        Ok((edit_start, attested_end))
     }
 }
 
@@ -330,15 +342,18 @@ mod tests {
 
     #[test]
     fn narrowing_refuses_multiple_declarations() {
-        assert!(
-            narrow_symbol_for_edit(
-                "src/a.rs::Widget",
-                vec![
-                    symbol(NodeKind::Struct, "Widget"),
-                    symbol(NodeKind::Struct, "Widget"),
-                ],
-            )
-            .is_err()
+        let error = narrow_symbol_for_edit(
+            "src/a.rs::Widget",
+            vec![
+                symbol(NodeKind::Struct, "Widget"),
+                symbol(NodeKind::Struct, "Widget"),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: symbol 'src/a.rs::Widget' is ambiguous (2 matches); pass an exact \
+             stored qualified name"
         );
     }
 
@@ -358,5 +373,19 @@ mod tests {
 
         subtotal.source_span.end_byte = source.len() as u64;
         assert!(subtotal.line_bounds(source).is_err());
+    }
+
+    #[test]
+    fn line_bounds_keep_attached_docs_and_leave_a_separated_header() {
+        let source = "// SPDX-License-Identifier: MIT\n\n/// Doubles.\n#[inline]\npub fn subtotal(value: i32) -> i32 {\n    value * 2\n}\n";
+        let mut subtotal = symbol(NodeKind::Function, "subtotal");
+        subtotal.source_span.end_byte = source.len() as u64;
+        subtotal.start_line = 4;
+        subtotal.line_span = 3;
+
+        assert_eq!(
+            subtotal.line_bounds(source).expect("consistent bounds"),
+            (2, 6)
+        );
     }
 }

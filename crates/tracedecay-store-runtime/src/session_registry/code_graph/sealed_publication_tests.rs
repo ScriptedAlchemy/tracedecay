@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use tracedecay_code_index_retention::code_index_generations::{
@@ -48,6 +48,10 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
 use tracedecay_daemon_identity::profile_identity;
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentSampleV1, RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1,
+    ResidentMemoryPressureV1,
+};
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -251,25 +255,65 @@ fn assert_unverified_publication_state(
     });
 }
 
-#[test]
-fn resident_memory_trip_is_permanent_for_one_publication_attempt() {
+fn pressure_from_sample(
+    limit_bytes: u64,
+) -> (
+    Arc<tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1>,
+    Arc<Mutex<tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1>>,
+) {
+    let sample = Arc::new(Mutex::new(
+        tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
+            resident_bytes: 0,
+            unreclaimable_bytes: 0,
+            swapped_bytes: 0,
+            cgroup_committed_bytes: None,
+        },
+    ));
+    let sampled = Arc::clone(&sample);
     let pressure = Arc::new(
-        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::new(
-            std::num::NonZeroU64::new(1024 * 1024 * 1024).expect("nonzero pressure limit"),
+        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
+            std::num::NonZeroU64::new(limit_bytes).expect("nonzero pressure limit"),
+            Arc::new(move || Some(*sampled.lock().expect("resident sample"))),
         ),
     );
+    (pressure, sample)
+}
+
+fn set_sample(
+    sample: &Mutex<tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1>,
+    unreclaimable_bytes: u64,
+) {
+    *sample.lock().expect("resident sample") =
+        tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
+            resident_bytes: unreclaimable_bytes,
+            unreclaimable_bytes,
+            swapped_bytes: 0,
+            cgroup_committed_bytes: None,
+        };
+}
+
+#[test]
+fn resident_memory_trip_is_permanent_for_one_publication_attempt() {
+    let (pressure, sample) = pressure_from_sample(1024 * 1024 * 1024);
     let request_cancelled = Arc::new(AtomicBool::new(false));
     let attempt = ResidentMemoryGuardedGraphCancellationV1::new(
         Arc::clone(&request_cancelled),
         Arc::clone(&pressure),
     );
 
-    assert!(!attempt.is_cancelled());
-    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
-    assert!(attempt.is_cancelled());
+    assert!(
+        !attempt.is_cancelled(),
+        "a checkpoint samples the process; an empty sample is not over budget"
+    );
+    set_sample(&sample, pressure.high_watermark_bytes() + 1);
+    std::thread::sleep(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1);
+    assert!(
+        attempt.is_cancelled(),
+        "the publication checkpoint must read the new sample instead of the last published state"
+    );
     assert!(attempt.refused_by_resident_memory());
 
-    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    set_sample(&sample, pressure.low_watermark_bytes());
     assert!(
         attempt.is_cancelled(),
         "pressure recovery must not revive the publication attempt that tripped"
@@ -285,6 +329,7 @@ fn resident_memory_trip_is_permanent_for_one_publication_attempt() {
 
     let next_attempt =
         ResidentMemoryGuardedGraphCancellationV1::new(Arc::new(AtomicBool::new(false)), pressure);
+    std::thread::sleep(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1);
     assert!(
         !next_attempt.is_cancelled(),
         "recovered pressure admits a distinct publication attempt"
@@ -1674,9 +1719,11 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         &project_root,
         &["config", "user.email", "tracedecay@example.invalid"],
     );
+    // Checkpoints sample at most once per interval, so the projection must
+    // outlast several of them for a sample to land inside it.
     std::fs::write(
         project_root.join("src/lib.rs"),
-        "pub fn resident_memory_refusal_value() -> usize { 917 }\n",
+        chained_functions_source(CHAINED_FUNCTIONS),
     )
     .expect("project source");
     git(&project_root, &["add", "."]);
@@ -1743,10 +1790,45 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         .expect("private graph replay root");
 
     // An isolated cell driven by a fake RSS series: no `/proc` read, and no
-    // interference with the process cell other cases observe.
+    // interference with the process cell other cases observe. The series stays
+    // nominal until manifest projection is in flight, then reports the limit.
+    // Row spill runs after the serving-gate classification, so a gate held
+    // before the publisher starts never lets that projection begin. A live
+    // checkpoint sample is what observes the crossing; a cell that only
+    // rereads its last publication admits the build.
+    let limit_bytes = 1024 * 1024 * 1024;
+    let sample = Arc::new(Mutex::new(
+        tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
+            resident_bytes: 0,
+            unreclaimable_bytes: 0,
+            swapped_bytes: 0,
+            cgroup_committed_bytes: None,
+        },
+    ));
+    let refuse_once_projecting = Arc::new(AtomicBool::new(true));
+    let sampled_over_limit_while_projecting = Arc::new(AtomicBool::new(false));
+    let sampled = Arc::clone(&sample);
+    let refuse = Arc::clone(&refuse_once_projecting);
+    let over_limit = Arc::clone(&sampled_over_limit_while_projecting);
     let pressure = Arc::new(
-        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::new(
-            std::num::NonZeroU64::new(1024 * 1024 * 1024).expect("nonzero pressure limit"),
+        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
+            std::num::NonZeroU64::new(limit_bytes).expect("nonzero pressure limit"),
+            Arc::new(move || {
+                if refuse.load(Ordering::Acquire)
+                    && PUBLICATION_PROJECTION_IN_FLIGHT.load(Ordering::Acquire) != 0
+                {
+                    over_limit.store(true, Ordering::Release);
+                    return Some(
+                        tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
+                            resident_bytes: limit_bytes,
+                            unreclaimable_bytes: limit_bytes,
+                            swapped_bytes: 0,
+                            cgroup_committed_bytes: None,
+                        },
+                    );
+                }
+                Some(*sampled.lock().expect("resident sample"))
+            }),
         ),
     );
     let runtime = registry
@@ -1763,41 +1845,16 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         .expect("retain the code graph runtime")
         .with_resident_memory_pressure(&pressure);
 
-    // Start under nominal pressure, let the real publication claim the corpus
-    // build permit and enter manifest projection, then trip the watermark.
-    // Holding the short publication gate keeps the attempt alive after that
-    // phase so this cannot collapse into an over-budget admission test.
-    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
-    let publication_gate = runtime
-        .publication_locks
-        .gate
-        .lock()
-        .expect("hold publication gate after manifest projection");
-    let _ = take_publication_projection_overlap_peak();
+    set_sample(&sample, pressure.low_watermark_bytes());
     let not_cancelled = Arc::new(AtomicBool::new(false));
-    let refused = std::thread::scope(|scope| {
-        let publisher =
-            scope.spawn(|| runtime.publish_verified_snapshot(Arc::clone(&not_cancelled)));
-        let projection_deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let build_claimed = runtime.publication_locks.build.try_lock().is_err();
-            if build_claimed
-                && (PUBLICATION_PROJECTION_IN_FLIGHT.load(Ordering::Acquire) != 0
-                    || take_publication_projection_overlap_peak() != 0)
-            {
-                break;
-            }
-            assert!(
-                Instant::now() <= projection_deadline,
-                "publication never entered manifest projection"
-            );
-            std::thread::yield_now();
-        }
-        pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
-        drop(publication_gate);
-        publisher.join().expect("join pressured publisher")
-    });
-    let _ = take_publication_projection_overlap_peak();
+    let refused = runtime.publish_verified_snapshot(Arc::clone(&not_cancelled));
+    // The projection peak is process-global and other cases reset it; this
+    // cell's own sampler is what saw the crossing.
+    assert!(
+        sampled_over_limit_while_projecting.load(Ordering::Acquire),
+        "the refusal must come from a checkpoint sample taken during manifest projection"
+    );
+    refuse_once_projecting.store(false, Ordering::Release);
     match refused {
         Err(GraphDbError::BudgetExhausted { kind, limit }) => {
             assert_eq!(kind, tracedecay_graph_db::GraphBudgetKind::ResidentMemory);
@@ -1840,7 +1897,8 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
 
     // Back under the low watermark the same runtime publishes the generation
     // it just refused; the refusal poisoned nothing.
-    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    set_sample(&sample, pressure.low_watermark_bytes());
+    std::thread::sleep(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1);
     let published = runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("nominal measured RSS publishes the sealed generation");
@@ -1874,6 +1932,120 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
             GraphPublicationReplayLookupV1::Active(_)
         ));
     });
+}
+
+const CHAINED_FUNCTIONS: usize = 2_000;
+
+/// One file of `count` functions, each calling its predecessor, so every
+/// function is a symbol row, a binding row, and a call edge.
+fn chained_functions_source(count: usize) -> String {
+    let mut source = String::from("pub fn chained_0000() -> usize { 0 }\n");
+    for index in 1..count {
+        writeln!(
+            &mut source,
+            "pub fn chained_{index:04}() -> usize {{ chained_{previous:04}() + 1 }}",
+            previous = index - 1,
+        )
+        .expect("write chained function");
+    }
+    source
+}
+
+/// Publication cost scales with the generation, never with how often the
+/// build polls its resident-memory guard. The guard is polled per row; each
+/// poll used to read `/proc/self/status` and every cgroup memory file, so a
+/// 200k-symbol repository spent its whole 15-minute budget in those reads,
+/// was retried into the same budget, and never served a graph (#2505). The
+/// sampler here costs what one such read costs on a busy cgroup.
+///
+/// Fails if the build samples per row (thousands of samples, a wall time the
+/// samples dominate), or if the published generation does not serve its
+/// symbols.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_publication_samples_resident_memory_per_interval_not_per_row() {
+    let fixture = sealed_generation_fixture(
+        "project.checkpoint-sampling",
+        &chained_functions_source(CHAINED_FUNCTIONS),
+    )
+    .await;
+    let samples = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&samples);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        std::num::NonZeroU64::new(1 << 40).expect("nonzero pressure limit"),
+        Arc::new(move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+            std::thread::sleep(Duration::from_micros(200));
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 0,
+                unreclaimable_bytes: 0,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let SealedGenerationFixture {
+        runtime,
+        generation_id,
+        ..
+    } = fixture;
+    let runtime = runtime.with_resident_memory_pressure(&pressure);
+
+    let started = Instant::now();
+    let snapshot = runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("the sealed generation publishes");
+    let elapsed = started.elapsed();
+    let samples = samples.load(Ordering::Acquire);
+    let ceiling =
+        2 + elapsed.as_micros() / RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1.as_micros();
+    assert!(
+        u128::from(samples) <= ceiling,
+        "publication took {samples} resident-memory samples in {elapsed:?}; \
+         at most {ceiling} fit one per checkpoint interval"
+    );
+
+    let store =
+        tracedecay_code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
+            snapshot,
+            generation_id.clone(),
+        )
+        .expect("projection store over the published snapshot");
+    store
+        .mark_interactive_catalog_warming()
+        .expect("mark warming");
+    store
+        .warm_serving_engine()
+        .expect("warm the serving engine");
+    store
+        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .expect("derive the catalog from the published projection");
+    let last = format!("src/lib.rs::chained_{:04}", CHAINED_FUNCTIONS - 1);
+    let resolved = store
+        .interactive_reader_with_cancellation(
+            &generation_id,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("interactive reader")
+        .resolve_qualified_name(
+            &last,
+            None,
+            4,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("resolve the last chained function");
+    let resolved = resolved
+        .iter()
+        .map(|summary| {
+            summary
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.simple_name.clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolved,
+        vec![Some(format!("chained_{:04}", CHAINED_FUNCTIONS - 1))]
+    );
 }
 
 fn pinned_publication_lock_cells(registry: &DaemonSessionRuntimeRegistryV1) -> usize {

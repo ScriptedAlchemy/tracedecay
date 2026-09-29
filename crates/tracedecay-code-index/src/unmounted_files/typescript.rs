@@ -976,8 +976,16 @@ mod tests {
             "import { compiled } from './compiled.js';\nexport { compiled };\n",
         );
         write(root, "src/compiled.ts", "export const compiled = 1;\n");
+        write(
+            root,
+            "src/unreferenced.ts",
+            "export const unreferenced = 1;\n",
+        );
 
-        assert!(unmounted_paths(&audit_typescript(root)).is_empty());
+        assert_eq!(
+            unmounted_paths(&audit_typescript(root)),
+            vec!["src/unreferenced.ts"]
+        );
     }
 
     /// Each workspace package is its own reachability walk, discovered by its

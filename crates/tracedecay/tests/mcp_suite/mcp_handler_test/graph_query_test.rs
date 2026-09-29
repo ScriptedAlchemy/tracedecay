@@ -2,6 +2,7 @@
 
 mod callers_coverage;
 mod relation_page_cost;
+mod restart_seat;
 mod typed_evidence_trailers;
 mod typescript_module_resolution;
 mod unsealed_graph;
@@ -46,6 +47,28 @@ async fn production_graph_query_fixture() -> GraphQueryFixture {
         .expect("production graph-query server");
     warm_code_index_search(&server, "helper").await;
     GraphQueryFixture { production }
+}
+
+/// The top name-first search result for `query`: the payload and the display
+/// names it ranked.
+async fn preferred_symbol_search(cg: &GraphQueryFixture, query: &str) -> (Value, Vec<String>) {
+    let search = call_production_tool(
+        cg,
+        "tracedecay_search",
+        json!({"query": query, "prefer_symbol": true, "limit": 1, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
+    let names = search["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("lexical search results: {search}"))
+        .iter()
+        .filter_map(|item| item["display"]["name"].as_str().map(str::to_owned))
+        .collect();
+    (search, names)
 }
 
 async fn production_empty_graph_query_fixture() -> GraphQueryFixture {
@@ -569,6 +592,29 @@ async fn test_ast_grep_search_respects_public_path_glob() {
         .collect();
 
     assert_eq!(files, vec!["tests/inside_scope.rs"], "{payload}");
+}
+
+/// The shared warm-up asserts a fresh search, so it must wait for `fresh`: a
+/// save no hook reported after warming is served before the warm-up returns.
+#[tokio::test]
+async fn code_index_warm_up_serves_an_unreported_save_before_returning() {
+    let cg = production_graph_query_fixture().await;
+    let root = cg.project_root().to_path_buf();
+    fs::write(
+        root.join("src/warm_probe.rs"),
+        "pub fn warm_probe_marker() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    let server = cg
+        .production
+        .harness
+        .server(&root)
+        .expect("production graph-query server");
+
+    warm_code_index_search(&server, "warm_probe_marker").await;
+
+    let (search, names) = preferred_symbol_search(&cg, "warm_probe_marker").await;
+    assert_eq!(names, ["warm_probe_marker"], "{search}");
 }
 
 #[tokio::test]
@@ -1160,22 +1206,7 @@ async fn test_module_api() {
 #[tokio::test]
 async fn name_first_lexical_search_discloses_preferred_symbol_route() {
     let cg = production_graph_query_fixture().await;
-    let search = call_production_tool(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "helper", "prefer_symbol": true, "limit": 1, "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let search: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
-    let search_names = search["results"]
-        .as_array()
-        .unwrap_or_else(|| panic!("lexical search results: {search}"))
-        .iter()
-        .filter_map(|item| item["display"]["name"].as_str())
-        .collect::<Vec<_>>();
+    let (search, search_names) = preferred_symbol_search(&cg, "helper").await;
     assert_eq!(search_names, ["helper"]);
     assert!(
         search["lexical_routes"]

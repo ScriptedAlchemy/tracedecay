@@ -101,16 +101,21 @@ pub struct AdmittedDoctorNetworkProbes {
 pub enum DoctorCompletion {
     Healthy,
     /// The operator owes a step Doctor named: the reset of a store the daemon
-    /// serves in its typed reset-required state, a host's interactive
-    /// activation, or a tracked host's missing CLI.
+    /// serves in its typed reset-required state, or a host's interactive
+    /// activation.
     PendingOperatorAction,
 }
 
 /// Runs a comprehensive health check of the tracedecay installation.
+///
+/// The human report goes to stderr. With `emit_json`, stdout also carries one
+/// JSON document with the same check lines and the daemon's canonical findings
+/// in the `/api/doctor/findings` payload shape.
 #[hotpath::measure(label = "doctor.run", future = true)]
 pub async fn run_doctor(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     network: AdmittedDoctorNetworkProbes,
+    emit_json: bool,
 ) -> tracedecay_domain::errors::Result<DoctorCompletion> {
     let _lifecycle_lease =
         match tracedecay_runtime_core::lifecycle_lease::acquire_shared_or_inherited(
@@ -130,6 +135,7 @@ pub async fn run_doctor(
 
     check_binary(&mut dc, build_version);
     check_daemon_service(&mut dc, profile, build_version);
+    let daemon_listening = tracedecay_daemon_control::daemon_socket_connectable(profile);
     let mut pending_reset = check_reset_required_stores(&mut dc, profile, build_version);
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
@@ -137,95 +143,237 @@ pub async fn run_doctor(
     check_inert_project_config(&mut dc, &project_path);
     check_pr_autotrack_state(&mut dc, profile.data_dir(), &project_path);
     check_automation_effect_resets(&mut dc, profile.data_dir(), &project_path);
-    let daemon_status = daemon_project_status(profile, &project_path).await;
-    let storage_health = match daemon_status.as_ref() {
-        Ok(None) => {
-            // The daemon answered, so the sole owner is reachable; it simply
-            // has not admitted this project far enough to publish storage
-            // telemetry. That is a warming state, not a lost authority.
-            dc.warn(&format!("{RUNTIME_TELEMETRY_PENDING} within {RUNTIME_TELEMETRY_WARMUP:?}; health remains unknown until the project is admitted"));
-            DatabaseHealth::unknown("daemon_storage_telemetry_pending")
-        }
-        Ok(Some(status)) => {
-            render_project_open_status(&mut dc, status)?;
-            render_schema_convergences(&mut dc, status)?;
-            match canonical_daemon_doctor_report(status)? {
-                CanonicalDoctorReport::Observed(report) => {
-                    let storage_health = database_health_from_canonical_report(&report);
-                    render_canonical_doctor_report(&mut dc, &report);
-                    storage_health
-                }
-                CanonicalDoctorReport::Mounting => {
-                    dc.warn(&format!(
-                        "Canonical Doctor report is pending: {PROJECT_RUNTIME_MOUNTING}"
-                    ));
-                    DatabaseHealth::unknown(crate::daemon::DOCTOR_REPORT_OWNER_WARMING_REASON)
-                }
-                CanonicalDoctorReport::Unavailable => {
-                    dc.warn("Canonical Doctor report is unavailable; health remains unknown");
-                    DatabaseHealth::unknown("canonical_doctor_report_unavailable")
-                }
-            }
-        }
-        Err(error) => {
-            if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
-                pending_reset = true;
-                dc.warn(&format!(
-                    "Current project is not served: {authority} requires reset ({reason}). \
-                     Pending operator action: run `{}`",
-                    tracedecay_mcp::reset_required_command(&authority, Some(&project_path))
-                ));
-                DatabaseHealth::unknown("reset_required")
-            } else {
-                classify_daemon_status_error(&mut dc, profile.data_dir(), &project_path, error)
-            }
-        }
+    let daemon_status = if daemon_listening {
+        Some(daemon_project_status(profile, &project_path).await)
+    } else {
+        None
     };
+    let (storage_health, observed_findings) = render_current_project_daemon_status(
+        &mut dc,
+        profile.data_dir(),
+        &project_path,
+        daemon_status.as_ref(),
+        &mut pending_reset,
+    )?;
+    let daemon_status = daemon_status
+        .as_ref()
+        .and_then(|status| status.as_ref().ok())
+        .and_then(Option::as_ref);
     check_watcher(&mut dc, profile);
-    let upload_enabled = configured_upload_enabled(profile, &project_path).await;
+    let upload_enabled = if daemon_listening {
+        configured_upload_enabled(profile, &project_path).await
+    } else {
+        Ok(UploadSetting::DaemonUnavailable)
+    };
     check_user_config(&mut dc, profile.data_dir(), upload_enabled.as_ref());
     check_external_tools(&mut dc);
 
-    if let Some(home) = profile.home() {
-        // Host integration health is read-only: every `healthcheck` only reads
-        // the host's own on-disk registration and reports findings. Doctor
-        // never repairs them, remediation stays with `tracedecay install`.
-        let hctx = HealthcheckContext {
-            home: home.to_path_buf(),
-            profile: profile.clone(),
-            project_path: project_path.clone(),
-        };
-        for agent in agents::all_integrations() {
-            if should_run_host_healthcheck(agent.as_ref(), home, profile) {
-                agent.healthcheck_with_daemon_status(
-                    &mut dc,
-                    &hctx,
-                    daemon_status.as_ref().ok().and_then(Option::as_ref),
-                );
-            } else if let Some(surface) = agent.detected_host_surface(home, profile) {
-                // The host itself is on this machine but carries no tracedecay
-                // integration. Silence here read as "nothing to say", which
-                // hid exactly the hosts an operator most likely wants wired
-                // up, warn uniformly, like the deferred-lifecycle hosts do.
-                eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
-                dc.warn(&format!(
-                    "{} detected ({}) but tracedecay is not integrated, run `tracedecay install --agent {}`",
-                    agent.name(),
-                    surface.display(),
-                    agent.id()
-                ));
-            }
-        }
-    } else {
-        dc.fail("Could not determine home directory");
-    }
-    check_tracked_host_clis(&mut dc, profile.data_dir());
+    check_host_integrations(&mut dc, profile, &project_path, daemon_status);
 
     check_network(&mut dc, upload_enabled.as_ref(), network);
     print_summary(&dc);
 
-    doctor_result(&dc, &storage_health, pending_reset)
+    let result = doctor_result(&dc, &storage_health, pending_reset);
+    if emit_json {
+        print_doctor_json(
+            build_version,
+            &result,
+            &dc,
+            observed_findings,
+            &storage_health,
+        )?;
+    }
+    result
 }
+
+/// The current project's section as the daemon answered it; `None` is the
+/// typed `daemon_unavailable` state.
+fn render_current_project_daemon_status(
+    dc: &mut DoctorCounters,
+    profile_root: &Path,
+    project_path: &Path,
+    daemon_status: Option<&tracedecay_domain::errors::Result<Option<serde_json::Value>>>,
+    pending_reset: &mut bool,
+) -> tracedecay_domain::errors::Result<(
+    DatabaseHealth,
+    Option<tracedecay_dashboard_api::DoctorFindingsReadV1>,
+)> {
+    Ok(match daemon_status {
+        None => {
+            dc.pending(DAEMON_UNAVAILABLE_STATEMENT);
+            (DatabaseHealth::unknown(DAEMON_UNAVAILABLE), None)
+        }
+        Some(Ok(None)) => {
+            // The daemon answered, so the sole owner is reachable; it simply
+            // has not admitted this project far enough to publish storage
+            // telemetry. That is a warming state, not a lost authority.
+            dc.warn(&format!("{RUNTIME_TELEMETRY_PENDING} within {RUNTIME_TELEMETRY_WARMUP:?}; health remains unknown until the project is admitted"));
+            (
+                DatabaseHealth::unknown("daemon_storage_telemetry_pending"),
+                None,
+            )
+        }
+        Some(Ok(Some(status))) => render_daemon_status(dc, status)?,
+        Some(Err(error)) => {
+            if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
+                *pending_reset = true;
+                dc.warn(&format!(
+                    "Current project is not served: {authority} requires reset ({reason}). \
+                     Pending operator action: run `{}`",
+                    tracedecay_mcp::reset_required_command(&authority, Some(project_path))
+                ));
+                (DatabaseHealth::unknown("reset_required"), None)
+            } else {
+                (
+                    classify_daemon_status_error(dc, profile_root, project_path, error),
+                    None,
+                )
+            }
+        }
+    })
+}
+
+/// Renders a daemon runtime answer: project open, schema convergence, and the
+/// canonical findings projected by the same authority `/api/doctor/findings`
+/// uses.
+fn render_daemon_status(
+    dc: &mut DoctorCounters,
+    status: &serde_json::Value,
+) -> tracedecay_domain::errors::Result<(
+    DatabaseHealth,
+    Option<tracedecay_dashboard_api::DoctorFindingsReadV1>,
+)> {
+    render_project_open_status(dc, status)?;
+    let schema_convergences = render_schema_convergences(dc, status)?;
+    Ok(match canonical_daemon_doctor_report(status)? {
+        CanonicalDoctorReport::Observed(report) => {
+            let findings =
+                tracedecay_dashboard_api::doctor_findings(&report, schema_convergences, None);
+            render_doctor_findings(dc, &findings.payload);
+            (
+                database_health_from_canonical_report(&report),
+                Some(findings),
+            )
+        }
+        CanonicalDoctorReport::Mounting => {
+            dc.warn(&format!(
+                "Canonical Doctor report is pending: {PROJECT_RUNTIME_MOUNTING}"
+            ));
+            (
+                DatabaseHealth::unknown(crate::daemon::DOCTOR_REPORT_OWNER_WARMING_REASON),
+                None,
+            )
+        }
+        CanonicalDoctorReport::Unavailable => {
+            dc.warn("Canonical Doctor report is unavailable; health remains unknown");
+            (
+                DatabaseHealth::unknown("canonical_doctor_report_unavailable"),
+                None,
+            )
+        }
+    })
+}
+
+fn print_doctor_json(
+    build_version: &str,
+    result: &tracedecay_domain::errors::Result<DoctorCompletion>,
+    dc: &DoctorCounters,
+    observed_findings: Option<tracedecay_dashboard_api::DoctorFindingsReadV1>,
+    storage_health: &DatabaseHealth,
+) -> tracedecay_domain::errors::Result<()> {
+    let daemon_findings = match (observed_findings, storage_health) {
+        (Some(read), _) => DoctorDaemonFindingsV1::Observed(Box::new(ObservedDoctorFindingsV1 {
+            domain_state: read.presentation.domain_state,
+            coverage: read.presentation.coverage,
+            freshness: read.presentation.freshness,
+            payload: read.payload,
+        })),
+        (None, DatabaseHealth::Unknown { reason }) if reason == DAEMON_UNAVAILABLE => {
+            DoctorDaemonFindingsV1::DaemonUnavailable
+        }
+        (None, DatabaseHealth::Unknown { reason })
+            if reason == crate::daemon::DOCTOR_REPORT_OWNER_WARMING_REASON =>
+        {
+            DoctorDaemonFindingsV1::Mounting
+        }
+        (None, DatabaseHealth::Unknown { reason } | DatabaseHealth::Failed { reason }) => {
+            DoctorDaemonFindingsV1::Unread {
+                reason: reason.clone(),
+            }
+        }
+        (None, DatabaseHealth::Healthy) => DoctorDaemonFindingsV1::Unread {
+            reason: "canonical_doctor_report_unavailable".to_owned(),
+        },
+    };
+    let document = DoctorJsonReportV1 {
+        version: build_version,
+        outcome: match result {
+            Ok(DoctorCompletion::Healthy) => DoctorOutcomeV1::Healthy,
+            Ok(DoctorCompletion::PendingOperatorAction) => DoctorOutcomeV1::PendingOperatorAction,
+            Err(_) => DoctorOutcomeV1::Issue,
+        },
+        issues: dc.issues,
+        warnings: dc.warnings,
+        pending_actions: dc.pending_actions,
+        daemon_findings,
+        checks: &dc.checks,
+    };
+    println!("{}", serde_json::to_string_pretty(&document)?);
+    Ok(())
+}
+
+/// The machine-readable `tracedecay doctor --json` document.
+#[derive(serde::Serialize)]
+struct DoctorJsonReportV1<'a> {
+    version: &'a str,
+    outcome: DoctorOutcomeV1,
+    issues: u32,
+    warnings: u32,
+    pending_actions: u32,
+    daemon_findings: DoctorDaemonFindingsV1,
+    checks: &'a [agents::DoctorCheckV1],
+}
+
+/// The exit-code table: `healthy` exits 0, `issue` 1, and
+/// `pending_operator_action` 75.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorOutcomeV1 {
+    Healthy,
+    Issue,
+    PendingOperatorAction,
+}
+
+/// What Doctor read from the daemon's canonical Doctor authority.
+#[derive(serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum DoctorDaemonFindingsV1 {
+    /// The daemon's canonical report, projected exactly as
+    /// `/api/doctor/findings` projects it.
+    Observed(Box<ObservedDoctorFindingsV1>),
+    /// No daemon listens for this profile; only binary-local checks ran.
+    DaemonUnavailable,
+    /// The project runtime that owns the report is still mounting
+    /// (`application.runtime.mounting`); wait, then re-run.
+    Mounting,
+    /// A daemon answered, but not with an observed report.
+    Unread { reason: String },
+}
+
+#[derive(serde::Serialize)]
+struct ObservedDoctorFindingsV1 {
+    domain_state: tracedecay_api::read_model::DashboardDomainStateV1,
+    coverage: tracedecay_api::read_model::DashboardCoverageV1,
+    freshness: tracedecay_api::read_model::DashboardFreshnessV1,
+    payload: tracedecay_dashboard_api::DoctorFindingsPayloadV1,
+}
+
+/// Typed state for a profile with no listening daemon.
+const DAEMON_UNAVAILABLE: &str = "daemon_unavailable";
+const DAEMON_UNAVAILABLE_STATEMENT: &str = "daemon_unavailable: no TraceDecay daemon is listening \
+     for this profile, so the daemon's canonical Doctor findings were not read and only \
+     binary-local checks ran. Pending operator action: start the daemon (`tracedecay daemon \
+     start` for the managed service, or `tracedecay daemon run`), then re-run `tracedecay doctor`";
 
 /// Lists every registered store the daemon serves in its typed
 /// reset-required state, each with the exact reset command. Returns whether
@@ -290,12 +438,12 @@ fn render_project_open_status(
 fn render_schema_convergences(
     dc: &mut DoctorCounters,
     status: &serde_json::Value,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<Vec<SchemaConvergenceFindingV1>> {
     let Some(value) = status.pointer("/doctor_report/schema_convergences") else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let findings: Vec<SchemaConvergenceFindingV1> = serde_json::from_value(value.clone())?;
-    for finding in findings {
+    for finding in &findings {
         let progress = match finding.progress {
             Some(SchemaConvergenceProgressV1::Rows { done, remaining }) => {
                 format!(", rows {done} done / {remaining} remaining")
@@ -314,7 +462,7 @@ fn render_schema_convergences(
         );
         match finding.state {
             SchemaConvergenceStateV1::Completed => dc.pass(&message),
-            SchemaConvergenceStateV1::Degraded => match finding.degraded_row {
+            SchemaConvergenceStateV1::Degraded => match &finding.degraded_row {
                 Some(row) => dc.fail(&format!("{message}: {row}")),
                 None => dc.fail(&message),
             },
@@ -322,26 +470,19 @@ fn render_schema_convergences(
             | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress => dc.warn(&message),
         }
     }
-    Ok(())
+    Ok(findings)
 }
 
-fn should_run_host_healthcheck(
-    agent: &dyn agents::AgentIntegration,
-    home: &Path,
-    profile: &tracedecay_runtime_core::config::ProfileRoot,
-) -> bool {
-    agent.reports_absence_to_doctor() || agent.has_tracedecay(home, profile)
-}
-
-fn render_canonical_doctor_report(
+/// Renders the same projected findings `/api/doctor/findings` serves.
+fn render_doctor_findings(
     dc: &mut DoctorCounters,
-    report: &tracedecay_contracts::doctor::DoctorReportV1,
+    payload: &tracedecay_dashboard_api::DoctorFindingsPayloadV1,
 ) {
     eprintln!("\n\x1b[1mCanonical Doctor findings\x1b[0m");
-    for finding in report.findings() {
-        render_doctor_finding(dc, finding);
+    for entry in &payload.entries {
+        render_doctor_finding(dc, entry.finding());
     }
-    dc.info(report.coverage().statement().statement());
+    dc.info(&payload.note);
 }
 
 fn render_doctor_finding(
@@ -357,19 +498,19 @@ fn render_doctor_finding(
             evidence.reference().as_str()
         });
     let message = format!(
-        "{:?}: {} ({evidence})",
-        finding.family(),
+        "{}: {} ({evidence})",
+        tracedecay_contracts::doctor::doctor_finding_family_label(finding.family()),
         finding.coverage().statement()
     );
     match finding.state() {
         State::HealthyCompleteCoverage => dc.pass(&message),
         State::Degraded => dc.fail(&message),
-        State::Unsupported
-        | State::Absent
-        | State::Stale
-        | State::Partial
-        | State::Unknown
-        | State::Denied => dc.warn(&message),
+        // Nothing there to grade (an optional capability, host, or analyzer
+        // that is not installed or configured): reported, counted nowhere.
+        State::Absent => dc.info(&message),
+        State::Unsupported | State::Stale | State::Partial | State::Unknown | State::Denied => {
+            dc.warn(&message);
+        }
     }
 }
 
@@ -526,19 +667,31 @@ async fn daemon_project_status(
     )?;
     let warmup_deadline = tokio::time::Instant::now() + RUNTIME_TELEMETRY_WARMUP;
     loop {
+        // Diagnostic probe, not a liveness gate. A multi-gigabyte store
+        // cold-opening while agents saturate the daemon can take well over 10s
+        // for its first integrity read; a warm steady-state read returns in well
+        // under a second. Give it headroom so a contended read reports real
+        // status instead of failing the post-update with a spurious timeout.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
         let result = crate::daemon::call_default_tool_within(
+            profile,
             &handshake,
             "tracedecay_runtime",
             daemon_doctor_runtime_args(),
-            // Diagnostic probe, not a liveness gate. A multi-gigabyte store
-            // cold-opening while agents saturate the daemon can take well over 10s
-            // for its first integrity read; a warm steady-state read returns in well
-            // under a second. Give it headroom so a contended read reports real
-            // status instead of failing the post-update with a spurious timeout.
-            tokio::time::Instant::now() + std::time::Duration::from_secs(90),
+            deadline,
         )
         .await?;
-        match daemon_runtime_status(&result)? {
+        // The runtime reply carrying the full report exceeds one response
+        // frame, so it arrives as a truncation envelope to reassemble.
+        let runtime = crate::daemon::recover_truncated_tool_payload(
+            profile,
+            &handshake,
+            "tracedecay_runtime",
+            result,
+            Some(deadline),
+        )
+        .await?;
+        match daemon_runtime_status(&runtime)? {
             Some(status) => return Ok(Some(status)),
             None if tokio::time::Instant::now() >= warmup_deadline => return Ok(None),
             None => tokio::time::sleep(RUNTIME_TELEMETRY_POLL).await,
@@ -596,9 +749,8 @@ const RUNTIME_TELEMETRY_POLL: std::time::Duration = std::time::Duration::from_mi
 /// `Ok(None)` is the warming state: the daemon answered but has not published
 /// a `database` block for this project yet.
 fn daemon_runtime_status(
-    result: &serde_json::Value,
+    runtime: &serde_json::Value,
 ) -> tracedecay_domain::errors::Result<Option<serde_json::Value>> {
-    let runtime = crate::daemon::tool_json_payload(result, "tracedecay_runtime")?;
     let Some(mut storage) = runtime.get("database").cloned() else {
         return Ok(None);
     };
@@ -779,7 +931,7 @@ fn database_recovery_guidance(db_path: &Path) -> String {
     )
 }
 
-fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
+fn print_database_recovery_guidance(dc: &mut DoctorCounters, db_path: &Path) {
     for line in database_recovery_guidance(db_path).lines() {
         dc.info(line);
     }
@@ -1073,7 +1225,7 @@ async fn configured_upload_enabled(
         false,
         false,
     )?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    let client = crate::daemon::invocation_client_for_current(profile, handshake)?;
     let dispatched = resolve_application_surface_dispatch(
         BindingSurface::Cli,
         operation,
@@ -1141,6 +1293,8 @@ enum UploadSetting {
     Resolved(bool),
     /// The project runtime that serves canonical configuration is mounting.
     Mounting,
+    /// No daemon listens for this profile, so no configuration owner answered.
+    DaemonUnavailable,
 }
 
 /// Check canonical user configuration and pending upload state.
@@ -1158,6 +1312,11 @@ fn check_user_config(
         Ok(UploadSetting::Mounting) => dc.warn(&format!(
             "Worldwide counter upload setting is pending: {PROJECT_RUNTIME_MOUNTING}"
         )),
+        Ok(UploadSetting::DaemonUnavailable) => {
+            dc.info(&format!(
+                "Worldwide counter upload setting unread: {DAEMON_UNAVAILABLE}"
+            ));
+        }
         Err(error) => dc.warn(&format!(
             "Worldwide counter upload setting unavailable from canonical configuration: {error}"
         )),
@@ -1170,37 +1329,94 @@ fn check_user_config(
     }
 }
 
-/// A tracked host whose lifecycle CLI is not installed waits on the operator,
-/// as `update-plugin` reports it: install the CLI or stop tracking the host.
-fn check_tracked_host_clis(dc: &mut DoctorCounters, profile_root: &Path) {
-    eprintln!("\n\x1b[1mTracked host CLIs\x1b[0m");
-    let config = match tracedecay_session_memory::user_config::UserConfig::load_strict(profile_root)
-    {
-        Ok(config) => config,
+/// Reports every host the profile tracks or finds integrated. A host that is
+/// not installed is one skipped line, counted nowhere.
+fn check_host_integrations(
+    dc: &mut DoctorCounters,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    project_path: &Path,
+    daemon_status: Option<&serde_json::Value>,
+) {
+    let Some(home) = profile.home() else {
+        dc.fail("Could not determine home directory");
+        return;
+    };
+    // Host integration health is read-only: every `healthcheck` only reads
+    // the host's own on-disk registration and reports findings. Doctor
+    // never repairs them, remediation stays with `tracedecay install`.
+    let hctx = HealthcheckContext {
+        home: home.to_path_buf(),
+        profile: profile.clone(),
+        project_path: project_path.to_path_buf(),
+    };
+    let tracked = tracked_hosts(dc, profile.data_dir());
+    for agent in agents::all_integrations() {
+        let integrated = agent.has_tracedecay(home, profile);
+        if !integrated && !tracked.iter().any(|id| id == agent.id()) {
+            warn_detected_unintegrated_host(dc, agent.as_ref(), home, profile);
+            continue;
+        }
+        let absence = match agent.require_host(home) {
+            Ok(agents::HostPresence::HostCli) => None,
+            Ok(agents::HostPresence::NoHostCli) if integrated || agent.is_detected(home) => None,
+            Ok(agents::HostPresence::NoHostCli) => Some((
+                tracedecay_domain::errors::HostAbsence::NotInstalled,
+                format!("{} is not detected under {}", agent.name(), home.display()),
+            )),
+            Err(error) => match error.host_absence() {
+                Some(absence) => Some((absence, error.to_string())),
+                None => {
+                    eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+                    dc.fail(&format!("{}: host CLI is unusable: {error}", agent.id()));
+                    continue;
+                }
+            },
+        };
+        match absence {
+            None => agent.healthcheck_with_daemon_status(dc, &hctx, daemon_status),
+            Some((absence, detail)) => {
+                eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+                dc.skipped(&format!(
+                    "{}: skipped, {} ({detail})",
+                    agent.id(),
+                    absence.reason()
+                ));
+            }
+        }
+    }
+}
+
+/// A host that is on this machine but carries no tracedecay integration,
+/// which an operator most likely wants wired up; an absent one says nothing.
+fn warn_detected_unintegrated_host(
+    dc: &mut DoctorCounters,
+    agent: &dyn agents::AgentIntegration,
+    home: &Path,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+) {
+    let surface = agent.detected_host_surface(home, profile);
+    if surface.is_none() && !agent.is_detected(home) {
+        return;
+    }
+    eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+    dc.warn(&format!(
+        "{} detected{} but tracedecay is not integrated, run `tracedecay install --agent {}`",
+        agent.name(),
+        surface
+            .map(|surface| format!(" ({})", surface.display()))
+            .unwrap_or_default(),
+        agent.id()
+    ));
+}
+
+/// The hosts the profile tracks; an unreadable profile config is a warning,
+/// with no host treated as tracked.
+fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
+    match tracedecay_session_memory::user_config::UserConfig::load_strict(profile_root) {
+        Ok(config) => config.installed_agents,
         Err(error) => {
             dc.warn(&format!("Tracked hosts are unknown: {error}"));
-            return;
-        }
-    };
-    for agent_id in &config.installed_agents {
-        let agent = match agents::get_integration(agent_id) {
-            Ok(agent) => agent,
-            Err(error) => {
-                dc.warn(&format!(
-                    "{agent_id}: tracked but not a supported host ({error})"
-                ));
-                continue;
-            }
-        };
-        match agent.require_lifecycle_host_cli() {
-            Ok(()) => {}
-            Err(error @ tracedecay_domain::errors::TraceDecayError::HostCliUnavailable { .. }) => {
-                dc.pending(&format!(
-                    "{agent_id}: pending operator action: {} ({error})",
-                    agents::tracked_host_cli_missing_action(agent_id)
-                ));
-            }
-            Err(error) => dc.fail(&format!("{agent_id}: host CLI is unusable: {error}")),
+            Vec::new()
         }
     }
 }
@@ -1269,6 +1485,9 @@ fn check_network(
         Ok(UploadSetting::Mounting) => dc.warn(&format!(
             "Worldwide counter check is pending: {PROJECT_RUNTIME_MOUNTING}"
         )),
+        Ok(UploadSetting::DaemonUnavailable) => {
+            dc.info(&format!("Worldwide counter check skipped: {DAEMON_UNAVAILABLE}"));
+        }
         Err(error) => dc.warn(&format!(
             "Worldwide counter check skipped because canonical configuration is unavailable: {error}"
         )),

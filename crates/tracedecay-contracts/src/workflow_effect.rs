@@ -9,9 +9,10 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::UseCaseId;
 
 use crate::{
-    AuthorityReceipt, Deadline, EffectId, IdempotencyKey, RequestId, ResolvedScope,
-    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowDefinitionDisposition,
-    WorkflowDefinitionLifecycleCommand,
+    ApplicationProblem, ApplicationProblemKind, AuthorityReceipt, Deadline, EffectId,
+    IdempotencyKey, RequestId, ResolvedScope, TaskHandoffGrant, TaskHandoffRedeemed,
+    TaskHandoffScope, WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,
+    WorkflowDefinitionLifecycleState,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -417,14 +418,57 @@ pub enum WorkflowEffectSuccessV1 {
     HandoffRedeemed(Box<TaskHandoffRedeemed>),
 }
 
+/// A journaled Workflow refusal. Each variant is one typed state the caller
+/// can act on; an unavailable authority is never journaled, because replaying
+/// the same key must be able to succeed once the authority returns.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowEffectProblemV1 {
-    InvalidRequest,
-    InvalidRequestDiagnostic(crate::SafeDiagnostic),
+    /// A refusal the owner decided before the effect ran.
+    Refused(ApplicationProblem),
     NotFoundOrNotAuthorized,
-    Conflict,
+    /// The definition id and version already name different immutable content.
+    DefinitionContentConflict,
+    /// The lifecycle compare-and-swap named a revision the disposition has
+    /// moved past.
+    LifecycleRevisionStale {
+        requested_revision: u64,
+        current_revision: u64,
+    },
+    /// The disposition has no edge for the requested lifecycle operation.
+    IllegalLifecycleTransition {
+        current_state: WorkflowDefinitionLifecycleState,
+        current_revision: u64,
+    },
+    /// A different handoff already holds this secret's token digest.
+    HandoffTokenConflict,
+    /// The handoff grant was already redeemed.
+    HandoffReplayed,
+    /// The handoff grant's lifetime ended before redemption.
+    HandoffExpired,
     TimedOut,
+}
+
+impl WorkflowEffectProblemV1 {
+    /// Journals `problem` as a refusal only when it is a final answer for this
+    /// request; any other problem is returned for the caller to answer
+    /// without a journal entry.
+    pub fn refused(problem: ApplicationProblem) -> Result<Self, ApplicationProblem> {
+        match problem.kind() {
+            ApplicationProblemKind::InvalidRequest
+            | ApplicationProblemKind::NotFoundOrNotAuthorized
+            | ApplicationProblemKind::Conflict
+            | ApplicationProblemKind::Stale => Ok(Self::Refused(problem)),
+            ApplicationProblemKind::PartialEffect
+            | ApplicationProblemKind::Unsupported
+            | ApplicationProblemKind::Unavailable
+            | ApplicationProblemKind::ExecutionFailed
+            | ApplicationProblemKind::ResetRequired
+            | ApplicationProblemKind::Saturated
+            | ApplicationProblemKind::Cancelled
+            | ApplicationProblemKind::TimedOut => Err(problem),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -586,6 +630,8 @@ impl WorkflowEffectJournalRecordV1 {
 pub enum WorkflowEffectAuthorityErrorV1 {
     IdentityConflict,
     InvalidTransition,
+    /// A persisted journal payload is a shape this binary does not open.
+    ResetRequired,
     Unavailable(String),
 }
 
@@ -595,6 +641,9 @@ impl fmt::Display for WorkflowEffectAuthorityErrorV1 {
             Self::IdentityConflict => formatter.write_str("workflow effect identity conflicts"),
             Self::InvalidTransition => {
                 formatter.write_str("workflow effect journal transition is invalid")
+            }
+            Self::ResetRequired => {
+                formatter.write_str("workflow effect journal record requires a reset")
             }
             Self::Unavailable(message) => {
                 write!(formatter, "workflow effect journal unavailable: {message}")
@@ -625,4 +674,28 @@ pub trait WorkflowEffectAuthorityPortV1: Send + Sync {
         prepared: &WorkflowEffectPreparedV1,
         ended_at: UtcMicros,
     ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkflowEffectProblemV1;
+    use crate::{ApplicationProblem, SafeDiagnostic};
+
+    #[test]
+    fn only_final_refusals_are_journaled() {
+        let unavailable = ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "workflow.unavailable".to_owned(),
+            message: "The Workflow application runtime is unavailable".to_owned(),
+        });
+        let conflict = ApplicationProblem::conflict("workflow.lifecycle.illegal_transition", "x");
+
+        assert_eq!(
+            WorkflowEffectProblemV1::refused(unavailable.clone()),
+            Err(unavailable)
+        );
+        assert_eq!(
+            WorkflowEffectProblemV1::refused(conflict.clone()),
+            Ok(WorkflowEffectProblemV1::Refused(conflict))
+        );
+    }
 }

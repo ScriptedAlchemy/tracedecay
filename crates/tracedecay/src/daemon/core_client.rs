@@ -9,11 +9,10 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
-use tracedecay_daemon_control::default_socket_path;
-#[cfg(not(unix))]
-use tracedecay_daemon_identity::current_daemon_connection;
+use tracedecay_daemon_control::{default_socket_path, with_unavailable_daemon_advice};
 use tracedecay_daemon_identity::{
     DAEMON_AUTHORITY_UNAVAILABLE, ResolvedDaemonConnection, client_connection,
+    current_daemon_connection,
 };
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 pub(crate) use tracedecay_daemon_protocol::connection::{
@@ -23,6 +22,7 @@ pub(crate) use tracedecay_daemon_protocol::connection::{
 pub use tracedecay_daemon_protocol::daemon_tool_response_bound;
 use tracedecay_daemon_protocol::tool_request_deadline;
 use tracedecay_mcp::server::attach_stateless_request_context;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::{
     BrokerStream, DaemonClientDeadline, DaemonHandshake, JsonRpcError, JsonRpcRequest,
@@ -128,26 +128,52 @@ pub(crate) async fn write_daemon_preamble(
     .await
 }
 
-/// The socket of the daemon serving the profile `handshake` names.
-pub(crate) fn default_available_socket_path(handshake: &DaemonHandshake) -> Result<PathBuf> {
-    let profile_root = &handshake.client_identity.profile_root;
-    let socket_path = default_socket_path(profile_root)?;
+/// The socket of the daemon serving `profile`. An absent socket's advice reads
+/// the boundary profile's home and config home, so it can name an installed
+/// but held managed service.
+pub(crate) fn default_available_socket_path(profile: &ProfileRoot) -> Result<PathBuf> {
+    let socket_path = default_socket_path(profile.data_dir())?;
     #[cfg(unix)]
     {
         if socket_path.exists() {
             Ok(socket_path)
         } else {
-            Err(unavailable_error(
-                &tracedecay_runtime_core::config::ProfileRoot::new(profile_root),
-                &socket_path,
-            ))
+            Err(unavailable_error(profile, &socket_path))
         }
     }
     #[cfg(not(unix))]
     {
-        current_daemon_connection(profile_root)?;
+        current_profile_daemon_connection(profile)?;
         Ok(socket_path)
     }
+}
+
+/// The daemon authority recorded in `profile`, whichever socket it bound. An
+/// absent record carries the boundary profile's managed-service advice.
+pub(crate) fn current_profile_daemon_connection(
+    profile: &ProfileRoot,
+) -> Result<ResolvedDaemonConnection> {
+    match current_daemon_connection(profile.data_dir()) {
+        Ok(connection) => Ok(connection),
+        Err(error) => Err(with_unavailable_daemon_advice(
+            profile,
+            &default_socket_path(profile.data_dir())?,
+            error,
+        )),
+    }
+}
+
+/// Authenticated invocation client for the daemon whose authority record
+/// `profile` holds, whichever socket it bound, so a daemon's own surfaces reach
+/// it under a custom `--socket`.
+pub fn invocation_client_for_current(
+    profile: &ProfileRoot,
+    handshake: DaemonHandshake,
+) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
+    Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        current_profile_daemon_connection(profile)?.into_protocol(),
+        handshake,
+    ))
 }
 
 /// Authenticated invocation client for the daemon serving this client: the
@@ -155,10 +181,12 @@ pub(crate) fn default_available_socket_path(handshake: &DaemonHandshake) -> Resu
 /// An absent socket is the typed daemon-unreachable refusal, as on the
 /// `tools/call` transport.
 pub fn invocation_client_for_current_client(
+    profile: &ProfileRoot,
     handshake: DaemonHandshake,
 ) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
-    let socket_path = default_available_socket_path(&handshake)?;
-    let connection = client_connection(&handshake.client_identity.profile_root, &socket_path)?;
+    let socket_path = default_available_socket_path(profile)?;
+    let connection = client_connection(&handshake.client_identity.profile_root, &socket_path)
+        .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))?;
     Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
         connection.into_protocol(),
         handshake,
@@ -584,11 +612,12 @@ async fn call_tool_with_project_open_retry(
 /// Callers that need a different budget use [`call_default_tool_within`] or
 /// [`call_default_tool_awaiting_project_open`].
 pub async fn call_default_tool(
+    profile: &ProfileRoot,
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path(handshake)?;
+    let socket_path = default_available_socket_path(profile)?;
     let deadline = Instant::now() + tool_request_deadline()?;
     let result = call_tool_within(
         &socket_path,
@@ -600,7 +629,8 @@ pub async fn call_default_tool(
     .await;
     let retry_deadline = (Instant::now() + PROJECT_OPEN_RETRY_GRACE).min(deadline);
     let Some(wait) = project_open_retry_wait(&result, retry_deadline) else {
-        return result;
+        return result
+            .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error));
     };
     tokio::time::sleep(wait).await;
     call_tool_with_project_open_retry(
@@ -611,19 +641,23 @@ pub async fn call_default_tool(
         retry_deadline,
     )
     .await
+    .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))
 }
 
 pub async fn call_default_tool_within(
+    profile: &ProfileRoot,
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path(handshake)?;
+    let socket_path = default_available_socket_path(profile)?;
     // Deadline-aware application callers need the daemon's typed warming
     // response. Retrying that response until `deadline` turns a useful
     // temporary state into a client-side timeout with no response body.
-    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
+    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline)
+        .await
+        .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))
 }
 
 /// Calls a daemon tool, waiting out a warming project, and the owners that
@@ -635,13 +669,16 @@ pub async fn call_default_tool_within(
 /// A completed mounting refusal is the same kind of progress and is re-sent
 /// until `deadline`. Every other completed result is returned immediately.
 pub async fn call_default_tool_awaiting_project_open(
+    profile: &ProfileRoot,
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path(handshake)?;
-    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline).await
+    let socket_path = default_available_socket_path(profile)?;
+    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline)
+        .await
+        .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))
 }
 
 /// Extracts the single JSON payload from an MCP tool result while ignoring
@@ -673,6 +710,104 @@ pub fn tool_json_payload(
         });
     }
     Ok(payload)
+}
+
+/// The single JSON payload of a daemon tool reply, with a response-budget
+/// truncation envelope reassembled from its stored pages.
+///
+/// A JSON reply larger than one response frame arrives as a preview plus a
+/// retrieval handle; `tracedecay_retrieve` pages the stored body so every page
+/// fits the budget, and the pages are joined through `offset` / `next_offset`
+/// / `has_more` before parsing, exactly as an agent does. `deadline` bounds
+/// every page fetch when the caller owns one.
+pub async fn recover_truncated_tool_payload(
+    profile: &ProfileRoot,
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    result: serde_json::Value,
+    deadline: Option<Instant>,
+) -> Result<serde_json::Value> {
+    let payload = tool_json_payload(&result, tool_name)?;
+    if !is_truncation_envelope(&payload) {
+        return Ok(payload);
+    }
+    let handle = payload
+        .get("handle")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "daemon tool {tool_name} returned truncated JSON without a retrieval handle"
+            ),
+        })?;
+    let mut content = String::new();
+    let mut offset: u64 = 0;
+    loop {
+        let arguments = json!({ "handle": handle, "format": "json", "offset": offset });
+        let retrieved = match deadline {
+            Some(deadline) => {
+                hotpath::future!(
+                    call_default_tool_awaiting_project_open(
+                        profile,
+                        handshake,
+                        "tracedecay_retrieve",
+                        arguments,
+                        deadline,
+                    ),
+                    label = "cli.daemon.recovery_fetch"
+                )
+                .await?
+            }
+            None => {
+                hotpath::future!(
+                    call_default_tool(profile, handshake, "tracedecay_retrieve", arguments),
+                    label = "cli.daemon.recovery_fetch"
+                )
+                .await?
+            }
+        };
+        let page = tool_json_payload(&retrieved, "tracedecay_retrieve")?;
+        let page_content = page
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("daemon retrieval for {tool_name} omitted response content"),
+            })?;
+        content.push_str(page_content);
+        if page.get("has_more").and_then(serde_json::Value::as_bool) != Some(true) {
+            break;
+        }
+        let next_offset = page
+            .get("next_offset")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "daemon retrieval for {tool_name} reported more pages without a next offset"
+                ),
+            })?;
+        if next_offset <= offset {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon retrieval for {tool_name} did not advance past offset {offset}"
+                ),
+            });
+        }
+        offset = next_offset;
+    }
+    serde_json::from_str(&content).map_err(Into::into)
+}
+
+/// Whether a tool payload is the response-budget truncation envelope rather
+/// than the tool's own result.
+pub fn is_truncation_envelope(value: &serde_json::Value) -> bool {
+    value.get("truncated").and_then(serde_json::Value::as_bool) == Some(true)
+        && value
+            .get("original_chars")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+        && value
+            .get("preview")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
 }
 
 #[cfg(test)]

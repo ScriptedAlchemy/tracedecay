@@ -691,20 +691,22 @@ mod tests {
         drop(rows);
         assert!(!tables.is_empty());
         for table in tables {
+            let update = connection
+                .execute(&format!("UPDATE {table} SET rowid = rowid"), ())
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(
-                connection
-                    .execute(&format!("UPDATE {table} SET rowid = rowid"), ())
-                    .await
-                    .is_err(),
-                "{table} accepted an update"
+                update.starts_with("SQLite execute failed: configuration ")
+                    && update.ends_with(" immutable"),
+                "{table} update was not refused by its immutability trigger: {update}"
             );
-            assert!(
-                connection
-                    .execute(&format!("DELETE FROM {table}"), ())
-                    .await
-                    .is_err(),
-                "{table} accepted a delete"
-            );
+            let delete = connection
+                .execute(&format!("DELETE FROM {table}"), ())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert_eq!(delete, update, "{table} delete refusal");
         }
     }
 

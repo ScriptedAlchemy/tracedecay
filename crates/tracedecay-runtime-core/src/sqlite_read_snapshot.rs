@@ -1535,6 +1535,8 @@ mod tests {
             for dir in &dirs {
                 fs::create_dir(dir).unwrap();
             }
+            fs::create_dir(root.join("read-abandoned")).unwrap();
+            fs::create_dir(root.join("foreign")).unwrap();
             let releasing = dirs.clone();
             let owner = std::thread::spawn(move || {
                 for dir in releasing {
@@ -1544,9 +1546,14 @@ mod tests {
             let cleaned = cleanup_stale_directories(&root);
             owner.join().unwrap();
             cleaned.expect("cleanup tolerates directories released under it");
-            assert!(
-                fs::read_dir(&root).unwrap().next().is_none(),
-                "every stale directory is gone afterwards"
+            let remaining: Vec<_> = fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                remaining,
+                ["foreign"],
+                "every stale read directory is gone and unrelated entries survive"
             );
         }
     }
@@ -1852,7 +1859,13 @@ mod tests {
         fs::write(with_suffix(&path, "-wal"), b"").unwrap();
         generation.validate().unwrap();
         fs::write(with_suffix(&path, "-wal"), b"logical frame").unwrap();
-        assert!(generation.validate().is_err());
+        assert_eq!(
+            generation.validate().unwrap_err().to_string(),
+            format!(
+                "SQLite database family '{}' changed after inspection",
+                path.display()
+            )
+        );
     }
 
     #[cfg(unix)]

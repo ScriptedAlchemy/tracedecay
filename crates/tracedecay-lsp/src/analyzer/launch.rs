@@ -486,8 +486,9 @@ fn command_candidates(command: &str) -> Vec<String> {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod fake_rustup {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     /// The version every fake reports unless a test asks for another.
     pub(crate) const CURRENT_VERSION: &str = "1.29.0";
@@ -550,8 +551,7 @@ pub(crate) mod fake_rustup {
             record.display()
         );
         let rustup = dir.path().join("rustup");
-        std::fs::write(&rustup, body).unwrap();
-        std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&rustup, body).unwrap();
         std::os::unix::fs::symlink(&rustup, dir.path().join("rust-analyzer")).unwrap();
         dir
     }
@@ -713,7 +713,7 @@ mod tests {
     mod unix {
         use super::super::fake_rustup::{self, Which, install as fake_rustup_dir, invocations};
         use super::*;
-        use std::os::unix::fs::PermissionsExt;
+        use tracedecay_runtime_core::test_executable::write_executable_script;
 
         #[test]
         fn proxy_without_component_is_typed_and_probed_without_install() {
@@ -889,8 +889,7 @@ mod tests {
         fn real_binary_beside_rustup_is_not_a_proxy() {
             let dir = fake_rustup_dir(None);
             let real = dir.path().join("gopls");
-            std::fs::write(&real, "#!/bin/sh\nexit 0\n").unwrap();
-            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+            write_executable_script(&real, "#!/bin/sh\nexit 0\n").unwrap();
 
             let launch = resolve_analyzer_launch(real.to_str().unwrap(), dir.path())
                 .expect("a non-proxy command launches directly");

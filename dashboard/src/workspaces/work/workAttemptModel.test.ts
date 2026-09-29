@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   WorkAttemptListV1Schema,
   type WorkAttemptListCoverageV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import {
   workAttempt as attempt,
   workAttemptList,
@@ -79,10 +79,7 @@ describe('the states the attempt list can be in', () => {
     const capped = page([attempt({ taskId: 'root', runId: 'run-1', attemptId: 'attempt-1' })], {
       coverage: 'capped',
       remaining: 41,
-      resume: {
-        generation: 'generation-7',
-        start_after: { attempt_id: 'attempt-1', run_id: 'run-1', task_id: 'root' },
-      },
+      resume: 'bc1.resume',
       returned: 1,
     });
 

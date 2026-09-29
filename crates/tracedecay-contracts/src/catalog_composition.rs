@@ -9,11 +9,12 @@
 use std::collections::BTreeSet;
 
 use crate::handlers::BoundApplicationHandler;
+use crate::retrieval::catalog::application_catalog_contributions_with;
+use crate::schema_bodies::SchemaBodyMaterialization;
 use crate::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
     APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID, ApplicationContractError,
-    ApplicationHandlerDescriptors, application_catalog_contributions,
-    application_handler_descriptors,
+    ApplicationHandlerDescriptors, application_handler_descriptors,
 };
 use thiserror::Error;
 use tracedecay_tool_catalog::{
@@ -84,7 +85,8 @@ pub fn compose_application_catalog<Dispatcher>(
 pub fn compose_application_catalog_with<Dispatcher>(
     dispatcher: impl FnOnce(&CatalogSnapshotV1) -> Dispatcher,
 ) -> Result<ApplicationCatalogComposition<Dispatcher>, CatalogCompositionError> {
-    let (snapshot, handlers) = assemble_application_catalog()?;
+    let (snapshot, handlers) =
+        assemble_application_catalog_with(SchemaBodyMaterialization::Materialize)?;
     let dispatcher = dispatcher(&snapshot);
     Ok(ApplicationCatalogComposition {
         snapshot,
@@ -96,16 +98,27 @@ pub fn compose_application_catalog_with<Dispatcher>(
 /// Build the immutable catalog snapshot used by transport binding resolution.
 /// Callers that execute operations must use [`compose_application_catalog`].
 pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
-    assemble_application_catalog().map(|(snapshot, _handlers)| snapshot)
+    assemble_application_catalog_with(SchemaBodyMaterialization::Materialize)
+        .map(|(snapshot, _handlers)| snapshot)
+}
+
+/// Binding snapshot for dispatch. Schema references stay; JSON Schema bodies do not.
+///
+/// A CLI process resolves one operation from this snapshot. Generating every
+/// executable schema body is discovery and SDK work, not a dispatch prerequisite.
+pub fn build_application_binding_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
+    assemble_application_catalog_with(SchemaBodyMaterialization::Omit)
+        .map(|(snapshot, _handlers)| snapshot)
 }
 
 #[hotpath::measure(label = "catalog_composition.assemble")]
-fn assemble_application_catalog()
--> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
+fn assemble_application_catalog_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
     let (mut contributions, handlers) =
         hotpath::measure_block!("catalog_composition.contributions", {
             (
-                application_catalog_contributions()?,
+                application_catalog_contributions_with(materialize)?,
                 application_handler_descriptors()?,
             )
         });
@@ -266,7 +279,10 @@ fn application_profile(
 mod tests {
     use super::*;
     use crate::handlers::CanonicalApplicationDispatcher;
-    use crate::{ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic};
+    use crate::{
+        ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
+        application_catalog_contributions,
+    };
     use tracedecay_tool_catalog::{CapabilityId, SurfaceBindingV1, SurfaceOperationName};
 
     fn current_bindings_on(surface: BindingSurface) -> Vec<SurfaceBindingV1> {
@@ -386,19 +402,23 @@ mod tests {
         let composition =
             compose_application_catalog(ParityDispatcher).expect("application composition");
         let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
-        let operation = SurfaceOperationName::new("git_apply").expect("surface operation");
-
-        assert!(
+        let dashboard_use_case = |operation: &str| {
             composition
                 .snapshot()
                 .resolve_binding(
                     &profile,
                     BindingSurface::Dashboard,
-                    &operation,
+                    &SurfaceOperationName::new(operation).expect("surface operation"),
                     1,
                     &BTreeSet::new(),
                 )
-                .is_none()
+                .map(|capability| capability.use_case_id().to_string())
+        };
+
+        assert_eq!(dashboard_use_case("git_apply"), None);
+        assert_eq!(
+            dashboard_use_case("diagnostics_read").as_deref(),
+            Some("use-case.application.primitive.diagnostics-read")
         );
     }
 }

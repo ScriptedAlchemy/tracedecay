@@ -1494,6 +1494,18 @@ impl PartitionedLexicalFileSourceV1 {
         self.descriptors.len()
     }
 
+    /// Keep file segments whose occurrence is in `keep`, preserving order.
+    ///
+    /// Callers use this to feed a successor text build only the files that
+    /// are not already durable in the parent artifact.
+    pub(super) fn retain_occurrences(
+        &mut self,
+        keep: &std::collections::BTreeSet<tracedecay_domain::FileOccurrenceId>,
+    ) {
+        self.descriptors
+            .retain(|descriptor| keep.contains(&descriptor.file_occurrence_id));
+    }
+
     /// Every input the content of the pages this source emits depends on
     /// apart from the generation's route identity: each file segment in
     /// order (its key, occurrence, content address, and symbol identities).
@@ -3290,6 +3302,18 @@ mod tests {
     fn archival_carrier_revision_is_refused_for_rebuild() {
         let manifest = std::fs::read(historical_fixture_root().join("manifest.json"))
             .expect("historical manifest");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&manifest).expect("historical manifest json");
+        let revision = u32::try_from(
+            envelope["generation"]["format_revision"]
+                .as_u64()
+                .expect("historical format revision"),
+        )
+        .expect("historical format revision fits u32");
+        assert!(
+            revision < SEALED_GENERATION_FORMAT_REVISION_V1,
+            "the archival carrier must stay behind the revision this build serves"
+        );
         let Err(error) = parse_partitioned_manifest(&manifest) else {
             panic!("a retired manifest revision must be refused, never migrated")
         };
@@ -3297,7 +3321,8 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(7)
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(refused)
+                    if refused == revision
             ),
             "unexpected error: {error}"
         );

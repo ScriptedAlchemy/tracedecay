@@ -1256,6 +1256,9 @@ where
         DashboardLcmReadStateV1::Redacted => {
             DashboardEnvelopeV1::redacted(scope, None::<T>, reason)
         }
+        DashboardLcmReadStateV1::CursorRefused => {
+            DashboardEnvelopeV1::error(scope, None::<T>, reason)
+        }
         DashboardLcmReadStateV1::Unavailable
         | DashboardLcmReadStateV1::CursorManifestLimitExceeded
         | DashboardLcmReadStateV1::BudgetExhausted
@@ -1278,6 +1281,7 @@ const fn explorer_lcm_error_code(state: DashboardLcmReadStateV1) -> &'static str
         DashboardLcmReadStateV1::CursorManifestLimitExceeded => {
             "lcm_temporal_cursor_manifest_limit_exceeded"
         }
+        DashboardLcmReadStateV1::CursorRefused => "lcm_temporal_cursor_refused",
         DashboardLcmReadStateV1::BudgetExhausted => "lcm_temporal_budget_exhausted",
         DashboardLcmReadStateV1::TimedOut => "lcm_temporal_read_timed_out",
         DashboardLcmReadStateV1::Cancelled => "lcm_temporal_read_cancelled",

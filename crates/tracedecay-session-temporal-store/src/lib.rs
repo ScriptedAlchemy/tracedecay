@@ -53,7 +53,10 @@ use tracedecay_contracts::retrieval::{
     SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
     SessionRetrievalBudgetStageV1,
 };
-use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
+use tracedecay_domain::{
+    CursorBindingMismatchV1, CursorBindingV1, HydrationStateV1, RetrievalAnchorId, SessionId,
+    SignedCursorKeyRefV1,
+};
 
 use self::execution::{
     AuthorizedTaskSessionExecutionRequestV1, AuthorizedTemporalExecutionRequest,
@@ -836,7 +839,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
     pub async fn encode_lcm_source_cursor(
         &self,
         snapshot: &TemporalExecutionSnapshot,
-        binding: &str,
+        binding: &CursorBindingV1,
         next_source_offset: usize,
     ) -> Result<String, SessionTemporalExecutionError> {
         let read = self.open_read_snapshot().await?;
@@ -851,7 +854,8 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
                 })?;
         encode_cursor(
             snapshot,
-            &lcm_source_cursor_sort_key(binding, next_source_offset),
+            binding,
+            &lcm_source_cursor_sort_key(next_source_offset),
             &authenticator,
         )
         .map_err(map_lcm_cursor_error)
@@ -861,7 +865,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
     pub async fn decode_lcm_source_cursor(
         &self,
         snapshot: &TemporalExecutionSnapshot,
-        binding: &str,
+        binding: &CursorBindingV1,
         encoded: &str,
     ) -> Result<usize, SessionTemporalExecutionError> {
         let read = self.open_read_snapshot().await?;
@@ -874,9 +878,9 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
                         error,
                     )
                 })?;
-        let sort_key =
-            verify_cursor(encoded, snapshot, &authenticator).map_err(map_lcm_cursor_error)?;
-        parse_lcm_source_cursor_offset(binding, &sort_key)
+        let sort_key = verify_cursor(encoded, snapshot, binding, &authenticator)
+            .map_err(map_lcm_cursor_error)?;
+        parse_lcm_source_cursor_offset(&sort_key)
     }
 
     /// Opens the store's read snapshot, reporting a failure as the typed storage
@@ -1365,25 +1369,23 @@ fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
     }
 }
 
-fn lcm_source_cursor_sort_key(binding: &str, next_source_offset: usize) -> StableSortKey {
+fn lcm_source_cursor_sort_key(next_source_offset: usize) -> StableSortKey {
     StableSortKey {
         normalized_score_micros: 0,
         knowledge_at_micros: 0,
-        stable_id: format!("lcm-source:{binding}:{next_source_offset}"),
+        stable_id: format!("lcm-source:{next_source_offset}"),
     }
 }
 
 fn parse_lcm_source_cursor_offset(
-    binding: &str,
     sort_key: &StableSortKey,
 ) -> Result<usize, SessionTemporalExecutionError> {
     if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
         return Err(SessionTemporalExecutionError::Denied);
     }
-    let prefix = format!("lcm-source:{binding}:");
     let offset = sort_key
         .stable_id
-        .strip_prefix(&prefix)
+        .strip_prefix("lcm-source:")
         .ok_or(SessionTemporalExecutionError::Denied)?;
     offset
         .parse()
@@ -1392,16 +1394,26 @@ fn parse_lcm_source_cursor_offset(
 
 fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
     match error {
+        CursorError::Binding(_) => SessionTemporalExecutionError::Kernel(
+            tracedecay_temporal_query::TemporalKernelError::Cursor(error),
+        ),
+        // Unverifiable, or authentic but minted for another request: either
+        // way this operation did not issue it for this request.
+        CursorError::Malformed | CursorError::Tampered | CursorError::WrongRequest => {
+            SessionTemporalExecutionError::Kernel(
+                tracedecay_temporal_query::TemporalKernelError::Cursor(CursorError::Binding(
+                    CursorBindingMismatchV1::Foreign,
+                )),
+            )
+        }
         CursorError::RootMismatch
         | CursorError::SessionMismatch
         | CursorError::WrongAccess
         | CursorError::TemporalModeMismatch
         | CursorError::GrainMismatch => SessionTemporalExecutionError::WrongScope,
-        CursorError::Malformed
-        | CursorError::Tampered
-        | CursorError::WrongRequest
-        | CursorError::FilterMismatch
-        | CursorError::SortKeyMismatch => SessionTemporalExecutionError::Denied,
+        CursorError::FilterMismatch | CursorError::SortKeyMismatch => {
+            SessionTemporalExecutionError::Denied
+        }
         CursorError::Expired
         | CursorError::UnknownOrExpiredKey
         | CursorError::SchemaMismatch
@@ -1427,10 +1439,14 @@ mod cursor_access_tests {
     use super::*;
 
     #[test]
-    fn request_rebinding_is_denied_while_missing_key_authority_is_unavailable() {
+    fn request_rebinding_is_refused_while_missing_key_authority_is_unavailable() {
         assert!(matches!(
             map_lcm_cursor_error(CursorError::WrongRequest),
-            SessionTemporalExecutionError::Denied
+            SessionTemporalExecutionError::Kernel(
+                tracedecay_temporal_query::TemporalKernelError::Cursor(CursorError::Binding(
+                    CursorBindingMismatchV1::Foreign
+                ))
+            )
         ));
         assert!(matches!(
             map_lcm_cursor_error(CursorError::KeyUnavailable),

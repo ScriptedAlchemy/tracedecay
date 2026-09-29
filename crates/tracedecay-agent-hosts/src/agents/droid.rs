@@ -143,8 +143,8 @@ fn install_droid_hooks(hooks_path: &Path, tracedecay_bin: &str) -> Result<bool> 
     })
 }
 
-/// Remove every TraceDecay hook group from the host-owned hooks document and
-/// drop event keys that become empty, removing the file once nothing remains.
+/// Remove every TraceDecay hook group from the host-owned hooks document;
+/// the event keys and the file go too exactly when install created them.
 /// Returns true when the document changed.
 fn remove_droid_hooks(hooks_path: &Path) -> Result<bool> {
     update_json_config_transactionally(hooks_path, JsonConfigDialect::Json, |mut config| {
@@ -159,13 +159,8 @@ fn remove_droid_hooks(hooks_path: &Path) -> Result<bool> {
             let before = groups.len();
             groups.retain(|group| !hook_group_is_tracedecay(group));
             changed |= groups.len() != before;
-            if groups.is_empty() {
-                object.remove(event);
-            }
         }
-        if changed && object.is_empty() {
-            Ok((true, JsonConfigMutation::Remove))
-        } else if changed {
+        if changed {
             Ok((true, JsonConfigMutation::Write(config)))
         } else {
             Ok((false, JsonConfigMutation::Unchanged))
@@ -250,8 +245,8 @@ impl AgentIntegration for DroidIntegration {
         false
     }
 
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
-        require_droid_cli().map(drop)
+    fn require_host(&self, _home: &Path) -> Result<super::HostPresence> {
+        require_droid_cli().map(|_| super::HostPresence::HostCli)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -510,6 +505,8 @@ fn server_args_are_current(server: &serde_json::Map<String, Value>) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     fn write_config(home: &Path, config: Value) {
         std::fs::create_dir_all(droid_config_dir(home)).unwrap();
@@ -598,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_removal_leaves_operator_entries_and_drops_empty_events() {
+    fn hook_removal_leaves_operator_entries_and_event_keys() {
         let home = tempfile::tempdir().unwrap();
         write_hooks(
             home.path(),
@@ -637,9 +634,10 @@ mod tests {
             remaining["SessionStart"][0]["hooks"][0]["command"],
             "/usr/local/bin/operator-hook.sh"
         );
-        assert!(
-            remaining.get("Stop").is_none(),
-            "emptied events are dropped"
+        assert_eq!(
+            remaining["Stop"],
+            serde_json::json!([]),
+            "an event key no recorded install created stays"
         );
         assert_eq!(
             droid_hooks_registration_state(home.path()),
@@ -767,7 +765,13 @@ mod tests {
         std::fs::create_dir_all(droid_config_dir(home.path())).unwrap();
         std::fs::write(&hooks_path, OPERATOR_HOOKS).unwrap();
 
-        assert!(install_droid_hooks(&hooks_path, "/usr/local/bin/tracedecay").unwrap());
+        let mut facts = Vec::new();
+        assert!(
+            crate::agents::recorded_lifecycle(home.path(), &mut facts, false, || {
+                install_droid_hooks(&hooks_path, "/usr/local/bin/tracedecay")
+            })
+            .unwrap()
+        );
         let installed = std::fs::read_to_string(&hooks_path).unwrap();
         assert_eq!(
             installed,
@@ -806,7 +810,12 @@ mod tests {
 "#
         );
 
-        assert!(remove_droid_hooks(&hooks_path).unwrap());
+        assert!(
+            crate::agents::recorded_lifecycle(home.path(), &mut facts, true, || {
+                remove_droid_hooks(&hooks_path)
+            })
+            .unwrap()
+        );
         assert_eq!(
             std::fs::read_to_string(&hooks_path).unwrap(),
             OPERATOR_HOOKS
@@ -818,15 +827,11 @@ mod tests {
     /// absolute tool paths.
     #[cfg(unix)]
     fn fake_droid_cli(bin: &Path, log: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n{body}\n",
             log = log.display(),
         );
-        std::fs::write(bin, script).unwrap();
-        let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(bin, permissions).unwrap();
+        write_executable_script(bin, script).unwrap();
     }
 
     #[cfg(unix)]

@@ -23,6 +23,7 @@ use crate::result::ResultContractRef;
 use crate::retrieval::catalog::{
     APPLICATION_COMPACT_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 use crate::{current_application_bindings, current_bindings};
 
 use super::read::{
@@ -226,11 +227,12 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
 
 pub fn feedback_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
-    feedback_surface_catalog_contribution_from_specs()
+    feedback_surface_catalog_contribution_with(SchemaBodyMaterialization::Materialize)
 }
 
-fn feedback_surface_catalog_contribution_from_specs()
--> Result<CatalogContributionV1, ApplicationContractError> {
+pub(crate) fn feedback_surface_catalog_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(FEEDBACK_SPECS.len());
     let mut bindings =
         Vec::with_capacity(FEEDBACK_SPECS.iter().map(|spec| spec.surfaces.len()).sum());
@@ -260,8 +262,7 @@ fn feedback_surface_catalog_contribution_from_specs()
         capabilities,
         bindings,
     ))?;
-    let schemas = feedback_executable_schemas(&contribution)?;
-    Ok(contribution.with_executable_schemas(schemas)?)
+    attach_schema_bodies(contribution, materialize, feedback_executable_schemas)
 }
 
 /// Rust-owned request/result schema bodies for the eight mounted feedback
@@ -513,12 +514,18 @@ mod tests {
                     "available_results",
                     "code_generation_id",
                     "completed",
-                    "generation",
+                    "exit_code",
+                    "failed",
+                    "finished_at",
                     "head_commit_id",
+                    "ignored",
                     "operation_id",
+                    "passed",
                     "receipt",
                     "result_offset",
                     "results",
+                    "session_id",
+                    "started_at",
                     "termination",
                     "total",
                 ],

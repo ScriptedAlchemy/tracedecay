@@ -5,6 +5,8 @@ use super::*;
 use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
 };
+#[cfg(unix)]
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(unix)]
 mod paused_tick;
@@ -192,6 +194,7 @@ async fn daemon_scheduler_discovery_without_work_does_not_wait_for_writer_gate()
             &project,
             &handshake,
             &engine.store_administration,
+            &CancellationToken::new(),
         )
         .await
         .expect("open scheduler discovery fixture through daemon authority"),

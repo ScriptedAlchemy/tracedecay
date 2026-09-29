@@ -416,7 +416,7 @@ fn definition_effects_retain_sources_without_sql_topology_authority() {
         .unwrap()
         .outcome(),
         &WorkflowEffectOutcomeV1::Problem(
-            tracedecay_contracts::WorkflowEffectProblemV1::InvalidRequest
+            tracedecay_contracts::WorkflowEffectProblemV1::DefinitionContentConflict
         )
     );
 
@@ -795,11 +795,66 @@ fn a_new_redeem_request_cannot_alias_the_first_requests_success() {
     ));
     assert_eq!(
         second.terminal().unwrap().outcome(),
-        &WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::InvalidRequest)
+        &WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::HandoffReplayed)
     );
     assert_ne!(
         first_identity.idempotency_key(),
         second_identity.idempotency_key()
+    );
+}
+
+#[test]
+fn an_unredeemed_grant_past_its_lifetime_is_expired_not_replayed() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-redeem-expired");
+    let authority = authority(&store);
+    let scope = handoff_scope();
+    let secret = "x".repeat(48);
+    let grant = TaskHandoffGrant::new(
+        scope.clone(),
+        token_digest(&secret),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+        runtime_frontier(),
+    )
+    .unwrap();
+    TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
+    let identity = effect_identity_for_request(
+        WorkflowEffectOperationV1::HandoffRedeem,
+        "actor.workflow.target",
+        'e',
+        EffectAuthorityBinding::BASE,
+        UtcMicros(20),
+        "request.workflow.redeem.expired",
+    );
+    let prepared = WorkflowEffectPreparedV1::handoff_redeem(
+        identity.input_digest().clone(),
+        token_digest(&secret),
+        scope,
+        UtcMicros(60_000_010),
+    );
+
+    let record = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(21),
+    )
+    .unwrap();
+
+    assert_eq!(
+        record.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::HandoffExpired)
+    );
+    assert_eq!(
+        store.inspect(|connection| {
+            connection
+                .query_row("SELECT consumed FROM workflow_handoffs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        }),
+        0,
+        "an expired grant is refused without being consumed"
     );
 }
 
@@ -843,10 +898,65 @@ fn rejected_effect_replays_the_exact_problem_without_reapplying() {
     assert_eq!(
         retry.terminal().unwrap().outcome(),
         &WorkflowEffectOutcomeV1::Problem(
-            tracedecay_contracts::WorkflowEffectProblemV1::InvalidRequest
+            tracedecay_contracts::WorkflowEffectProblemV1::HandoffTokenConflict
         )
     );
     assert_eq!(store.count("workflow_handoffs"), 1);
+}
+
+/// A terminal persisted by an earlier binary's problem shape is not
+/// reinterpreted: replaying its key is a typed reset refusal.
+#[test]
+fn a_terminal_in_an_earlier_problem_shape_is_a_reset_refusal() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-earlier-shape");
+    let authority = authority(&store);
+    let grant = TaskHandoffGrant::new(
+        handoff_scope(),
+        token_digest(&"q".repeat(48)),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+        runtime_frontier(),
+    )
+    .unwrap();
+    TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::HandoffIssue,
+        "actor.workflow.source",
+        '6',
+    );
+    let prepared = WorkflowEffectPreparedV1::handoff_issue(identity.input_digest().clone(), grant);
+    let refused = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
+    assert_eq!(
+        refused.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::HandoffTokenConflict)
+    );
+
+    store.inspect(|connection| {
+        connection
+            .execute(
+                r#"UPDATE workflow_effect_journal
+                 SET terminal_payload = replace(
+                     terminal_payload, '"handoff_token_conflict"', '"invalid_request"'
+                 )"#,
+                [],
+            )
+            .unwrap()
+    });
+    assert_eq!(
+        WorkflowEffectAuthorityPortV1::execute_effect(
+            &authority,
+            &identity,
+            &prepared,
+            UtcMicros(40),
+        ),
+        Err(tracedecay_contracts::WorkflowEffectAuthorityErrorV1::ResetRequired)
+    );
 }
 
 #[test]
@@ -1278,7 +1388,10 @@ fn rejection_is_terminal_and_illegal_transitions_are_conflicts() {
             'u',
             lifecycle_command(&definition, WorkflowLifecycleOperation::Activate, 2, 71),
         ),
-        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::Conflict),
+        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::IllegalLifecycleTransition {
+            current_state: WorkflowDefinitionLifecycleState::Rejected,
+            current_revision: 2,
+        }),
         "a rejected disposition is terminal"
     );
     assert_eq!(
@@ -1288,7 +1401,10 @@ fn rejection_is_terminal_and_illegal_transitions_are_conflicts() {
             'v',
             lifecycle_command(&definition, WorkflowLifecycleOperation::Retire, 2, 72),
         ),
-        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::Conflict),
+        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::IllegalLifecycleTransition {
+            current_state: WorkflowDefinitionLifecycleState::Rejected,
+            current_revision: 2,
+        }),
         "retirement has no edge out of a rejected disposition"
     );
 
@@ -1383,7 +1499,10 @@ fn a_stale_expected_revision_is_a_compare_and_swap_conflict() {
             'm',
             lifecycle_command(&definition, WorkflowLifecycleOperation::Retire, 1, 91),
         ),
-        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::Conflict),
+        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::LifecycleRevisionStale {
+            requested_revision: 1,
+            current_revision: 3,
+        }),
         "retiring against a superseded revision must not silently overwrite"
     );
     assert_eq!(

@@ -3,7 +3,7 @@ import type {
   FeedbackProximityReadPageV1,
   FeedbackProximityReadResultV1,
   FeedbackProximityRelationV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 
 export type ProximityTone = 'candidate' | 'overlap' | 'conflict';
 

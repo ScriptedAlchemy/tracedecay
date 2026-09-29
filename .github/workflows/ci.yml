@@ -1,4 +1,6 @@
 name: CI
+run-name: >-
+  ${{ github.event_name == 'pull_request' && format('CI for PR #{0}', github.event.pull_request.number) || format('CI for {0}', github.ref_name) }}
 
 on:
   pull_request:
@@ -41,10 +43,15 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Draft PRs run cheap gates. Ready PRs and pushes run the ordinary Linux
-  # lane; dispatch can additionally request OS, host and profiling work.
+  # Drafts run cheap gates. Enabled, trusted PRs use the Hauler pool; other
+  # PRs and pushes retain native jobs. Dispatch can request additional lanes.
   scope-gate:
     name: Scope gate
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -56,6 +63,24 @@ jobs:
       windows-partitions: ${{ steps.windows-partitions.outputs.matrix }}
       macos-groups: ${{ steps.macos-groups.outputs.matrix }}
     steps:
+      - name: Route eligible PR checks through Hauler
+        id: route
+        if: >-
+          github.event_name == 'pull_request' &&
+          !github.event.pull_request.draft &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          vars.HAULER_CI_ENABLED == 'true'
+        continue-on-error: true
+        uses: ScriptedAlchemy/cargo-hauler@64956063446174b9f0989eecfb46ef0dcc9d5277
+        with:
+          mode: route
+          token: ${{ github.token }}
+          recipe: .github/hauler-ci.json
+          admission-workflow: ci.yml
+
+      - name: Hauler route / ${{ steps.route.outputs.decision || 'native' }} / ${{ steps.route.outputs.policy || 'unavailable' }}
+        run: ':'
+
       - name: Decide what this run may spend
         id: decide
         env:
@@ -64,9 +89,16 @@ jobs:
           RUN_OS: ${{ inputs.run_os || false }}
           RUN_HOSTS: ${{ inputs.run_hosts || false }}
           RUN_PERF: ${{ inputs.run_perf || false }}
+          HAULER_DECISION: ${{ steps.route.outputs.decision }}
+          HAULER_ROUTE_OUTCOME: ${{ steps.route.outcome }}
         run: |
           heavy=true
           if [[ $EVENT == pull_request && $DRAFT == true ]]; then
+            heavy=false
+          fi
+          # Only the validated Action receipt transfers ownership. Missing or
+          # failed routing keeps the native jobs, even if enqueue arrives later.
+          if [[ $EVENT == pull_request && $HAULER_ROUTE_OUTCOME == success && $HAULER_DECISION == delegated ]]; then
             heavy=false
           fi
           os=false
@@ -94,6 +126,7 @@ jobs:
             .github/linux-test-partitions.json
             scripts
           sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - name: Derive the Linux test matrix
         id: linux-groups
@@ -467,12 +500,11 @@ jobs:
       # response is the only authority for those. Without the component the
       # runner still has rustup's `rust-analyzer` proxy on PATH, so the daemon
       # routes the language and only the spawn fails. The test would then
-      # measure a missing component instead of the negotiation contract. This
-      # action exports `RUSTUP_TOOLCHAIN`, so the component has to be installed
-      # here rather than through `rust-toolchain.toml`, which it overrides.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rust-analyzer
+      # measure a missing component instead of the negotiation contract.
+      - name: Select the repository toolchain
+        run: |
+          rustup show active-toolchain
+          rustup which rust-analyzer
 
       - uses: ./.github/actions/setup-linux-mold
 
@@ -953,12 +985,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Install Windows target for the pinned toolchain
-        run: rustup target add x86_64-pc-windows-gnu
+      - name: Install pinned toolchain and Windows check target
+        run: |
+          rustup toolchain install
+          rustup target add x86_64-pc-windows-gnu
 
       - uses: ./.github/actions/setup-linux-mold
 

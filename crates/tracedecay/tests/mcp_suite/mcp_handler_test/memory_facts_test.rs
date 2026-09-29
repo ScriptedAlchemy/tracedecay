@@ -1036,12 +1036,9 @@ async fn memory_recall_updates_retrieval_count() {
         .map(available_fact)
         .find(|fact| fact["fact_id"].as_str() == Some(fact_id.as_str()))
         .unwrap();
-    assert!(
-        fact["telemetry"]["retrieval_count"]
-            .as_u64()
-            .unwrap_or_default()
-            > 0,
-        "writable-graph search must increment retrieval_count: {status}"
+    assert_eq!(
+        fact["telemetry"]["retrieval_count"], 1,
+        "writable-graph search must increment retrieval_count once: {status}"
     );
     assert!(
         fact["telemetry"]["last_retrieved_at"].as_i64().is_some(),
@@ -1215,9 +1212,13 @@ async fn fact_store_add_rejects_out_of_range_trust() {
         }),
     )
     .await;
+    let error =
+        result.expect_err("the exact add route must reject a trust value outside its schema range");
+    let message = error.to_string();
     assert!(
-        result.is_err(),
-        "the exact add route must reject a trust value outside its schema range"
+        message.contains(r#""code":"application.retained.invalid-request""#)
+            && message.contains(r#""kind":"invalid_request""#),
+        "refused with: {error}"
     );
     close_test_graph(cg).await;
 }

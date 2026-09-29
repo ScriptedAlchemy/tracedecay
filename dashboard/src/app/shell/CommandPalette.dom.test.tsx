@@ -185,14 +185,16 @@ describe('CommandPalette keyboard operation', () => {
     const user = userEvent.setup();
     stubListing(listing([]));
     const { findByRole } = renderPalette();
-    await findByRole('listbox');
+    const listbox = await findByRole('listbox');
+    const labels = [...listbox.querySelectorAll('[role="option"]')].map(
+      (option) => option.querySelector('span')?.textContent,
+    );
 
     await user.keyboard('{ArrowUp}{ArrowUp}');
-    const top = activeOptionLabel();
-    expect(top).not.toContain('nothing is announced');
+    expect(activeOptionLabel()).toBe(labels[0]);
 
-    await user.keyboard('{ArrowDown}'.repeat(40));
-    expect(activeOptionLabel()).not.toContain('nothing is announced');
+    await user.keyboard('{ArrowDown}'.repeat(labels.length + 5));
+    expect(activeOptionLabel()).toBe(labels.at(-1));
   });
 
   it('selects a project by keyboard and starts it from the measured activation', async () => {
@@ -369,7 +371,7 @@ describe('CommandPalette long and shrinking lists', () => {
   it('clamps when a failed registry read removes every project row', async () => {
     const user = userEvent.setup();
     stubListing(listing(MANY));
-    const { findByText, client } = renderPalette();
+    const { findByText, queryByText, getByRole, client } = renderPalette();
     await findByText('Project 23');
 
     await user.keyboard('{ArrowDown}'.repeat(26));
@@ -380,8 +382,8 @@ describe('CommandPalette long and shrinking lists', () => {
       });
     });
 
-    await waitFor(() => expect(activeOptionLabel()).not.toContain('names no row'));
-    const id = combobox().getAttribute('aria-activedescendant') ?? '';
-    expect(document.getElementById(id)).not.toBeNull();
+    await waitFor(() => expect(queryByText('Project 23')).toBeNull());
+    const remaining = [...getByRole('listbox').querySelectorAll('[role="option"]')];
+    expect(activeOptionLabel()).toBe(remaining.at(-1)?.querySelector('span')?.textContent);
   });
 });

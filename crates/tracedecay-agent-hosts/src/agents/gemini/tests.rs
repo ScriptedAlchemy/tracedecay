@@ -12,6 +12,8 @@ use super::extension::{
 use super::*;
 
 use tracedecay_domain::errors::TraceDecayError;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -31,15 +33,11 @@ fn stage_rendered_extension(home: &Path, tracedecay_bin: &str) -> PathBuf {
 /// then performs `body`.
 #[cfg(unix)]
 fn fake_gemini_cli(bin: &Path, log: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
         log = shell_single_quote(&log.to_string_lossy()),
     );
-    std::fs::write(bin, script).unwrap();
-    let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(bin, permissions).unwrap();
+    write_executable_script(bin, script).unwrap();
 }
 
 /// A fake body that behaves like the real CLI far enough to be observable:
@@ -414,27 +412,6 @@ fn doctor_warns_when_nothing_is_staged_or_installed() {
 
     assert_eq!(dc.issues, 0);
     assert_eq!(dc.warnings, 2);
-}
-
-#[cfg(unix)]
-#[test]
-fn doctor_only_treats_an_absent_gemini_cli_as_unobserved_state() {
-    let home = tempfile::tempdir().unwrap();
-    let empty_path_dir = tempfile::tempdir().unwrap();
-    let _path =
-        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path_dir.path());
-
-    assert!(
-        host_reported_extensions(home.path())
-            .expect("an absent Gemini binary is the one optional host-report state")
-            .is_none()
-    );
-
-    let mut dc = DoctorCounters::new();
-    doctor_check_host_reported_extensions(&mut dc, home.path());
-
-    assert_eq!(dc.issues, 0);
-    assert_eq!(dc.warnings, 0);
 }
 
 #[cfg(unix)]

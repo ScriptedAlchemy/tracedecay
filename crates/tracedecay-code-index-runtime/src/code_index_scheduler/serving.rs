@@ -273,6 +273,10 @@ impl CodeIndexBuildProgressSlotStateV1 {
                 CodeIndexBuildPhaseV1::Verification => {
                     hotpath::gauge!("query.artifact.progress.phase.verification_total").inc(1u64);
                 }
+                CodeIndexBuildPhaseV1::GraphPublication => {
+                    hotpath::gauge!("query.artifact.progress.phase.graph_publication_total")
+                        .inc(1u64);
+                }
                 CodeIndexBuildPhaseV1::Ready => {
                     hotpath::gauge!("query.artifact.progress.phase.ready_total").inc(1u64);
                 }
@@ -295,6 +299,19 @@ impl CodeIndexBuildProgressSlotStateV1 {
     pub fn snapshot(&self) -> Option<Arc<CodeIndexBuildProgressV1>> {
         self.snapshot.as_ref().map(Arc::clone)
     }
+}
+
+/// Whether the committed-file rate can estimate what `phase` has left. Index
+/// build, verification, and graph publication run after the last file
+/// committed, so the file rate would claim zero seconds of work they have not
+/// done (#2470).
+const fn phase_has_file_rate_estimate(phase: CodeIndexBuildPhaseV1) -> bool {
+    matches!(
+        phase,
+        CodeIndexBuildPhaseV1::SourceScan
+            | CodeIndexBuildPhaseV1::RelationalPreparation
+            | CodeIndexBuildPhaseV1::BulkCommit
+    )
 }
 
 /// Publishes an observational scan sample without delaying sealed-byte authentication.
@@ -1799,9 +1816,10 @@ impl LatestCodeTextGenerationV1 {
                     control,
                 )
                 .map(|(reader, witness)| {
-                    if let Err(error) = self
-                        .text_artifact_store
-                        .publish_restore_witness(descriptor, &witness)
+                    if let Some(witness) = witness
+                        && let Err(error) = self
+                            .text_artifact_store
+                            .publish_restore_witness(descriptor, &witness)
                     {
                         tracing::warn!(
                             event = "code_text_artifact_restore_witness_publish_failed",
@@ -2179,6 +2197,10 @@ impl LatestCompleteCodeIndexV1 {
     pub(super) fn mark_graph_activation_unavailable(&self, reason: String) {
         self.text.mark_graph_activation_unavailable(reason);
     }
+
+    pub(super) fn graph_publication_budget_spent(&self) -> bool {
+        self.text.graph_publication_budget_spent()
+    }
 }
 
 impl LatestCodeTextGenerationV1 {
@@ -2254,7 +2276,20 @@ impl LatestCodeTextGenerationV1 {
         refused_for_memory
     }
 
-    fn refuse_graph_activation(&self, reason: &'static str) {
+    /// This generation's native graph publication already ran out its
+    /// background budget; building it again replays the identical work.
+    pub(super) fn graph_publication_budget_spent(&self) -> bool {
+        matches!(
+            *self
+                .graph_activation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            CodeGraphActivationStateV1::Refused(reason)
+                if reason == super::graph_activation::GRAPH_PUBLICATION_DEADLINE_REASON
+        )
+    }
+
+    pub(super) fn refuse_graph_activation(&self, reason: &'static str) {
         let mut state = self
             .graph_activation
             .write()
@@ -2320,6 +2355,27 @@ impl LatestCodeTextGenerationV1 {
                 snapshot_digest: self.metadata.manifest().snapshot_digest.clone(),
             }),
         })
+    }
+
+    /// The published text artifact of this generation's parent, when one is
+    /// still on disk. A missing parent is a full build, not a failure.
+    fn published_parent_text_artifact(&self) -> Result<Option<PathBuf>, RetrievalPortError> {
+        let Some(parent_id) = self.metadata.manifest().parent_generation.clone() else {
+            return Ok(None);
+        };
+        let Some(descriptor) = self.text_artifact_store.published_descriptor(&parent_id)? else {
+            return Ok(None);
+        };
+        let path = code_text_artifact_path(self.text_artifact_store.store_root(), &descriptor)
+            .map_err(text_artifact_unavailable)?;
+        match path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(Some(path)),
+            Ok(_) => Err(RetrievalPortError::Contract(
+                "parent code text artifact is not a regular file".to_owned(),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(text_artifact_unavailable(error)),
+        }
     }
 
     fn publish_text_progress_boundary(
@@ -2408,6 +2464,8 @@ impl LatestCodeTextGenerationV1 {
         }
         let (files_per_second, lexical_units_per_second, estimated_remaining_seconds) =
             state.rates_and_eta(total_lexical_units);
+        let estimated_remaining_seconds =
+            estimated_remaining_seconds.filter(|_| phase_has_file_rate_estimate(phase));
         let snapshot = CodeIndexBuildProgressV1 {
             generation_id: self.metadata.manifest().generation_id.as_str().to_owned(),
             daemon_incarnation: self.text_progress_daemon_incarnation,
@@ -2516,6 +2574,9 @@ impl LatestCodeTextGenerationV1 {
             };
             let mut snapshot = current.as_ref().clone();
             snapshot.phase = phase;
+            if !phase_has_file_rate_estimate(phase) {
+                snapshot.estimated_remaining_seconds = None;
+            }
             snapshot.current_batch_pages = current_batch_pages;
             snapshot.current_batch_payload_bytes = current_batch_payload_bytes;
             snapshot.elapsed_micros = elapsed_micros;
@@ -2890,24 +2951,35 @@ impl LatestCodeTextGenerationV1 {
         let builder_budget =
             text_artifact_builder_budget(build_memory_budget, source.staging_window_bytes())?;
         let metadata = self.text_projection_metadata()?;
-        let content_key = text_artifact_content_key(&source, &metadata)?;
         let mut builder = if staging_path.exists() {
-            match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+            open_or_replace_incompatible_text_staging(
+                store,
                 &staging_path,
-                metadata.clone(),
+                &metadata,
                 builder_budget,
                 control,
+            )
+        } else if let Some(parent_artifact) = self.published_parent_text_artifact()? {
+            match CodeLexicalArtifactBuilderV1::stage_carried_parent(
+                &parent_artifact,
+                &staging_path,
+                &metadata,
+                control,
             ) {
-                Ok(builder) => Ok(builder),
-                Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
-                    store.discard_incompatible_staging(&staging_path, control)?;
-                    CodeLexicalArtifactBuilderV1::create_with_memory_budget(
-                        &staging_path,
-                        metadata.clone(),
-                        builder_budget,
-                    )
-                }
-                Err(error) => Err(error),
+                Ok(true) => open_or_replace_incompatible_text_staging(
+                    store,
+                    &staging_path,
+                    &metadata,
+                    builder_budget,
+                    control,
+                ),
+                Ok(false) => CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                    &staging_path,
+                    metadata.clone(),
+                    builder_budget,
+                )
+                .map_err(map_text_artifact_error),
+                Err(error) => Err(map_text_artifact_error(error)),
             }
         } else {
             CodeLexicalArtifactBuilderV1::create_with_memory_budget(
@@ -2915,12 +2987,24 @@ impl LatestCodeTextGenerationV1 {
                 metadata.clone(),
                 builder_budget,
             )
+            .map_err(map_text_artifact_error)
+        }?;
+        // A carried staging file already holds the parent's unchanged rows.
+        // Restrict the sealed source to the occurrences still missing so the
+        // content key, the receipt, and reported progress describe that work.
+        if let Some(rebuild) = builder
+            .carried_rebuild_occurrences()
+            .map_err(map_text_artifact_error)?
+        {
+            source
+                .restrict_to_file_occurrences(&rebuild)
+                .map_err(map_sealed_page_source_error)?;
         }
-        .map_err(map_text_artifact_error)?;
+        let mut content_key = text_artifact_content_key(&source, &metadata)?;
         // A staging file sealed before its publication was interrupted keeps
         // no source cursor; it is complete and is published as it stands.
         if builder
-            .sealed_receipt()
+            .sealed_receipt(control)
             .map_err(map_text_artifact_error)?
             .is_some()
         {
@@ -2934,20 +3018,22 @@ impl LatestCodeTextGenerationV1 {
                 control,
             );
         }
-        let mut progress = builder.progress().map_err(map_text_artifact_error)?;
+        let mut progress = builder.progress(control).map_err(map_text_artifact_error)?;
         if let Some(cursor) = progress.next_cursor.as_ref() {
             match source.restore_cursor_classified(cursor, control) {
                 Ok(()) => {}
                 Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition) => {
                     drop(builder);
                     store.discard_incompatible_staging(&staging_path, control)?;
+                    source = store.open_sealed_source(&sealed_identity, control)?;
+                    content_key = text_artifact_content_key(&source, &metadata)?;
                     builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
                         &staging_path,
                         metadata,
                         builder_budget,
                     )
                     .map_err(map_text_artifact_error)?;
-                    progress = builder.progress().map_err(map_text_artifact_error)?;
+                    progress = builder.progress(control).map_err(map_text_artifact_error)?;
                 }
                 Err(VerifiedSealedLexicalCursorRestoreErrorV1::Production(error)) => {
                     return Err(map_sealed_page_source_error(error));
@@ -3282,7 +3368,7 @@ impl LatestCodeTextGenerationV1 {
                 };
                 let progress = artifact_build
                     .builder
-                    .progress()
+                    .progress(control)
                     .map_err(map_text_artifact_error)?;
                 self.publish_text_progress_boundary(
                     artifact_build,
@@ -3522,6 +3608,34 @@ pub(super) fn sha256_private_file_and_size(
     Ok((hasher.finalize().into(), file_metadata.len()))
 }
 
+/// Resume `staging_path`, or replace an incompatible file with a fresh build.
+fn open_or_replace_incompatible_text_staging(
+    store: &DaemonCodeTextArtifactStoreV1,
+    staging_path: &Path,
+    metadata: &CodeLexicalProjectionMetadataV1,
+    builder_budget: usize,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<CodeLexicalArtifactBuilderV1, RetrievalPortError> {
+    match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        staging_path,
+        metadata.clone(),
+        builder_budget,
+        control,
+    ) {
+        Ok(builder) => Ok(builder),
+        Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
+            store.discard_incompatible_staging(staging_path, control)?;
+            CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                staging_path,
+                metadata.clone(),
+                builder_budget,
+            )
+            .map_err(map_text_artifact_error)
+        }
+        Err(error) => Err(map_text_artifact_error(error)),
+    }
+}
+
 /// The content key the text artifact of `source` under `metadata` is
 /// published with.
 fn text_artifact_content_key(
@@ -3627,12 +3741,15 @@ fn clear_text_artifact_staging_sidecars(staging_path: &Path) -> std::io::Result<
     };
     // The compacted rewrite's own rollback journal goes before the rewrite,
     // for the same reason the staging journal goes before the staging file.
+    // A parent carry killed before its rename leaves the same pair.
     for suffix in [
         "-journal",
         "-wal",
         "-shm",
         "-compacting-journal",
         "-compacting",
+        "-carrying-journal",
+        "-carrying",
     ] {
         let mut sidecar_name = name.to_os_string();
         sidecar_name.push(suffix);
@@ -3702,6 +3819,16 @@ mod staging_sidecar_tests {
         assert!(!journal.exists());
         assert!(!compacting.exists());
         assert!(!compacting_journal.exists());
+
+        let carrying = root.path().join(".text-artifact-ab.staging-carrying");
+        let carrying_journal = root
+            .path()
+            .join(".text-artifact-ab.staging-carrying-journal");
+        std::fs::write(&carrying, b"torn parent copy").expect("plant torn carry");
+        std::fs::write(&carrying_journal, b"carry rollback").expect("plant carry journal");
+        prepare_absent_text_artifact_staging(&staging).expect("clear torn carry");
+        assert!(!carrying.exists());
+        assert!(!carrying_journal.exists());
 
         std::fs::write(root.path().join(".text-artifact-ab.staging-wal"), b"wal")
             .expect("plant wal");

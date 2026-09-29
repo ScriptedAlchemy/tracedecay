@@ -510,7 +510,8 @@ sys.exit(101 if first and mode == "test-failure" else 0)
                     self.assertFalse((output / "root-lib.xml").exists())
                 elif mode == "report-move-failure":
                     self.assertEqual(first["test"]["exit_code"], 0)
-                    self.assertIsNotNone(first["error"])
+                    self.assertIn("junit.xml' -> '", first["error"])
+                    self.assertTrue(first["error"].endswith("root-lib.xml'"), first["error"])
                     self.assertIsNone(first["report"])
                 else:
                     self.assertEqual(first["test"]["exit_code"], 101 if mode == "test-failure" else 0)

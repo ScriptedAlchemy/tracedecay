@@ -33,12 +33,14 @@ pub(super) fn complete_protocol_controls(
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
-    complete_protocol_controls_for_tool(
-        operation.mcp_tool_name(),
-        request_id,
-        deadline,
-        cancellation,
-    )
+    let ceiling =
+        tracedecay_daemon_service::application_surface::application_operation_deadline_ceiling(
+            operation,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("could not resolve application surface deadline: {error}"),
+        })?;
+    complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
 }
 
 pub(super) fn complete_retained_protocol_controls(
@@ -49,19 +51,6 @@ pub(super) fn complete_retained_protocol_controls(
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
     let binding = super::retained_catalog::retained_mcp_binding(operation)?;
     let ceiling = std::time::Duration::from_millis(binding.maximum_millis());
-    complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
-}
-
-fn complete_protocol_controls_for_tool(
-    tool_name: &str,
-    request_id: &RequestId,
-    deadline: Option<Deadline>,
-    cancellation: Option<CancellationSignal>,
-) -> Result<Option<(Deadline, CancellationSignal)>> {
-    let ceiling = tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("could not resolve application surface deadline: {error}"),
-        })?;
     complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
 }
 
@@ -602,6 +591,20 @@ pub(crate) fn graph_tool_error_problem(
             tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
                 "application.surface.invalid_request",
                 safe_diagnostic_message(message),
+            )
+        }
+        TraceDecayError::ProjectRoute {
+            reason_code,
+            detail,
+            ..
+        } if reason_code == tracedecay_domain::CURSOR_PARAMETER_CHANGED_CODE
+            || reason_code == tracedecay_domain::CURSOR_INVALID_CODE =>
+        {
+            tracedecay_contracts::ApplicationProblem::cursor_refusal(
+                tracedecay_contracts::SafeDiagnostic {
+                    code: reason_code.clone(),
+                    message: detail.clone(),
+                },
             )
         }
         TraceDecayError::ProjectRoute {

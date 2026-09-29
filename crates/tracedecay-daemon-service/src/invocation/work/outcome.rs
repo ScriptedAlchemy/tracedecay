@@ -106,6 +106,9 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
                     .to_owned(),
             })
         }
+        WorkProductApplicationErrorV1::CursorRefused(mismatch) => {
+            ApplicationProblem::cursor_refused(&mismatch)
+        }
         WorkProductApplicationErrorV1::IdempotencyConflict => ApplicationProblem::Conflict {
             diagnostic: SafeDiagnostic {
                 code: "work.graph_idempotency_conflict".to_owned(),

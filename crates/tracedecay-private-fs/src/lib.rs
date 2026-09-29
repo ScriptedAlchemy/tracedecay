@@ -6,10 +6,15 @@ use std::fs::File;
 use std::io;
 
 pub mod capability_dir;
+mod coarse_time;
 mod file_lease;
 pub mod framed_log;
+mod inode_generation;
 mod lock_admission;
 mod rename_noreplace;
+
+pub use coarse_time::{RewriteWitness, change_time_settled};
+pub use inode_generation::inode_generation;
 
 pub use file_lease::FileLease;
 pub use lock_admission::{LockAdmissionError, lock_until};
@@ -396,13 +401,26 @@ mod tests {
         create_private_directory(&directory).unwrap();
         let directory_link = temp.path().join("directory-link");
         symlink(&directory, &directory_link).unwrap();
-        assert!(open_private_directory(&directory_link).is_err());
+        drop(open_private_directory(&directory).unwrap());
+        let refused = open_private_directory(&directory_link).unwrap_err();
+        // `O_NOFOLLOW | O_DIRECTORY` on a symlink fails ENOTDIR on Linux and
+        // ELOOP (normalized to InvalidInput) on the BSDs.
+        assert!(
+            matches!(
+                refused.kind(),
+                std::io::ErrorKind::NotADirectory | std::io::ErrorKind::InvalidInput
+            ),
+            "{refused:?}"
+        );
 
         let file_path = directory.join("store");
         drop(create_private_file(&file_path).unwrap());
         let file_link = directory.join("store-link");
         symlink(&file_path, &file_link).unwrap();
-        assert!(open_private_file(&file_link).is_err());
+        drop(open_private_file(&file_path).unwrap());
+        let refused = open_private_file(&file_link).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(refused.to_string(), "path is a symbolic link");
     }
 
     #[test]
@@ -480,6 +498,10 @@ mod available_space_tests {
     fn available_space_rejects_missing_path() {
         let temp = tempdir().unwrap();
         let missing = temp.path().join("does-not-exist");
-        assert!(available_space(&missing).is_err());
+        assert_eq!(
+            available_space(&missing).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(available_space(temp.path()).unwrap() > 0);
     }
 }

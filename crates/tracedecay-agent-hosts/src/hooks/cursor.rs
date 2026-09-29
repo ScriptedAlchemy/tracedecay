@@ -55,7 +55,11 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
 /// [`super::tool_hints::ToolHintDedupe`] persisted under `.tracedecay/`.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.post_tool_use")]
 pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::CursorDesktop,
+        "postToolUse"
+    );
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
     let _hook_telemetry = record_hook_invoked_parsed(
@@ -84,7 +88,11 @@ pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.session_start")]
 pub async fn hook_cursor_session_start(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::CursorDesktop,
+        "sessionStart"
+    );
     let (root, output) = cursor_session_start_response(runtime, &event, started).await;
     if !super::write_hook_output(
         &runtime.profile,

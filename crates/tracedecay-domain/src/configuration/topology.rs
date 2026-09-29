@@ -905,7 +905,10 @@ mod tests {
             .review_topology
             .allowed
             .insert(ReviewTopologyKindV1::GitHubStackedPullRequests);
-        assert!(policy.validate().is_err());
+        assert_eq!(
+            policy.validate().unwrap_err().to_string(),
+            "GitHub stacked pull request policy is not canonical"
+        );
 
         policy.review_topology.github_stacked_prs =
             GitHubStackedPullRequestPolicyV1::ProbePrivatePreview;
@@ -913,7 +916,10 @@ mod tests {
 
         policy.review_topology.allowed =
             BTreeSet::from([ReviewTopologyKindV1::GitHubStackedPullRequests]);
-        assert!(policy.validate().is_err());
+        assert_eq!(
+            policy.validate().unwrap_err().to_string(),
+            "GitHub stacked pull request policy is not canonical"
+        );
     }
 
     #[test]
@@ -945,6 +951,9 @@ mod tests {
         policy.placement = WorktreePlacementModeV1::ConfiguredRoot(
             WorktreePlacementRootId::new("root.missing").unwrap(),
         );
-        assert!(policy.validate().is_err());
+        assert_eq!(
+            policy.validate().unwrap_err().to_string(),
+            "configured worktree placement root references an unknown identity"
+        );
     }
 }

@@ -21,7 +21,7 @@ use super::{
     CodeIndexMountedScopeV1, CodeIndexSchedulerRegistryV1, CodeIndexServingScopeV1,
     MountedCodeIndexWorktreeV1, PendingWakeClaimV1, ReadyProbeServingPartsV1,
     dashboard_code_graph_serving, dashboard_freshness_identity, dashboard_terminal_status,
-    dashboard_text_freshness_identity, unique_mounted_for_scope,
+    dashboard_text_freshness_identity, project_graph_publication_phase, unique_mounted_for_scope,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -360,7 +360,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     let restore_progress = text
                         .as_ref()
                         .and_then(LatestCodeTextGenerationV1::restore_progress);
-                    let restore_in_flight = restore_progress.is_some();
                     let identity = if text.is_some() {
                         dashboard_text_freshness_identity(text.as_ref())
                     } else {
@@ -390,6 +389,13 @@ impl CodeIndexSchedulerRegistryV1 {
                         graph_activation_enabled,
                         &code_graph_serving,
                     );
+                    let restore_in_flight = restore_progress.is_some()
+                        || retained_generation_restoring(
+                            text.as_ref(),
+                            ready,
+                            source_freshness.verified_against_source(),
+                            source_change_pending,
+                        );
                     let observation = tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderV1::project(
                         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderInputsV1 {
                             ready,
@@ -419,6 +425,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         0 => None,
                         micros => Some(micros),
                     };
+                    project_graph_publication_phase(&mut progress, &code_graph_serving);
                     return tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
                         code_graph_serving,
@@ -451,7 +458,6 @@ impl CodeIndexSchedulerRegistryV1 {
             let restore_progress = text
                 .as_ref()
                 .and_then(LatestCodeTextGenerationV1::restore_progress);
-            let restore_in_flight = restore_progress.is_some();
             let hook_hint_count = scheduler.pending_hint_count();
             let code_graph_serving = dashboard_code_graph_serving(
                 latest.as_ref(),
@@ -473,6 +479,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 graph_activation_enabled,
                 &code_graph_serving,
             );
+            let restore_in_flight = restore_progress.is_some()
+                || retained_generation_restoring(
+                    text.as_ref(),
+                    ready,
+                    verified,
+                    source_change_pending,
+                );
             let observation = tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderV1::project(
                 tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderInputsV1 {
                     ready,
@@ -499,6 +512,7 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 dashboard_freshness_identity(latest.as_ref())
             };
+            project_graph_publication_phase(&mut progress, &code_graph_serving);
             tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
                 code_graph_serving,
@@ -938,7 +952,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // its authenticated text owner is warming. Return that known answer
         // before entering the exact freshness probe: probing an unseated slot
         // cannot produce a decoded owner, and on an initial lightweight mount
-        // it would turn `freshness_unknown` into a fabricated overflow wake.
+        // it would turn an unverified fence into a fabricated overflow wake.
         let serving = serving_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1633,6 +1647,20 @@ impl CodeIndexSchedulerRegistryV1 {
         wake_claim.settle();
         CodeIndexReconcileAdmissionV1::Accepted
     }
+}
+
+/// Whether a restarted owner is still seating the generation it retained.
+///
+/// Before any pass has verified the source, the only text owner is the one
+/// restored from the durable pointer. Until a pass observes changed source,
+/// seating it is a restore, not a rebuild.
+fn retained_generation_restoring(
+    text: Option<&LatestCodeTextGenerationV1>,
+    ready: bool,
+    source_verified: bool,
+    source_change_pending: bool,
+) -> bool {
+    text.is_some() && !ready && !source_verified && !source_change_pending
 }
 
 /// Whether source evidence proves the text owner's sealed clone census lags

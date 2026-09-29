@@ -1036,6 +1036,16 @@ mod privacy_tests {
         let sanitized = sanitize_summary_draft(draft).expect("sanitize summary draft");
         let durable = serde_json::to_string(&sanitized).expect("serialize sanitized draft");
         assert!(!durable.contains(secret));
+        assert_eq!(
+            (
+                sanitized.summary_text.as_str(),
+                sanitized.expand_hint.as_deref()
+            ),
+            (
+                "api_key=TraceDecay-redacted-sensitive-field",
+                Some("[TraceDecay redacted: bearer token]")
+            )
+        );
         let metadata: JsonValue =
             serde_json::from_str(sanitized.metadata_json.as_deref().expect("metadata"))
                 .expect("decode sanitized metadata");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WorkGraphReadV1Schema, type WorkGraphReadV1 } from '../../contracts/index.ts';
+import { WorkGraphReadV1Schema, type WorkGraphReadV1 } from '../../contracts/generated.ts';
 import {
   workGraphRead,
   workGraphTimeline,

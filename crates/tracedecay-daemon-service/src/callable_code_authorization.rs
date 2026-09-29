@@ -574,19 +574,27 @@ mod tests {
             current.effective_capabilities.clear();
         }
 
-        assert!(
-            authorization
-                .recheck_publication(&context, &operation, &admission, UtcMicros(11))
-                .await
-                .is_err(),
+        let Err(problem) = authorization
+            .recheck_publication(&context, &operation, &admission, UtcMicros(11))
+            .await
+        else {
+            panic!("configuration/capability mutation must reject the recheck");
+        };
+        assert_eq!(
+            problem.kind(),
+            ApplicationProblemKind::NotFoundOrNotAuthorized,
             "configuration/capability mutation must conceal the result"
         );
-        assert!(
-            source
-                .authorize(mounted)
-                .admit(&context, &operation, UtcMicros(12))
-                .await
-                .is_err(),
+        let Err(problem) = source
+            .authorize(mounted)
+            .admit(&context, &operation, UtcMicros(12))
+            .await
+        else {
+            panic!("a later call must be rejected");
+        };
+        assert_eq!(
+            problem.kind(),
+            ApplicationProblemKind::NotFoundOrNotAuthorized,
             "a later call must not reuse project-open access"
         );
     }

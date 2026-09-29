@@ -7,6 +7,7 @@ use crate::mcp::McpServer;
 use crate::mcp::server::McpServerConstructionContext;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -92,10 +93,14 @@ async fn live_runtime_snapshot_does_not_fabricate_store_metadata_after_observati
         "core-doctor-missing-live-store-metadata",
     )
     .expect("enter daemon database scope");
-    let graph =
-        super::super::open_project_for_handshake(&project, &handshake, &store_administration)
-            .await
-            .expect("open retained project graph");
+    let graph = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &store_administration,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("open retained project graph");
     let key = crate::daemon::ProjectServerKey::from_open_project(&graph, &handshake)
         .expect("project server key");
     let server = McpServer::new_with_context(

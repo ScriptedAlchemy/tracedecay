@@ -271,7 +271,7 @@ pub(crate) async fn capture_opencode_observations(
     .await?;
     let database = match opened {
         crate::runtime::hosts::opencode_snapshot::OpenedOpenCodeDatabase::Ready(database) => {
-            database
+            *database
         }
         crate::runtime::hosts::opencode_snapshot::OpenedOpenCodeDatabase::Refused(reason) => {
             let outcome = outcome_for_scan_evidence(open_budget.evidence());

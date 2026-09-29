@@ -325,6 +325,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
         apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
+        assert!(plugin_dir.join("dashboard").is_dir());
 
         apply_install_policy(&plugin_dir, "/bin/tracedecay", false).unwrap();
 

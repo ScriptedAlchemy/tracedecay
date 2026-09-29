@@ -76,6 +76,47 @@ pub(super) async fn admit_native_context_scout_lifecycle(
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
+    let source = match ObservationSourceIdentityV1::for_provider(
+        provider.clone(),
+        lifecycle.session_id.clone(),
+    ) {
+        Ok(source) => source,
+        Err(_) => return false,
+    };
+    let binding = sessions.binding();
+    let authorities = HostAdmissionAuthorities::for_project(
+        binding.shard_id.brain_id.clone(),
+        binding.shard_id.profile_id.clone(),
+        project_id,
+        sessions,
+    );
+    let facade = HostAdmissionFacade::new(match background_cpu {
+        Some(background_cpu) => {
+            authorities.with_background_cpu(std::sync::Arc::clone(background_cpu))
+        }
+        None => authorities,
+    });
+    // Admission order is per host, so another session's events, or this
+    // session's events without a lifecycle, leave gaps between this session's
+    // lifecycle positions. The observation covers from the session cursor to
+    // this event; a cursor already at or past it means this record, or a later
+    // one that supersedes it, is committed.
+    let (range, expected_cursor) = match facade.get_source_cursor(&source, &scope).await {
+        Ok(None) => (range, None),
+        Ok(Some(cursor))
+            if cursor.generation().file_id() == 1
+                && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence =>
+        {
+            if cursor.position() >= range.end() {
+                return true;
+            }
+            let Ok(covered) = ObservationSourceRangeV1::new(cursor.position(), range.end()) else {
+                return false;
+            };
+            (covered, Some(cursor))
+        }
+        Ok(Some(_)) | Err(_) => return false,
+    };
     let raw = match serde_json::to_vec(lifecycle) {
         Ok(raw) => raw,
         Err(_) => return false,
@@ -116,42 +157,6 @@ pub(super) async fn admit_native_context_scout_lifecycle(
     ) {
         Ok(parsed) => parsed,
         Err(_) => return false,
-    };
-    let source =
-        match ObservationSourceIdentityV1::for_provider(provider, lifecycle.session_id.clone()) {
-            Ok(source) => source,
-            Err(_) => return false,
-        };
-    let binding = sessions.binding();
-    let authorities = HostAdmissionAuthorities::for_project(
-        binding.shard_id.brain_id.clone(),
-        binding.shard_id.profile_id.clone(),
-        project_id,
-        sessions,
-    );
-    let facade = HostAdmissionFacade::new(match background_cpu {
-        Some(background_cpu) => {
-            authorities.with_background_cpu(std::sync::Arc::clone(background_cpu))
-        }
-        None => authorities,
-    });
-    let expected_cursor = match facade.get_source_cursor(&source, &scope).await {
-        Ok(None) => None,
-        Ok(Some(cursor))
-            if cursor.generation().file_id() == 1
-                && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence
-                && cursor.position() == range.start() =>
-        {
-            Some(cursor)
-        }
-        Ok(Some(cursor))
-            if cursor.generation().file_id() == 1
-                && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence
-                && cursor.position() == range.end() =>
-        {
-            None
-        }
-        Ok(Some(_)) | Err(_) => return false,
     };
     let identity = match ObservationIdentityMaterialV1::for_native_record(
         source,

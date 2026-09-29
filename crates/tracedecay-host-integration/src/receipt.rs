@@ -33,6 +33,27 @@ pub struct HostBundleInstallReceiptV1 {
     /// before this record existed list none, so their directories are kept.
     #[serde(default)]
     pub created_directories: Vec<String>,
+    /// Host config structure a lifecycle operation created, sorted by path:
+    /// facts only, never the operator's bytes. Uninstall removes exactly this
+    /// structure once TraceDecay's own entries are gone from it. `None` marks
+    /// a receipt written before creation was recorded: nothing proves what its
+    /// install created, so every config file and container it touched is
+    /// kept, and of its directories only those named in TraceDecay's own
+    /// namespace are removed once empty.
+    #[serde(default)]
+    pub created_config: Option<Vec<HostConfigCreationV1>>,
+}
+
+/// Structure one lifecycle operation added to one host config file.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostConfigCreationV1 {
+    pub relative_path: String,
+    /// The file did not exist before the operation wrote it.
+    pub created_file: bool,
+    /// JSON pointers of the object members, holding an object or array, the
+    /// operation added, sorted.
+    pub created_containers: Vec<String>,
 }
 
 /// Durable aggregate commit marker for a complete host component set. The root

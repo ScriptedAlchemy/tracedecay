@@ -1544,16 +1544,18 @@ mod tests {
         })
         .expect("input");
 
-        assert!(
-            input(FeedbackCycleRequest {
-                root_uri: format!("{WORKSPACE_URI}/"),
-                trigger: DiagnosticTrigger::DocumentSave,
-                document_uri: format!("{WORKSPACE_URI}/src/lib.rs"),
-            })
-            .await
-            .is_err(),
-            "a cycle must not publish under a configuration identity that lost authorization"
-        );
+        let Err(error) = input(FeedbackCycleRequest {
+            root_uri: format!("{WORKSPACE_URI}/"),
+            trigger: DiagnosticTrigger::DocumentSave,
+            document_uri: format!("{WORKSPACE_URI}/src/lib.rs"),
+        })
+        .await
+        else {
+            panic!(
+                "a cycle must not publish under a configuration identity that lost authorization"
+            );
+        };
+        assert_eq!(error.class(), "feedback-cycle-configuration-drift");
     }
 
     #[tokio::test]
@@ -1574,15 +1576,18 @@ mod tests {
             .effective_capabilities
             .remove(&CapabilityId::new(MANAGED_CAPABILITY.to_owned()).expect("capability"));
 
-        assert!(
-            authorized_daemon_request_context(
-                &scope,
-                &ActorId::new("actor.cycle-production").expect("actor"),
-                access,
-                observed_at,
-            )
-            .is_err(),
-            "a derived request grant must not add capability.diagnostics.current"
+        let Err(error) = authorized_daemon_request_context(
+            &scope,
+            &ActorId::new("actor.cycle-production").expect("actor"),
+            access,
+            observed_at,
+        ) else {
+            panic!("a derived request grant must not add capability.diagnostics.current");
+        };
+        assert_eq!(
+            error.to_string(),
+            "feedback-cycle current authorization capability is inconsistent with the \
+             application contract"
         );
     }
 

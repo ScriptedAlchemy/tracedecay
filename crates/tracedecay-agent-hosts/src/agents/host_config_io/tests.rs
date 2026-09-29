@@ -92,8 +92,11 @@ mod safe_config_tests {
     fn safe_write_cleans_up_new_file_on_success() {
         let dir = tmpdir();
         let path = dir.path().join("config.json");
-        safe_write_json_file(&path, &serde_json::json!({})).unwrap();
+        safe_write_json_file(&path, &serde_json::json!({"mcpServers": {}})).unwrap();
 
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written, serde_json::json!({"mcpServers": {}}));
         let new_path = dir.path().join("config.json.new");
         assert!(!new_path.exists(), ".new staging file should be removed");
     }
@@ -613,15 +616,40 @@ mod local_install_safety_tests {
 #[allow(clippy::unwrap_used)]
 mod format_preserving_edit_tests {
     use super::*;
-    use crate::agents::{McpUninstallPolicy, install_mcp_server_entry, uninstall_mcp_server_entry};
-
-    const PRUNE: McpUninstallPolicy = McpUninstallPolicy {
-        prune_empty_root: true,
-        remove_empty_file: true,
-    };
+    use crate::agents::{install_mcp_server_entry, uninstall_mcp_server_entry};
+    use tracedecay_host_integration::HostConfigCreationV1;
 
     fn entry(binary: &str) -> serde_json::Value {
         serde_json::json!({"command": binary, "args": ["serve"]})
+    }
+
+    /// Install `binary` as one lifecycle operation over `recorded` facts,
+    /// returning the facts its receipt would keep.
+    fn install_recorded(
+        root: &Path,
+        path: &Path,
+        binary: &str,
+        dialect: JsonConfigDialect,
+        recorded: &[HostConfigCreationV1],
+    ) -> Vec<HostConfigCreationV1> {
+        let (installed, facts) = with_host_config_creations(root, recorded, false, || {
+            install_mcp_server_entry(path, "mcpServers", entry(binary), "test", dialect)
+        });
+        installed.unwrap();
+        facts
+    }
+
+    fn uninstall_recorded(
+        root: &Path,
+        path: &Path,
+        dialect: JsonConfigDialect,
+        recorded: &[HostConfigCreationV1],
+    ) {
+        let (removed, facts) = with_host_config_creations(root, recorded, true, || {
+            uninstall_mcp_server_entry(path, "mcpServers", dialect)
+        });
+        removed.unwrap();
+        assert_eq!(facts, Vec::new(), "an uninstall keeps no creation facts");
     }
 
     /// Install, reinstall with a moved binary, then uninstall `original`,
@@ -635,41 +663,28 @@ mod format_preserving_edit_tests {
         let path = dir.path().join(file_name);
         std::fs::write(&path, original).unwrap();
 
-        install_mcp_server_entry(
-            &path,
-            "mcpServers",
-            entry("/opt/a/tracedecay"),
-            "test",
-            dialect,
-        )
-        .unwrap();
+        let facts = install_recorded(dir.path(), &path, "/opt/a/tracedecay", dialect, &[]);
         let installed = std::fs::read_to_string(&path).unwrap();
+        let original_value = dialect.parse_for_edit(&path, original).unwrap();
         let mut parsed = dialect.parse_for_edit(&path, &installed).unwrap();
         let servers = parsed["mcpServers"].as_object_mut().unwrap();
         assert_eq!(
             servers.remove("tracedecay"),
             Some(entry("/opt/a/tracedecay"))
         );
-        if servers.is_empty() {
+        if original_value.get("mcpServers").is_none() {
             parsed.as_object_mut().unwrap().remove("mcpServers");
         }
-        assert_eq!(parsed, dialect.parse_for_edit(&path, original).unwrap());
+        assert_eq!(parsed, original_value);
 
-        install_mcp_server_entry(
-            &path,
-            "mcpServers",
-            entry("/opt/b/tracedecay"),
-            "test",
-            dialect,
-        )
-        .unwrap();
+        let facts = install_recorded(dir.path(), &path, "/opt/b/tracedecay", dialect, &facts);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             installed.replace("/opt/a/tracedecay", "/opt/b/tracedecay"),
             "a reinstall rewrote more than the moved command"
         );
 
-        uninstall_mcp_server_entry(&path, "mcpServers", dialect, PRUNE).unwrap();
+        uninstall_recorded(dir.path(), &path, dialect, &facts);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         let entries: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -704,6 +719,89 @@ mod format_preserving_edit_tests {
             "absent-root.json",
             JsonConfigDialect::Jsonc,
             "{\n  // keep me\n  \"theme\": \"dark\" // tail\n}\n",
+        );
+    }
+
+    /// A registry the operator already had, even one holding nothing but an
+    /// empty server map, is theirs: uninstall restores it byte for byte.
+    #[test]
+    fn uninstall_keeps_a_preexisting_empty_root_and_file() {
+        assert_lifecycle_preserves_bytes(
+            "mcp_config.json",
+            JsonConfigDialect::Json,
+            "{\"mcpServers\":{}}\n",
+        );
+        assert_lifecycle_preserves_bytes("empty-object.json", JsonConfigDialect::Json, "{}");
+    }
+
+    /// A registry install created is deleted again, parent directory kept,
+    /// and one the operator filled with a server of their own survives with
+    /// only TraceDecay's entry gone.
+    #[test]
+    fn uninstall_deletes_the_file_install_created_unless_the_operator_filled_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let facts = install_recorded(
+            dir.path(),
+            &path,
+            "/opt/a/tracedecay",
+            JsonConfigDialect::Json,
+            &[],
+        );
+        assert_eq!(
+            facts,
+            vec![HostConfigCreationV1 {
+                relative_path: "mcp.json".to_string(),
+                created_file: true,
+                created_containers: vec![
+                    "/mcpServers".to_string(),
+                    "/mcpServers/tracedecay".to_string(),
+                    "/mcpServers/tracedecay/args".to_string(),
+                ],
+            }]
+        );
+        uninstall_recorded(dir.path(), &path, JsonConfigDialect::Json, &facts);
+        assert!(
+            !path.exists(),
+            "install-created registry survived uninstall"
+        );
+        assert!(dir.path().is_dir());
+
+        let facts = install_recorded(
+            dir.path(),
+            &path,
+            "/opt/a/tracedecay",
+            JsonConfigDialect::Json,
+            &[],
+        );
+        let mut filled = load_json_file_strict(&path).unwrap();
+        filled["mcpServers"]["mine"] = serde_json::json!({"command": "mine"});
+        safe_write_json_file(&path, &filled).unwrap();
+        uninstall_recorded(dir.path(), &path, JsonConfigDialect::Json, &facts);
+        assert_eq!(
+            load_json_file_strict(&path).unwrap(),
+            serde_json::json!({"mcpServers": {"mine": {"command": "mine"}}})
+        );
+    }
+
+    /// Outside a recorded lifecycle nothing proves what install created, so
+    /// uninstall removes only the entry.
+    #[test]
+    fn unrecorded_uninstall_removes_only_the_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        install_mcp_server_entry(
+            &path,
+            "mcpServers",
+            entry("/opt/a/tracedecay"),
+            "test",
+            JsonConfigDialect::Json,
+        )
+        .unwrap();
+        uninstall_mcp_server_entry(&path, "mcpServers", JsonConfigDialect::Json).unwrap();
+        assert_eq!(
+            load_json_file_strict(&path).unwrap(),
+            serde_json::json!({"mcpServers": {}})
         );
     }
 

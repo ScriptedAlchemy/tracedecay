@@ -161,7 +161,32 @@ fn flatten_error_chain(source: &(dyn std::error::Error + 'static)) -> String {
     message
 }
 
+/// Why a host cannot be reached on this machine. An absent host is
+/// informational everywhere TraceDecay reports hosts: it is never an issue, a
+/// warning, a pending operator action, or a non-zero exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostAbsence {
+    NotInstalled,
+}
+
+impl HostAbsence {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not installed",
+        }
+    }
+}
+
 impl TraceDecayError {
+    /// The host absence this error reports when it came from resolving a
+    /// host's own CLI, `None` for every real failure.
+    pub fn host_absence(&self) -> Option<HostAbsence> {
+        match self {
+            Self::HostCliUnavailable { .. } => Some(HostAbsence::NotInstalled),
+            _ => None,
+        }
+    }
+
     pub fn reset_required(authority: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::ResetRequired {
             authority: authority.into(),

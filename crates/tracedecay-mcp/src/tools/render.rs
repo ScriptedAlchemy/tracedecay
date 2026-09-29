@@ -579,6 +579,35 @@ pub fn diagnostics_md(value: &Value) -> String {
     md.render()
 }
 
+/// Closes the summary fields, then lists the files whose sites were withheld.
+fn risky_pattern_omissions_md(md: &mut Md, value: &Value) {
+    let omissions = value
+        .get("omissions")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    if omissions.is_empty() {
+        md.blank();
+        return;
+    }
+    md.field("Coverage", "partial");
+    md.blank();
+    md.heading(3, "Omitted files");
+    for omission in omissions {
+        let text = |key: &str| omission.get(key).and_then(Value::as_str).unwrap_or("");
+        let withheld = omission
+            .get("withheld_match_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        md.bullet(&format!(
+            "**{}**: {} ({}), {withheld} site(s) withheld",
+            text("file"),
+            text("reason"),
+            text("cause"),
+        ));
+    }
+    md.blank();
+}
+
 /// Renders the `tracedecay_unsafe_patterns` payload
 /// (`{ match_count, by_kind, matches: [...] }`).
 ///
@@ -618,7 +647,7 @@ pub fn risky_patterns_md(value: &Value) -> String {
             .join(", ");
         md.field("By kind", &summary);
     }
-    md.blank();
+    risky_pattern_omissions_md(&mut md, value);
 
     if matches.is_empty() {
         md.empty_note("No risky patterns found.");

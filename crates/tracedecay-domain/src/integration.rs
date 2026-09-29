@@ -361,7 +361,7 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum HostIntegrationIdV1 {
-    /// Claude Code's provider identifier remains `claude` for compatibility.
+    /// Claude Code's provider identifier is `claude`.
     Claude,
     Codex,
     Cursor,

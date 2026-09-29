@@ -1,16 +1,16 @@
 //! AWS Kiro agent integration.
 //!
-//! Global MCP registration is driven through Kiro's own registry CLI
-//! (`kiro-cli mcp add` / `kiro-cli mcp remove`), which owns
-//! `~/.kiro/settings/mcp.json`. TraceDecay does not merge that file itself: the
-//! host owns the registry, and emulating its writes is exactly what the
-//! host-capability doctrine forbids. The binary is therefore a hard
-//! requirement for the global lifecycle, with no config-editing fallback.
+//! Kiro documents its MCP registry as plain JSON files, user-level
+//! `~/.kiro/settings/mcp.json` and workspace-level `.kiro/settings/mcp.json`
+//! (<https://kiro.dev/docs/cli/mcp/configuration/>), and hot-reloads them on
+//! save. TraceDecay edits those files directly through the shared
+//! byte-preserving JSON editor and never runs `kiro-cli`: its `mcp`
+//! subcommands refuse to run until the operator signs in, which would make
+//! TraceDecay's lifecycle depend on a Kiro account.
 //!
 //! The canonical global integration is MCP-only and does not create global
-//! steering, a managed agent, or a default-agent selection. Workspace-local registration
-//! still writes its MCP entry, steering, and managed agent because Kiro has no
-//! project-path-aware registry operation.
+//! steering, a managed agent, or a default-agent selection. Workspace-local
+//! registration also writes steering and a managed agent.
 //!
 //! User-owned Kiro agents remain user-managed. If `~/.kiro/agents/tracedecay.json`
 //! already exists and is not the file tracedecay writes, install and uninstall
@@ -29,8 +29,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpUninstallPolicy, install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay,
-    safe_write_json_file, uninstall_mcp_server_entry,
+    install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay, safe_write_json_file,
+    uninstall_mcp_server_entry,
 };
 
 pub struct KiroIntegration;
@@ -50,23 +50,7 @@ const KIRO_ALLOWED_BUILTIN_TOOLS: &str = "@builtin";
 const KIRO_ALLOWED_TRACEDECAY_TOOLS: &str = "@tracedecay";
 const KIRO_PROMPT_HOOK: &str = "hook-kiro-prompt-submit";
 
-/// Name of Kiro's own MCP registry binary.
-const KIRO_CLI: &str = "kiro-cli";
-
-/// What the binary is required *for*, used in the typed absence error.
-const KIRO_CLI_LIFECYCLE: &str = "kiro MCP registry lifecycle";
-
-/// Name Kiro's registry selects the server by (`kiro-cli mcp add --name`,
-/// `kiro-cli mcp remove --name`) and the key it lands under in
-/// `mcpServers`. The two are the same string by Kiro's own contract, so the
-/// doctor and registration-state readers below keep reading `mcpServers`.
-const KIRO_MCP_SERVER_NAME: &str = "tracedecay";
-
 /// Arguments the tracedecay MCP server is launched with.
-///
-/// Shared by the CLI-driven global registration (one raw `--args` value per
-/// item) and the workspace-local config writer, so the two spellings of the
-/// same server cannot drift apart.
 const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 /// A hook the managed Kiro agent registers. Kiro's documented hook entry
@@ -125,10 +109,8 @@ fn managed_agent_hooks(tracedecay_bin: &str) -> serde_json::Value {
 }
 
 fn kiro_home(home: &Path) -> PathBuf {
-    // Kiro's registry CLI is invoked with an environment-cleared child and
-    // therefore resolves its profile from the admitted HOME. Do the same for
-    // every path we inspect or write here; an ambient operator KIRO_HOME must
-    // never redirect an isolated lifecycle to another profile.
+    // Every path resolves from the admitted HOME; an ambient operator
+    // KIRO_HOME must never redirect an isolated lifecycle to another profile.
     home.join(".kiro")
 }
 
@@ -145,33 +127,11 @@ fn workspace_mcp_config_path(project_path: &Path) -> PathBuf {
 }
 
 enum KiroDoctorInstallationState {
-    HostAbsent,
     TraceDecayAbsent,
     Installed,
 }
 
 fn kiro_doctor_installation_state(home: &Path) -> Result<KiroDoctorInstallationState> {
-    let host_home = kiro_home(home);
-    match std::fs::metadata(&host_home) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => {
-            return Err(TraceDecayError::Config {
-                message: format!("Kiro home {} is not a directory", host_home.display()),
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(KiroDoctorInstallationState::HostAbsent);
-        }
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "failed to inspect Kiro home {}: {error}",
-                    host_home.display()
-                ),
-            });
-        }
-    }
-
     let mcp_path = mcp_config_path(home);
     match std::fs::metadata(&mcp_path) {
         Ok(metadata) if metadata.is_file() => {}
@@ -230,7 +190,7 @@ fn kiro_doctor_installation_state(home: &Path) -> Result<KiroDoctorInstallationS
             ),
         });
     };
-    if servers.contains_key(KIRO_MCP_SERVER_NAME) {
+    if servers.contains_key("tracedecay") {
         Ok(KiroDoctorInstallationState::Installed)
     } else {
         Ok(KiroDoctorInstallationState::TraceDecayAbsent)
@@ -250,14 +210,6 @@ impl AgentIntegration for KiroIntegration {
         true
     }
 
-    /// Workspace-local registration still writes `.kiro/settings/mcp.json`
-    /// directly rather than driving `kiro-cli mcp add --scope workspace`.
-    /// `--scope workspace` resolves against the CLI's *working directory*, and
-    /// `host_cli::run_host_cli` admits the profile home as its working
-    /// directory. That cannot target an arbitrary `project_path` from here;
-    /// adopting it needs a project-aware host-CLI invocation first. Until then
-    /// the file write is the only way to target the requested project. The
-    /// global path above *is* CLI-driven.
     #[hotpath::measure(label = "kiro_project_install")]
     fn activate_project_host_component_registration(
         &self,
@@ -305,8 +257,6 @@ impl AgentIntegration for KiroIntegration {
         ])
     }
 
-    /// Mirrors `activate_project_host_component_registration`: the workspace
-    /// scope is file-written for the same working-directory reason.
     fn deactivate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle::HostComponentV1],
@@ -333,21 +283,10 @@ impl AgentIntegration for KiroIntegration {
         Ok(())
     }
 
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
-        require_kiro_cli().map(drop)
-    }
-
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKiro integration\x1b[0m");
         let host_home = kiro_home(&ctx.home);
         match kiro_doctor_installation_state(&ctx.home) {
-            Ok(KiroDoctorInstallationState::HostAbsent) => {
-                dc.warn(&format!(
-                    "Kiro is not detected at {}, run `tracedecay install --agent kiro` if you use Kiro",
-                    host_home.display()
-                ));
-                return;
-            }
             Ok(KiroDoctorInstallationState::TraceDecayAbsent) => {
                 dc.warn(&format!(
                     "Kiro is detected at {}, but TraceDecay is not installed, run `tracedecay install --agent kiro` if you use Kiro",
@@ -378,10 +317,6 @@ impl AgentIntegration for KiroIntegration {
             ],
             SkillInstallTarget::Kiro,
         );
-    }
-
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
     }
 
     fn host_component_registration(
@@ -428,8 +363,7 @@ impl AgentIntegration for KiroIntegration {
         ctx: &InstallContext,
     ) -> Result<()> {
         if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
-            let kiro_cli = require_kiro_cli()?;
-            kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
+            install_mcp_server(&mcp_config_path(&ctx.home), &ctx.tracedecay_bin)?;
         }
         Ok(())
     }
@@ -440,8 +374,7 @@ impl AgentIntegration for KiroIntegration {
         ctx: &InstallContext,
     ) -> Result<()> {
         if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
-            let kiro_cli = require_kiro_cli()?;
-            kiro_mcp_remove_with(&kiro_cli, &ctx.home)?;
+            uninstall_mcp_server(&mcp_config_path(&ctx.home))?;
         }
         Ok(())
     }
@@ -507,69 +440,6 @@ fn mcp_server_entry(tracedecay_bin: &str) -> serde_json::Value {
     })
 }
 
-/// Resolve Kiro's own registry CLI, or fail with the typed requirement.
-///
-/// Kiro owns `~/.kiro/settings/mcp.json` through `kiro-cli mcp`. Its CLI is
-/// therefore a hard requirement for the global lifecycle, not a preference
-/// with a config-editing fallback: emulating those writes is precisely what
-/// the host-capability doctrine forbids, and a half-emulated registration is
-/// indistinguishable on disk from a corrupt one.
-fn require_kiro_cli() -> Result<PathBuf> {
-    super::host_cli::require_host_cli(KIRO_CLI, KIRO_CLI_LIFECYCLE)
-}
-
-/// Drive Kiro's own registry to add the tracedecay MCP server globally.
-///
-/// Split from the trait method so tests can supply a fake CLI and an isolated
-/// `HOME` without mutating the process environment.
-#[hotpath::measure(label = "kiro_mcp_install")]
-fn kiro_mcp_add_with(kiro_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
-    // Make the global scope explicit. Kiro's CLI also supports a workspace
-    // registry, but this lifecycle owns only the profile-global entry; the
-    // workspace (`--scope workspace`) form is deliberately not driven here,
-    // see `activate_project_host_component_registration`.
-    let mut args = vec![
-        "mcp",
-        "add",
-        "--name",
-        KIRO_MCP_SERVER_NAME,
-        "--command",
-        tracedecay_bin,
-    ];
-    for server_arg in MCP_SERVER_ARGS {
-        args.extend(["--args", server_arg]);
-    }
-    args.extend(["--scope", "global", "--force"]);
-    run_mcp_registry_step(kiro_cli, &args, home)
-}
-
-/// Drive Kiro's own registry to drop the tracedecay MCP server globally.
-fn kiro_mcp_remove_with(kiro_cli: &Path, home: &Path) -> Result<()> {
-    run_mcp_registry_step(
-        kiro_cli,
-        &[
-            "mcp",
-            "remove",
-            "--name",
-            KIRO_MCP_SERVER_NAME,
-            "--scope",
-            "global",
-        ],
-        home,
-    )
-}
-
-fn run_mcp_registry_step(kiro_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
-    super::host_cli::run_mcp_registry_step(
-        kiro_cli,
-        args,
-        home,
-        &mcp_config_path(home),
-        KIRO_MCP_SERVER_NAME,
-        "Kiro CLI",
-    )
-}
-
 /// Render a path as a `file://` resource URI for Kiro's agent config. Reuses
 /// the LSP client's encoder, which additionally handles Windows drive paths and
 /// UNC (`//server/share`) prefixes; POSIX paths encode identically to before.
@@ -597,7 +467,7 @@ fn managed_agent_config(
     })
 }
 
-/// Register MCP server in a workspace-local `.kiro/settings/mcp.json`.
+/// Register the MCP server in a user- or workspace-level Kiro `mcp.json`.
 fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
     install_mcp_server_entry(
         path,
@@ -709,15 +579,7 @@ missing decision or an external or destructive action outside that authority.",
 // ---------------------------------------------------------------------------
 
 fn uninstall_mcp_server(path: &Path) -> Result<()> {
-    uninstall_mcp_server_entry(
-        path,
-        "mcpServers",
-        JsonConfigDialect::Json,
-        McpUninstallPolicy {
-            prune_empty_root: true,
-            remove_empty_file: true,
-        },
-    )
+    uninstall_mcp_server_entry(path, "mcpServers", JsonConfigDialect::Json)
 }
 
 /// Remove every tracedecay-owned steering block.

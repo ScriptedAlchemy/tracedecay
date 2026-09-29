@@ -4,7 +4,7 @@ import type {
   WorkItemV1,
   WorkLegalActionV1,
   WorkTimelineLaneV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { WorkResult } from './workApi.ts';
 
 /**

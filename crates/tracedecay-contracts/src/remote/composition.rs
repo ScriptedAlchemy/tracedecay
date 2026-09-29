@@ -418,7 +418,10 @@ mod tests {
             value: Some("must-not-leak".to_owned()),
             reason_code: Some("integrity_unknown".into()),
         };
-        assert!(contribution.validate().is_err());
+        assert_eq!(
+            contribution.validate().unwrap_err().to_string(),
+            "remote query disclosure is inconsistent with the application contract"
+        );
     }
 
     #[test]
@@ -441,14 +444,18 @@ mod tests {
             has_sequence_gap: false,
             has_quarantined: false,
         };
-        assert!(
-            RemoteQueryCompositionV1::compose(
-                expected_shards(),
-                vec![contribution.clone(), contribution],
-                pending,
-                100,
-            )
-            .is_err()
+        let problem = RemoteQueryCompositionV1::compose(
+            expected_shards(),
+            vec![contribution.clone(), contribution],
+            pending,
+            100,
+        )
+        .unwrap_err();
+        assert_eq!(
+            problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("remote_query_shard_duplicate")
         );
     }
 }

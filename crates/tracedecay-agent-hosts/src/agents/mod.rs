@@ -83,19 +83,23 @@ pub use host_config_io::{
     with_host_config_write_intents,
 };
 pub(crate) use host_config_io::{
-    JsonConfigMutation, collect_regular_files, ensure_project_local_safe_path,
-    ensure_project_local_safe_paths, hook_command, host_home_override,
-    record_host_config_observation_bytes, update_json_config_transactionally,
-    update_toml_config_transactionally,
+    JsonConfigMutation, collect_regular_files, emptied_text_mutation,
+    ensure_project_local_safe_path, ensure_project_local_safe_paths, hook_command,
+    host_home_override, lifecycle_created_container, lifecycle_created_file,
+    note_created_container, record_host_config_observation_bytes, root_relative_path,
+    update_json_config_transactionally, update_toml_config_transactionally,
+    with_host_config_creations,
 };
 #[cfg(test)]
 use host_config_io::{
     TestHostConfigWritePauseController, pause_next_host_config_write_after_validation,
     pause_next_host_config_write_at_publication,
 };
+#[cfg(test)]
+pub(crate) use host_config_io::{recorded_install_then_uninstall, recorded_lifecycle};
 pub(crate) use mcp_registration::doctor_check_prompt_contains_tracedecay;
 pub use mcp_registration::{
-    McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry,
+    McpDoctorLabels, doctor_check_mcp_registration, install_mcp_server_entry,
     mcp_config_has_tracedecay, mcp_registration_entry, mcp_servers_registration_state,
     read_only_tool_names, report_mcp_registration, tool_names, uninstall_mcp_server_entry,
 };
@@ -249,6 +253,15 @@ pub fn export_managed_skills_to_agent_hosts(
 // AgentIntegration trait
 // ---------------------------------------------------------------------------
 
+/// What [`AgentIntegration::require_host`] proved about the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostPresence {
+    /// The host's own CLI resolved and admits its commands: it is here.
+    HostCli,
+    /// TraceDecay configures the host without a host CLI.
+    NoHostCli,
+}
+
 /// A CLI agent that can be configured to use tracedecay via MCP.
 pub trait AgentIntegration {
     /// Human-readable name (e.g. "Claude Code").
@@ -342,20 +355,14 @@ pub trait AgentIntegration {
     /// Verify installation health (replaces agent-specific doctor checks).
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext);
 
-    /// Whether Doctor must report this supported host's absence even when it
-    /// has no configuration directory yet. Most optional hosts stay quiet
-    /// until their own registration exists; hosts with a documented deferred
-    /// or native-only lifecycle opt in so Doctor does not turn their absence
-    /// into an empty success.
-    fn reports_absence_to_doctor(&self) -> bool {
-        false
-    }
-
-    /// Resolve the host's own lifecycle CLI when its lifecycle is driven
-    /// through one, failing with `HostCliUnavailable` when it is not on
-    /// `PATH`. Hosts TraceDecay configures without a host CLI need none.
-    fn require_lifecycle_host_cli(&self) -> Result<()> {
-        Ok(())
+    /// Require the host itself on this machine: the one presence check
+    /// every lifecycle and Doctor apply before touching a host. A host whose
+    /// own CLI is not on `PATH` fails with `HostCliUnavailable`, which
+    /// classifies through `TraceDecayError::host_absence` as an
+    /// informational skip. Hosts TraceDecay configures without a host CLI
+    /// need none, and only their files can show they are here.
+    fn require_host(&self, _home: &Path) -> Result<HostPresence> {
+        Ok(HostPresence::NoHostCli)
     }
 
     /// Evidence that the host application itself is present on this machine
@@ -777,20 +784,12 @@ pub fn inspect_receipt_backed_host_components(
     )
 }
 
-/// The operator step for a tracked host whose lifecycle CLI is not installed,
-/// worded once for the lifecycle summaries and Doctor.
-pub fn tracked_host_cli_missing_action(agent_id: &str) -> String {
-    format!(
-        "install the {agent_id} CLI, or run `tracedecay uninstall --agent {agent_id}` to stop \
-         tracking it"
-    )
-}
-
 // ---------------------------------------------------------------------------
 // DoctorCounters
 // ---------------------------------------------------------------------------
 
-/// Diagnostic counters for doctor checks.
+/// Diagnostic counters for doctor checks, plus every check line in order so
+/// `tracedecay doctor --json` carries exactly what the terminal showed.
 #[derive(Default)]
 pub struct DoctorCounters {
     pub issues: u32,
@@ -798,29 +797,74 @@ pub struct DoctorCounters {
     /// Steps only the operator can take; nothing failed, but the
     /// installation is not converged until they are done.
     pub pending_actions: u32,
+    pub checks: Vec<DoctorCheckV1>,
+}
+
+/// One reported doctor check line.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DoctorCheckV1 {
+    pub level: DoctorCheckLevelV1,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorCheckLevelV1 {
+    Pass,
+    Issue,
+    Warning,
+    PendingOperatorAction,
+    /// A host that is not installed.
+    Skipped,
+    Info,
 }
 
 impl DoctorCounters {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn pass(&self, msg: &str) {
-        eprintln!("  \x1b[32m✔\x1b[0m {msg}");
+    pub fn pass(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::Pass, msg);
     }
     pub fn fail(&mut self, msg: &str) {
-        eprintln!("  \x1b[31m✘\x1b[0m {msg}");
-        self.issues += 1;
+        self.report(DoctorCheckLevelV1::Issue, msg);
     }
     pub fn warn(&mut self, msg: &str) {
-        eprintln!("  \x1b[33m!\x1b[0m {msg}");
-        self.warnings += 1;
+        self.report(DoctorCheckLevelV1::Warning, msg);
     }
     pub fn pending(&mut self, msg: &str) {
-        eprintln!("  \x1b[33m…\x1b[0m {msg}");
-        self.pending_actions += 1;
+        self.report(DoctorCheckLevelV1::PendingOperatorAction, msg);
     }
-    pub fn info(&self, msg: &str) {
-        eprintln!("    {msg}");
+    /// A host that is not installed; counted nowhere.
+    pub fn skipped(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::Skipped, msg);
+    }
+    pub fn info(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::Info, msg);
+    }
+    fn report(&mut self, level: DoctorCheckLevelV1, msg: &str) {
+        let marker = match level {
+            DoctorCheckLevelV1::Pass => "  \x1b[32m✔\x1b[0m ",
+            DoctorCheckLevelV1::Issue => {
+                self.issues += 1;
+                "  \x1b[31m✘\x1b[0m "
+            }
+            DoctorCheckLevelV1::Warning => {
+                self.warnings += 1;
+                "  \x1b[33m!\x1b[0m "
+            }
+            DoctorCheckLevelV1::PendingOperatorAction => {
+                self.pending_actions += 1;
+                "  \x1b[33m…\x1b[0m "
+            }
+            DoctorCheckLevelV1::Skipped => "  - ",
+            DoctorCheckLevelV1::Info => "    ",
+        };
+        eprintln!("{marker}{msg}");
+        self.checks.push(DoctorCheckV1 {
+            level,
+            message: msg.to_owned(),
+        });
     }
 }
 

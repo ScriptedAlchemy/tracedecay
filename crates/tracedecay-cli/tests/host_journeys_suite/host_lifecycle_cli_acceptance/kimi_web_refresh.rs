@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use super::IsolatedCli;
 use super::sweep_outcomes::complete_kimi_plugins_install;
 use crate::isolated_profile::hermetic_path;
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 const PENDING_OPERATOR_ACTION_EXIT: i32 = 75;
 const TOKEN: &str = "fake-kimi-server-token";
@@ -117,15 +118,12 @@ impl FakeKimi {
     /// Put the fake `kimi` first on the isolated `PATH`, with its interpreter
     /// named absolutely so the fake needs nothing else from `PATH`.
     fn install(cli: &IsolatedCli) -> Self {
-        use std::os::unix::fs::PermissionsExt;
-
         let python = std::env::split_paths(&hermetic_path::<&Path>(&[]))
             .map(|dir| dir.join("python3"))
             .find(|candidate| candidate.is_file())
             .expect("python3 in a system dir for the fake Kimi Code server");
         let kimi = cli.bin_dir.join("kimi");
-        fs::write(&kimi, format!("#!{}\n{FAKE_KIMI}", python.display())).unwrap();
-        fs::set_permissions(&kimi, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&kimi, format!("#!{}\n{FAKE_KIMI}", python.display())).unwrap();
         let code_home = cli.home.path().join(".kimi-code");
         fs::create_dir_all(code_home.join("fake-kimi")).unwrap();
         fs::write(code_home.join("server.token"), format!("{TOKEN}\n")).unwrap();
@@ -286,7 +284,13 @@ fn update_plugin_refreshes_the_installed_kimi_plugin_through_kimi_web() {
         doctor.contains("Kimi Code CLI managed plugin matches its staged source"),
         "{doctor}"
     );
-    assert!(!doctor.contains("pending operator action"), "{doctor}");
+    // No daemon listens here, so `daemon_unavailable` is the one step left.
+    assert!(!doctor.contains("open Kimi Code and run"), "{doctor}");
+    assert!(
+        doctor.contains("daemon_unavailable: no TraceDecay daemon is listening")
+            && doctor.contains("1 pending operator action(s), "),
+        "{doctor}"
+    );
 }
 
 #[test]
@@ -394,8 +398,10 @@ fn kimi_web_refresh_falls_back_to_the_operator_step_when_kimi_never_serves() {
     );
 }
 
+/// Without its `kimi` CLI, Kimi Code is not installed: the sweep skips it and
+/// exits 0 rather than waiting on an operator step nothing can reach.
 #[test]
-fn kimi_web_refresh_falls_back_to_the_operator_step_without_a_kimi_cli() {
+fn kimi_web_refresh_skips_kimi_code_without_a_kimi_cli() {
     let cli = IsolatedCli::new();
     let kimi = FakeKimi::install(&cli);
     let _ = cli.run(&["install", "--agent", "kimi"]);
@@ -405,16 +411,16 @@ fn kimi_web_refresh_falls_back_to_the_operator_step_without_a_kimi_cli() {
     let update = cli.run(&["update-plugin"]);
     let update_stderr = stderr(&update);
 
-    assert_eq!(
-        update.status.code(),
-        Some(PENDING_OPERATOR_ACTION_EXIT),
+    assert_eq!(update.status.code(), Some(0), "{update_stderr}");
+    assert!(
+        update_stderr.contains(
+            "  kimi: skipped, not installed (host CLI `kimi` is unavailable for Kimi Code \
+             plugin lifecycle; install it or add it to PATH and retry)\n"
+        ),
         "{update_stderr}"
     );
     assert!(
-        update_stderr.contains(
-            "The automatic refresh through `kimi web` did not apply: the `kimi` CLI is \
-             unavailable"
-        ),
+        !update_stderr.contains("pending operator action"),
         "{update_stderr}"
     );
     assert_eq!(kimi.managed_version(), PREVIOUS_VERSION);

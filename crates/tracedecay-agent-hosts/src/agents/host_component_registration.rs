@@ -150,18 +150,14 @@ impl CatalogHostComponentRegistrationAuthority {
         host: crate::agents::host_bundle::HostKindV1,
         error: tracedecay_domain::errors::TraceDecayError,
     ) -> crate::agents::host_bundle::HostBundleError {
-        if matches!(
-            &error,
-            tracedecay_domain::errors::TraceDecayError::HostCliUnavailable { .. }
-        ) {
-            return crate::agents::host_bundle::HostBundleError::HostCliUnavailable { host };
+        if let Some(absence) = error.host_absence() {
+            return crate::agents::host_bundle::HostBundleError::HostAbsent {
+                host,
+                absence,
+                detail: error.to_string(),
+            };
         }
-        // The transaction error vocabulary is fixed, so surface the
-        // integration's own message here before it is collapsed into the
-        // generic storage failure, otherwise the actionable cause (for
-        // example a refused symlinked project config) is lost.
-        eprintln!("{error}");
-        host_bundle_storage_failure!()
+        crate::agents::host_bundle::HostBundleError::RegistrationFailed(error.to_string())
     }
 
     fn registration_mode(
@@ -1193,18 +1189,22 @@ mod tests {
     #[test]
     fn typed_host_cli_absence_stays_distinct_from_config_failure() {
         let unavailable = CatalogHostComponentRegistrationAuthority::registration_error(
-            HostKindV1::Kiro,
+            HostKindV1::FactoryDroid,
             tracedecay_domain::errors::TraceDecayError::HostCliUnavailable {
-                program: "kiro-cli".to_string(),
-                lifecycle: "kiro MCP registry lifecycle".to_string(),
+                program: "droid".to_string(),
+                lifecycle: "Factory Droid MCP registry lifecycle".to_string(),
             },
         );
         assert_eq!(
             unavailable,
-            HostBundleError::HostCliUnavailable {
-                host: HostKindV1::Kiro,
+            HostBundleError::HostAbsent {
+                host: HostKindV1::FactoryDroid,
+                absence: tracedecay_domain::errors::HostAbsence::NotInstalled,
+                detail: "host CLI `droid` is unavailable for Factory Droid MCP registry \
+                         lifecycle; install it or add it to PATH and retry"
+                    .to_string(),
             },
-            "a proven absent Kiro CLI must not be relabelled as a filesystem failure"
+            "a proven absent host CLI must not be relabelled as a filesystem failure"
         );
 
         let config_failure = CatalogHostComponentRegistrationAuthority::registration_error(
@@ -1213,9 +1213,12 @@ mod tests {
                 message: "malformed Kiro MCP config".to_string(),
             },
         );
-        assert!(
-            matches!(config_failure, HostBundleError::StorageFailure(_)),
-            "a genuine host config failure must retain the existing lifecycle failure mapping"
+        assert_eq!(
+            config_failure,
+            HostBundleError::RegistrationFailed(
+                "config error: malformed Kiro MCP config".to_string()
+            ),
+            "a host config failure must carry the integration's diagnosis, not a filesystem failure"
         );
     }
 

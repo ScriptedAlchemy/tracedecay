@@ -5,21 +5,65 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tracedecay_code_index_retention::code_index_generations::code_index_store_root;
 use tracedecay_maintenance::compaction_receipt::record_live_compaction_outcome;
-use tracedecay_maintenance::generation::run_project_generation_maintenance;
+use tracedecay_maintenance::generation::{
+    run_project_generation_maintenance, run_registered_project_generation_maintenance,
+};
 use tracedecay_maintenance::lease::ProjectStoreMaintenanceLeaseV1;
 use tracedecay_maintenance::loop_run::{MaintenanceWake, run_maintenance_loop};
+use tracedecay_maintenance::store_maintenance::RegisteredProjectStoreV1;
 use tracedecay_maintenance::telemetry::StoreTelemetrySamplingOutcome;
 use tracedecay_maintenance::tick::{
     MaintenanceContinuation, MaintenanceTickOutcome, cursor_after_attempted_units,
     select_store_window,
 };
+use tracedecay_runtime_core::storage::profile_sharded_data_root;
 
 use super::branch_admin::StoreAdministration;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::resident_memory::release_c_library_heap_v1;
 
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
+const REGISTERED_PROJECT_PAGE_LIMIT: usize = 64;
+
+/// Every registered project whose profile shard exists on disk, keyed for the
+/// tick's work list.
+///
+/// ponytail: reads the whole project registry each full or continuation tick.
+/// The round-robin store window bounds the retention work, not this read; page
+/// the listing behind the store cursor if registries reach thousands of rows.
+async fn registered_project_stores(
+    profile_root: &Path,
+    profile_database: &tracedecay_global_db::RegisteredGlobalDb,
+) -> tracedecay_domain::errors::Result<Vec<(String, RegisteredProjectStoreV1)>> {
+    let mut stores = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = profile_database
+            .list_code_projects_after(after.as_deref(), REGISTERED_PROJECT_PAGE_LIMIT)
+            .await?;
+        let exhausted = page.len() < REGISTERED_PROJECT_PAGE_LIMIT;
+        after = page.last().map(|project| project.project_id.clone());
+        for project in page {
+            let data_root = profile_sharded_data_root(profile_root, &project.project_id);
+            if !data_root.is_dir() {
+                continue;
+            }
+            stores.push((
+                project.project_id,
+                RegisteredProjectStoreV1 {
+                    data_root,
+                    canonical_root: PathBuf::from(project.canonical_root),
+                },
+            ));
+        }
+        if exhausted {
+            return Ok(stores);
+        }
+    }
+}
 
 async fn join_abandoned_maintenance_task(task: Option<JoinHandle<()>>, owner: &'static str) {
     let Some(task) = task else {
@@ -311,13 +355,17 @@ impl Default for MaintenanceCoordinator {
 enum MaintenanceStoreWork {
     Session(tracedecay_global_db::RegisteredGlobalDbLeaseV1),
     Graph(Arc<tracedecay_project::project::TraceDecay>),
+    /// The code-index scopes of a registered project that no mounted graph
+    /// owns; its database is never opened by this unit.
+    Registered(RegisteredProjectStoreV1),
 }
 
 impl MaintenanceStoreWork {
-    fn database_path(&self) -> &Path {
+    fn database_path(&self) -> Option<&Path> {
         match self {
-            Self::Session(database) => database.db_path(),
-            Self::Graph(graph) => graph.db().database_path(),
+            Self::Session(database) => Some(database.db_path()),
+            Self::Graph(graph) => Some(graph.db().database_path()),
+            Self::Registered(_) => None,
         }
     }
 }
@@ -470,7 +518,9 @@ impl MaintenanceCoordinator {
     /// Sample measured RSS every [`RESIDENT_MEMORY_SAMPLE_INTERVAL_V1`] until
     /// cancelled. Publishing a sample runs the pressure reclaimers when it
     /// reaches the high watermark, so this loop is what turns a climb during
-    /// a cold index into released memory instead of refused admissions.
+    /// a cold index into released memory instead of refused admissions. Each
+    /// sample first returns freed C-library heap, which no owner is charged
+    /// for and which no other release reaches between graph publications.
     #[hotpath::skip]
     async fn run_resident_memory_sampler(&self) {
         let log = Arc::clone(&self.resident_memory_log);
@@ -478,6 +528,7 @@ impl MaintenanceCoordinator {
             &self.cancellation,
             RESIDENT_MEMORY_SAMPLE_INTERVAL_V1,
             Arc::new(move || {
+                let _ = release_c_library_heap_v1();
                 record_process_resident_memory_gauge(&log);
                 sweep_resident_owners();
             }),
@@ -584,6 +635,28 @@ impl MaintenanceCoordinator {
             Vec::new()
         };
         let project_graphs = administration.mounted_project_graphs().await;
+        let (registered_projects, registry_listed) =
+            match registered_project_stores(profile_root, profile_database).await {
+                Ok(stores) => (stores, true),
+                Err(error) => {
+                    log_daemon_event(
+                        "retention_degraded",
+                        &[
+                            ("pass", "code_generations".to_owned()),
+                            ("failure", "project_registry_unavailable".to_owned()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    (Vec::new(), false)
+                }
+            };
+        let mounted_store_roots = project_graphs
+            .iter()
+            .map(|graph| {
+                let layout = graph.store_layout();
+                code_index_store_root(&layout.data_root, &layout.project_root)
+            })
+            .collect::<BTreeSet<_>>();
         let mut active_telemetry_paths = BTreeSet::from([profile_database.db_path().to_path_buf()]);
         active_telemetry_paths.extend(
             session_databases
@@ -600,8 +673,9 @@ impl MaintenanceCoordinator {
         // loop independently. Keys are unique on-disk identities (session db
         // path; project root + serving branch), prefixed by kind so the order
         // is deterministic regardless of the mounted maps' iteration order.
-        let mut work: Vec<(String, MaintenanceStoreWork)> =
-            Vec::with_capacity(session_databases.len() + project_graphs.len());
+        let mut work: Vec<(String, MaintenanceStoreWork)> = Vec::with_capacity(
+            session_databases.len() + project_graphs.len() + registered_projects.len(),
+        );
         for database in &session_databases {
             work.push((
                 format!("s:{}", database.db_path().display()),
@@ -618,6 +692,12 @@ impl MaintenanceCoordinator {
                 MaintenanceStoreWork::Graph(Arc::clone(graph)),
             ));
         }
+        for (project_id, store) in registered_projects {
+            work.push((
+                format!("r:{project_id}"),
+                MaintenanceStoreWork::Registered(store),
+            ));
+        }
         work.sort_by(|left, right| left.0.cmp(&right.0));
         let keys = work.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
         let after = self.store_cursor.lock().await.clone();
@@ -628,7 +708,7 @@ impl MaintenanceCoordinator {
         sampled_telemetry_paths.extend(
             window
                 .iter()
-                .map(|index| work[*index].1.database_path().to_path_buf()),
+                .filter_map(|index| work[*index].1.database_path().map(Path::to_path_buf)),
         );
         let maintenance_observations = administration.store_telemetry_sampling();
         let active_maintenance_projects = project_graphs
@@ -678,6 +758,17 @@ impl MaintenanceCoordinator {
                             )
                             .await
                         }
+                        MaintenanceStoreWork::Registered(store) => {
+                            run_registered_project_generation_maintenance(
+                                store,
+                                &mounted_store_roots,
+                                code_index_schedulers,
+                                profile_database,
+                                &maintenance_observations,
+                                &self.cancellation,
+                            )
+                            .await
+                        }
                     }
                 })
                 .await;
@@ -696,6 +787,9 @@ impl MaintenanceCoordinator {
         }
         *self.store_cursor.lock().await =
             cursor_after_attempted_units(&keys, &window, attempted, after.as_deref());
+        if !registry_listed {
+            outcome = MaintenanceTickOutcome::Retry;
+        }
 
         // Profile-wide maintenance is intentionally excluded from a bounded
         // continuation: only the owning phase is eligible for the short
@@ -842,16 +936,16 @@ impl MaintenanceCoordinator {
 }
 
 /// Samples this process's resident set, republishes it as Hotpath gauges, and
-/// feeds its unreclaimable bytes to the resident-memory admission authority.
+/// feeds its admission bytes to the resident-memory admission authority.
 ///
 /// A 20G RSS overrun past the admission limit was visible only to `ps` during
 /// a 2026-08 incident; the dedicated sampler closes that gap on a short
 /// cadence. Publishing the same sample to
 /// [`process_resident_memory_pressure_v1`](tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1)
 /// closes the loop: admission stops trusting its reservation model once the
-/// measurement says the process is over budget. The post-reclaim observation
-/// returned by the pressure cell is the authority for the unreclaimable gauge
-/// and logs.
+/// measurement says the process is over budget. The unreclaimable gauge stays
+/// the anonymous set; admission and the over-budget log use the pressure
+/// state, which also counts cgroup committed bytes.
 #[cfg(target_os = "linux")]
 fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {
     use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1;
@@ -861,9 +955,9 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
         return;
     };
     hotpath::gauge!("daemon.process.resident_bytes").set(sample.resident_bytes);
-    if let Some(observed_bytes) = state.observed_bytes() {
-        hotpath::gauge!("daemon.process.unreclaimable_resident_bytes").set(observed_bytes);
-    }
+    // The gauge keeps its name: admission may publish the larger cgroup
+    // committed figure, which is not this process's unreclaimable set.
+    hotpath::gauge!("daemon.process.unreclaimable_resident_bytes").set(sample.unreclaimable_bytes);
     let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
     let transition = {
         let mut log = log
@@ -1646,6 +1740,88 @@ mod tests {
             "cancellation must not wait for a blocked pressure reclaimer"
         );
         sampler_result.expect("sampler joins after cancellation");
+    }
+
+    /// A registered project nothing has mounted since the daemon started is
+    /// collected by the first full tick and converges on its continuation,
+    /// instead of waiting for a client to mount it.
+    #[tokio::test]
+    async fn a_full_tick_collects_an_unmounted_registered_project() {
+        let temp = tempfile::TempDir::new().expect("temp root");
+        let profile_root = temp.path().join("profile");
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(&checkout).expect("checkout");
+        let checkout = checkout.canonicalize().expect("canonical checkout");
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+            &profile_root,
+        )
+        .await
+        .expect("profile database");
+        let profile_database = runtime.profile_database_arc();
+        let project = profile_database
+            .upsert_code_project("proj_unmounted", &checkout, None, None, None)
+            .await
+            .expect("register project");
+        let store_root =
+            tracedecay_code_index_retention::code_index_generations::code_index_store_root(
+                &tracedecay_runtime_core::storage::profile_sharded_data_root(
+                    &profile_root,
+                    &project.project_id,
+                ),
+                &checkout,
+            );
+        tracedecay_code_index_retention::code_index_generations::fixture::write_generation_store_fixture(
+            &store_root,
+            6,
+        );
+        let generation_files = || {
+            std::fs::read_dir(store_root.join("code-generations-v1"))
+                .expect("list generations")
+                .count()
+        };
+        let coordinator = MaintenanceCoordinator {
+            background_cpu: Some(Arc::new(
+                tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1::new(
+                    std::num::NonZeroUsize::MIN,
+                ),
+            )),
+            ..MaintenanceCoordinator::default()
+        };
+        let administration = super::StoreAdministration::default();
+        let schedulers =
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
+                1,
+            );
+        let retention = tracedecay_configuration::RetentionConfig::default();
+        let branch_gc = super::BranchStoreGcCadenceV1 { branch_gc_days: 30 };
+        assert_eq!(generation_files(), 6);
+
+        coordinator
+            .run_tick(
+                &profile_root,
+                &profile_database,
+                &administration,
+                &schedulers,
+                &retention,
+                branch_gc,
+                None,
+            )
+            .await;
+        assert_eq!(generation_files(), 1, "the full tick collects the backlog");
+
+        let continuation = coordinator
+            .run_tick(
+                &profile_root,
+                &profile_database,
+                &administration,
+                &schedulers,
+                &retention,
+                branch_gc,
+                Some(MaintenanceContinuation::CodeGenerationRetention),
+            )
+            .await;
+        assert_eq!(continuation, MaintenanceTickOutcome::Complete);
+        assert_eq!(generation_files(), 1);
     }
 
     #[tokio::test]

@@ -668,7 +668,6 @@ pub(crate) fn install_pass_covers_tracked_agents(
 async fn reinstall_tracked_agents_under_lease(
     profile: &ProfileRoot,
     agent_ids: &[String],
-    tracked: &[String],
     home: &Path,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> tracedecay_domain::errors::Result<HostLifecycleSummary> {
@@ -680,7 +679,6 @@ async fn reinstall_tracked_agents_under_lease(
     crate::agent_cmd::reinstall_agent_integrations_under_lease(
         profile,
         agent_ids,
-        tracked,
         home,
         &bin,
         lifecycle_lease,
@@ -753,14 +751,8 @@ async fn run_post_update_mutations(
     } else {
         eprintln!("Refreshing agent integrations: {}", agent_ids.join(", "));
     }
-    let summary = reinstall_tracked_agents_under_lease(
-        profile,
-        &agent_ids,
-        &config.installed_agents,
-        &home,
-        lifecycle_lease,
-    )
-    .await;
+    let summary =
+        reinstall_tracked_agents_under_lease(profile, &agent_ids, &home, lifecycle_lease).await;
     let summary = match summary {
         Ok(summary) => summary,
         Err(error) => {
@@ -989,8 +981,23 @@ mod tests {
         #[cfg(windows)]
         assert!(reacquired.is_ok());
         #[cfg(not(windows))]
-        assert!(reacquired.is_err());
+        {
+            let Err(error) = reacquired else {
+                panic!("the post-update lease stays held across the handoff");
+            };
+            assert_eq!(
+                error.to_string(),
+                "config error: cannot start post-update: update is already active; retry after it \
+                 finishes"
+            );
+        }
         drop(held);
+        #[cfg(not(windows))]
+        tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+            profile.path(),
+            "post-update",
+        )
+        .expect("dropping the handed-off lease releases the profile");
     }
 
     use tracedecay_session_memory::user_config::UserConfig;
@@ -1029,7 +1036,6 @@ mod tests {
             )?;
         let summary = crate::agent_cmd::reinstall_agent_integrations_under_lease(
             profile,
-            &["unknown-agent".to_string()],
             &["unknown-agent".to_string()],
             home.path(),
             "tracedecay",

@@ -1164,11 +1164,14 @@ impl RustExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
-                target: id,
+                target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
             });
         }
+        // A `const`/`static` initializer (`LazyLock::new(|| build())`) is
+        // evaluated as the item; the item owns its calls.
+        Self::extract_call_sites(state, node, &id, &ReceiverTypes::default());
     }
 
     /// Extract a static item node.
@@ -1222,11 +1225,12 @@ impl RustExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
-                target: id,
+                target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
             });
         }
+        Self::extract_call_sites(state, node, &id, &ReceiverTypes::default());
     }
 
     /// Extract a type alias node.

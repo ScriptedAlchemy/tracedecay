@@ -341,15 +341,22 @@ fn test_glsl_complexity_metrics() {
         .extract_artifact("sample.glsl", &source)
         .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let calc = result
+    // `calculatePointLight` has one `if`, `main` one `for`; the rest are
+    // straight-line bodies.
+    let complexity: Vec<_> = result
         .nodes
         .iter()
-        .find(|n| n.name == "calculatePointLight")
-        .unwrap();
-    assert!(
-        calc.branches > 0,
-        "calculatePointLight should have branch complexity"
+        .filter(|n| n.kind == NodeKind::Function)
+        .map(|n| (n.name.as_str(), n.branches, n.loops))
+        .collect();
+    assert_eq!(
+        complexity,
+        [
+            ("fresnelSchlick", 0, 0),
+            ("distributionGGX", 0, 0),
+            ("geometrySchlickGGX", 0, 0),
+            ("calculatePointLight", 1, 0),
+            ("main", 0, 1),
+        ]
     );
-    let main_fn = result.nodes.iter().find(|n| n.name == "main").unwrap();
-    assert!(main_fn.loops > 0, "main should have loop complexity");
 }

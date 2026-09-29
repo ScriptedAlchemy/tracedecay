@@ -6,7 +6,7 @@ import type {
   WorkGraphVersionEntryV1,
   WorkRuntimeAttemptProjectionV1,
   WorkRuntimeProjectionV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkResult } from './workApi.ts';
 import type { WorkChannel } from './workChannel.ts';

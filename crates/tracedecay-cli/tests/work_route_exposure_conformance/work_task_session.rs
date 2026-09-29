@@ -54,6 +54,8 @@ use super::{
     DashboardProcess, ProductionDaemon, assert_canonical_envelope, post_dashboard_envelope,
     post_envelope,
 };
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 /// The task the parent journey already created through both mounts.
 const TASK_ID: &str = "task.work-surface-conformance";
@@ -631,13 +633,11 @@ fn assert_both_mounts(
             &format!("{phase} {mode} expanded"),
         );
 
-        // 3. A continuation carrying an epoch no participant manifest ever
-        //    produced. The authority gate runs before the epoch check, so an
-        //    unseated lane refuses it as `unavailable` while a seated one
-        //    reaches the comparison and revokes it as the rank-final `stale`.
-        //    Both verdicts are pinned, because the failure this guards is a
-        //    third one: hydrating a foreign epoch as though it matched.
-        let revoked = evidence_request(
+        // 3. A continuation Work never minted: its binding and epoch are
+        //    forged. It is refused as the one typed cursor refusal on every
+        //    lane, seated or not; the failure this guards is hydrating a
+        //    foreign continuation as though Work had issued it.
+        let forged = evidence_request(
             selection.clone(),
             verified_version,
             temporal.clone(),
@@ -653,30 +653,23 @@ fn assert_both_mounts(
                         "source_key": Value::Null,
                     },
                     "participant_epoch": format!("sha256:{}", "e".repeat(64)),
+                    "binding": "bc1.7b7d",
                     "temporal_cursor": Value::Null,
                     "ranking_cursor": Value::Null,
                 },
             })),
         );
-        let label = format!("{phase} {mode} foreign epoch");
-        let answer = both_mounts_answer(agent, fixture, dashboard, &revoked, &label);
-        match answer["outcome"]["outcome"].as_str() {
-            Some("evidence") => assert_task_session_relation_is_typed(
-                &answer["outcome"]["value"]["payload"],
-                identity,
-                &label,
-            ),
-            _ => {
-                assert_eq!(
-                    answer["problem"]["kind"], "stale",
-                    "{label} must revoke a foreign participant epoch as stale: {answer}"
-                );
-                assert_eq!(
-                    answer["problem"]["retryable"], true,
-                    "{label} must tell the dashboard to restart its read: {answer}"
-                );
-            }
-        }
+        let label = format!("{phase} {mode} forged continuation");
+        let answer = both_mounts_answer(agent, fixture, dashboard, &forged, &label);
+        assert_eq!(
+            answer["problem"]["kind"], "invalid_request",
+            "{label} must refuse a continuation Work never minted: {answer}"
+        );
+        assert_eq!(
+            answer["problem"]["code"], "cursor.invalid",
+            "{label}: {answer}"
+        );
+        assert_eq!(answer["problem"]["retryable"], false, "{label}: {answer}");
     }
 }
 
@@ -1133,15 +1126,8 @@ fn write_provider_transcript(home: &Path, project: &Path) {
 
 #[cfg(unix)]
 fn pinned_executable(directory: &Path, name: &str, body: &str) -> (PathBuf, ManifestDigest) {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = directory.join(name);
-    std::fs::write(&path, body).expect("fixture executable");
-    let mut permissions = std::fs::metadata(&path)
-        .expect("executable metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&path, permissions).expect("executable mode");
+    write_executable_script(&path, body).expect("fixture executable");
     let digest = ManifestDigest::new(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(body.as_bytes()))

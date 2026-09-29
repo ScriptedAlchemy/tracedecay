@@ -96,16 +96,19 @@ async fn user_scope_excludes_codex_turns_after_switching_to_registered_project()
         .await
         .unwrap();
 
-    assert!(stats.messages_upserted > 0);
+    assert_eq!(stats.messages_upserted, 2);
+    let search = |query: &'static str| {
+        runtime.search_session_messages_for_test(
+            HostAdmissionScope::Profile,
+            "codex",
+            None,
+            query,
+            10,
+        )
+    };
+    assert!(!search("billing pipeline").await.unwrap().is_empty());
     assert!(
-        runtime
-            .search_session_messages_for_test(
-                HostAdmissionScope::Profile,
-                "codex",
-                None,
-                "registered project secret",
-                10,
-            )
+        search("registered project secret")
             .await
             .unwrap()
             .is_empty()

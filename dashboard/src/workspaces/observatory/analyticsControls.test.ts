@@ -15,6 +15,12 @@ describe('analyticsModeReading', () => {
 
   it('does not coerce an incomplete retained transition into a current mode', () => {
     expect(analyticsModeReading(mode('aggregate_share', 'partial', 'source_partial')).mode).toBeNull();
+    expect(analyticsModeReading(mode('aggregate_share', 'known', null))).toEqual({
+      mode: 'aggregate_share',
+      label: 'Aggregate share',
+      state: 'ready',
+      reason: null,
+    });
   });
 });
 

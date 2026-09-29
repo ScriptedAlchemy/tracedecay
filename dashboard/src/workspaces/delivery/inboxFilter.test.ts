@@ -37,9 +37,13 @@ describe('filterInbox', () => {
         pull_request: { ...row.pull_request, identity: null },
       })),
     };
-    expect(
-      filterInbox(withoutIdentity, readDeliveryLocation(new URLSearchParams('status=open'))),
-    ).toEqual([]);
+    const open = readDeliveryLocation(new URLSearchParams('status=open'));
+    expect(filterInbox(withoutIdentity, open)).toEqual([]);
+    expect(filterInbox(INBOX, open).map((row) => row.id)).toEqual([
+      'project.alpha:github:42',
+      'project.alpha:github:43',
+      'project.beta:github:8',
+    ]);
   });
 });
 

@@ -2471,14 +2471,27 @@ mod tests {
                     \"completed_at\":\"1970-01-01T00:00:02Z\"}";
         let (_temp, path) = write_ledger(&[line.to_owned()]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            "automation run ledger persisted shape requires reset: a row predates schema v2 (the released v1 wrote RFC3339 timestamps)"
+        );
     }
 
     #[test]
     fn rejects_malformed_or_ambiguous_rows_without_unrelated_size_poisoning() {
         let malformed = vec![ledger_line("target", "succeeded", 1), "not json".to_owned()];
         let (_temp, malformed_path) = write_ledger(&malformed);
-        assert!(read_exact_run_record_bounded(&malformed_path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&malformed_path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 240: automation ledger row must be a JSON object",
+                malformed_path.display()
+            )
+        );
 
         let oversized = vec![
             ledger_line("target", "succeeded", 1),
@@ -2504,18 +2517,42 @@ mod tests {
             ledger_line("target", "failed", 2),
         ];
         let (_temp, ambiguous_path) = write_ledger(&duplicate_terminals);
-        assert!(read_exact_run_record_bounded(&ambiguous_path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&ambiguous_path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains an invalid lifecycle for run 'target'",
+                ambiguous_path.display()
+            )
+        );
     }
 
     #[test]
     fn identity_tokens_fail_at_their_bounds_but_unknown_keys_stream() {
         let huge_run = ledger_line(&"x".repeat(PROJECTED_TEXT_MAX_BYTES + 1), "running", 1);
         let (_temp, huge_run_path) = write_ledger(&[huge_run]);
-        assert!(read_exact_run_record_bounded(&huge_run_path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&huge_run_path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 543: automation run identity exceeds its 512-byte bound",
+                huge_run_path.display()
+            )
+        );
 
         let huge_status = ledger_line("other", &"x".repeat(64 * 1024), 1);
         let (_temp, huge_status_path) = write_ledger(&[huge_status]);
-        assert!(read_exact_run_record_bounded(&huge_status_path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&huge_status_path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 155: automation run status exceeds its 32-byte bound",
+                huge_status_path.display()
+            )
+        );
 
         let huge_key = ledger_line("target", "running", 1).replace(
             "\"completed_at\":\"1\"",
@@ -2571,7 +2608,15 @@ mod tests {
         );
         let (_temp, path) = write_ledger(&[malformed]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 2097357: invalid JSON number",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -2592,36 +2637,61 @@ mod tests {
             .replace("\"accepted_count\":0", "\"accepted_count\":false");
         let (_temp, path) = write_ledger(&[ledger_line("target", "succeeded", 2), unrelated]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 393: invalid JSON number",
+                path.display()
+            )
+        );
     }
 
     #[test]
     fn exact_lookup_rejects_semantically_invalid_unrelated_rows() {
         let unrelated = ledger_line("unrelated", "succeeded", 1);
         let invalid_rows = [
-            unrelated
-                .clone()
-                .replace("\"schema_version\":2", "\"schema_version\":99"),
-            unrelated
-                .clone()
-                .replace("\"schema_version\":2", "\"schema_version\":1")
-                .replace(
-                    "\"started_at\":\"1\"",
-                    "\"started_at\":\"1970-01-01T00:00:01Z\"",
-                ),
-            unrelated.clone().replace(
-                "\"completed_at\":\"1\"",
-                "\"completed_at\":\"9223372036854775807\"",
+            (
+                unrelated
+                    .clone()
+                    .replace("\"schema_version\":2", "\"schema_version\":99"),
+                "config error: automation run ledger schema version 99 is unsupported",
             ),
-            unrelated.replace(
-                "\"completed_at_micros\":1000000",
-                "\"completed_at_micros\":2000000",
+            (
+                unrelated
+                    .clone()
+                    .replace("\"schema_version\":2", "\"schema_version\":1")
+                    .replace(
+                        "\"started_at\":\"1\"",
+                        "\"started_at\":\"1970-01-01T00:00:01Z\"",
+                    ),
+                "automation run ledger persisted shape requires reset: a row predates schema v2 (the released v1 wrote RFC3339 timestamps)",
+            ),
+            (
+                unrelated.clone().replace(
+                    "\"completed_at\":\"1\"",
+                    "\"completed_at\":\"9223372036854775807\"",
+                ),
+                "config error: automation completion timestamp overflows signed microseconds",
+            ),
+            (
+                unrelated.replace(
+                    "\"completed_at_micros\":1000000",
+                    "\"completed_at_micros\":2000000",
+                ),
+                "config error: automation completion timestamp seconds and microseconds disagree",
             ),
         ];
 
-        for invalid in invalid_rows {
+        for (invalid, expected) in invalid_rows {
             let (_temp, path) = write_ledger(&[ledger_line("target", "succeeded", 2), invalid]);
-            assert!(read_exact_run_record_bounded(&path, "target").is_err());
+            assert_eq!(
+                read_exact_run_record_bounded(&path, "target")
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
         }
     }
 
@@ -2635,7 +2705,13 @@ mod tests {
             .expect("ledger");
         let selected = std::collections::HashSet::from(["selected".to_owned()]);
 
-        assert!(read_committed_run_lifecycles(&file, &path, &selected).is_err());
+        assert_eq!(
+            read_committed_run_lifecycles(&file, &path, &selected)
+                .err()
+                .expect("rejected")
+                .to_string(),
+            "config error: automation ledger row started_at predates the UNIX epoch"
+        );
         let lenient = read_lenient_run_lifecycles(&file, &path, &selected)
             .expect("lenient readers skip the unselected malformed row");
         assert_eq!(lenient["selected"].newest.run_id, "selected");
@@ -2648,7 +2724,15 @@ mod tests {
             .replace("\"task\":\"memory_curator\"", "\"task\":\"skill_writer\"");
         let (_temp, path) = write_ledger(&[queued, terminal]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' mutates immutable identity for run 'target'",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -2658,7 +2742,15 @@ mod tests {
         let conflicting_queued = ledger_line("target", "queued", 3);
         let (_temp, path) = write_ledger(&[queued, running, conflicting_queued]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' repeats a conflicting lifecycle state for run 'target'",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -2667,7 +2759,15 @@ mod tests {
         let running = ledger_line("target", "running", 100);
         let (_temp, path) = write_ledger(&[queued, running]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' regresses completion time for run 'target'",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -2729,8 +2829,26 @@ mod tests {
         std::fs::write(&path, &row).expect("ledger");
         let file = std::fs::File::open(&path).expect("ledger");
 
-        assert!(ForwardJsonlScanner::new(&file, &path).is_err());
-        assert!(ReverseJsonlScanner::new(&file, &path).is_err());
+        assert_eq!(
+            ForwardJsonlScanner::new(&file, &path)
+                .err()
+                .expect("rejected")
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' has an incomplete durable tail",
+                path.display()
+            )
+        );
+        assert_eq!(
+            ReverseJsonlScanner::new(&file, &path)
+                .err()
+                .expect("rejected")
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' has an incomplete durable tail",
+                path.display()
+            )
+        );
         assert!(
             scan_jsonl_row(&file, &path, 0..row.len() as u64)
                 .expect("raw staged payload scan")

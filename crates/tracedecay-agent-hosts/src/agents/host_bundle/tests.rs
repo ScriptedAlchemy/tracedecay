@@ -1557,6 +1557,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
             ownership_marker: expected_ownership_marker(HostKindV1::Hermes, HostComponentV1::Core),
         }],
         created_directories: Vec::new(),
+        created_config: Some(Vec::new()),
     };
     let foreign_receipt_path = lifecycle
         .path()
@@ -1664,6 +1665,7 @@ fn write_component_receipt(
             })
             .collect(),
         created_directories: Vec::new(),
+        created_config: Some(Vec::new()),
     };
     for (relative_path, bytes) in artifacts {
         let Some(bytes) = bytes else {

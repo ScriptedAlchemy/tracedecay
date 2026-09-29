@@ -247,16 +247,21 @@ thread_local! {
 
 impl CodeIndexWorkerRuntimeV1 {
     /// Build a runtime for one owner without touching the process plan.
+    ///
+    /// The width comes from these inputs alone: neither the host's core count
+    /// nor the operator environment override reaches an owner built here, so
+    /// in-process owners that coexist (test schedulers) never size from the
+    /// machine they happen to run on.
     pub fn build(
         configured: CodeIndexWorkerSelectionV1,
+        available_logical_cpus: usize,
         available_memory_bytes: u64,
     ) -> Result<Self, CodeIndexWorkerPlanInstallErrorV1> {
-        let environment_override = environment_override_value()?;
         let plan = worker_plan_from(
             configured,
-            detected_cores(),
+            available_logical_cpus,
             available_memory_bytes,
-            environment_override.as_deref(),
+            None,
         )?;
         Self::from_plan(plan)
     }
@@ -768,11 +773,13 @@ mod tests {
         let available = 64 * 1024 * 1024 * 1024;
         let one = CodeIndexWorkerRuntimeV1::build(
             CodeIndexWorkerSelectionV1::Exact { workers: 1 },
+            2,
             available,
         )
         .expect("one-worker owner");
         let two = CodeIndexWorkerRuntimeV1::build(
             CodeIndexWorkerSelectionV1::Exact { workers: 2 },
+            2,
             available,
         )
         .expect("two-worker owner");
@@ -792,6 +799,20 @@ mod tests {
                 .map(|worker| worker.join().expect("owner thread"))
         });
         assert_eq!(observed, [(1, (1, 1)), (2, (2, 2))]);
+    }
+
+    #[test]
+    fn automatic_owner_width_follows_its_constructor_not_the_host() {
+        let owner = CodeIndexWorkerRuntimeV1::build(
+            CodeIndexWorkerSelectionV1::Automatic {},
+            2,
+            64 * 1024 * 1024 * 1024,
+        )
+        .expect("automatic owner");
+        let _entered = owner.enter();
+        let pooled =
+            install(|| (rayon::current_num_threads(), indexing_workers())).expect("owner pool");
+        assert_eq!((indexing_workers(), pooled), (2, (2, 2)));
     }
 
     #[test]

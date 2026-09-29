@@ -1670,7 +1670,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(
+        assert_eq!(
             FeedbackCycleResultV1::new(
                 &request,
                 FeedbackCycleTerminationV1::Clean,
@@ -1684,7 +1684,9 @@ mod tests {
                 0,
                 0,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "clean feedback cycle result is not canonical"
         );
     }
 }

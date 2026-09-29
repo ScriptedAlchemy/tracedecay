@@ -5,7 +5,12 @@
 //! genuine conflicts, and renders the client-visible refusal.
 
 use super::*;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::test_support::hold_after_project_sessions_for_test;
 
+/// Each store it mounts is one transactionally safe unit that cannot observe
+/// `cancellation` from inside; the token is checked between them so a
+/// draining daemon waits for at most the unit in flight, not the whole open.
 #[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
 #[cfg_attr(
     not(feature = "hotpath"),
@@ -18,6 +23,7 @@ pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
+    cancellation: &CancellationToken,
 ) -> Result<tracedecay_project::project::TraceDecay> {
     let open_options = crate::daemon::handshake_open_options(handshake);
     let registry_database = store_administration.registered_profile_database().await?;
@@ -36,18 +42,21 @@ pub(super) async fn open_project_for_handshake(
         // explicitly asked to initialize (first-touch `tracedecay init`),
         // mint a fresh path-derived identity and let the missing-index
         // fallback below bootstrap it.
-        Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
-            Box::pin(
-                tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-                    project_path,
-                    &open_options,
-                    registry_database.as_ref(),
-                    &handshake.moved_store_adoption,
-                ),
+        Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => {
+            refuse_enrollment_from_another_build(project_path, handshake)?;
+            (
+                Box::pin(
+                    tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+                        project_path,
+                        &open_options,
+                        registry_database.as_ref(),
+                        &handshake.moved_store_adoption,
+                    ),
+                )
+                .await?,
+                true,
             )
-            .await?,
-            true,
-        ),
+        }
         Err(err) if is_unregistered_identity_error(&err) => {
             return Err(TraceDecayError::Config {
                 message: format!(
@@ -67,6 +76,7 @@ pub(super) async fn open_project_for_handshake(
                 message: "registered project open requires an authoritative project identity"
                     .to_owned(),
             })?;
+    project_open_cancellation_checkpoint(cancellation)?;
     // First-touch enrollment: persist the minted identity in the `.git/`
     // repository identity marker so a subsequent open resolves the same
     // identity before the registry row lands. A non-git root persists
@@ -83,6 +93,11 @@ pub(super) async fn open_project_for_handshake(
         store_administration.registered_project_session_database(project_path, &store_layout),
     )
     .await?;
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        Box::pin(hold_after_project_sessions_for_test()).await?;
+    }
+    project_open_cancellation_checkpoint(cancellation)?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
     // The retired relational graph health/index lane is never spent on the
     // admission path. Opening establishes the exact registered configuration
@@ -140,6 +155,32 @@ pub(super) async fn open_project_for_handshake(
         }
         Err(open_err) => Err(open_err),
     }
+}
+
+/// First-touch enrollment writes this profile's registry before any request
+/// is served. A client from another build, such as a checkout build that
+/// resolved the installed profile, is not this installation's client: it is
+/// refused before it enrolls anything.
+fn refuse_enrollment_from_another_build(
+    project_path: &Path,
+    handshake: &DaemonHandshake,
+) -> Result<()> {
+    let daemon_version = super::core_handshake::binary_version()?;
+    let Some(client_version) =
+        tracedecay_daemon_protocol::client_version_skew(&handshake.client_version, daemon_version)
+    else {
+        return Ok(());
+    };
+    Err(TraceDecayError::project_route(
+        tracedecay_daemon_protocol::client::DAEMON_PROTOCOL_REVISION_SKEW,
+        false,
+        format!(
+            "daemon (version {daemon_version}) refuses to enroll '{}' for client version \
+             {client_version}; {}",
+            project_path.display(),
+            tracedecay_daemon_protocol::version_skew_action(daemon_version, &client_version)
+        ),
+    ))
 }
 
 /// Whether `err` is the specific fail-closed error raised when identity

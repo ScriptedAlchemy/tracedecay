@@ -12,7 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Tree};
 
 use crate::types::{
-    Edge, EdgeKind, Node, NodeKind, UnresolvedRef, generate_node_id, generate_node_id_at,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id, generate_node_id_at,
 };
 
 /// Seconds since the Unix epoch, stamped on every emitted node as `updated_at`.
@@ -154,6 +155,58 @@ fn begins_line(source: &[u8], node: TsNode<'_>) -> bool {
     source[line_start..start_byte]
         .iter()
         .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
+}
+
+/// The owner of one module-scope statement's calls, and its `Contains` edge
+/// from the file. The statement runs when the module loads, inside no named
+/// symbol, so it becomes a `<module>` init block the way a Java static
+/// initializer owns its block. Callers add it only when the statement has
+/// calls, leaving call-free statements to the file's unowned chunks.
+pub(crate) fn module_scope_init_block(
+    file_path: &str,
+    source: &[u8],
+    file_node_id: &str,
+    statement: TsNode<'_>,
+    updated_at: u64,
+) -> (Node, Edge) {
+    const NAME: &str = "<module>";
+    let start = statement.start_position();
+    let end = statement.end_position();
+    let id = local_node_id(file_path, source, &NodeKind::InitBlock, NAME, statement);
+    let text = node_text(source, statement);
+    let node = Node {
+        id: id.clone(),
+        kind: NodeKind::InitBlock,
+        name: NAME.to_owned(),
+        qualified_name: format!("{file_path}::{NAME}"),
+        file_path: file_path.to_owned(),
+        start_line: start.row as u32,
+        attrs_start_line: start.row as u32,
+        end_line: end.row as u32,
+        start_column: start.column as u32,
+        end_column: end.column as u32,
+        signature: text.lines().next().map(|line| line.trim().to_owned()),
+        docstring: None,
+        visibility: Visibility::Private,
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
+        updated_at,
+        parent_id: None,
+    };
+    let edge = Edge {
+        source: file_node_id.to_owned(),
+        target: id,
+        kind: EdgeKind::Contains,
+        line: Some(start.row as u32),
+    };
+    (node, edge)
 }
 
 /// Strip comment markers from a single C-style comment text: `//` and `///`

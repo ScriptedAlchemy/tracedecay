@@ -4,7 +4,7 @@ use super::super::dependency_hints;
 use super::affected::collect_verified_affected_test_files;
 use super::pr_context_cursor::{
     PrContextCursorBinding, PrContextCursorComparison, decode_pr_context_cursor,
-    encode_pr_context_cursor, pr_context_cursor_authority,
+    encode_pr_context_cursor, pr_context_cursor_authority, pr_context_request_binding,
 };
 use super::shell::{
     classify_file_role, default_pr_base_ref, git_changed_files, git_diff_file_changes,
@@ -223,6 +223,12 @@ async fn exact_semantic_symbol_diff(
                 (partial.base_generation, partial.head_generation),
                 Some(partial.next_cursor),
             ),
+            CodeIndexBranchDiffOutcomeV1::CursorRefused(mismatch) => {
+                return Err(SemanticSymbolDiffUnavailable {
+                    reason: mismatch.code(),
+                    retryable: false,
+                });
+            }
             CodeIndexBranchDiffOutcomeV1::Unavailable(unavailable) => {
                 let retryable = matches!(
                     unavailable.reason,
@@ -1306,10 +1312,15 @@ where
         }
         None => None,
     };
+    let request_binding =
+        pr_context_request_binding(&evidence.base, &evidence.head, maximum_symbols)?;
     let cursor_position = match (encoded_cursor, cursor_authority.as_ref()) {
-        (Some(cursor), Some((snapshot, authenticator))) => {
-            Some(decode_pr_context_cursor(cursor, snapshot, authenticator)?)
-        }
+        (Some(cursor), Some((snapshot, authenticator))) => Some(decode_pr_context_cursor(
+            cursor,
+            snapshot,
+            &request_binding,
+            authenticator,
+        )?),
         _ => None,
     };
     let prior_impact_budget =
@@ -1499,6 +1510,7 @@ where
             impact.direct_call_edges_admitted,
             impact.bytes_admitted,
             snapshot,
+            &request_binding,
             authenticator,
         )?)
     };

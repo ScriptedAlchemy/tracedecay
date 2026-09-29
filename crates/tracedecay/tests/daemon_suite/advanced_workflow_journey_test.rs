@@ -63,6 +63,8 @@ use tracedecay_sdk::operations::{
 };
 
 use super::common;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[path = "advanced_workflow_journey/daemon_fixture.rs"]
 mod daemon_fixture;
@@ -213,8 +215,6 @@ fn write_provider_fixture(
     first_hold: &Path,
     cancellation_hold: &Path,
 ) -> (PathBuf, Vec<u8>) {
-    use std::os::unix::fs::PermissionsExt;
-
     let script = format!(
         "#!/bin/sh\ninput=$(/bin/cat)\ncase \"$input\" in\n  crash)\n    : > '{first_started}'\n    while [ -e '{first_hold}' ]; do /bin/sleep 1; done\n    exit 1\n    ;;\n  cancel)\n    : > '{cancellation_started}'\n    while [ -e '{cancellation_hold}' ]; do /bin/sleep 1; done\n    ;;\n  *)\n    printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{provider_session}\"}}'\n    printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"fan-out evidence\"}}]}}}}'\n    printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}'\n    ;;\nesac\n",
         first_started = first_started.display(),
@@ -225,12 +225,7 @@ fn write_provider_fixture(
     )
     .into_bytes();
     let path = root.join("workflow-provider");
-    std::fs::write(&path, &script).expect("provider script");
-    let mut permissions = std::fs::metadata(&path)
-        .expect("provider metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&path, permissions).expect("provider executable mode");
+    write_executable_script(&path, &script).expect("provider script");
     (
         canonical_existing_identity(&path).expect("canonical provider"),
         script,
@@ -1489,8 +1484,12 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .execute::<WorkflowHandoffRedeem>(&redeem)
         .expect_err("host handoff must be single-use");
     assert!(
-        matches!(replay, ClientError::Problem(ref problem) if problem.kind == "invalid_request"),
-        "handoff replay must be a typed refusal: {replay}"
+        matches!(
+            replay,
+            ClientError::Problem(ref problem)
+                if problem.kind == "conflict" && problem.code == "workflow.handoff.replayed"
+        ),
+        "handoff replay must be the typed replayed refusal: {replay}"
     );
     let retired = client
         .execute::<WorkflowRetireDefinition>(&WorkflowDefinitionRetireRequest {

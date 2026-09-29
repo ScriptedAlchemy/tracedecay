@@ -10,97 +10,33 @@ use tracedecay_contracts::diagnostics::{
     DiagnosticProviderState, GenerationDiagnosticHistoryPort, GenerationDiagnosticHistoryRequest,
     ProviderSourceIdentity,
 };
-use tracedecay_domain::{CodeGenerationId, GenerationDiagnosticV1, RetrievalAnchorId};
-use tracedecay_store::{DiagnosticStore, DiagnosticStoreResult};
+use tracedecay_domain::{GenerationDiagnosticV1, RetrievalAnchorId};
+use tracedecay_store::DiagnosticStore;
 
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::lsp_runtime::LspFeedbackDiagnosticRecordPort;
-use tracedecay_runtime_core::db::Database;
 
-/// Owned adapter that lets long-lived feedback runtimes reuse the canonical
-/// diagnostics store without retaining a borrowed database connection.
-#[derive(Clone)]
-pub struct DatabaseDiagnosticStore {
-    database: Database,
-}
-
-impl DatabaseDiagnosticStore {
-    pub fn new(database: Database) -> Self {
-        Self { database }
-    }
-}
-
-impl LspFeedbackDiagnosticRecordPort for DatabaseDiagnosticStore {
+impl LspFeedbackDiagnosticRecordPort for DiagnosticsStore<'static> {
     fn diagnostic_by_anchor(
         &self,
         anchor: RetrievalAnchorId,
     ) -> tracedecay_lsp::LspRuntimeFuture<
         Result<Option<GenerationDiagnosticV1>, tracedecay_lsp::LspRuntimeFailure>,
     > {
-        let database = self.database.clone();
+        let Some(database) = self.cloned_database() else {
+            return Box::pin(async {
+                Err(tracedecay_lsp::LspRuntimeFailure::new(
+                    "diagnostic-anchor-read-failed",
+                ))
+            });
+        };
         Box::pin(async move {
-            DiagnosticsStore::new(database)
-                .diagnostic_by_anchor(&anchor)
+            DiagnosticStore::diagnostic_by_anchor(&DiagnosticsStore::new(database), &anchor)
                 .await
                 .map_err(|_| {
                     tracedecay_lsp::LspRuntimeFailure::new("diagnostic-anchor-read-failed")
                 })
         })
-    }
-}
-
-impl DiagnosticStore for DatabaseDiagnosticStore {
-    async fn current_diagnostic_generation(
-        &self,
-    ) -> DiagnosticStoreResult<Option<CodeGenerationId>> {
-        DiagnosticsStore::new(self.database.clone())
-            .current_diagnostic_generation()
-            .await
-    }
-
-    #[hotpath::measure(label = "usecases.diagnostics.for_generation", future = true)]
-    async fn diagnostics_for_generation(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        let records = DiagnosticsStore::new(self.database.clone())
-            .diagnostics_for_generation(generation)
-            .await?;
-        crate::hotpath_observe::feedback_query(records.len());
-        Ok(records)
-    }
-
-    #[hotpath::measure(label = "usecases.diagnostics.current", future = true)]
-    async fn current_diagnostics(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        let records = DiagnosticsStore::new(self.database.clone())
-            .current_diagnostics(generation)
-            .await?;
-        crate::hotpath_observe::feedback_query(records.len());
-        Ok(records)
-    }
-
-    #[hotpath::measure(label = "usecases.diagnostics.current_file", future = true)]
-    async fn current_diagnostics_for_file(
-        &self,
-        generation: &CodeGenerationId,
-        file_occurrence_id: &tracedecay_domain::FileOccurrenceId,
-    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.clone())
-            .current_diagnostics_for_file(generation, file_occurrence_id)
-            .await
-    }
-
-    #[hotpath::measure(label = "usecases.diagnostics.by_anchor", future = true)]
-    async fn diagnostic_by_anchor(
-        &self,
-        anchor: &RetrievalAnchorId,
-    ) -> DiagnosticStoreResult<Option<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.clone())
-            .diagnostic_by_anchor(anchor)
-            .await
     }
 }
 

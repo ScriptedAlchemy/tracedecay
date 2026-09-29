@@ -478,11 +478,13 @@ fn summaries_canonicalize_sources_and_reject_self_predecessors() {
             "publication": null
         }),
     );
-    assert!(
+    assert_eq!(
         serde_json::from_value::<SummarySourceHorizonV1>(json!({
             "knowledge_through": 50
         }))
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "missing field `valid_through`"
     );
 
     assert_eq!(
@@ -510,7 +512,12 @@ fn summaries_canonicalize_sources_and_reject_self_predecessors() {
 
     let mut self_predecessor = serde_json::to_value(canonical).unwrap();
     self_predecessor["predecessor_summary_id"] = json!("summary.fixture");
-    assert!(serde_json::from_value::<SessionSummaryRecordV1>(self_predecessor).is_err());
+    assert_eq!(
+        serde_json::from_value::<SessionSummaryRecordV1>(self_predecessor)
+            .unwrap_err()
+            .to_string(),
+        "a session summary cannot name itself as predecessor"
+    );
 }
 
 #[test]
@@ -1065,9 +1072,13 @@ fn session_wire_records_reject_unknown_fields() {
         T: DeserializeOwned,
     {
         value["unexpected"] = json!(true);
+        let error = serde_json::from_value::<T>(value)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
         assert!(
-            serde_json::from_value::<T>(value).is_err(),
-            "{} accepted an unknown field",
+            error.starts_with("unknown field `unexpected`"),
+            "{} accepted an unknown field: {error}",
             std::any::type_name::<T>()
         );
     }
@@ -1180,23 +1191,33 @@ fn session_wire_records_reject_unknown_fields() {
 }
 
 #[test]
-fn compact_context_temporal_frames_are_required_in_memory_and_default_on_legacy_wire() {
-    let legacy = json!({
+fn compact_context_temporal_frames_are_required_on_the_wire() {
+    let current = json!({
+        "records": [],
+        "omissions": [],
+        "continuation_anchors": [],
+        "coverage": {"visible": 0, "hidden": 0, "unknown": 0, "redacted": 0},
+        "conflicts": [],
+        "lineage": [],
+        "encoded_bytes": 0
+    });
+    let decoded: CompactContextBundleV1 = serde_json::from_value(current.clone()).unwrap();
+    assert_eq!(decoded.coverage, TemporalCoverageCountsV1::default());
+    assert!(decoded.conflicts.is_empty());
+    assert!(decoded.lineage.is_empty());
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), current);
+
+    let omitted = json!({
         "records": [],
         "omissions": [],
         "continuation_anchors": [],
         "encoded_bytes": 0
     });
-    let decoded: CompactContextBundleV1 = serde_json::from_value(legacy).unwrap();
-
-    assert_eq!(decoded.coverage, TemporalCoverageCountsV1::default());
-    assert!(decoded.conflicts.is_empty());
-    assert!(decoded.lineage.is_empty());
-
-    let encoded = serde_json::to_value(decoded).unwrap();
-    assert_eq!(encoded["coverage"]["visible"], 0);
-    assert_eq!(encoded["conflicts"], json!([]));
-    assert_eq!(encoded["lineage"], json!([]));
+    let error = serde_json::from_value::<CompactContextBundleV1>(omitted).unwrap_err();
+    assert!(
+        error.to_string().starts_with("missing field `coverage`"),
+        "{error}"
+    );
 }
 
 #[test]

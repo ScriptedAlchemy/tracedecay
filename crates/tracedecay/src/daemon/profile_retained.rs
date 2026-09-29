@@ -287,6 +287,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ProfileExecutor {
                     ..
                 } => Box::pin(super::profile_owner::invoke_profile_owner_operation(
                     &self.store_administration,
+                    None,
                     self.active_project_root.as_deref(),
                     request.request_id,
                     surface_operation,

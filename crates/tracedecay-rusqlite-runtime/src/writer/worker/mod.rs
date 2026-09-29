@@ -47,7 +47,7 @@ use crate::{
 };
 
 use super::{
-    WriterActorError, WriterPersistence, WriterStartError, WriterState,
+    WriterActorError, WriterStartError, WriterState,
     request::{
         AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
         IncrementalVacuumCommand, SharedReply,
@@ -309,7 +309,9 @@ pub(super) struct Worker {
     pub(super) incremental_vacuum_receiver: mpsc::Receiver<IncrementalVacuumCommand>,
     pub(super) checkpoint_receiver: mpsc::Receiver<CheckpointCommand>,
     pub(super) shutdown_receiver: mpsc::UnboundedReceiver<()>,
-    pub(super) persistence: Box<dyn WriterPersistence>,
+    pub(super) persistence: crate::persistence::RuntimeWriterPersistence<
+        Box<dyn crate::StorageOperationExecutor + Send>,
+    >,
     pub(super) state: Arc<AtomicU8>,
     pub(super) shutdown_requested: Arc<AtomicBool>,
     pub(super) telemetry: WriterTelemetry,
@@ -460,11 +462,7 @@ impl Worker {
         let _ = self.started.send(Err(error));
     }
 
-    fn run_loop(
-        mut self,
-        mut checkpoint: WriterCheckpointController<RusqliteCheckpointDriver>,
-        runtime: Runtime,
-    ) {
+    fn run_loop(mut self, mut checkpoint: WriterCheckpointController, runtime: Runtime) {
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
         let mut exact_sql_queue = VecDeque::new();
@@ -768,7 +766,7 @@ impl Worker {
                     checkpoint.connection_mut(),
                     &self.binding,
                     batch,
-                    self.persistence.as_mut(),
+                    &mut self.persistence,
                     &self.telemetry,
                     &self.state,
                     &self.watermark_publisher,
@@ -818,10 +816,7 @@ impl Worker {
         }
     }
 
-    fn run_scheduled_checkpoint(
-        &self,
-        checkpoint: &mut WriterCheckpointController<RusqliteCheckpointDriver>,
-    ) {
+    fn run_scheduled_checkpoint(&self, checkpoint: &mut WriterCheckpointController) {
         crate::hotpath_observe::record_scheduled_checkpoint_dispatch();
         let snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
         match hotpath::measure_block!("rusqlite.writer.checkpoint", {
@@ -843,7 +838,7 @@ impl Worker {
 
     fn run_requested_checkpoint(
         &self,
-        checkpoint: &mut WriterCheckpointController<RusqliteCheckpointDriver>,
+        checkpoint: &mut WriterCheckpointController,
         command: CheckpointCommand,
     ) {
         if let Err(error) = command.verify(RuntimeWriteAuthorityStage::Dequeued) {
@@ -988,11 +983,11 @@ fn checkpoint_sample(result: &CheckpointResult) -> WalCheckpointSample {
 }
 
 #[hotpath::measure(label = "rusqlite_runtime.writer.execution_batch")]
-pub(super) fn process_execution_batch(
+pub(super) fn process_execution_batch<E: crate::StorageOperationExecutor>(
     connection: &mut rusqlite::Connection,
     binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
-    persistence: &mut dyn WriterPersistence,
+    persistence: &mut crate::persistence::RuntimeWriterPersistence<E>,
     telemetry: &WriterTelemetry,
     state: &AtomicU8,
     watermark_publisher: &CommittedWatermarkPublisher,

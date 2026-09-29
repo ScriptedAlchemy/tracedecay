@@ -13,7 +13,7 @@ use tracedecay_domain::{
     RetrievalAnchorTarget, SessionId, WorktreeId,
 };
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
     ObservationBatchPersistOutcome, ObservationCommitReceipt, ObservationStore,
@@ -288,11 +288,11 @@ impl ObservationStore for FakeStore {
     }
 }
 
-fn request(record: &Value) -> CaptureClaudeObservationRequest {
+fn request(record: &Value) -> CaptureObservationRequest {
     request_at(record, 0)
 }
 
-fn request_at(record: &Value, start: u64) -> CaptureClaudeObservationRequest {
+fn request_at(record: &Value, start: u64) -> CaptureObservationRequest {
     request_at_with_cancellation(record, start, ObservationCancellation::default())
 }
 
@@ -300,7 +300,7 @@ fn request_at_with_cancellation(
     record: &Value,
     start: u64,
     cancellation: ObservationCancellation,
-) -> CaptureClaudeObservationRequest {
+) -> CaptureObservationRequest {
     request_at_for_session(record, start, "session.application-test", cancellation)
 }
 
@@ -309,7 +309,7 @@ fn request_at_for_session(
     start: u64,
     session_id: &str,
     cancellation: ObservationCancellation,
-) -> CaptureClaudeObservationRequest {
+) -> CaptureObservationRequest {
     let encoded_frame = serde_json::to_vec(record).unwrap();
     let end = start + u64::try_from(encoded_frame.len()).unwrap();
     let parsed_record = parse_observation_record_v1(
@@ -340,7 +340,7 @@ fn request_at_for_session(
         ObservationSourceRangeV1::new(start, end).unwrap(),
     )
     .unwrap();
-    CaptureClaudeObservationRequest::new(
+    CaptureObservationRequest::new(
         parsed_record,
         identity,
         expected_cursor,
@@ -361,10 +361,7 @@ fn application_with_batch_concurrency(max_in_flight: usize) -> ObservationApplic
     application().with_batch_concurrency(std::num::NonZeroUsize::new(max_in_flight).unwrap())
 }
 
-fn consecutive_requests(
-    records: &[Value],
-    session_id: &str,
-) -> Vec<CaptureClaudeObservationRequest> {
+fn consecutive_requests(records: &[Value], session_id: &str) -> Vec<CaptureObservationRequest> {
     let mut start = 0;
     records
         .iter()
@@ -428,7 +425,7 @@ async fn non_durable_cursor_advance_honors_cancellation_before_and_after_commit(
         ObservationSourceGenerationV1::new(1).unwrap(),
         None,
         ObservationSourceRangeV1::new(0, 4).unwrap(),
-        NonDurableFrameReason::BlankFrame,
+        ObservationCoverageReason::BlankFrame,
     )
     .unwrap();
 
@@ -473,7 +470,7 @@ async fn capture_redacts_before_the_store_and_replays_the_receipt_bound_row() {
     let application = application();
     let secret = "sk-proj-application-secret-1234567890";
     let outcome = application
-        .capture_claude_observation(request(&json!({
+        .capture_observation(request(&json!({
             "type": "user",
             "message": { "role": "user", "content": "hello" },
             "api_key": secret
@@ -624,14 +621,14 @@ fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
     )
     .unwrap();
     assert!(matches!(
-        CaptureClaudeObservationRequest::new(
+        CaptureObservationRequest::new(
             parsed,
             identity(0, u64::try_from(raw.len()).unwrap()),
             None,
             retention(),
             ObservationCancellation::default(),
         ),
-        Err(CaptureClaudeObservationRequestError::SourceRangeMismatch)
+        Err(CaptureObservationRequestError::SourceRangeMismatch)
     ));
 }
 
@@ -641,7 +638,7 @@ async fn committed_capture_with_missed_read_back_stays_persisted_as_queued() {
     *application.store.read_none_once.lock().unwrap() = true;
 
     let outcome = application
-        .capture_claude_observation(request(&json!({
+        .capture_observation(request(&json!({
             "type": "user",
             "message": { "role": "user", "content": "read-your-writes miss" }
         })))
@@ -673,7 +670,7 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
         "message": { "role": "user", "content": "duplicate" }
     });
     let first = application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .unwrap();
     let first_sanitized_record = match first {
@@ -685,7 +682,7 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
     mark_first_observation_not_queued(&application.store);
 
     let duplicate = application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .unwrap();
     match duplicate {
@@ -731,7 +728,7 @@ async fn assert_duplicate_read_miss_status_is_unavailable(
         }
     });
     application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .expect("first capture persists");
     match seeded_projection_status {
@@ -748,7 +745,7 @@ async fn assert_duplicate_read_miss_status_is_unavailable(
     *application.store.read_none_once.lock().unwrap() = true;
 
     let outcome = application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .expect("a duplicate receipt proves the row is durable despite a read miss");
 
@@ -809,7 +806,7 @@ async fn first_write_persist_error_stays_typed_and_skips_read_back() {
     *application.store.persist_error_once.lock().unwrap() = true;
 
     let error = application
-        .capture_claude_observation(request(&json!({
+        .capture_observation(request(&json!({
             "type": "user",
             "message": { "role": "user", "content": "first write failure" }
         })))
@@ -837,7 +834,7 @@ async fn replay_reports_partial_coverage_and_a_truthful_continuation() {
             }
         });
         application
-            .capture_claude_observation(request_at(&record, start))
+            .capture_observation(request_at(&record, start))
             .await
             .unwrap();
         start += u64::try_from(serde_json::to_vec(&record).unwrap().len()).unwrap();
@@ -874,7 +871,7 @@ async fn pre_cancelled_capture_never_reaches_the_store() {
     let cancellation = ObservationCancellation::default();
     cancellation.cancel();
     let result = application
-        .capture_claude_observation(request_at_with_cancellation(
+        .capture_observation(request_at_with_cancellation(
             &json!({
                 "type": "user",
                 "message": { "role": "user", "content": "cancelled" }
@@ -902,13 +899,13 @@ async fn cancellation_during_atomic_commit_is_reported_after_commit_and_retry_is
     });
 
     let first = application
-        .capture_claude_observation(request_at_with_cancellation(&record, 0, cancellation))
+        .capture_observation(request_at_with_cancellation(&record, 0, cancellation))
         .await;
     assert!(matches!(first, Err(ObservationApplicationError::Cancelled)));
     assert_eq!(application.store.observations.lock().unwrap().len(), 1);
 
     let retry = application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .unwrap();
     let CaptureObservationOutcome::Persisted { outcome, .. } = retry else {
@@ -925,7 +922,7 @@ async fn cancellation_during_atomic_commit_is_reported_after_commit_and_retry_is
 async fn cancellation_after_point_read_and_replay_discards_non_atomic_results() {
     let application = application();
     let capture = application
-        .capture_claude_observation(request(&json!({
+        .capture_observation(request(&json!({
             "type": "user",
             "message": { "role": "user", "content": "read cancellation" }
         })))

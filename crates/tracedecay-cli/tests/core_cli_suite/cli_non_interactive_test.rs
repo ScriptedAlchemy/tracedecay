@@ -23,6 +23,7 @@ use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
     default_profile_project_id, profile_sharded_data_root, write_repository_identity_marker,
 };
+use tracedecay_runtime_core::test_executable::link_or_copy_executable;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 /// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
@@ -115,15 +116,7 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
     } else {
         "tracedecay"
     });
-    if std::fs::hard_link(env!("CARGO_BIN_EXE_tracedecay"), &shim).is_err() {
-        std::fs::copy(env!("CARGO_BIN_EXE_tracedecay"), &shim).unwrap();
-    }
-    #[cfg(unix)]
-    {
-        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim, permissions).unwrap();
-    }
+    link_or_copy_executable(Path::new(env!("CARGO_BIN_EXE_tracedecay")), &shim).unwrap();
     command.env("PATH", hermetic_path(&[bin_dir]));
     shim
 }
@@ -136,6 +129,12 @@ fn add_codex_plugin_cli_shim(command: &mut Command, home: &Path) {
     let bin_dir = home.join("bin");
     provision_host_cli_fixture::install_compiled_host_cli_fixture(&bin_dir, "codex");
     command.env("PATH", hermetic_path(&[bin_dir]));
+}
+
+/// Kimi Code on the `PATH` [`add_tracedecay_path_shim`] set, which is what
+/// makes Kimi Code installed; its lifecycle only resolves `kimi`.
+fn add_kimi_cli_shim(home: &Path) {
+    provision_host_cli_fixture::install_compiled_host_cli_fixture(&home.join("bin"), "kimi");
 }
 
 fn arm_implicit_cursor_reinstall(home: &Path) {
@@ -838,6 +837,7 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
     let kimi_home = canonical_temp_path(home.path()).join(".kimi-code");
     let mut install = tracedecay_command_without_daemon(home.path(), project.path());
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
+    add_kimi_cli_shim(home.path());
     install
         .env(
             tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
@@ -873,6 +873,7 @@ fn detected_install_continues_past_a_host_waiting_on_the_operator() {
     std::fs::create_dir_all(home_path.join(".vibe")).unwrap();
     let mut install = tracedecay_command_without_daemon(home.path(), project.path());
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
+    add_kimi_cli_shim(home.path());
     install
         .env(
             tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,

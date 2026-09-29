@@ -71,8 +71,13 @@ pub enum HookReplayAdmissionOutcomeV1 {
     Unavailable,
 }
 
+/// The directory holding every host's spool for one project data root.
+pub fn hook_v2_spool_directory(data_root: &Path) -> PathBuf {
+    data_root.join("hook-v2-spool")
+}
+
 pub fn hook_v2_spool_root(data_root: &Path, host: NativeHostIdentityV1) -> PathBuf {
-    data_root.join("hook-v2-spool").join(host.hook_key())
+    hook_v2_spool_directory(data_root).join(host.hook_key())
 }
 
 pub fn published_hook_scope_binding(
@@ -110,29 +115,28 @@ fn replay_receipt_id(
     receipt
 }
 
-fn acknowledge(
-    spool: &mut HookSpoolV1,
-    record: &HookSpoolRecordV1,
-    disposition: HookSpoolAckDispositionV1,
-    now: UtcMicros,
-) -> bool {
-    spool
-        .acknowledge(
-            HookSpoolAckV1 {
-                sequence: record.sequence,
-                receipt_id: replay_receipt_id(record, disposition),
-                disposition,
-            },
-            now,
-        )
-        .is_ok()
-}
-
 enum ReplayCompletion {
     Committed(HookSpoolRecordV1),
     ExactDuplicate(HookSpoolRecordV1),
     Tombstone(HookSpoolRecordV1, HookReplayTombstoneReasonV1),
     Retained(u32),
+}
+
+/// How an admitted or refused record leaves the spool.
+#[derive(Clone, Copy)]
+enum ReplaySettlement {
+    Committed,
+    ExactDuplicate,
+    Tombstone(HookReplayTombstoneReasonV1),
+}
+
+impl ReplaySettlement {
+    const fn disposition(self) -> HookSpoolAckDispositionV1 {
+        match self {
+            Self::Committed | Self::ExactDuplicate => HookSpoolAckDispositionV1::Committed,
+            Self::Tombstone(_) => HookSpoolAckDispositionV1::TerminalTombstone,
+        }
+    }
 }
 
 /// Drain one admitted host spool once. `admit` reauthorizes and admits a
@@ -156,16 +160,22 @@ where
     // Age-expired records are terminal regardless of binding state: the spool
     // keeps them durable precisely until the drain says otherwise.
     if let Ok(expired) = spool.expired_records(now) {
-        for record in expired {
-            if acknowledge(
-                &mut spool,
-                &record,
-                HookSpoolAckDispositionV1::TerminalTombstone,
-                now,
-            ) {
-                hotpath::gauge!("hooks.replay.expired").inc(1.0);
-                log_tombstone(host, &record, HookReplayTombstoneReasonV1::Expired);
-                pass.tombstoned = pass.tombstoned.saturating_add(1);
+        let disposition = HookSpoolAckDispositionV1::TerminalTombstone;
+        let acknowledgements = expired
+            .iter()
+            .map(|record| HookSpoolAckV1 {
+                sequence: record.sequence,
+                receipt_id: replay_receipt_id(record, disposition),
+                disposition,
+            })
+            .collect::<Vec<_>>();
+        if let Ok(outcomes) = spool.acknowledge_many(&acknowledgements, now) {
+            for (record, outcome) in expired.iter().zip(outcomes) {
+                if matches!(outcome, Ok(true)) {
+                    hotpath::gauge!("hooks.replay.expired").inc(1.0);
+                    log_tombstone(host, record, HookReplayTombstoneReasonV1::Expired);
+                    pass.tombstoned = pass.tombstoned.saturating_add(1);
+                }
             }
         }
     }
@@ -264,53 +274,60 @@ where
         pass.retained = pass.retained.saturating_add(retained_without_ack);
         return pass;
     };
+    let mut settled = Vec::new();
     for completion in completions {
         match completion {
             ReplayCompletion::Committed(record) => {
-                if acknowledge(
-                    &mut spool,
-                    &record,
-                    HookSpoolAckDispositionV1::Committed,
-                    now,
-                ) {
-                    hotpath::gauge!("hooks.replay.delivered").inc(1.0);
-                    pass.committed = pass.committed.saturating_add(1);
-                }
+                settled.push((record, ReplaySettlement::Committed))
             }
             ReplayCompletion::ExactDuplicate(record) => {
-                if acknowledge(
-                    &mut spool,
-                    &record,
-                    HookSpoolAckDispositionV1::Committed,
-                    now,
-                ) {
-                    hotpath::gauge!("hooks.replay.duplicate").inc(1.0);
-                    pass.duplicates = pass.duplicates.saturating_add(1);
-                }
+                settled.push((record, ReplaySettlement::ExactDuplicate));
             }
             ReplayCompletion::Tombstone(record, reason) => {
-                if acknowledge(
-                    &mut spool,
-                    &record,
-                    HookSpoolAckDispositionV1::TerminalTombstone,
-                    now,
-                ) {
-                    match reason {
-                        HookReplayTombstoneReasonV1::Expired => {
-                            hotpath::gauge!("hooks.replay.expired").inc(1.0);
-                        }
-                        HookReplayTombstoneReasonV1::BindingStale
-                        | HookReplayTombstoneReasonV1::IdentityConflict => {
-                            hotpath::gauge!("hooks.replay.refused").inc(1.0);
-                        }
-                    }
-                    log_tombstone(host, &record, reason);
-                    pass.tombstoned = pass.tombstoned.saturating_add(1);
-                }
+                settled.push((record, ReplaySettlement::Tombstone(reason)));
             }
             ReplayCompletion::Retained(count) => {
                 hotpath::gauge!("hooks.replay.retained").inc(f64::from(count));
                 pass.retained = pass.retained.saturating_add(count);
+            }
+        }
+    }
+    let acknowledgements = settled
+        .iter()
+        .map(|(record, settlement)| HookSpoolAckV1 {
+            sequence: record.sequence,
+            receipt_id: replay_receipt_id(record, settlement.disposition()),
+            disposition: settlement.disposition(),
+        })
+        .collect::<Vec<_>>();
+    let Ok(outcomes) = spool.acknowledge_many(&acknowledgements, now) else {
+        return pass;
+    };
+    for ((record, settlement), outcome) in settled.into_iter().zip(outcomes) {
+        if !matches!(outcome, Ok(true)) {
+            continue;
+        }
+        match settlement {
+            ReplaySettlement::Committed => {
+                hotpath::gauge!("hooks.replay.delivered").inc(1.0);
+                pass.committed = pass.committed.saturating_add(1);
+            }
+            ReplaySettlement::ExactDuplicate => {
+                hotpath::gauge!("hooks.replay.duplicate").inc(1.0);
+                pass.duplicates = pass.duplicates.saturating_add(1);
+            }
+            ReplaySettlement::Tombstone(reason) => {
+                match reason {
+                    HookReplayTombstoneReasonV1::Expired => {
+                        hotpath::gauge!("hooks.replay.expired").inc(1.0);
+                    }
+                    HookReplayTombstoneReasonV1::BindingStale
+                    | HookReplayTombstoneReasonV1::IdentityConflict => {
+                        hotpath::gauge!("hooks.replay.refused").inc(1.0);
+                    }
+                }
+                log_tombstone(host, &record, reason);
+                pass.tombstoned = pass.tombstoned.saturating_add(1);
             }
         }
     }

@@ -2,10 +2,10 @@
 //
 // Compiled as a Cargo example in test workflows so Windows runners do not
 // have to rename a shell script to `.exe` (os error 216) or depend on an
-// ambient Kiro/Codex install. The child environment is cleared by
+// ambient Codex install. The child environment is cleared by
 // `run_host_cli`; only `HOME` / `USERPROFILE` are admitted. Dispatch follows
-// argv[0] (`kiro-cli` / `codex`) and implements install, list, and conflict
-// outputs while recording arguments under the isolated home.
+// argv[0] (`codex`) and implements install, list, and conflict outputs while
+// recording arguments under the isolated home.
 
 use std::env;
 use std::fmt::Write as _;
@@ -43,13 +43,6 @@ fn main() -> ExitCode {
     }
 
     match host_kind(program, &args) {
-        HostKind::Kiro => match run_kiro(&home, &args) {
-            Ok(code) => ExitCode::from(code),
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(1)
-            }
-        },
         HostKind::Codex => match run_codex(&home, &args) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
@@ -66,7 +59,6 @@ fn main() -> ExitCode {
 
 #[derive(Clone, Copy)]
 enum HostKind {
-    Kiro,
     Codex,
     Unknown,
 }
@@ -76,14 +68,10 @@ fn host_kind(program: &str, args: &[String]) -> HostKind {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or(program);
-    if stem == "kiro-cli" {
-        return HostKind::Kiro;
-    }
     if stem == "codex" {
         return HostKind::Codex;
     }
     match args.first().map(String::as_str) {
-        Some("mcp") => HostKind::Kiro,
         Some("plugin") => HostKind::Codex,
         _ => HostKind::Unknown,
     }
@@ -118,118 +106,6 @@ fn record_invocation(home: &Path, args: &[String]) -> io::Result<()> {
         write!(file, "\"{}\"", json_escape(arg))?;
     }
     writeln!(file, "]")
-}
-
-fn run_kiro(home: &Path, args: &[String]) -> Result<u8, String> {
-    match args.first().map(String::as_str) {
-        Some("mcp") => {}
-        _ => {
-            eprintln!("unexpected kiro-cli invocation: {}", args.join(" "));
-            return Ok(64);
-        }
-    }
-    match args.get(1).map(String::as_str) {
-        Some("add") => kiro_mcp_add(home, args),
-        Some("remove") => kiro_mcp_remove(home, args),
-        Some("list") => kiro_mcp_list(home),
-        _ => {
-            eprintln!("unexpected kiro-cli invocation: {}", args.join(" "));
-            Ok(64)
-        }
-    }
-}
-
-fn read_kiro_servers(config: &Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let Some(text) = existing_text(config) else {
-        return Ok(serde_json::Map::new());
-    };
-    let document: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
-        format!(
-            "failed to parse Kiro fixture config {}: {error}",
-            config.display()
-        )
-    })?;
-    match document.get("mcpServers") {
-        Some(serde_json::Value::Object(servers)) => Ok(servers.clone()),
-        Some(_) => Err(format!(
-            "Kiro fixture config {} has a non-object mcpServers field",
-            config.display()
-        )),
-        None => Ok(serde_json::Map::new()),
-    }
-}
-
-fn write_kiro_servers(
-    config: &Path,
-    servers: serde_json::Map<String, serde_json::Value>,
-) -> Result<String, String> {
-    let body = serde_json::json!({ "mcpServers": servers }).to_string();
-    write_parent(config)?;
-    fs::write(config, format!("{body}\n")).map_err(io_err)?;
-    Ok(body)
-}
-
-fn kiro_mcp_add(home: &Path, args: &[String]) -> Result<u8, String> {
-    if args.get(6).map(String::as_str) != Some("--args")
-        || args.get(7).map(String::as_str) != Some("serve")
-        || args.get(8).map(String::as_str) != Some("--scope")
-        || args.get(9).map(String::as_str) != Some("global")
-        || args.get(10).map(String::as_str) != Some("--force")
-    {
-        eprintln!("unexpected kiro-cli mcp add arguments: {}", args.join(" "));
-        return Ok(64);
-    }
-    let command = args.get(5).cloned().unwrap_or_default();
-    let config = kiro_config_path(home);
-    if fixture_marker(home, MALFORMED_MARKER) {
-        write_parent(&config)?;
-        fs::write(&config, "{not-json\n").map_err(io_err)?;
-        println!("not-a-json-document");
-        return Ok(0);
-    }
-    let mut servers = read_kiro_servers(&config)?;
-    servers.insert(
-        "tracedecay".to_owned(),
-        serde_json::json!({ "command": command, "args": ["serve"] }),
-    );
-    let body = write_kiro_servers(&config, servers)?;
-    println!("{body}");
-    Ok(0)
-}
-
-fn kiro_mcp_remove(home: &Path, args: &[String]) -> Result<u8, String> {
-    if args.get(2).map(String::as_str) != Some("--name")
-        || args.get(3).map(String::as_str) != Some("tracedecay")
-        || args.get(4).map(String::as_str) != Some("--scope")
-        || args.get(5).map(String::as_str) != Some("global")
-    {
-        eprintln!(
-            "unexpected kiro-cli mcp remove arguments: {}",
-            args.join(" ")
-        );
-        return Ok(64);
-    }
-    let config = kiro_config_path(home);
-    let mut servers = read_kiro_servers(&config)?;
-    servers.remove("tracedecay");
-    if servers.is_empty() {
-        let _ = fs::remove_file(&config);
-    } else {
-        write_kiro_servers(&config, servers)?;
-    }
-    Ok(0)
-}
-
-fn kiro_mcp_list(home: &Path) -> Result<u8, String> {
-    if fixture_marker(home, MALFORMED_MARKER) {
-        println!("not-a-json-document");
-        return Ok(0);
-    }
-    match existing_text(&kiro_config_path(home)) {
-        Some(text) => print!("{text}"),
-        None => println!(r#"{{"mcpServers":{{}}}}"#),
-    }
-    Ok(0)
 }
 
 fn run_codex(home: &Path, args: &[String]) -> Result<u8, String> {
@@ -394,10 +270,6 @@ fn remove_toml_section(text: &str, header: &str) -> String {
         }
     }
     out
-}
-
-fn kiro_config_path(home: &Path) -> PathBuf {
-    home.join(".kiro/settings/mcp.json")
 }
 
 fn codex_config_path(home: &Path) -> PathBuf {

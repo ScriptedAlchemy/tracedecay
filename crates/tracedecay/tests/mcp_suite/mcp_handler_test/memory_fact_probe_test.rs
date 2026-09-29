@@ -161,8 +161,12 @@ async fn fact_store_probe_returns_connected_facts_and_typed_refusals() {
 
     let first_page = probe(&cg.server, json!({"entity": LEDGER, "limit": 1})).await;
     assert_probe_hits(&first_page, &[(FRIDAY, "project", &[LEDGER], 750_000)]);
-    assert_eq!(first_page["next_after"]["score_millionths"], 750_000);
-    assert_eq!(first_page["next_after"]["fact_id"], friday_id);
+    assert!(
+        first_page["next_after"]
+            .as_str()
+            .is_some_and(|cursor| cursor.starts_with("bc1.")),
+        "opaque continuation: {first_page}"
+    );
     let second_page = probe(
         &cg.server,
         json!({

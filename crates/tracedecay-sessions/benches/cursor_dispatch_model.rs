@@ -15,6 +15,8 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -107,8 +109,32 @@ fn configure_hotpath() -> PathBuf {
     }
 }
 
+fn wait_until_change_settled(path: &Path) {
+    #[cfg(unix)]
+    {
+        for _ in 0..10_000_000u32 {
+            let metadata = fs::metadata(path).expect("stat parent transcript");
+            let changed_at_nanos =
+                i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec());
+            if tracedecay_private_fs::change_time_settled(changed_at_nanos) {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("filesystem change clock stayed inside one timestamp quantum");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
 fn run_harness() -> Value {
     let fixture = write_parent_without_dispatch();
+    // The zero-read measurement is only sound once the parent's change time
+    // is older than the kernel timestamp quantum. A just-written file can
+    // still share that quantum with a later same-length rewrite.
+    wait_until_change_settled(&fixture.parent_path);
     let unchanged = measure_repeated_lookups(&fixture.child_path, LOOKUPS);
     assert!(
         unchanged.model.is_none(),

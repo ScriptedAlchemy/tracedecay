@@ -4,6 +4,7 @@ use tracedecay_application::code_index::{
     CodeIndexIgnoredDependencyAdmissionRequestV1,
 };
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
+use tracedecay_contracts::ApplicationProblemDetailV1;
 use tracedecay_contracts::retrieval::{
     PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1, SearchExternalImportCandidatesV1,
     SearchExternalImportV1,
@@ -119,6 +120,18 @@ pub async fn admit_verified_ignored_dependency(
             Err(TraceDecayError::project_route(
                 "application.symbol-graph.ignored-dependency-scheduler-unavailable",
                 true,
+                detail,
+            ))
+        }
+        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::Parked(parked)) => {
+            let detail = ApplicationProblemDetailV1::Parked {
+                cause: parked.reason,
+                remedy: parked.remediation,
+                retries_on_wake: parked.retries_on_wake,
+            };
+            Err(TraceDecayError::project_route_with_detail(
+                detail.code(),
+                false,
                 detail,
             ))
         }

@@ -335,7 +335,13 @@ fn dirty_overlay_result_cannot_gain_durable_outputs_or_handles() {
     let mut leaked = execution;
     leaked.dedupe_key =
         Some(tracedecay_domain::feedback::FeedbackDedupeKeyV1::new("dedupe.overlay").unwrap());
-    assert!(CanonicalFeedbackResultV1::new(leaked, None, Vec::new()).is_err());
+    let Err(error) = CanonicalFeedbackResultV1::new(leaked, None, Vec::new()) else {
+        panic!("a session-only result must not gain a durable dedupe key");
+    };
+    assert_eq!(
+        error.to_string(),
+        "overlay feedback durable output is inconsistent with the application contract"
+    );
 }
 
 #[test]

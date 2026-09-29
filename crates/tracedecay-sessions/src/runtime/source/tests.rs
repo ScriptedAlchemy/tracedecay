@@ -1047,6 +1047,10 @@ fn cold_full_file_scan_does_not_hash_the_whole_file() {
     let record = b"{\"v\":0}\n";
     let records = 512;
     std::fs::write(&path, record.repeat(records)).unwrap();
+    // A change time still inside the kernel's coarse quantum is not proof the
+    // bytes are stable, so the scan seals a snapshot. This assertion is about
+    // a settled file, whose token already rules that rewrite out.
+    super::jsonl::spin_until_jsonl_change_settled(&path);
 
     let scan = try_stream_new_jsonl_raw_strict_with_resume(
         &path,
@@ -1079,6 +1083,10 @@ fn unchanged_settled_repoll_reads_zero_file_bytes() {
     let path = dir.path().join("warm.jsonl");
     let record = b"{\"v\":0}\n";
     std::fs::write(&path, record.repeat(8)).unwrap();
+    // The proving scan has to observe a settled change time. A cache entry
+    // recorded inside the coarse quantum would authorize a later repoll to
+    // skip bytes a same-length rewrite could still have replaced.
+    super::jsonl::spin_until_jsonl_change_settled(&path);
 
     let first = try_stream_new_jsonl_raw_strict_with_resume(
         &path,
@@ -1246,8 +1254,17 @@ fn bound_path_list_stops_on_cumulative_discovery_bytes() {
 fn stream_new_jsonl_returns_none_for_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("missing.jsonl");
-
     assert!(stream_new_jsonl(&path, StoredCursor::default(), None).is_none());
+
+    std::fs::write(&path, "{\"a\":1}\n").unwrap();
+    let read = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+    assert_eq!(
+        read.lines
+            .iter()
+            .map(|line| line.value.clone())
+            .collect::<Vec<_>>(),
+        vec![serde_json::json!({"a": 1})]
+    );
 }
 
 #[test]
@@ -1265,8 +1282,11 @@ fn stream_new_jsonl_skips_invalid_json_lines_without_panicking() {
 fn read_changed_file_returns_none_for_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("missing.json");
-
     assert!(read_changed_file(&path, StoredCursor::default(), 1024).is_none());
+
+    std::fs::write(&path, "{\"a\":1}").unwrap();
+    let changed = read_changed_file(&path, StoredCursor::default(), 1024).unwrap();
+    assert_eq!(changed.contents, "{\"a\":1}");
 }
 
 #[tokio::test]
@@ -1312,19 +1332,31 @@ async fn read_new_rows_tracks_last_rowid() {
 
 #[tokio::test]
 async fn read_new_rows_returns_none_for_invalid_query() {
-    let conn = crate::runtime::shared::SqliteReadConn::new(
-        rusqlite::Connection::open_in_memory().unwrap(),
-    );
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("CREATE TABLE turns (text TEXT); INSERT INTO turns (text) VALUES ('hello');")
+        .unwrap();
+    let conn = crate::runtime::shared::SqliteReadConn::new(connection);
+    let map = |_rowid: i64, row: &rusqlite::Row<'_>| row.get::<_, String>(1).ok();
 
     let rows = read_new_rows(
         &conn,
-        "SELECT not_a_column FROM missing_table WHERE rowid > ? ORDER BY rowid",
+        "SELECT rowid, not_a_column FROM missing_table WHERE rowid > ? ORDER BY rowid",
         StoredCursor::default(),
-        |_rowid: i64, row: &rusqlite::Row<'_>| row.get::<_, String>(0).ok(),
+        map,
     )
     .await;
-
     assert!(rows.is_none());
+
+    let rows = read_new_rows(
+        &conn,
+        "SELECT rowid, text FROM turns WHERE rowid > ? ORDER BY rowid",
+        StoredCursor::default(),
+        map,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.items, vec!["hello".to_string()]);
 }
 
 #[test]

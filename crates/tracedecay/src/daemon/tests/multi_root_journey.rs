@@ -1013,6 +1013,48 @@ async fn run_authenticated_multi_root_journey() {
         .clone()
         .expect("120 matches per root must exceed the 100-item child page");
 
+    let mut changed_operation = operation.clone();
+    let MultiRootOperationV1::Query { request } = &mut changed_operation else {
+        unreachable!("constructed query operation")
+    };
+    request["request"]["returns"] = json!("String");
+    let observed_at = now();
+    let (deadline, cancellation) = controls("paged-query-changed", observed_at);
+    let changed = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.paged-query-changed",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                changed_operation,
+                1,
+                Some(continuation.clone()),
+            )
+            .expect("changed-operation page request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = changed.outcome else {
+        panic!("a continuation replayed with another operation must be refused")
+    };
+    assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
+    assert_eq!(
+        problem
+            .diagnostic()
+            .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.message.as_str())),
+        Some((
+            "cursor.parameter_changed",
+            "The cursor was issued for a request with a different `operation`. Repeat the \
+             request with the parameters that returned the cursor, or restart without it."
+        ))
+    );
+
     let observed_at = now();
     let (deadline, cancellation) = controls("paged-query-1", observed_at);
     let second_page_response = execute_daemon_invocation(

@@ -17,8 +17,8 @@ use std::fmt;
 use thiserror::Error;
 use tracedecay_domain::{
     CompactContextConflictV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
-    ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, RetrieverCoverage,
-    SessionAuthorityClassV1, SessionSummaryRecordV1, TemporalAssertionKindV1,
+    ContextOmissionReasonV1, CursorBindingV1, HydrationStateV1, RetrievalAnchorId,
+    RetrieverCoverage, SessionAuthorityClassV1, SessionSummaryRecordV1, TemporalAssertionKindV1,
     TemporalCoverageCountsV1,
 };
 use zeroize::Zeroizing;
@@ -52,6 +52,8 @@ use self::snapshot::{TemporalExecutionSnapshot, TemporalRetrievalScope};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemporalKernelRequest {
     pub snapshot: TemporalExecutionSnapshot,
+    /// The operation and request parameters a continuation is minted for.
+    pub cursor_binding: CursorBindingV1,
     pub query: String,
     pub direct_anchor: Option<RetrievalAnchorId>,
     pub cursor: Option<String>,
@@ -424,7 +426,9 @@ pub async fn execute_temporal_candidate_export(
     let resume = request
         .cursor
         .as_deref()
-        .map(|cursor| verify_cursor_position(cursor, &snapshot, authenticator))
+        .map(|cursor| {
+            verify_cursor_position(cursor, &snapshot, &request.cursor_binding, authenticator)
+        })
         .transpose()?
         .unwrap_or_default();
     let strict_population = snapshot
@@ -599,7 +603,9 @@ pub async fn execute_temporal_candidate_export(
         })
     };
     let next_cursor = next_position
-        .map(|position| encode_cursor_position(&snapshot, &position, authenticator))
+        .map(|position| {
+            encode_cursor_position(&snapshot, &request.cursor_binding, &position, authenticator)
+        })
         .transpose()?;
 
     Ok(TemporalCandidateExport {

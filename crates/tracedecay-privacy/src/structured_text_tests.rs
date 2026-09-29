@@ -40,7 +40,11 @@ fn raw_sweep(text: &str) -> String {
         .to_owned()
 }
 
-fn assert_detected_only_by_parsing(raw: &str, expected: StructuredTextFormatV1) {
+fn assert_detected_only_by_parsing(
+    raw: &str,
+    expected: StructuredTextFormatV1,
+    expected_sanitized: &str,
+) {
     assert!(
         raw_sweep(raw).contains(PLACEHOLDER),
         "the raw sweep already caught this value, so the parse proves nothing"
@@ -53,6 +57,7 @@ fn assert_detected_only_by_parsing(raw: &str, expected: StructuredTextFormatV1) 
         "parsed sensitive field survived sanitization: {}",
         scanned.sanitized_text()
     );
+    assert_eq!(scanned.sanitized_text(), expected_sanitized);
     assert!(
         scanned
             .findings()
@@ -83,6 +88,7 @@ fn yaml_sensitive_field_is_detected_only_after_parsing() {
     assert_detected_only_by_parsing(
         &format!("vault:\n  vault_passphrase: {PLACEHOLDER}\n  region: us-east\n"),
         StructuredTextFormatV1::Yaml,
+        "vault:\n  vault_passphrase: TraceDecay-redacted-sensitive-field\n  region: us-east\n",
     );
 }
 
@@ -91,6 +97,7 @@ fn yaml_document_markers_do_not_hide_sensitive_fields_from_the_format_probe() {
     assert_detected_only_by_parsing(
         &format!("---\nvault_passphrase: {PLACEHOLDER}\n...\n"),
         StructuredTextFormatV1::Yaml,
+        "---\nvault_passphrase: TraceDecay-redacted-sensitive-field\n...\n",
     );
 }
 
@@ -99,6 +106,7 @@ fn yaml_tags_reach_the_canonical_parser_before_sensitive_field_scanning() {
     assert_detected_only_by_parsing(
         &format!("---\nprovider: !ProviderConfig\n  vault_passphrase: {PLACEHOLDER}\n"),
         StructuredTextFormatV1::Yaml,
+        "---\nprovider: !ProviderConfig\n  vault_passphrase: TraceDecay-redacted-sensitive-field\n",
     );
 }
 
@@ -107,6 +115,7 @@ fn toml_sensitive_field_is_detected_only_after_parsing() {
     assert_detected_only_by_parsing(
         &format!("[vault]\nregion = \"us-east\"\nvault_passphrase = \"{PLACEHOLDER}\"\n"),
         StructuredTextFormatV1::Toml,
+        "[vault]\nregion = \"us-east\"\nvault_passphrase = \"TraceDecay-redacted-sensitive-field\"\n",
     );
 }
 
@@ -115,6 +124,7 @@ fn dotenv_sensitive_field_is_detected_only_after_parsing() {
     assert_detected_only_by_parsing(
         &format!("# deployment\nREGION=us-east\nVAULT_PASSPHRASE={PLACEHOLDER}\n"),
         StructuredTextFormatV1::Dotenv,
+        "# deployment\nREGION=us-east\nVAULT_PASSPHRASE=TraceDecay-redacted-sensitive-field\n",
     );
 }
 
@@ -123,6 +133,7 @@ fn url_query_sensitive_field_is_detected_only_after_parsing() {
     assert_detected_only_by_parsing(
         &format!("https://example.test/callback?region=us-east&vault_passphrase={PLACEHOLDER}"),
         StructuredTextFormatV1::Url,
+        "https://example.test/callback?region=us-east&vault_passphrase=TraceDecay-redacted-sensitive-field",
     );
 }
 
@@ -133,6 +144,7 @@ fn http_header_sensitive_field_is_detected_only_after_parsing() {
             "GET /v1/session HTTP/1.1\nHost: example.test\nX-Vault_Passphrase: {PLACEHOLDER}\n"
         ),
         StructuredTextFormatV1::HttpHeaders,
+        "GET /v1/session HTTP/1.1\nHost: example.test\nX-Vault_Passphrase: TraceDecay-redacted-sensitive-field\n",
     );
 }
 
@@ -141,6 +153,7 @@ fn url_userinfo_password_is_detected_only_after_parsing() {
     assert_detected_only_by_parsing(
         &format!("postgres://service:{PLACEHOLDER}@db.example.test/app"),
         StructuredTextFormatV1::Url,
+        "postgres://service:TraceDecay-redacted-sensitive-field@db.example.test/app",
     );
 }
 
@@ -156,6 +169,10 @@ fn decoded_url_values_are_inspected_as_well_as_raw_bytes() {
     let scanned = sanitize_structured_text(&raw).expect("structured scan runs");
     assert_eq!(scanned.format(), Some(StructuredTextFormatV1::Url));
     assert!(!scanned.sanitized_text().contains(encoded));
+    assert_eq!(
+        scanned.sanitized_text(),
+        "https://example.test/callback?state=TraceDecay-redacted-sensitive-field"
+    );
     assert!(
         scanned
             .findings()
@@ -174,7 +191,10 @@ fn percent_encoded_url_query_keys_are_classified_before_redaction() {
 
     assert_eq!(scanned.format(), Some(StructuredTextFormatV1::Url));
     assert!(!scanned.sanitized_text().contains(PLACEHOLDER));
-    assert!(scanned.sanitized_text().contains("region=us-east"));
+    assert_eq!(
+        scanned.sanitized_text(),
+        "https://example.test/callback?vault%5Fpassphrase=TraceDecay-redacted-sensitive-field&region=us-east"
+    );
 }
 
 #[test]
@@ -190,6 +210,10 @@ fn malformed_structured_input_is_quarantined_after_a_best_effort_raw_redaction()
         "input that does not parse whole must not claim a structural parse"
     );
     assert!(!scanned.sanitized_text().contains(&credential));
+    assert_eq!(
+        scanned.sanitized_text(),
+        "vault:\n  rotation: [TraceDecay redacted: exact credential]\n  broken: [unclosed\n"
+    );
     assert!(
         scanned
             .quarantine_findings()
@@ -539,7 +563,21 @@ fn lcm_json_credential_values_under_ordinary_keys_still_redact_durably() {
 
     let sanitized = sanitize_lcm_payload_text(&raw).expect("credential values redact durably");
     assert!(!sanitized.sanitized_text().contains(&credential));
-    assert!(!sanitized.findings().is_empty());
+    assert_eq!(
+        sanitized.sanitized_text(),
+        r#"{"note":"[TraceDecay redacted: exact credential]"}"#
+    );
+    assert_eq!(
+        sanitized
+            .findings()
+            .iter()
+            .map(|finding| (finding.detector(), finding.action()))
+            .collect::<Vec<_>>(),
+        vec![(
+            PrivacyDetectorV1::ExactCredential,
+            SanitizationActionV1::Redacted
+        )]
+    );
 }
 
 #[test]
@@ -601,9 +639,10 @@ fn code_source_sanitizer_parses_environment_files_before_scanning() {
     let text = String::from_utf8(sanitized.sanitized_bytes().to_vec()).expect("sanitized UTF-8");
 
     assert!(!text.contains(PLACEHOLDER));
-    assert!(
-        text.contains("REGION=us-east"),
-        "in-place redaction must leave the rest of the file alone: {text}"
+    assert_eq!(
+        text,
+        "# service env\nREGION=us-east\nVAULT_PASSPHRASE=TraceDecay-redacted-sensitive-field\n",
+        "in-place redaction must leave the rest of the file alone"
     );
 }
 
@@ -619,7 +658,10 @@ fn provider_metadata_text_parses_yaml_before_sanitizing() {
         sanitize_provider_metadata_text(&raw).expect("provider metadata sanitizer accepts YAML");
 
     assert!(!sanitized.contains(PLACEHOLDER));
-    assert!(sanitized.contains("region: us-east"));
+    assert_eq!(
+        sanitized,
+        "provider:\n  vault_passphrase: TraceDecay-redacted-sensitive-field\n  region: us-east\n"
+    );
 }
 
 #[test]

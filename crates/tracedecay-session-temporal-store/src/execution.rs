@@ -10,8 +10,9 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_domain::SessionSourceCoverageAggregateStateV1;
 use tracedecay_domain::{
-    ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalAnchorId, RetrievalRequest,
-    RetrieverBatch, RetrieverOutcome, ScoreDomainId, SessionSourceCoverageReceiptV1,
+    ComponentRevision, CursorBindingV1, EphemeralSanitizedQueryViewV1, RetrievalAnchorId,
+    RetrievalRequest, RetrieverBatch, RetrieverOutcome, ScoreDomainId,
+    SessionSourceCoverageReceiptV1,
 };
 use tracedecay_query::retrieval::evidence_lanes::{
     EvidenceLaneExecutionControlV1, TaskSessionBindingV1, TaskSessionCandidateSelectionV1,
@@ -27,6 +28,7 @@ use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedTemporalExecutionRequest {
     snapshot_request: TemporalSnapshotRequest,
+    cursor_binding: CursorBindingV1,
     query: String,
     direct_anchor: Option<RetrievalAnchorId>,
     cursor: Option<String>,
@@ -42,6 +44,7 @@ impl AuthorizedTemporalExecutionRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         snapshot_request: TemporalSnapshotRequest,
+        cursor_binding: CursorBindingV1,
         query: String,
         cursor: Option<String>,
         limit: usize,
@@ -53,6 +56,7 @@ impl AuthorizedTemporalExecutionRequest {
     ) -> Self {
         Self {
             snapshot_request,
+            cursor_binding,
             query,
             direct_anchor: None,
             cursor,
@@ -126,6 +130,7 @@ impl AuthorizedTemporalExecutionRequest {
     ) -> tracedecay_temporal_query::TemporalKernelRequest {
         tracedecay_temporal_query::TemporalKernelRequest {
             snapshot,
+            cursor_binding: self.cursor_binding,
             query: self.query,
             direct_anchor: self.direct_anchor,
             cursor: self.cursor,

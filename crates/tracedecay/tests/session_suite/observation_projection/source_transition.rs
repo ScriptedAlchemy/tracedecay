@@ -277,12 +277,21 @@ async fn forged_native_source_supersession_requires_a_projected_successor() {
             rusqlite::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION, old.observation_id().as_str(),
                 old.receipt().receipt().receipt_id().as_str(), ProjectionSkipReason::NativeSourceSuperseded.as_str()]).unwrap();
         drop(conn);
+        let Err(error) = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay")).await
+        else {
+            panic!("a forged supersession label must fail the store reopen");
+        };
+        let message = error.to_string();
         assert!(
-            HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
-                .await
-                .is_err(),
-            "a forged label must fail with either a missing or an unprojected successor"
+            message.contains("invalid native source supersession: "),
+            "capture_successor={capture_successor} refused with: {error}"
         );
+        if !capture_successor {
+            assert!(
+                message.contains("projection provenance collided with an existing output"),
+                "a missing successor refused with: {error}"
+            );
+        }
     }
 }
 

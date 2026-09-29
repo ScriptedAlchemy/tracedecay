@@ -218,6 +218,15 @@ impl DiagnosticsStore<'static> {
             conn: DiagnosticsConnection::Database(database),
         }
     }
+
+    pub(crate) fn cloned_database(&self) -> Option<Database> {
+        match &self.conn {
+            DiagnosticsConnection::Database(database) => Some(database.clone()),
+            #[cfg(test)]
+            DiagnosticsConnection::Runtime(_) => None,
+            DiagnosticsConnection::Transaction(_) => None,
+        }
+    }
 }
 
 impl<'a> DiagnosticsStore<'a> {
@@ -934,24 +943,33 @@ impl DiagnosticStore for DiagnosticsStore<'_> {
             .map_err(|error| port_error("current_diagnostic_generation", error))
     }
 
+    #[hotpath::measure(label = "usecases.diagnostics.for_generation", future = true)]
     async fn diagnostics_for_generation(
         &self,
         generation: &CodeGenerationId,
     ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        self.records_for_generation(generation)
+        let records = self
+            .records_for_generation(generation)
             .await
-            .map_err(|error| port_error("diagnostics_for_generation", error))
+            .map_err(|error| port_error("diagnostics_for_generation", error))?;
+        crate::hotpath_observe::feedback_query(records.len());
+        Ok(records)
     }
 
+    #[hotpath::measure(label = "usecases.diagnostics.current", future = true)]
     async fn current_diagnostics(
         &self,
         generation: &CodeGenerationId,
     ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        self.current_records(generation)
+        let records = self
+            .current_records(generation)
             .await
-            .map_err(|error| port_error("current_diagnostics", error))
+            .map_err(|error| port_error("current_diagnostics", error))?;
+        crate::hotpath_observe::feedback_query(records.len());
+        Ok(records)
     }
 
+    #[hotpath::measure(label = "usecases.diagnostics.current_file", future = true)]
     async fn current_diagnostics_for_file(
         &self,
         generation: &CodeGenerationId,
@@ -962,6 +980,7 @@ impl DiagnosticStore for DiagnosticsStore<'_> {
             .map_err(|error| port_error("current_diagnostics_for_file", error))
     }
 
+    #[hotpath::measure(label = "usecases.diagnostics.by_anchor", future = true)]
     async fn diagnostic_by_anchor(
         &self,
         anchor: &RetrievalAnchorId,

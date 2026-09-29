@@ -27,9 +27,9 @@ use tracedecay_contracts::{
     StreamTermination, now_micros,
 };
 use tracedecay_domain::{
-    ActorId, CodeGenerationId, CommitId, ContentDigest, ProjectId, RetrievalGrainV1,
-    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
-    UtcMicros, canonical_sha256,
+    ActorId, CodeGenerationId, CommitId, ContentDigest, CursorBindingMismatchV1, CursorBindingV1,
+    ProjectId, RetrievalGrainV1, SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId,
+    SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
@@ -249,6 +249,8 @@ pub enum OperationEventError {
     InvalidTerminal(String),
     #[error("managed test-run event is invalid")]
     InvalidTestRunEvent,
+    #[error("{0}")]
+    CursorRefused(CursorBindingMismatchV1),
 }
 
 impl OperationEventError {
@@ -263,6 +265,7 @@ impl OperationEventError {
             Self::NotFoundOrNotAuthorized => {
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
             }
+            Self::CursorRefused(mismatch) => ApplicationProblem::cursor_refused(&mismatch),
             Self::FrontierExpired | Self::ResumeExpired => ApplicationProblem::Stale {
                 diagnostic: SafeDiagnostic::new(
                     "operation_event.resume_expired",
@@ -448,27 +451,6 @@ impl CanonicalManagedTestRunReader {
         Some(current_managed_test_run(snapshot, current))
     }
 
-    pub(crate) async fn latest_page(
-        &self,
-        root_uri: &str,
-        page: &PageRequest,
-    ) -> Result<ManagedTestRunSnapshot, ManagedTestRunUnavailableReason> {
-        let snapshot = self
-            .events
-            .latest_managed_test_run(root_uri)
-            .await
-            .map_err(|error| match error {
-                OperationEventError::FrontierExpired => {
-                    ManagedTestRunUnavailableReason::FrontierExpired
-                }
-                _ => ManagedTestRunUnavailableReason::AuthorityFailure,
-            })?;
-        self.events
-            .page_managed_test_run(snapshot, page)
-            .await
-            .map_err(|_| ManagedTestRunUnavailableReason::AuthorityFailure)
-    }
-
     #[hotpath::measure(label = "usecases.operation.page_test_run", future = true)]
     pub(crate) async fn latest_current_page(
         &self,
@@ -488,32 +470,41 @@ impl CanonicalManagedTestRunReader {
     }
 }
 
+/// The refusal outcome when a retained run's head or code generation is
+/// unbound or differs from the current one; `None` when both are current.
+pub(crate) fn managed_test_run_source_refusal(
+    retained_head: Option<&CommitId>,
+    retained_generation: Option<&CodeGenerationId>,
+    current: &ManagedTestRunCurrentScope,
+) -> Option<ManagedTestRunReadOutcome> {
+    let unavailable = |reason| Some(ManagedTestRunReadOutcome::Unavailable(reason));
+    let Some(current_head) = current.head_commit_id.as_ref() else {
+        return unavailable(ManagedTestRunUnavailableReason::CurrentHeadUnbound);
+    };
+    let Some(current_generation) = current.code_generation_id.as_ref() else {
+        return unavailable(ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound);
+    };
+    let Some(retained_head) = retained_head else {
+        return unavailable(ManagedTestRunUnavailableReason::RetainedHeadUnbound);
+    };
+    let Some(retained_generation) = retained_generation else {
+        return unavailable(ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound);
+    };
+    (retained_head != current_head || retained_generation != current_generation).then_some(
+        ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity),
+    )
+}
+
 pub(crate) fn current_managed_test_run(
     snapshot: ManagedTestRunSnapshot,
     current: &ManagedTestRunCurrentScope,
 ) -> ManagedTestRunReadOutcome {
-    let Some(current_head) = current.head_commit_id.as_ref() else {
-        return ManagedTestRunReadOutcome::Unavailable(
-            ManagedTestRunUnavailableReason::CurrentHeadUnbound,
-        );
-    };
-    let Some(current_generation) = current.code_generation_id.as_ref() else {
-        return ManagedTestRunReadOutcome::Unavailable(
-            ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound,
-        );
-    };
-    let Some(retained_head) = snapshot.head_commit_id.as_ref() else {
-        return ManagedTestRunReadOutcome::Unavailable(
-            ManagedTestRunUnavailableReason::RetainedHeadUnbound,
-        );
-    };
-    let Some(retained_generation) = snapshot.code_generation_id.as_ref() else {
-        return ManagedTestRunReadOutcome::Unavailable(
-            ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound,
-        );
-    };
-    if retained_head != current_head || retained_generation != current_generation {
-        return ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity);
+    if let Some(outcome) = managed_test_run_source_refusal(
+        snapshot.head_commit_id.as_ref(),
+        snapshot.code_generation_id.as_ref(),
+        current,
+    ) {
+        return outcome;
     }
     match (
         current.document_uri.as_ref(),
@@ -621,6 +612,7 @@ impl OperationResumeAuthority {
         let snapshot = operation_resume_snapshot(binding, generation, self.key.clone())?;
         let encoded = encode_cursor(
             &snapshot,
+            &resume_binding()?,
             &StableSortKey {
                 normalized_score_micros: 0,
                 knowledge_at_micros: generation as i64,
@@ -639,8 +631,13 @@ impl OperationResumeAuthority {
     ) -> Result<(), OperationEventError> {
         let snapshot =
             operation_resume_snapshot(&record.binding, record.generation, self.key.clone())?;
-        let sort_key = verify_cursor(token.as_str(), &snapshot, &self.authenticator)
-            .map_err(operation_resume_verification_error)?;
+        let sort_key = verify_cursor(
+            token.as_str(),
+            &snapshot,
+            &resume_binding()?,
+            &self.authenticator,
+        )
+        .map_err(operation_resume_verification_error)?;
         if sort_key.normalized_score_micros != 0
             || sort_key.knowledge_at_micros != record.generation as i64
             || sort_key.stable_id != record.binding.operation_id.to_string()
@@ -656,10 +653,12 @@ impl OperationResumeAuthority {
         generation: u64,
         completed: u64,
         next_offset: usize,
+        page_size: u32,
     ) -> Result<OpaqueCursor, OperationEventError> {
         let snapshot = operation_resume_snapshot(binding, generation, self.key.clone())?;
         let encoded = encode_cursor(
             &snapshot,
+            &test_result_binding(page_size)?,
             &StableSortKey {
                 normalized_score_micros: u64::try_from(next_offset)
                     .map_err(|_| OperationEventError::ResumeUnavailable)?,
@@ -678,11 +677,23 @@ impl OperationResumeAuthority {
         cursor: &OpaqueCursor,
         record: &OperationRecord,
         completed: u64,
+        page_size: u32,
     ) -> Result<usize, OperationEventError> {
         let snapshot =
             operation_resume_snapshot(&record.binding, record.generation, self.key.clone())?;
-        let sort_key = verify_cursor(cursor.as_str(), &snapshot, &self.authenticator)
-            .map_err(operation_resume_verification_error)?;
+        let sort_key = verify_cursor(
+            cursor.as_str(),
+            &snapshot,
+            &test_result_binding(page_size)?,
+            &self.authenticator,
+        )
+        .map_err(|error| match error {
+            CursorError::Binding(mismatch) => OperationEventError::CursorRefused(mismatch),
+            CursorError::Malformed | CursorError::Tampered => {
+                OperationEventError::CursorRefused(CursorBindingMismatchV1::Foreign)
+            }
+            error => operation_resume_verification_error(error),
+        })?;
         if sort_key.stable_id != record.binding.operation_id.to_string()
             || sort_key.knowledge_at_micros
                 != i64::try_from(completed).map_err(|_| OperationEventError::ResumeUnavailable)?
@@ -1016,11 +1027,12 @@ impl OperationEventAuthority {
         }
         let available_results = snapshot.results.len();
         let offset = match page.cursor.as_ref() {
-            Some(cursor) => {
-                self.inner
-                    .resume
-                    .verify_test_result_cursor(cursor, record, snapshot.completed)?
-            }
+            Some(cursor) => self.inner.resume.verify_test_result_cursor(
+                cursor,
+                record,
+                snapshot.completed,
+                page.page_size,
+            )?,
             None => 0,
         };
         if offset > available_results {
@@ -1039,6 +1051,7 @@ impl OperationEventAuthority {
                     record.generation,
                     snapshot.completed,
                     end,
+                    page.page_size,
                 )
             })
             .transpose()?;
@@ -1759,8 +1772,23 @@ fn operation_resume_snapshot(
     .map_err(|_| OperationEventError::ResumeUnavailable)
 }
 
+/// Resume tokens continue one operation's event stream; the operation and its
+/// generation ride the snapshot.
+fn resume_binding() -> Result<CursorBindingV1, OperationEventError> {
+    CursorBindingV1::new("operation_events", Vec::new())
+        .map_err(|_| OperationEventError::ResumeUnavailable)
+}
+
+fn test_result_binding(page_size: u32) -> Result<CursorBindingV1, OperationEventError> {
+    CursorBindingV1::builder("test_results")
+        .parameter("page_size", &page_size)
+        .build()
+        .map_err(|_| OperationEventError::ResumeUnavailable)
+}
+
 fn operation_resume_verification_error(error: CursorError) -> OperationEventError {
     match error {
+        CursorError::Binding(mismatch) => OperationEventError::CursorRefused(mismatch),
         CursorError::Expired
         | CursorError::UnknownOrExpiredKey
         | CursorError::KeyUnavailable
@@ -2026,18 +2054,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_managed_test_run_pages_without_source_identity() {
-        let reader = CanonicalManagedTestRunReader::new(OperationEventAuthority::default());
-
-        assert_eq!(
-            reader
-                .latest_page("file:///workspace", &PageRequest::first(1).expect("page"),)
-                .await,
-            Err(ManagedTestRunUnavailableReason::FrontierExpired)
-        );
-    }
-
-    #[tokio::test]
     async fn canonical_test_run_reader_rejects_exact_source_identity_drift() {
         let authority = OperationEventAuthority::default();
         let head = CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit");
@@ -2138,7 +2154,6 @@ mod tests {
                 ManagedTestRunUnavailableReason::AuthorityFailure,
             )
         );
-
         let ManagedTestRunReadOutcome::Current(second) = reader
             .latest_current_page(
                 &current,
