@@ -271,7 +271,8 @@ fn acquire_branch_add_lock_blocking_with(
 /// than inventing a default branch.
 #[must_use]
 pub fn detect_default_branch(project_root: &Path) -> Option<String> {
-    let authority = crate::git_repository::GitRepositoryAuthority::discover(project_root).ok()?;
+    let authority =
+        crate::git_repository::GitRepositoryAuthority::discover_settled(project_root).ok()?;
     let references = authority.references().ok()?;
 
     if let Some(branch) = references
@@ -455,5 +456,28 @@ mod branch_memo_tests {
             1,
             "a memo must resolve the live branch at most once"
         );
+    }
+
+    /// A discovery walk another thread owns is not an unknown default
+    /// branch: branch tracking would refuse the checkout as detached.
+    #[tokio::test]
+    async fn default_branch_resolves_while_another_walk_owns_discovery() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repository directory");
+        let root = root.canonicalize().expect("canonical repository");
+        run_git(&root, &["init", "--quiet", "--initial-branch=main"]);
+        run_git(&root, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
+
+        let mut block = crate::git_repository::block_repository_discovery_for_test(&root);
+        let parked = std::thread::spawn({
+            let root = root.clone();
+            move || super::detect_default_branch(&root)
+        });
+        block.wait_entered().await;
+        assert_eq!(super::detect_default_branch(&root).as_deref(), Some("main"));
+        block.release();
+        assert_eq!(parked.join().expect("parked walk").as_deref(), Some("main"));
+        crate::git_repository::reset_repository_discovery_for_test(&root);
     }
 }

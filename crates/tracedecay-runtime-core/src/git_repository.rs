@@ -711,6 +711,17 @@ impl GitRepositoryAuthority {
         })
     }
 
+    /// [`Self::discover`] for callers that need the answer, not a
+    /// non-blocking probe: a walk another thread already owns is repeated
+    /// uncached, as [`settled_repository_topology`] does, instead of being
+    /// reported as [`GitRepositoryError::DiscoveryBlocked`].
+    pub fn discover_settled(path: &Path) -> Result<Self, GitRepositoryError> {
+        match Self::discover(path) {
+            Err(GitRepositoryError::DiscoveryBlocked { .. }) => Self::discover_uncached(path),
+            discovered => discovered,
+        }
+    }
+
     /// Open a repository whose topology is already known, or `None` when the
     /// open fails and the full walk has to decide.
     fn open_retained(topology: &GitRepositoryTopologyV1) -> Option<Self> {

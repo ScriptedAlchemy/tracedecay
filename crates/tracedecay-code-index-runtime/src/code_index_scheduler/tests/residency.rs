@@ -20,7 +20,7 @@ use super::{
     CodeIndexSchedulerRegistryV1, GitFixture, core_search_request, git,
     mounted_core_query_worktree_at, mounted_core_query_worktree_in, test_project_id,
     wait_for_generation_change, wait_for_live_complete_generation,
-    wait_for_queryable_text_generation, wait_for_worker_phase,
+    wait_for_queryable_text_generation, wait_for_settled_owner, wait_for_worker_phase,
 };
 
 const IDLE_WINDOW: Duration = Duration::from_mins(10);
@@ -54,6 +54,8 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
         .expect("the seated generation answers");
     assert!(!fresh.served_stale);
     let generation = fresh.generation.as_str().to_owned();
+    // A pass still finishing the mount can re-seat the decode it measures.
+    wait_for_settled_owner(&registry, fixture.path()).await;
 
     let used = owners.report(Instant::now());
     assert_eq!(
@@ -524,7 +526,9 @@ async fn a_text_build_sheds_retained_state_before_it_refuses() {
     registry.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// Paused time makes the refused build's delayed memory retry virtual, so it
+// cannot overtake the headroom wake however long the host takes.
+#[tokio::test(start_paused = true)]
 async fn readers_of_a_build_waiting_for_memory_do_not_spin_the_worker() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
