@@ -524,24 +524,20 @@ async fn streamed_message_refresh_reads_do_not_scale_with_the_session_store() {
         usize::try_from(BASE_SESSIONS).unwrap()
     );
     let probe_timestamp = SEED_TIMESTAMP + 10_000_000;
-    scratch_mark("base-start");
     let before = process_read_bytes();
     probe_one_message(&facade, project, &scope, &mut probed, probe_timestamp).await;
     assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
     let base_read = process_read_bytes() - before;
-    scratch_mark("base-end");
 
     seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
     assert_eq!(
         refresh_until_idle(&database, &refresh).await,
         usize::try_from(GROWN_SESSIONS - BASE_SESSIONS).unwrap()
     );
-    scratch_mark("grown-start");
     let before = process_read_bytes();
     probe_one_message(&facade, project, &scope, &mut probed, probe_timestamp + 1).await;
     assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
     let grown_read = process_read_bytes() - before;
-    scratch_mark("grown-end");
 
     eprintln!("streamed message ingest read bytes: base={base_read} grown={grown_read}");
     assert!(
@@ -549,13 +545,4 @@ async fn streamed_message_refresh_reads_do_not_scale_with_the_session_store() {
         "an 8x larger session store must not double one streamed message's reads: \
          base={base_read} grown={grown_read}"
     );
-}
-
-fn scratch_mark(label: &str) {
-    if let Some(path) = std::env::var_os("TRACEDECAY_SCAFFOLD_SQL_PROFILE") {
-        let lines = std::fs::read_to_string(path)
-            .map(|t| t.lines().count())
-            .unwrap_or(0);
-        eprintln!("SCRATCH {label} line={lines}");
-    }
 }
