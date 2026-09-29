@@ -182,6 +182,8 @@ pub struct VerifiedGraphSnapshot {
     head: Arc<VerifiedGenerationLease>,
     closure: BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>,
     direct_sealed: bool,
+    /// A direct-sealed layered head's store; `database` is its delta.
+    direct_store: Option<Arc<crate::sealed_store::SealedGenerationStore>>,
     meter: Option<Arc<GraphReadMeter>>,
 }
 
@@ -271,6 +273,7 @@ impl VerifiedGraphSnapshot {
             head,
             closure,
             direct_sealed: false,
+            direct_store: None,
             meter: None,
         }
     }
@@ -278,6 +281,7 @@ impl VerifiedGraphSnapshot {
     pub(crate) fn new_direct_sealed(
         database: crate::GraphDbLeaseV1,
         head: Arc<VerifiedGenerationLease>,
+        direct_store: Option<Arc<crate::sealed_store::SealedGenerationStore>>,
     ) -> Self {
         let projection = head.locator.projection.clone();
         Self {
@@ -285,6 +289,7 @@ impl VerifiedGraphSnapshot {
             head: Arc::clone(&head),
             closure: BTreeMap::from([(projection, head)]),
             direct_sealed: true,
+            direct_store,
             meter: None,
         }
     }
@@ -362,6 +367,16 @@ impl VerifiedGraphSnapshot {
         let (store, entity) = self.with_operation(|| {
             let lease = self.lease_for_projection(&reference.projection)?;
             let namespace = lease.locator.physical_namespace()?;
+            if let Some(layered) = self
+                .sealed_store(&lease.locator)
+                .as_deref()
+                .and_then(crate::sealed_store::SealedGenerationStore::layered_reads)
+            {
+                return Ok((
+                    GraphReadStore::Sealed,
+                    layered.entity(&reference.identity, cancellation)?,
+                ));
+            }
             if self.direct_sealed {
                 return Ok((
                     GraphReadStore::Sealed,
@@ -373,12 +388,6 @@ impl VerifiedGraphSnapshot {
             // per-generation store; the digest proved the exact row set, so
             // a miss there is authoritative and never re-read from staging.
             if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
-                if let Some(layered) = sealed.layered_reads() {
-                    return Ok((
-                        GraphReadStore::Sealed,
-                        layered.entity(&reference.identity, cancellation)?,
-                    ));
-                }
                 return Ok((
                     GraphReadStore::Sealed,
                     sealed
@@ -413,7 +422,7 @@ impl VerifiedGraphSnapshot {
             // The owning generation's sealed store holds the relation, its
             // edge, and full copies of any dependency-generation endpoints,
             // so the endpoint decode below stays inside one store.
-            if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
+            if let Some(sealed) = self.sealed_store(&lease.locator) {
                 if let Some(layered) = sealed.layered_reads() {
                     return Ok((
                         GraphReadStore::Sealed,
@@ -951,7 +960,21 @@ impl VerifiedGraphSnapshot {
         if !self.head.dependency_identities.is_empty() {
             return None;
         }
-        self.database.sealed_generation_reader(&self.head.locator)
+        self.sealed_store(&self.head.locator)
+    }
+
+    /// The sealed store serving `locator`: a direct-sealed layered head's
+    /// own, or whichever the database has installed.
+    fn sealed_store(
+        &self,
+        locator: &GenerationLocator,
+    ) -> Option<Arc<crate::sealed_store::SealedGenerationStore>> {
+        if *locator == self.head.locator
+            && let Some(store) = &self.direct_store
+        {
+            return Some(Arc::clone(store));
+        }
+        self.database.sealed_generation_reader(locator)
     }
 
     /// A head fan-out served by the head's layered store, metered like any

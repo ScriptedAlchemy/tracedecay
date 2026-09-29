@@ -936,8 +936,14 @@ impl LayeredReads<'_> {
                 Arc::clone(cancellation),
             ),
         };
-        let delta = read(self.delta, &self.namespace)?;
-        let base = read(&self.layer.base, &self.layer.base_namespace)?;
+        // A layer past its headroom holds more visible rows than the caller's
+        // budget, so the refusal is the caller's.
+        let refused = |error| match error {
+            GraphDbError::BudgetExhausted { .. } => read_budget(budget),
+            error => error,
+        };
+        let delta = read(self.delta, &self.namespace).map_err(refused)?;
+        let base = read(&self.layer.base, &self.layer.base_namespace).map_err(refused)?;
         Ok(delta
             .into_iter()
             .zip(base)

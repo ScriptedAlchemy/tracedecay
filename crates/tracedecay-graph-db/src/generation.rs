@@ -309,6 +309,7 @@ struct RecoveredGenerationDigestMemo {
     entity_count: usize,
     relation_count: usize,
     digest: GraphRecoveredGenerationDigestV1,
+    row_sum: GraphRowDigestSum,
 }
 
 impl RecoveredGenerationDigestMemo {
@@ -609,15 +610,32 @@ impl GraphGenerationManifest {
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+        self.recovered_digest_and_row_sum(check)
+            .map(|(digest, _)| digest)
+    }
+
+    /// The order-independent row half of [`Self::expected_recovered_digest`].
+    pub(crate) fn row_sum(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphRowDigestSum, GraphDbError> {
+        self.recovered_digest_and_row_sum(check)
+            .map(|(_, row_sum)| row_sum)
+    }
+
+    fn recovered_digest_and_row_sum(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(GraphRecoveredGenerationDigestV1, GraphRowDigestSum), GraphDbError> {
         if let Some(memo) = self.digest_memo.expected_recovered.get() {
             if memo.binds(self) {
-                return Ok(memo.digest.clone());
+                return Ok((memo.digest.clone(), memo.row_sum));
             }
             // Mutated after seeding: the pinned key is stale, so every read
             // recomputes from the current fields.
             return self.compute_expected_recovered_digest(check);
         }
-        let digest = self.compute_expected_recovered_digest(check)?;
+        let (digest, row_sum) = self.compute_expected_recovered_digest(check)?;
         // A lost seeding race means another reader memoized the same value.
         let _ = self
             .digest_memo
@@ -627,17 +645,19 @@ impl GraphGenerationManifest {
                 entity_count: self.entities.len(),
                 relation_count: self.relations.len(),
                 digest: digest.clone(),
+                row_sum,
             });
-        Ok(digest)
+        Ok((digest, row_sum))
     }
 
     #[hotpath::measure(label = "code_index.seal.digest")]
     fn compute_expected_recovered_digest(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
-        let digest = recovered_generation_digest(self, check)?;
+    ) -> Result<(GraphRecoveredGenerationDigestV1, GraphRowDigestSum), GraphDbError> {
+        let (digest, row_sum) = recovered_generation_digest(self, check)?;
         GraphRecoveredGenerationDigestV1::new(format!("sha256:{digest}"))
+            .map(|digest| (digest, row_sum))
             .map_err(|error| GraphDbError::invalid(error.to_string()))
     }
 
@@ -1128,10 +1148,10 @@ pub(crate) fn recovered_entity_ref(
 fn recovered_generation_digest(
     manifest: &GraphGenerationManifest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<String, GraphDbError> {
+) -> Result<(String, GraphRowDigestSum), GraphDbError> {
     #[cfg(test)]
     MANIFEST_CANONICALIZATIONS.with(|count| count.set(count.get() + 1));
-    recovered_generation_digest_with_config(
+    recovered_generation_digest_and_rows(
         manifest,
         check,
         ManifestDigestPipelineConfig::production(),
@@ -1314,12 +1334,21 @@ struct ReservedManifestDigestChunk {
     _reservation: ManifestDigestReservation,
 }
 
-#[hotpath::measure(label = "graph_db.generation.manifest_digest")]
+#[cfg(test)]
 fn recovered_generation_digest_with_config(
     manifest: &GraphGenerationManifest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     config: ManifestDigestPipelineConfig,
 ) -> Result<String, GraphDbError> {
+    recovered_generation_digest_and_rows(manifest, check, config).map(|(digest, _)| digest)
+}
+
+#[hotpath::measure(label = "graph_db.generation.manifest_digest")]
+fn recovered_generation_digest_and_rows(
+    manifest: &GraphGenerationManifest,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    config: ManifestDigestPipelineConfig,
+) -> Result<(String, GraphRowDigestSum), GraphDbError> {
     let GraphGenerationManifest {
         projection,
         generation,
@@ -1369,8 +1398,9 @@ fn recovered_generation_digest_with_config(
             workers,
         )?;
     }
+    let row_sum = writer.row_sum();
     writer.finish()?;
-    Ok(encode_lowercase_hex(&digest.finalize()))
+    Ok((encode_lowercase_hex(&digest.finalize()), row_sum))
 }
 
 #[hotpath::measure(label = "graph_db.generation.manifest_digest.parallel")]
@@ -2279,7 +2309,7 @@ mod checked_vec_writer_tests {
         let manifest = manifest_with_entities(4_096);
 
         reset_canonical_buffer_allocation_growths();
-        let digest = recovered_generation_digest(&manifest, &|| Ok(())).unwrap();
+        let (digest, _) = recovered_generation_digest(&manifest, &|| Ok(())).unwrap();
         let allocation_growths = canonical_buffer_allocation_growths();
         assert_eq!(
             digest,

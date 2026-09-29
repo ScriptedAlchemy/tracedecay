@@ -38,7 +38,7 @@ fn raw_store(temp: &TempDir) -> grafeo_engine::GrafeoDB {
 }
 
 const FORMAT_MARKER: [(&str, i64); 2] = [
-    ("__tracedecay_graph_db_version", 6),
+    ("__tracedecay_graph_db_version", 7),
     ("__tracedecay_graph_db_sequence", 0),
 ];
 
@@ -88,7 +88,7 @@ fn persisted_scalar_identity_mismatch_is_corrupt_on_point_read() {
     ));
 }
 
-/// A format-6 relation as it lies on disk: one native edge row carrying the
+/// A format-7 relation as it lies on disk: one native edge row carrying the
 /// relation's kind and payload, and its locator carrying the key, identity,
 /// source, and target. Keys are base64url of
 /// `sha256("workspace")[..8] ‖ digest-identity tag ‖ kind ‖ digest[..16]`;

@@ -94,7 +94,14 @@ pub(crate) fn open_direct_sealed_generation(
     expected: &GraphRecoveredGenerationDigestV1,
     authority_lease: Arc<dyn tracedecay_store::RetainedGraphStoreLeaseV1>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Option<(crate::GraphDbLeaseV1, GraphGenerationManifestIdentity)>, GraphDbError> {
+) -> Result<
+    Option<(
+        crate::GraphDbLeaseV1,
+        GraphGenerationManifestIdentity,
+        Option<Arc<SealedGenerationStore>>,
+    )>,
+    GraphDbError,
+> {
     if sealed_store_disabled() {
         return Ok(None);
     }
@@ -121,11 +128,6 @@ pub(crate) fn open_direct_sealed_generation(
     {
         return Err(GraphDbError::unavailable(
             "sealed generation store receipt does not bind this generation".to_owned(),
-        ));
-    }
-    if receipt.base.is_some() {
-        return Err(GraphDbError::unavailable(
-            "a layered sealed generation recovers through its registered store",
         ));
     }
     // Lazily, for the same reason as `open_sealed_store`, and additionally so
@@ -161,6 +163,16 @@ pub(crate) fn open_direct_sealed_generation(
             Vec::new(),
         )
     };
+    if receipt.base.is_some() {
+        // A layered store serves through its two engines; the direct
+        // snapshot routes its head reads through the proven store.
+        let _ = database.close();
+        let store = open_sealed_store_checked(&directory, &identity, expected, check, None)?
+            .ok_or_else(|| GraphDbError::unavailable("layered sealed generation is absent"))?;
+        let lease =
+            crate::owner::issue_derived_read_lease(Arc::clone(&store.database), authority_lease)?;
+        return Ok(Some((lease, identity, Some(store))));
+    }
     // Same marker-aware proof as registry adoption: a boot that reopens the
     // exact bytes an earlier open already proved resolves by marker, and a
     // fresh or changed container pays the full row proof and files the marker.
@@ -174,7 +186,7 @@ pub(crate) fn open_direct_sealed_generation(
     }
     database.mark_sealed_read_only();
     let lease = crate::owner::issue_derived_read_lease(database, authority_lease)?;
-    Ok(Some((lease, identity)))
+    Ok(Some((lease, identity, None)))
 }
 
 /// Rows loaded from the shared staging database per read-guard hold while a
@@ -1622,7 +1634,8 @@ fn build_or_open_sealed_store(
     let (row_sum, attachment) = match rows {
         SealedRowSource::Spilled(spilled) => (Some(spilled.row_sum()), spilled.attachment()),
         SealedRowSource::Layered(layered) => (Some(layered.row_sum()), None),
-        SealedRowSource::Staging(_) | SealedRowSource::Manifest(_) => (None, None),
+        SealedRowSource::Manifest(manifest) => (Some(manifest.row_sum(check)?), None),
+        SealedRowSource::Staging(_) => (None, None),
     };
     let container_rows = match rows {
         SealedRowSource::Layered(layered) => SealedRowSource::Spilled(layered.delta()),
