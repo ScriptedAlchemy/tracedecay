@@ -96,7 +96,7 @@ pub(super) async fn invoke_profile_retained(
 
 /// A profile authority that could not be mounted keeps its reason code and
 /// retry verdict as a typed unavailable terminal.
-fn authority_problem(error: &TraceDecayError) -> ApplicationProblem {
+pub(super) fn authority_problem(error: &TraceDecayError) -> ApplicationProblem {
     if let Some((authority, _)) = tracedecay_mcp::reset_required_context(error)
         && let Some(detail) = tracedecay_contracts::ApplicationProblemDetailV1::from_reset_required(
             error,
@@ -295,6 +295,21 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ProfileExecutor {
                     deadline,
                     context,
                     Some(token.clone()),
+                )),
+                tracedecay_daemon_protocol::DaemonInvocationPayload::ProfileConfiguration {
+                    surface_operation,
+                    request: configuration_request,
+                    observed_at,
+                    deadline,
+                    cancellation: context,
+                } => Box::pin(super::profile_configuration::invoke_profile_configuration(
+                    &self.store_administration,
+                    request.request_id,
+                    surface_operation,
+                    configuration_request,
+                    observed_at,
+                    deadline,
+                    context,
                 )),
                 _ => {
                     return Ok(DaemonInvocationResponse::problem(

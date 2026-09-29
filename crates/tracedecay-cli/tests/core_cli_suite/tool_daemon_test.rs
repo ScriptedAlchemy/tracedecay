@@ -3545,3 +3545,92 @@ fn projectless_json_tool_call_prints_the_typed_refusal() {
         "{multi_root}"
     );
 }
+
+fn configuration_get_from(home: &Path, cwd: &Path, key: &str) -> (Option<i32>, Value) {
+    let output = tracedecay_command_with_home(home)
+        .current_dir(cwd)
+        .args(["tool", "configuration_get", "--json", "--args"])
+        .arg(json!({ "key": key }).to_string())
+        .stdin(Stdio::null())
+        .output()
+        .expect("tracedecay tool should run");
+    let body = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "configuration_get printed non-JSON ({error}):\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.code(), body)
+}
+
+fn run_upload_counter_command(home: &Path, cwd: &Path, command: &str) {
+    let output = tracedecay_command_with_home(home)
+        .current_dir(cwd)
+        .arg(command)
+        .stdin(Stdio::null())
+        .output()
+        .expect("upload counter command should run");
+    assert!(output.status.success(), "{command} failed: {output:?}");
+}
+
+/// A user-scoped setting belongs to the profile, so it resolves wherever the
+/// command runs: a value written inside a project is the one doctor and
+/// `configuration_get` report outside any project, and a write made outside a
+/// project is the one the project then reads. A project-scoped key still needs
+/// a project.
+#[test]
+fn user_settings_resolve_from_the_profile_outside_any_project() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    let outside = canonical_existing_path(outside.path());
+    init_committed_git_project_with_cli(&home, &project);
+    let _daemon = spawn_tracedecay_daemon(&home);
+
+    run_upload_counter_command(&home, &project, "enable-upload-counter");
+
+    let doctor = tracedecay_command_with_home(&home)
+        .current_dir(&outside)
+        .arg("doctor")
+        .stdin(Stdio::null())
+        .output()
+        .expect("doctor should run");
+    let doctor_stderr = String::from_utf8_lossy(&doctor.stderr);
+    assert!(
+        doctor_stderr.contains("Worldwide counter upload enabled"),
+        "doctor outside a project must report the profile's upload setting:\n{doctor_stderr}"
+    );
+    assert!(
+        !doctor_stderr.contains("upload setting unavailable")
+            && !doctor_stderr.contains("canonical configuration is unavailable"),
+        "doctor outside a project reported the user setting unavailable:\n{doctor_stderr}"
+    );
+
+    let (code, enabled) = configuration_get_from(&home, &outside, "user.upload_enabled.v1");
+    assert_eq!(code, Some(0), "{enabled}");
+    assert_eq!(
+        enabled["outcome"]["value"]["payload"]["effective_value"],
+        json!({ "kind": "boolean", "value": true }),
+        "{enabled}"
+    );
+
+    run_upload_counter_command(&home, &outside, "disable-upload-counter");
+    let (code, disabled) = configuration_get_from(&home, &project, "user.upload_enabled.v1");
+    assert_eq!(code, Some(0), "{disabled}");
+    assert_eq!(
+        disabled["outcome"]["value"]["payload"]["effective_value"],
+        json!({ "kind": "boolean", "value": false }),
+        "a write made outside a project must be the value the project reads: {disabled}"
+    );
+
+    let (code, refused) = configuration_get_from(&home, &outside, "index.git_ignore.v1");
+    assert_eq!(code, Some(1), "{refused}");
+    assert_eq!(
+        (&refused["problem"]["kind"], &refused["problem"]["code"]),
+        (&json!("invalid_request"), &json!("project_required")),
+        "{refused}"
+    );
+}
