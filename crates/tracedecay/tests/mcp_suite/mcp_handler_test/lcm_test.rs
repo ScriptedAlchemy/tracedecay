@@ -386,8 +386,9 @@ async fn lcm_load_session_cursor_walk_reads_every_message_exactly_once() {
     // More records than the internal candidate cohort window, so the walk has
     // to advance the storage keyset rather than re-rank the first window.
     const RECORDS: usize = 300;
-    // Small enough that a page plus its cursor fits one MCP response frame.
-    const LIMIT: usize = 5;
+    // Small enough that a page plus its request-bound cursor fits one MCP
+    // response frame.
+    const LIMIT: usize = 4;
     let (cg, _env, _dir) = setup_empty_project().await;
     let mut projections = Vec::with_capacity(RECORDS);
     for index in 0..RECORDS {
@@ -1359,6 +1360,178 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
 }
 
 #[cfg(feature = "test-transport")]
+fn cursor_refusal(response: &Value, code: &str, message: &str) {
+    assert_eq!(
+        crate::support::tool_refusal(response),
+        json!({"kind": "invalid_request", "code": code, "message": message}),
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["problem"]["legal_actions"],
+        json!(["correct_request", "restart_without_cursor"]),
+        "{response}"
+    );
+}
+
+#[cfg(feature = "test-transport")]
+const CURSOR_NOT_ISSUED: &str = "The cursor was not issued by this operation. Restart without it.";
+
+#[cfg(feature = "test-transport")]
+fn cursor_parameter_changed(parameter: &str) -> String {
+    format!(
+        "The cursor was issued for a request with a different `{parameter}`. Repeat the \
+         request with the parameters that returned the cursor, or restart without it."
+    )
+}
+
+/// A session continuation belongs to the operation and request that minted
+/// it: `lcm_load_session` refuses its own cursor with a changed content slice
+/// or page size, other session operations refuse it as foreign, and only the
+/// unchanged request reads the next page.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn lcm_session_cursor_pages_only_the_operation_and_request_that_minted_it() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let mut projections = Vec::new();
+    for index in 0_i64..4 {
+        projections.push(
+            seed_temporal_lcm_session_message_for_provider(
+                &cg,
+                "codex",
+                "lcm-cursor-binding",
+                &format!("lcm-binding-message-{index}"),
+                format!("bound retained message {index}"),
+                index + 1,
+            )
+            .await,
+        );
+    }
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-cursor-binding", projections).await;
+    let server = real_mcp_server(cg).await;
+    let load = |extra: Value| {
+        let mut arguments = json!({
+            "provider": "codex",
+            "session_id": "lcm-cursor-binding",
+            "limit": 2,
+            "content_limit": 8
+        });
+        for (key, value) in extra.as_object().expect("extra arguments") {
+            arguments[key] = value.clone();
+        }
+        arguments
+    };
+    let message_ids = |payload: &Value| {
+        payload["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                message["message_id"]
+                    .as_str()
+                    .expect("message id")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let first =
+        handle_real_server_tool_call(&server, "tracedecay_lcm_load_session", load(json!({}))).await;
+    let first: Value = serde_json::from_str(extract_real_server_text(&first)).unwrap();
+    let first_ids = message_ids(&first);
+    assert_eq!(first_ids.len(), 2, "{first}");
+    let cursor = first["temporal"]["next_cursor"]
+        .as_str()
+        .expect("page one continues")
+        .to_owned();
+
+    for (parameter, changed) in [
+        (
+            "content_limit",
+            json!({"content_limit": 9, "cursor": cursor}),
+        ),
+        (
+            "content_offset",
+            json!({"content_offset": 1, "cursor": cursor}),
+        ),
+        ("limit", json!({"limit": 3, "cursor": cursor})),
+    ] {
+        cursor_refusal(
+            &handle_real_server_tool_call_raw(
+                &server,
+                "tracedecay_lcm_load_session",
+                load(changed),
+            )
+            .await,
+            "cursor.parameter_changed",
+            &cursor_parameter_changed(parameter),
+        );
+    }
+    cursor_refusal(
+        &handle_real_server_tool_call_raw(
+            &server,
+            "tracedecay_lcm_load_session",
+            load(json!({"cursor": "4.00.1.00.00"})),
+        )
+        .await,
+        "cursor.invalid",
+        CURSOR_NOT_ISSUED,
+    );
+    for (tool, arguments) in [
+        (
+            "tracedecay_lcm_grep",
+            json!({
+                "provider": "codex",
+                "query": "bound retained message",
+                "scope": "session",
+                "session_id": "lcm-cursor-binding",
+                "limit": 2,
+                "cursor": cursor
+            }),
+        ),
+        (
+            "tracedecay_lcm_expand_query",
+            json!({
+                "provider": "codex",
+                "session_id": "lcm-cursor-binding",
+                "prompt": "bound retained message",
+                "max_results": 2,
+                "cursor": cursor
+            }),
+        ),
+    ] {
+        cursor_refusal(
+            &handle_real_server_tool_call_raw(&server, tool, arguments).await,
+            "cursor.invalid",
+            CURSOR_NOT_ISSUED,
+        );
+    }
+
+    let second = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_load_session",
+        load(json!({"cursor": cursor})),
+    )
+    .await;
+    let second: Value = serde_json::from_str(extract_real_server_text(&second)).unwrap();
+    let second_ids = message_ids(&second);
+    let mut every_id = first_ids.clone();
+    every_id.extend(second_ids.iter().cloned());
+    every_id.sort();
+    assert_eq!(
+        every_id,
+        vec![
+            "lcm-binding-message-0",
+            "lcm-binding-message-1",
+            "lcm-binding-message-2",
+            "lcm-binding-message-3",
+        ],
+        "pages one and two partition the session: {first} {second}"
+    );
+    server.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -1488,12 +1661,10 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     )
     .await;
     let tampered: Value = serde_json::from_str(extract_real_server_text(&tampered)).unwrap();
-    // An unverifiable cursor fails closed as a typed not-found-or-not-
-    // authorized problem envelope rather than a served page.
-    assert_eq!(
-        tampered["problem"]["kind"], "not_found_or_not_authorized",
-        "{tampered}"
-    );
+    // An unverifiable cursor is refused as one this operation did not issue,
+    // not served as a page.
+    assert_eq!(tampered["problem"]["kind"], "invalid_request", "{tampered}");
+    assert_eq!(tampered["problem"]["code"], "cursor.invalid", "{tampered}");
 
     let rebound = handle_real_server_tool_call(
         &server,
@@ -1508,10 +1679,34 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     )
     .await;
     let rebound: Value = serde_json::from_str(extract_real_server_text(&rebound)).unwrap();
+    assert_eq!(rebound["problem"]["kind"], "invalid_request", "{rebound}");
     assert_eq!(
-        rebound["problem"]["kind"], "not_found_or_not_authorized",
+        rebound["problem"]["code"], "cursor.parameter_changed",
         "{rebound}"
     );
+    assert_eq!(
+        rebound["problem"]["message"],
+        cursor_parameter_changed("source_limit"),
+        "{rebound}"
+    );
+
+    // The same source window requested through expand-query is another
+    // operation: its node path must not redeem an lcm_expand cursor.
+    let expand_cursor_on_query = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "prompt": "Recover every paged source",
+            "node_ids": [summary_id],
+            "max_results": 3,
+            "context_max_tokens": 4096,
+            "cursor": cursor
+        }),
+    )
+    .await;
+    cursor_refusal(&expand_cursor_on_query, "cursor.invalid", CURSOR_NOT_ISSUED);
 
     let private_terminal = handle_real_server_tool_call(
         &server,
@@ -1600,6 +1795,26 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let query_cursor = first_query_page["temporal"]["next_cursor"]
         .as_str()
         .expect("expand-query source page should return a cursor");
+
+    let reprompted = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "prompt": "Recover a different answer",
+            "node_ids": [summary_id],
+            "max_results": 2,
+            "context_max_tokens": 4096,
+            "cursor": query_cursor
+        }),
+    )
+    .await;
+    cursor_refusal(
+        &reprompted,
+        "cursor.parameter_changed",
+        &cursor_parameter_changed("prompt"),
+    );
 
     let continued_query_page = handle_real_server_tool_call(
         &server,

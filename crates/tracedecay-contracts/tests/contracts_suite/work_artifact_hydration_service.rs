@@ -22,6 +22,8 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use tracedecay_domain::test_fixtures::id;
 
+use crate::work_attempt_service::{cursor_invalid, cursor_parameter_changed};
+
 use tracedecay_domain::test_fixtures::digest;
 
 fn context(project: &str) -> RequestContext {
@@ -146,6 +148,24 @@ fn request(
     WorkArtifactHydrationRequestV1 { page_size, cursor }
 }
 
+/// The cursor a capped first page mints under `generation`.
+fn minted_cursor(
+    service: &WorkArtifactHydrationService<RowStore>,
+    context: &RequestContext,
+    generation: &str,
+) -> WorkAttemptListCursorV1 {
+    let WorkArtifactHydrationV1::Hydrated {
+        coverage: WorkAttemptListCoverageV1::Capped { resume, .. },
+        ..
+    } = service
+        .hydrate(context, &request(2, None), |_| Ok(verified(generation)))
+        .unwrap()
+    else {
+        panic!("a capped first page must mint a cursor");
+    };
+    resume
+}
+
 fn seeded() -> (WorkArtifactHydrationService<RowStore>, RowStore) {
     let store = RowStore::default();
     let first = identity("task.hydration.a", "attempt.1");
@@ -199,12 +219,9 @@ fn an_absent_scope_is_typed_and_a_cursor_against_it_is_stale() {
         .unwrap();
     assert_eq!(absent, WorkArtifactHydrationV1::Absent);
 
-    let cursor = WorkAttemptListCursorV1 {
-        generation: "generation.hydration.gone".to_owned(),
-        start_after: identity("task.hydration.a", "attempt.1"),
-    };
+    let cursor = minted_cursor(&service, &context, "generation.hydration.gone");
     let stale = service
-        .hydrate(&context, &request(10, Some(cursor)), |_| {
+        .hydrate(&context, &request(2, Some(cursor)), |_| {
             Ok(WorkAttemptTopologyStateV1::Absent)
         })
         .unwrap_err();
@@ -253,7 +270,20 @@ fn hydration_pages_under_one_generation_and_types_evidence_coverage() {
         panic!("a capped page must say so");
     };
     assert_eq!((returned, remaining), (2, 1));
-    assert_eq!(resume.generation, "generation.hydration.1");
+
+    let replay = |page_size, cursor: WorkAttemptListCursorV1| {
+        service.hydrate(&context, &request(page_size, Some(cursor)), |_| {
+            Ok(verified("generation.hydration.1"))
+        })
+    };
+    assert_eq!(
+        replay(3, resume.clone()).unwrap_err(),
+        cursor_parameter_changed("page_size")
+    );
+    assert_eq!(
+        replay(2, serde_json::from_str("\"bc1.7b7d\"").unwrap()).unwrap_err(),
+        cursor_invalid()
+    );
 
     let second_page = service
         .hydrate(&context, &request(2, Some(resume)), |_| {
@@ -281,10 +311,7 @@ fn hydration_pages_under_one_generation_and_types_evidence_coverage() {
 fn a_cursor_from_a_superseded_generation_is_refused_stale() {
     let (service, _) = seeded();
     let context = context("project.hydration.stale");
-    let cursor = WorkAttemptListCursorV1 {
-        generation: "generation.hydration.old".to_owned(),
-        start_after: identity("task.hydration.a", "attempt.1"),
-    };
+    let cursor = minted_cursor(&service, &context, "generation.hydration.old");
     let stale = service
         .hydrate(&context, &request(2, Some(cursor)), |_| {
             Ok(verified("generation.hydration.2"))

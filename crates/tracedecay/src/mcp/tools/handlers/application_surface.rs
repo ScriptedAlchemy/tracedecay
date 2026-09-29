@@ -550,6 +550,20 @@ pub(crate) fn graph_tool_error_problem(
         }
         TraceDecayError::ProjectRoute {
             reason_code,
+            detail,
+            ..
+        } if reason_code == tracedecay_domain::CURSOR_PARAMETER_CHANGED_CODE
+            || reason_code == tracedecay_domain::CURSOR_INVALID_CODE =>
+        {
+            tracedecay_contracts::ApplicationProblem::cursor_refusal(
+                tracedecay_contracts::SafeDiagnostic {
+                    code: reason_code.clone(),
+                    message: detail.clone(),
+                },
+            )
+        }
+        TraceDecayError::ProjectRoute {
+            reason_code,
             retryable,
             detail,
             ..

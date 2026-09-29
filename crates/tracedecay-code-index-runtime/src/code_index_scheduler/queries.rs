@@ -25,20 +25,20 @@ use tracedecay_contracts::{
     CancellationStage, CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest,
     CodeOccurrenceRecord, CodeQueryPage, CodeRelationRequest, CodeSignatureRequest,
     CodeSymbolSearchRequest, CoverageCompleteness, CoverageDomainState, EvidenceCoverage,
-    EvidenceDomain, ExactOccurrenceRecord, ExactOccurrenceRequest, FreshnessState, LegalAction,
+    EvidenceDomain, ExactOccurrenceRecord, ExactOccurrenceRequest, FreshnessState,
     LexicalOccurrenceRecord, ModuleApiRequest, Omission, OmissionReason, OpaqueCursor,
     OperationBudgetUsage, PageCursor, PageState, PhraseSearchRequest, QualifiedNameRequest,
     RequestAdmission, RequestContext, RequestCostReceiptV1, RetrievalEvidence,
-    RetrievalPortContext, RetrievalPortOutcome, RetryDirective, SafeDiagnostic,
-    SourceMetadataRecord, SourceMetadataRequest, TemporalState,
+    RetrievalPortContext, RetrievalPortOutcome, SourceMetadataRecord, SourceMetadataRequest,
+    TemporalState,
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
-    ExactAdmissionRuleRevision, FileOccurrenceId, FreshnessVectorDigest, ManifestDigest, NodeKind,
-    PrincipalId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalBudget,
-    RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SymbolOccurrenceId, TemporalModeV1,
-    UtcMicros, VectorWatermark, canonical_sha256,
+    CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision, FileOccurrenceId,
+    FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId, QueryNormalizationRevision,
+    RelationEdgeKindV1, RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
+    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -64,9 +64,8 @@ use tracedecay_query::retrieval::ports::{
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeLaneOutcomeV1,
     NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1, NativeSymbolRecordV1,
-    PreparedQueryBindingV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
-    PreparedQueryRoutingBindingsV1, PreparedQueryV1, QueryExecutionContractErrorV1,
-    route_authenticated_prepared_query_cursor,
+    PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
+    QueryExecutionContractErrorV1, route_authenticated_prepared_query_cursor,
 };
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
@@ -541,12 +540,10 @@ fn retrieval_budget(page_size: u32) -> RetrievalBudget {
 fn prepared_routing_bindings(
     context: &RetrievalPortContext<'_>,
     temporal_mode: TemporalModeV1,
-    operation: &'static str,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
     page_size: u32,
 ) -> Result<PreparedQueryRoutingBindingsV1, CallableCodeCursorError> {
     Ok(PreparedQueryRoutingBindingsV1 {
-        operation: operation.to_owned(),
         scope_digest: context.request.scope().scope_digest.clone(),
         principal: typed::<PrincipalId>(context.request.actor().to_string())
             .map_err(|_| CallableCodeCursorError::Unavailable)?,
@@ -755,31 +752,16 @@ fn rejected_cursor<T>(
     }
 }
 
-/// A cursor this request cannot redeem as presented: the caller corrects the
-/// request or restarts paging without the cursor.
+/// A cursor this request cannot redeem as presented.
 fn cursor_refusal(error: &CallableCodeCursorError) -> ApplicationProblem {
     tracing::info!(%error, "callable code query refused its continuation cursor");
-    let diagnostic = match error {
-        CallableCodeCursorError::ParameterChanged { parameter } => SafeDiagnostic {
-            code: "callable_code.cursor_parameter_changed".to_owned(),
-            message: format!(
-                "The cursor was issued for a request with a different `{parameter}`. Repeat the \
-                 request with the parameters that returned the cursor, or restart without it."
-            ),
-        },
-        _ => SafeDiagnostic {
-            code: "callable_code.cursor_invalid".to_owned(),
-            message: "The cursor was not issued by this operation. Restart without it.".to_owned(),
-        },
+    let mismatch = match error {
+        CallableCodeCursorError::ParameterChanged { parameter } => {
+            CursorBindingMismatchV1::ParameterChanged { parameter }
+        }
+        _ => CursorBindingMismatchV1::Foreign,
     };
-    ApplicationProblem::InvalidRequest {
-        diagnostic,
-        retry: RetryDirective::Never,
-        legal_actions: vec![
-            LegalAction::CorrectRequest,
-            LegalAction::RestartWithoutCursor,
-        ],
-    }
+    ApplicationProblem::cursor_refused(&mismatch)
 }
 
 fn bounded_result<T>(
@@ -1745,13 +1727,14 @@ impl PreparedCallableQueryStateV1 for PreparedGraphCallableQueryV1 {
 }
 
 fn prepared_query_binding(
+    operation: &'static str,
     parameters: Vec<Result<(&'static str, ManifestDigest), tracedecay_domain::DomainError>>,
-) -> Result<PreparedQueryBindingV1, PreparedQueryErrorV1> {
+) -> Result<CursorBindingV1, PreparedQueryErrorV1> {
     let parameters = parameters
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
-    PreparedQueryBindingV1::new(parameters)
+    CursorBindingV1::new(operation, parameters).map_err(|_| PreparedQueryErrorV1::Unavailable)
 }
 
 macro_rules! prepare_callable_query_or_return {
@@ -1762,7 +1745,7 @@ macro_rules! prepare_callable_query_or_return {
         $operation:expr,
         [$($parameter:literal => $value:expr),* $(,)?]
     ) => {{
-        let Ok(query_binding) = prepared_query_binding(vec![
+        let Ok(query_binding) = prepared_query_binding($operation, vec![
             $(canonical_sha256(&$value).map(|digest| ($parameter, digest))),*
         ]) else {
             return unavailable(query_finished_at());
@@ -1773,7 +1756,6 @@ macro_rules! prepare_callable_query_or_return {
                 &$request.scope.generation,
                 &$request.meta.page,
                 $request.meta.temporal,
-                $operation,
                 query_binding.clone(),
             )
             .await
@@ -1798,7 +1780,7 @@ macro_rules! prepare_text_callable_query_or_return {
         $operation:expr,
         [$($parameter:literal => $value:expr),* $(,)?]
     ) => {{
-        let Ok(query_binding) = prepared_query_binding(vec![
+        let Ok(query_binding) = prepared_query_binding($operation, vec![
             $(canonical_sha256(&$value).map(|digest| ($parameter, digest))),*
         ]) else {
             return unavailable(query_finished_at());
@@ -1809,7 +1791,6 @@ macro_rules! prepare_text_callable_query_or_return {
                 &$request.scope.generation,
                 &$request.meta.page,
                 $request.meta.temporal,
-                $operation,
                 query_binding.clone(),
             )
             .await
@@ -1834,7 +1815,7 @@ macro_rules! prepare_graph_callable_query_or_return {
         $operation:expr,
         [$($parameter:literal => $value:expr),* $(,)?]
     ) => {{
-        let Ok(query_binding) = prepared_query_binding(vec![
+        let Ok(query_binding) = prepared_query_binding($operation, vec![
             $(canonical_sha256(&$value).map(|digest| ($parameter, digest))),*
         ]) else {
             return unavailable(query_finished_at());
@@ -1845,7 +1826,6 @@ macro_rules! prepare_graph_callable_query_or_return {
                 &$request.scope.generation,
                 &$request.meta.page,
                 $request.meta.temporal,
-                $operation,
                 query_binding.clone(),
             )
             .await
@@ -1897,15 +1877,13 @@ impl CodeIndexSchedulerRegistryV1 {
         generation: &CodeGenerationId,
         page: &tracedecay_contracts::PageRequest,
         temporal: TemporalModeV1,
-        operation: &'static str,
-        query_binding: PreparedQueryBindingV1,
+        query_binding: CursorBindingV1,
     ) -> Result<PreparedCallableQueryV1, CallableCodeCursorError> {
         let authority = self
             .query_authority_for_scope(context.request.scope())
             .await
             .ok_or(CallableCodeCursorError::Unavailable)?;
-        let routing =
-            prepared_routing_bindings(context, temporal, operation, query_binding, page.page_size)?;
+        let routing = prepared_routing_bindings(context, temporal, query_binding, page.page_size)?;
         let latest = self
             .resolve_serving_generation(
                 context.request,
@@ -1931,15 +1909,13 @@ impl CodeIndexSchedulerRegistryV1 {
         generation: &CodeGenerationId,
         page: &tracedecay_contracts::PageRequest,
         temporal: TemporalModeV1,
-        operation: &'static str,
-        query_binding: PreparedQueryBindingV1,
+        query_binding: CursorBindingV1,
     ) -> Result<PreparedTextCallableQueryV1, CallableCodeCursorError> {
         let authority = self
             .query_authority_for_scope(context.request.scope())
             .await
             .ok_or(CallableCodeCursorError::Unavailable)?;
-        let routing =
-            prepared_routing_bindings(context, temporal, operation, query_binding, page.page_size)?;
+        let routing = prepared_routing_bindings(context, temporal, query_binding, page.page_size)?;
         let latest = self
             .resolve_text_serving_generation(
                 context.request,
@@ -1965,15 +1941,13 @@ impl CodeIndexSchedulerRegistryV1 {
         generation: &CodeGenerationId,
         page: &tracedecay_contracts::PageRequest,
         temporal: TemporalModeV1,
-        operation: &'static str,
-        query_binding: PreparedQueryBindingV1,
+        query_binding: CursorBindingV1,
     ) -> Result<PreparedGraphCallableQueryV1, CallableCodeCursorError> {
         let authority = self
             .query_authority_for_scope(context.request.scope())
             .await
             .ok_or(CallableCodeCursorError::Unavailable)?;
-        let routing =
-            prepared_routing_bindings(context, temporal, operation, query_binding, page.page_size)?;
+        let routing = prepared_routing_bindings(context, temporal, query_binding, page.page_size)?;
         let latest = self
             .resolve_graph_serving_generation(
                 context.request,
@@ -2019,7 +1993,7 @@ fn finish_direct_query<T: serde::Serialize>(
     prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
     page: CodeQueryPage<T>,
     requested_page: &tracedecay_contracts::PageRequest,
     eligible: u64,
@@ -2052,7 +2026,7 @@ fn finish_generation_page<T: serde::Serialize>(
     prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
     items: Vec<T>,
     requested_page: &tracedecay_contracts::PageRequest,
     page_label: &'static str,
@@ -2089,7 +2063,7 @@ fn finish_generation_candidate_page<K, T>(
     prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
     keys: Vec<K>,
     hydrate: impl FnOnce(&[K]) -> Result<Vec<T>, PreparedQueryErrorV1>,
     requested_page: &tracedecay_contracts::PageRequest,
@@ -2119,7 +2093,7 @@ fn finish_query_with_coverage<T: serde::Serialize>(
     prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
     page: CodeQueryPage<T>,
     requested_page: &tracedecay_contracts::PageRequest,
     coverage: tracedecay_domain::RetrieverCoverage,
@@ -2141,7 +2115,7 @@ fn finish_generation_candidate_page_unmetered<K, T>(
     prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
     keys: Vec<K>,
     hydrate: impl FnOnce(&[K]) -> Result<Vec<T>, PreparedQueryErrorV1>,
     requested_page: &tracedecay_contracts::PageRequest,
@@ -2156,7 +2130,6 @@ where
     let finished_at = query_finished_at();
     let generation = prepared.generation().clone();
     let bindings = PreparedQueryBindingsV1::new(
-        operation,
         context.request.scope().scope_digest.clone(),
         generation.clone(),
         query_binding,
@@ -2230,7 +2203,7 @@ fn finish_query_with_coverage_unmetered<T: serde::Serialize>(
     prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
     page: CodeQueryPage<T>,
     requested_page: &tracedecay_contracts::PageRequest,
     coverage: tracedecay_domain::RetrieverCoverage,
@@ -2238,7 +2211,6 @@ fn finish_query_with_coverage_unmetered<T: serde::Serialize>(
     let finished_at = query_finished_at();
     let generation = prepared.generation().clone();
     let bindings = PreparedQueryBindingsV1::new(
-        operation,
         context.request.scope().scope_digest.clone(),
         generation.clone(),
         query_binding,
@@ -2500,7 +2472,7 @@ fn finish_native_lane_page<T, N>(
     prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
     requested_page: &tracedecay_contracts::PageRequest,
     page: NativeLanePageV1<N>,
     map: impl FnMut(N) -> T,
@@ -2569,7 +2541,7 @@ fn finish_native_lane_query<T, N>(
     prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
     requested_page: &tracedecay_contracts::PageRequest,
     outcome: NativeLaneOutcomeV1<N>,
     mut map: impl FnMut(N) -> T,
@@ -2677,7 +2649,7 @@ fn execute_prepared_exact_query(
     prepared: &PreparedTextCallableQueryV1,
     context: &RetrievalPortContext<'_>,
     request: &ExactOccurrenceRequest,
-    query_binding: PreparedQueryBindingV1,
+    query_binding: CursorBindingV1,
 ) -> RetrievalPortOutcome<CodeQueryPage<ExactOccurrenceRecord>> {
     let latest = &prepared.latest;
     let served_generation = latest.metadata().manifest().generation_id.clone();
@@ -3946,13 +3918,17 @@ mod tests {
             request: &context,
             operation: &operation,
         };
-        let binding = prepared_query_binding(vec![
-            canonical_sha256(&request.literal).map(|digest| ("literal", digest)),
-            canonical_sha256(&request.kind).map(|digest| ("kind", digest)),
-            canonical_sha256(&request.scope).map(|digest| ("scope", digest)),
-            canonical_sha256(&request.meta.projection).map(|digest| ("meta.projection", digest)),
-            canonical_sha256(&request.meta.order).map(|digest| ("meta.order", digest)),
-        ])
+        let binding = prepared_query_binding(
+            "code_exact_occurrence",
+            vec![
+                canonical_sha256(&request.literal).map(|digest| ("literal", digest)),
+                canonical_sha256(&request.kind).map(|digest| ("kind", digest)),
+                canonical_sha256(&request.scope).map(|digest| ("scope", digest)),
+                canonical_sha256(&request.meta.projection)
+                    .map(|digest| ("meta.projection", digest)),
+                canonical_sha256(&request.meta.order).map(|digest| ("meta.order", digest)),
+            ],
+        )
         .expect("request binding");
         let prepared = registry
             .prepare_text_callable_query(
@@ -3960,7 +3936,6 @@ mod tests {
                 &generation,
                 &request.meta.page,
                 request.meta.temporal,
-                "code_exact_occurrence",
                 binding.clone(),
             )
             .await

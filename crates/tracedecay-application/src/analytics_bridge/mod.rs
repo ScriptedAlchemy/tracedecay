@@ -159,7 +159,7 @@ pub async fn import_source(
         .map_or(0, |duration| duration.as_secs());
 
     let cursor_key = import_cursor_key(&source.path);
-    let expected_cursor = match gdb.get_parse_offset_result(&cursor_key).await {
+    let expected_cursor = match gdb.get_parse_offset(&cursor_key).await {
         Ok(Some(cursor)) => cursor,
         Ok(None) => ParseOffset::default(),
         Err(err) => {

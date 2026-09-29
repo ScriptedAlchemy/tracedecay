@@ -161,6 +161,7 @@ pub(crate) mod tests {
         ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
         ResultContractRef, RetryDirective,
     };
+    use tracedecay_domain::CursorBindingMismatchV1;
     use tracedecay_tool_catalog::SchemaId;
 
     pub(crate) fn assert_json_problem(schema_id: &str, request_id: &str) {
@@ -205,5 +206,40 @@ pub(crate) mod tests {
         );
         let refused = super::refused(super::WORKFLOW, "get-run", &outcome).unwrap_err();
         assert_eq!(refused.to_string(), expected);
+    }
+
+    #[test]
+    fn a_json_rendered_cursor_refusal_still_fails_the_command() {
+        let outcome: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
+            ResultContractRef::new(
+                SchemaId::new("schema.work.list_attempts.result").unwrap(),
+                1,
+            )
+            .unwrap(),
+            RequestId::new("request.cli.work.cursor").unwrap(),
+            ApplicationProblem::cursor_refused(&CursorBindingMismatchV1::ParameterChanged {
+                parameter: "page_size",
+            }),
+        )
+        .expect("construct canonical cursor refusal fixture"));
+
+        let rendered = super::render(
+            super::WORK,
+            "list-attempts",
+            std::path::Path::new("/project"),
+            &outcome,
+            true,
+        )
+        .expect("the refusal renders as its JSON line");
+        let problem: Value = serde_json::from_str(rendered.trim_end()).unwrap();
+        assert_eq!(problem["problem"]["code"], "cursor.parameter_changed");
+        assert_eq!(
+            super::refused(super::WORK, "list-attempts", &outcome)
+                .unwrap_err()
+                .to_string(),
+            "work list-attempts refused the request (cursor.parameter_changed): The cursor was \
+             issued for a request with a different `page_size`. Repeat the request with the \
+             parameters that returned the cursor, or restart without it."
+        );
     }
 }

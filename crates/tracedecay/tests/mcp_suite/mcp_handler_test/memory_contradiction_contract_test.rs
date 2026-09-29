@@ -164,7 +164,7 @@ async fn fact_store_contradict_rejects_noncanonical_arguments() {
     for (arguments, field) in [
         (json!({"threshold": 0.3}), "threshold"),
         (json!({"min_trust": 0.5}), "min_trust"),
-        (json!({"after": {"fact_id": "fact.v1.invalid"}}), "after"),
+        (json!({"after": "bc1.00"}), "after"),
     ] {
         let body = rejection_body(&fixture, arguments).await;
         assert_eq!(

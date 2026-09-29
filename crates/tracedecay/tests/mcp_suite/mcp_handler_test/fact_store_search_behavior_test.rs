@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
 
+use super::fact_store_list_test::assert_cursor_refused;
 use crate::support::{
     TestTempDir, application_invalid_request_error, commit_worktree, extract_real_server_text,
     handle_real_server_tool_call, handle_real_server_tool_call_raw, production_composition_fixture,
@@ -425,15 +426,41 @@ async fn fact_store_search_returns_the_stored_fact_and_pages_the_rest() {
     )
     .await;
     assert_eq!(contents(&first_page), vec![HIGH.to_owned()], "{first_page}");
-    assert_eq!(
-        first_page["next_after"]["fact_id"], first_page["hits"][0]["fact"]["fact_id"],
-        "{first_page}"
-    );
+    let continuation = first_page["next_after"]
+        .as_str()
+        .expect("opaque continuation")
+        .to_owned();
+    assert!(continuation.starts_with("bc1."), "{first_page}");
     assert_eq!(
         first_page["retrieval_telemetry"],
         json!({"kind": "recorded", "fact_count": 1}),
         "{first_page}"
     );
+    for (tool, arguments, code, message) in [
+        (
+            TOOL,
+            json!({"query": "Quince", "category": "project", "min_trust": 0.0, "limit": 1, "after": continuation}),
+            "cursor.parameter_changed",
+            "The cursor was issued for a request with a different `category`. Repeat the \
+             request with the parameters that returned the cursor, or restart without it.",
+        ),
+        (
+            TOOL,
+            json!({"query": "Hallway", "category": "decision", "min_trust": 0.0, "limit": 1, "after": continuation}),
+            "cursor.parameter_changed",
+            "The cursor was issued for a request with a different `query`. Repeat the \
+             request with the parameters that returned the cursor, or restart without it.",
+        ),
+        (
+            "tracedecay_fact_store_probe",
+            json!({"entity": "Quince", "category": "decision", "min_trust": 0.0, "limit": 1, "after": continuation}),
+            "cursor.invalid",
+            "The cursor was not issued by this operation. Restart without it.",
+        ),
+    ] {
+        let refused = handle_real_server_tool_call_raw(server, tool, arguments).await;
+        assert_cursor_refused(&refused, code, message);
+    }
     let second_page = search_payload(
         server,
         json!({
@@ -441,7 +468,7 @@ async fn fact_store_search_returns_the_stored_fact_and_pages_the_rest() {
             "category": "decision",
             "min_trust": 0.0,
             "limit": 1,
-            "after": first_page["next_after"]
+            "after": continuation
         }),
     )
     .await;

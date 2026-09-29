@@ -440,7 +440,7 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
         .await,
     );
     assert_eq!(listed_contents(&listed), vec![SURVIVOR_CONTENT.to_owned()]);
-    assert!(listed["next_after_fact_id"].is_null(), "{listed}");
+    assert!(listed["next_after"].is_null(), "{listed}");
 
     let tombstone = payload(
         call_tool(

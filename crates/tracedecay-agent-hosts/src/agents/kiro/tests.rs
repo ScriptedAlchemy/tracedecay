@@ -1,15 +1,4 @@
-//! Host-CLI-driven Kiro MCP registry lifecycle.
-//!
-//! Kiro owns `~/.kiro/settings/mcp.json` through `kiro-cli mcp`, so TraceDecay
-//! drives that CLI rather than merging the file. These tests stand a fake
-//! `kiro-cli` in an isolated HOME, assert the exact argv TraceDecay issues,
-//! and assert that an absent binary refuses instead of falling back to config
-//! surgery. The fake host preserves a known peer server so the lifecycle's
-//! preservation guard is exercised on both add and remove.
-//!
-//! The fake CLI also emulates the registry's own effect (add writes the
-//! server entry, remove drops it) so removal can be shown to reverse
-//! installation rather than merely being spelled correctly.
+//! Kiro lifecycle: file-edited MCP registration, steering, and doctor.
 
 use super::*;
 #[cfg(unix)]
@@ -89,19 +78,12 @@ fn healthcheck_skips_steering_when_legacy_file_is_absent() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn global_activate_does_not_create_missing_legacy_steering() {
     use crate::agents::host_bundle::HostComponentV1;
     use crate::agents::{AgentIntegration, InstallContext};
 
     let home = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let log = bin_dir.path().join("invocations.log");
-    let kiro_cli = bin_dir.path().join("kiro-cli");
-    fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
-    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
-
     let steering = home.path().join(".kiro/steering/tracedecay.md");
     assert!(!steering.exists());
 
@@ -325,160 +307,95 @@ fn steering_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
     assert!(!empty.exists());
 }
 
-/// Install a fake `kiro-cli` that appends each invocation's argv to `log` and
-/// then performs `body`.
-#[cfg(unix)]
-fn fake_kiro_cli(bin: &Path, log: &Path, body: &str) {
-    let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
-        log = shell_single_quote(&log.to_string_lossy()),
-    );
-    write_executable_script(bin, script).unwrap();
+fn install_context(home: &Path, tracedecay_bin: &str) -> InstallContext {
+    InstallContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
+        home: home.to_path_buf(),
+        tracedecay_bin: tracedecay_bin.to_string(),
+        project_root: None,
+        dashboard: false,
+    }
 }
 
-/// Body for a fake `kiro-cli` that emulates the registry's own writes, so a
-/// test can observe that TraceDecay's removal really reverses its install.
-#[cfg(unix)]
-const FAKE_REGISTRY_BODY: &str = r#"case "$1 $2" in
-  "mcp add")
-    [ "${11-}" = "--force" ] || { echo 'missing --force' >&2; exit 64; }
-    command="$6"
-    /bin/mkdir -p "$HOME/.kiro/settings"
-    if [ -f "$HOME/.kiro/settings/mcp.json" ] && /usr/bin/grep -q '"other"' "$HOME/.kiro/settings/mcp.json"; then
-      printf '{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"%s","args":["serve"],"disabled":false}}}\n' "$command" > "$HOME/.kiro/settings/mcp.json"
-    else
-      printf '{"mcpServers":{"tracedecay":{"command":"%s","args":["serve"],"disabled":false}}}\n' "$command" > "$HOME/.kiro/settings/mcp.json"
-    fi
-    ;;
-  "mcp remove")
-    if [ -f "$HOME/.kiro/settings/mcp.json" ] && /usr/bin/grep -q '"other"' "$HOME/.kiro/settings/mcp.json"; then
-      printf '%s\n' '{"mcpServers":{"other":{"command":"other","args":[]}}}' > "$HOME/.kiro/settings/mcp.json"
-    else
-      /bin/rm -f "$HOME/.kiro/settings/mcp.json"
-    fi
-    ;;
-esac
-exit 0"#;
+const CONTEXT_MCP: &[crate::agents::host_bundle::HostComponentV1] =
+    &[crate::agents::host_bundle::HostComponentV1::ContextMcp];
 
-/// A host command can mutate its registry and still return a failure (for
-/// example after a post-write validation error). The component-set transaction
-/// must restore the exact pre-command bytes in that case.
-#[cfg(unix)]
-const FAKE_FAIL_AFTER_WRITE_BODY: &str = r#"case "$1 $2" in
-  "mcp add")
-    /bin/mkdir -p "$HOME/.kiro/settings"
-    printf '%s\n' '{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}' > "$HOME/.kiro/settings/mcp.json"
-    ;;
-esac
-echo 'Kiro rejected the registry after writing it' >&2
-exit 7"#;
-
-#[cfg(unix)]
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
-
-#[cfg(unix)]
-fn recorded_invocations(log: &Path) -> Vec<String> {
-    std::fs::read_to_string(log)
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect()
-}
-
+/// Kiro's CLI refuses every `mcp` command while signed out. Registration edits
+/// the documented `~/.kiro/settings/mcp.json` itself, so that CLI on `PATH`
+/// is never run and the operator's peer server and formatting survive both
+/// directions byte for byte.
 #[cfg(unix)]
 #[test]
-fn activation_drives_the_hosts_own_mcp_add_with_the_registered_server_contract() {
+fn global_registration_edits_mcp_json_without_running_a_signed_out_kiro_cli() {
     let home = tempfile::tempdir().unwrap();
     let bin_dir = tempfile::tempdir().unwrap();
-    let log = bin_dir.path().join("invocations.log");
-    let kiro_cli = bin_dir.path().join("kiro-cli");
-    fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
-
-    kiro_mcp_add_with(&kiro_cli, home.path(), "/bin/tracedecay")
-        .expect("a clean host CLI run is a completed registration");
-
-    assert_eq!(
-        recorded_invocations(&log),
-        vec![
-            "mcp add --name tracedecay --command /bin/tracedecay --args serve --scope global --force"
-                .to_string(),
-        ],
-        "activation must add the server through Kiro's own registry, naming it and \
-         passing each launch argument as Kiro's raw `--args` value at global scope"
-    );
-    assert!(
-        mcp_config_path(home.path()).exists(),
-        "the host's own registry write must be what lands the entry"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn removal_drives_the_hosts_own_mcp_remove_and_reverses_the_registration() {
-    let home = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let log = bin_dir.path().join("invocations.log");
-    let kiro_cli = bin_dir.path().join("kiro-cli");
-    fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
-    let mcp_path = mcp_config_path(home.path());
-    assert!(!mcp_path.exists(), "precondition: nothing registered yet");
-
-    kiro_mcp_add_with(&kiro_cli, home.path(), "/bin/tracedecay").unwrap();
-    kiro_mcp_remove_with(&kiro_cli, home.path())
-        .expect("a clean host CLI run is a completed removal");
-
-    assert_eq!(
-        recorded_invocations(&log),
-        vec![
-            "mcp add --name tracedecay --command /bin/tracedecay --args serve --scope global --force"
-                .to_string(),
-            "mcp remove --name tracedecay --scope global".to_string(),
-        ],
-        "removal must address the server by the same registry name the add used"
-    );
-    assert!(
-        !mcp_path.exists(),
-        "removal must fully reverse installation, leaving no tracedecay entry behind"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn add_and_remove_preserve_an_operator_owned_peer_server() {
-    let home = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let log = bin_dir.path().join("invocations.log");
-    let kiro_cli = bin_dir.path().join("kiro-cli");
-    fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
-    let mcp_path = mcp_config_path(home.path());
-    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &mcp_path,
-        br#"{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"/old/tracedecay","args":["serve"]}}}"#,
+    let ran = bin_dir.path().join("kiro-cli-ran");
+    write_executable_script(
+        &bin_dir.path().join("kiro-cli"),
+        format!(
+            "#!/bin/sh\ntouch '{}'\necho 'error: You are not logged in, please log in with kiro-cli login' >&2\nexit 1\n",
+            ran.display()
+        ),
     )
     .unwrap();
+    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    let original = "{\n  \"mcpServers\": {\n    \"other\": {\n      \"command\": \"other\",\n      \"args\": []\n    }\n  }\n}\n";
+    std::fs::write(&mcp_path, original).unwrap();
 
-    kiro_mcp_add_with(&kiro_cli, home.path(), "/new/tracedecay")
-        .expect("host add must force-update tracedecay while preserving the peer");
-    let added: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
-    assert_eq!(added["mcpServers"]["other"]["command"], "other");
+    KiroIntegration
+        .activate_deployed_host_component_registration(
+            CONTEXT_MCP,
+            &install_context(home.path(), "/new/tracedecay"),
+        )
+        .unwrap();
+
     assert_eq!(
-        added["mcpServers"]["tracedecay"]["command"],
-        "/new/tracedecay"
+        std::fs::read_to_string(&mcp_path).unwrap(),
+        "{\n  \"mcpServers\": {\n    \"other\": {\n      \"command\": \"other\",\n      \"args\": []\n    },\n    \"tracedecay\": {\n      \"args\": [\n        \"serve\"\n      ],\n      \"command\": \"/new/tracedecay\",\n      \"disabled\": false\n    }\n  }\n}\n"
     );
+    assert!(KiroIntegration.has_tracedecay(
+        home.path(),
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+    ));
 
-    kiro_mcp_remove_with(&kiro_cli, home.path())
-        .expect("host remove must preserve the peer while dropping tracedecay");
-    let removed: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
-    assert_eq!(removed["mcpServers"]["other"]["command"], "other");
-    assert!(removed["mcpServers"].get("tracedecay").is_none());
+    KiroIntegration
+        .deactivate_deployed_host_component_registration(
+            CONTEXT_MCP,
+            &install_context(home.path(), "/new/tracedecay"),
+        )
+        .unwrap();
+
+    assert_eq!(std::fs::read_to_string(&mcp_path).unwrap(), original);
+    assert!(!ran.exists(), "the lifecycle ran kiro-cli");
 }
 
-#[cfg(unix)]
+/// With no `kiro-cli` anywhere, registration creates the documented user-level
+/// file from nothing.
+#[test]
+fn global_registration_creates_mcp_json_without_any_kiro_cli() {
+    let home = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path.path());
+
+    KiroIntegration
+        .activate_deployed_host_component_registration(
+            CONTEXT_MCP,
+            &install_context(home.path(), "/bin/tracedecay"),
+        )
+        .unwrap();
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(mcp_config_path(home.path())).unwrap()).unwrap();
+    assert_eq!(
+        written,
+        serde_json::json!({"mcpServers": {"tracedecay": {
+            "command": "/bin/tracedecay", "args": ["serve"], "disabled": false
+        }}})
+    );
+}
+
 fn kiro_component_set() -> crate::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1 {
     crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
         crate::agents::host_bundle::HostKindV1::Kiro,
@@ -490,7 +407,6 @@ fn kiro_component_set() -> crate::agents::host_bundle_registry::VerifiedEmbedded
     .expect("the embedded Kiro component set must verify")
 }
 
-#[cfg(unix)]
 fn kiro_component_request(
     operation: crate::agents::host_bundle::HostBundleLifecycleOpV1,
     operation_id: [u8; 16],
@@ -508,66 +424,8 @@ fn kiro_component_request(
     }
 }
 
-#[cfg(unix)]
 #[test]
-fn failed_kiro_cli_effect_rolls_back_the_peer_containing_registry() {
-    use crate::agents::host_bundle::{
-        HostBundleLifecycleOpV1, HostBundleWriterV1, HostComponentSetTransactionV1,
-    };
-
-    let home = tempfile::tempdir().unwrap();
-    let lifecycle = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let kiro_cli = bin_dir.path().join("kiro-cli");
-    let log = bin_dir.path().join("invocations.log");
-    fake_kiro_cli(&kiro_cli, &log, FAKE_FAIL_AFTER_WRITE_BODY);
-    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
-
-    let mcp_path = mcp_config_path(home.path());
-    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
-    let original = br#"{"mcpServers":{"other":{"command":"other","args":[]}}}"#;
-    std::fs::write(&mcp_path, original).unwrap();
-
-    let component_set = kiro_component_set();
-    let request = kiro_component_request(HostBundleLifecycleOpV1::Install, [31; 16]);
-    let mut writer = HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path())
-        .expect("host bundle writer must open for an isolated profile");
-    let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
-        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-        "kiro",
-        home.path(),
-        request.lifecycle.operation,
-        "/bin/tracedecay".to_string(),
-    )
-    .unwrap();
-    let mut transaction = HostComponentSetTransactionV1::new(&mut writer);
-    let preview = transaction
-        .preview(
-            &component_set.component_set,
-            &request,
-            &component_set,
-            &mut registration,
-        )
-        .expect("the isolated peer-containing registry must preview");
-    let _error = transaction
-        .execute_confirmed(
-            &component_set.component_set,
-            &request,
-            &preview,
-            &component_set,
-            &mut registration,
-        )
-        .expect_err("a failing native command must fail the lifecycle");
-    assert_eq!(
-        std::fs::read(&mcp_path).unwrap(),
-        original,
-        "registration rollback must restore the exact peer-containing document"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
+fn rollback_refuses_a_foreign_registry_write_after_apply() {
     use crate::agents::host_bundle::{
         HostBundleLifecycleOpV1, HostBundleWriterV1, HostComponentSetRegistrationV1,
         HostComponentSetTransactionV1,
@@ -575,11 +433,6 @@ fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
 
     let home = tempfile::tempdir().unwrap();
     let lifecycle = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let kiro_cli = bin_dir.path().join("kiro-cli");
-    let log = bin_dir.path().join("invocations.log");
-    fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
-    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
 
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
@@ -622,7 +475,7 @@ fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
         .unwrap();
     registration
         .apply(&component_set.component_set, &request)
-        .expect("the fake native add must apply");
+        .expect("the registration edit must apply");
 
     let foreign = br#"{"mcpServers":{"foreign":{"command":"operator"}}}"#;
     std::fs::write(&mcp_path, foreign).unwrap();
@@ -722,9 +575,8 @@ fn an_empty_kiro_mcp_config_is_a_doctor_failure() {
     assert_eq!(counters.warnings, 0);
 }
 
-#[cfg(unix)]
 #[test]
-fn cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched() {
+fn lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched() {
     const AMBIENT_CHILD: &str = "TRACEDECAY_TEST_AMBIENT_KIRO_HOME_CHILD";
     let Some(ambient) = std::env::var_os(AMBIENT_CHILD).map(PathBuf::from) else {
         // The ambient `KIRO_HOME` is process environment; a child isolates
@@ -733,7 +585,7 @@ fn cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "agents::kiro::tests::cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched",
+                "agents::kiro::tests::lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched",
             ])
             .env(AMBIENT_CHILD, ambient.path())
             .env("KIRO_HOME", ambient.path())
@@ -743,16 +595,16 @@ fn cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched() {
         return;
     };
     let home = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let log = bin_dir.path().join("invocations.log");
-    let kiro_cli = bin_dir.path().join("kiro-cli");
-    fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
     let ambient_mcp = ambient.join("settings/mcp.json");
     std::fs::create_dir_all(ambient_mcp.parent().unwrap()).unwrap();
     let sentinel = br#"{"mcpServers":{"operator-sentinel":{"command":"keep"}}}"#;
     std::fs::write(&ambient_mcp, sentinel).unwrap();
-    kiro_mcp_add_with(&kiro_cli, home.path(), "/bin/tracedecay")
-        .expect("the admitted profile must drive the native CLI");
+    KiroIntegration
+        .activate_deployed_host_component_registration(
+            CONTEXT_MCP,
+            &install_context(home.path(), "/bin/tracedecay"),
+        )
+        .expect("the admitted profile must be the one registered");
     assert_eq!(std::fs::read(&ambient_mcp).unwrap(), sentinel);
     assert!(mcp_config_path(home.path()).is_file());
 }

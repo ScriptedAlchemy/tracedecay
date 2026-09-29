@@ -585,12 +585,9 @@ async fn redundancy_ranks_exact_copies_by_duplicated_body_bytes() {
         json!(reviewable_bytes(&ledger)),
         "{capped}"
     );
-    assert!(
-        capped_families[0]["next_cursor"]
-            .as_str()
-            .is_some_and(|cursor| !cursor.is_empty()),
-        "{capped}"
-    );
+    // Members were read under the path scope, which no member continuation
+    // can carry; the whole family pages through `tracedecay_similar`.
+    assert_eq!(capped_families[0]["next_cursor"], Value::Null, "{capped}");
     let capped_paths = capped_families[0]["members"]
         .as_array()
         .expect("capped members")

@@ -340,14 +340,18 @@ async fn context_memory_matches(
         .search_project_memory_facts(query, read_control)
         .await
         .map_err(memory_application_error)?;
-    let mapped =
-        tracedecay_session_memory::memory_mapping::search_page(&page).map_err(|error| {
+    // Context assembly reads one page and hands no continuation back.
+    let binding = tracedecay_domain::CursorBindingV1::new("context_memory", Vec::new())
+        .map_err(|error| TraceDecayError::database_operation("bind context memory page", error))?;
+    let mapped = tracedecay_session_memory::memory_mapping::search_page(&page, &binding).map_err(
+        |error| {
             let problem = retained_surface_execution_problem(error);
             TraceDecayError::Database {
                 operation: "project canonical context memory".to_string(),
                 message: problem.canonical_code().to_string(),
             }
-        })?;
+        },
+    )?;
     Ok(ContextMemoryMatches {
         hits: mapped.hits,
         graph_coverage: mapped.graph_coverage,

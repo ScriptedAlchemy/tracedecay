@@ -15,8 +15,8 @@ use tracedecay_contracts::{
     now_micros,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, RetrievalGrainV1, SessionId, SignedCursorKeyRefV1,
-    TemporalModeV1, UtcMicros, canonical_sha256,
+    CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1, ManifestDigest, RetrievalGrainV1,
+    SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
@@ -47,7 +47,7 @@ use tracedecay_graph_query::{
 use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
 use tracedecay_temporal_query::cursor::SessionCursorAuthenticator;
 use tracedecay_temporal_query::cursor::{
-    CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
+    CURSOR_LIFETIME_MICROS, CursorError, StableSortKey, encode_cursor, verify_cursor,
 };
 use tracedecay_temporal_query::execution::BindingDigest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
@@ -219,7 +219,7 @@ fn diagnostics_unavailable(
     evidence_unavailable(EvidenceDomain::Diagnostic, finished_at, reason, 0)
 }
 
-fn omitted_evidence<T>(
+pub(super) fn omitted_evidence<T>(
     domain: EvidenceDomain,
     finished_at: UtcMicros,
     reason: OmissionReason,
@@ -517,20 +517,32 @@ impl AuthenticatedDiagnosticCursorAuthorityV1 {
         .map_err(|_| ())
     }
 
+    /// The page position `encoded` names, or the refusal a cursor minted for
+    /// another request receives (`None` when the cursor is merely stale).
     fn decode(
         &self,
         encoded: &str,
         context: &RequestContext,
         generation: &CodeGenerationId,
         lane: &str,
-    ) -> Result<DiagnosticQueryCursor, ()> {
-        let snapshot = self.snapshot(context, generation, lane)?;
-        let sort_key =
-            verify_cursor(encoded, &snapshot, self.authenticator.as_ref()).map_err(|_| ())?;
+        binding: &CursorBindingV1,
+    ) -> Result<DiagnosticQueryCursor, Option<CursorBindingMismatchV1>> {
+        let snapshot = self
+            .snapshot(context, generation, lane)
+            .map_err(|()| None)?;
+        let sort_key = verify_cursor(encoded, &snapshot, binding, self.authenticator.as_ref())
+            .map_err(|error| match error {
+                CursorError::Binding(mismatch) => Some(mismatch),
+                CursorError::Malformed | CursorError::Tampered => {
+                    Some(CursorBindingMismatchV1::Foreign)
+                }
+                _ => None,
+            })?;
         if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
-            return Err(());
+            return Err(Some(CursorBindingMismatchV1::Foreign));
         }
-        DiagnosticQueryCursor::decode(&format!("dq1:{}", sort_key.stable_id)).map_err(|_| ())
+        DiagnosticQueryCursor::decode(&format!("dq1:{}", sort_key.stable_id))
+            .map_err(|_| Some(CursorBindingMismatchV1::Foreign))
     }
 
     fn encode(
@@ -539,10 +551,12 @@ impl AuthenticatedDiagnosticCursorAuthorityV1 {
         context: &RequestContext,
         generation: &CodeGenerationId,
         lane: &str,
+        binding: &CursorBindingV1,
     ) -> Result<OpaqueCursor, ()> {
         let snapshot = self.snapshot(context, generation, lane)?;
         let encoded = encode_cursor(
             &snapshot,
+            binding,
             &StableSortKey {
                 normalized_score_micros: 0,
                 knowledge_at_micros: 0,

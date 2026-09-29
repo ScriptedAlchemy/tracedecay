@@ -2554,11 +2554,37 @@ fn project_routed_tool_names_a_held_managed_daemon() {
         "TraceDecay daemon socket '{socket}' is not available. TraceDecay daemon unit is installed but socket '{socket}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running."
     );
     let project_arg = project_path.to_string_lossy().to_string();
-    let search_probe: [&str; 3] = ["search", "--args", r#"{"query":"answer"}"#];
-    let status_probe: [&str; 2] = ["status", "--json"];
-    let unit_dir = home_path.join(".config/systemd/user");
+    let search_probe = [
+        "tool",
+        "--project",
+        &project_arg,
+        "search",
+        "--args",
+        r#"{"query":"answer"}"#,
+    ];
+    let status_probe = ["tool", "--project", &project_arg, "status", "--json"];
 
-    for (unit_installed, expected) in [(false, &not_installed), (true, &held)] {
+    assert_unreachable_advice_follows_the_unit(
+        &home_path,
+        &project_path,
+        &[&search_probe, &status_probe],
+        &not_installed,
+        &held,
+    );
+}
+
+/// Runs each probe with no daemon, first without and then with a managed unit
+/// file, and requires the matching unreachable-daemon advice on stderr.
+#[cfg(target_os = "linux")]
+fn assert_unreachable_advice_follows_the_unit(
+    home_path: &Path,
+    project_path: &Path,
+    probes: &[&[&str]],
+    not_installed: &str,
+    held: &str,
+) {
+    let unit_dir = home_path.join(".config/systemd/user");
+    for (unit_installed, expected) in [(false, not_installed), (true, held)] {
         if unit_installed {
             std::fs::create_dir_all(&unit_dir).unwrap();
             std::fs::write(
@@ -2567,13 +2593,13 @@ fn project_routed_tool_names_a_held_managed_daemon() {
             )
             .unwrap();
         }
-        for probe in [&search_probe[..], &status_probe[..]] {
-            let output = tracedecay_command_with_home(&home_path)
-                .current_dir(&project_path)
-                .args(["tool", "--project", &project_arg])
-                .args(probe)
+        for probe in probes {
+            let output = tracedecay_command_with_home(home_path)
+                .current_dir(project_path)
+                .args(*probe)
+                .stdin(Stdio::null())
                 .output()
-                .expect("tracedecay tool should run");
+                .expect("tracedecay client should run");
             assert_eq!(
                 output.status.code(),
                 Some(i32::from(
@@ -2583,11 +2609,61 @@ fn project_routed_tool_names_a_held_managed_daemon() {
             );
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
-                stderr.contains(expected.as_str()),
+                stderr.contains(expected),
                 "{probe:?} (unit installed: {unit_installed}): expected\n{expected}\ngot:\n{stderr}"
             );
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn authority_routed_clients_name_a_held_managed_daemon() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let work_request = project_path.join("work-request.json");
+    std::fs::write(&work_request, r#"{"page_size":10}"#).unwrap();
+    let workflow_request = project_path.join("workflow-request.json");
+    std::fs::write(&workflow_request, "{}").unwrap();
+    let record = home_path.join(".tracedecay/daemon-authority.json");
+    let record = record.display();
+    let socket = home_path.join(".tracedecay/daemon.sock");
+    let socket = socket.display();
+    let not_installed = format!(
+        "TraceDecay daemon is not available: no authority record at '{record}'. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+    );
+    let held = format!(
+        "TraceDecay daemon is not available: no authority record at '{record}'. TraceDecay daemon unit is installed but socket '{socket}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running."
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let work_request_arg = work_request.to_string_lossy().to_string();
+    let workflow_request_arg = workflow_request.to_string_lossy().to_string();
+    let lsp_probe = ["lsp", "bridge", "--stdio", "--project", &project_arg];
+    let work_probe = [
+        "work",
+        "list-attempts",
+        "--request-file",
+        &work_request_arg,
+        "--project",
+        &project_arg,
+    ];
+    let workflow_probe = [
+        "workflow",
+        "list-definitions",
+        "--request-file",
+        &workflow_request_arg,
+        "--project",
+        &project_arg,
+    ];
+    assert_unreachable_advice_follows_the_unit(
+        &home_path,
+        &project_path,
+        &[&lsp_probe, &work_probe, &workflow_probe],
+        &not_installed,
+        &held,
+    );
 }
 
 #[test]

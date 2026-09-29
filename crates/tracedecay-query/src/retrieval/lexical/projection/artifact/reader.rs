@@ -213,21 +213,6 @@ pub(super) enum CloneArtifactCursorPositionV1 {
     },
 }
 
-impl CloneArtifactCursorV1 {
-    pub fn encode(&self) -> Result<String, CodeLexicalArtifactErrorV1> {
-        serde_json::to_vec(self)
-            .map(hex::encode)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
-    }
-
-    pub fn decode(encoded: &str) -> Result<Self, CodeLexicalArtifactErrorV1> {
-        let bytes = hex::decode(encoded)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloneArtifactPageV1<T> {
     pub members: Vec<T>,

@@ -59,7 +59,7 @@ use crate::diagnostics_producer::{
 };
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
-    ManagedTestRunStaleReason, ManagedTestRunUnavailableReason, OperationEventAuthority,
+    ManagedTestRunStaleReason, OperationEventAuthority, OperationEventError,
     current_managed_test_run,
 };
 use tracedecay_runtime_core::db::Database;
@@ -1667,11 +1667,18 @@ async fn recent_test_results(
         Ok(snapshot) => snapshot,
         // No managed test run is retained for this root: none has run since
         // the daemon started, or it was evicted. Retrying cannot produce one.
-        Err(ManagedTestRunUnavailableReason::FrontierExpired) => {
+        Err(OperationEventError::FrontierExpired) => {
             return problem(
                 context,
                 operation,
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            );
+        }
+        Err(OperationEventError::CursorRefused(mismatch)) => {
+            return problem(
+                context,
+                operation,
+                ApplicationProblem::cursor_refused(&mismatch),
             );
         }
         Err(_) => return unavailable(context, operation),

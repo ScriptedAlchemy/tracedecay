@@ -43,8 +43,8 @@ pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
 };
 pub use self::prepared_query::{
-    PreparedQueryBindingV1, PreparedQueryBindingsV1, PreparedQueryCursorRoutingV1,
-    PreparedQueryErrorV1, PreparedQueryPageV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
+    PreparedQueryBindingsV1, PreparedQueryCursorRoutingV1, PreparedQueryErrorV1,
+    PreparedQueryPageV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
     authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
 };
 pub use self::query_authority::{

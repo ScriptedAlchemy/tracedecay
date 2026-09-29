@@ -386,7 +386,7 @@ pub async fn invoke_work_cli_with_delivery(
         cancellation.context(),
     );
     let handshake = crate::commands::client_handshake(profile, Some(&project_root))?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    let client = tracedecay::daemon::invocation_client_for_current(profile, handshake)?;
     let result = match client
         .invoke_controlled_with_delivery(
             request,

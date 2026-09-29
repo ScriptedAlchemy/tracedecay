@@ -211,7 +211,7 @@ pub async fn invoke_workflow_cli(
         cancellation.context(),
     );
     let handshake = crate::commands::client_handshake(profile, Some(&project_root))?;
-    let response = match tracedecay_daemon_identity::invocation_client_for_current(handshake)?
+    let response = match tracedecay::daemon::invocation_client_for_current(profile, handshake)?
         .invoke_controlled(
             request,
             deadline,

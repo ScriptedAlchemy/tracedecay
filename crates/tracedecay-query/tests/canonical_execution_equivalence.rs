@@ -4,14 +4,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_domain::{
-    CalibrationProfileId, CodeGenerationId, CompactCandidate, ComponentRevision, DiversityPolicy,
-    EdgeAuthorityV1, EvidenceRole, ExactAdmissionProof, ExactAdmissionRuleRevision, ExactFieldV1,
-    ExactTechnicalTermKindV1, FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1,
-    FusionProfile, ManifestDigest, PrincipalId, RelationEdgeKindV1, RetrievalAnchorId,
-    RetrievalBudget, RetrievalBudgetUsage, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SourceFreshness,
-    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark,
+    CalibrationProfileId, CodeGenerationId, CompactCandidate, ComponentRevision, CursorBindingV1,
+    DiversityPolicy, EdgeAuthorityV1, EvidenceRole, ExactAdmissionProof,
+    ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1, FileOccurrenceId,
+    FixedPointScore, FreshnessCompatibilityV1, FusionProfile, ManifestDigest, PrincipalId,
+    RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget, RetrievalBudgetUsage,
+    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId,
+    SingleRootScopeV1, SourceFreshness, SourceOccurrenceId, SourceSpan, SymbolOccurrenceId,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{ExactLaneEvidence, ExactLiteralV1};
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
@@ -21,7 +22,7 @@ use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceR
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSymbolRecordV1, PreparedQueryBindingV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
+    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
     PreparedQueryRoutingBindingsV1, PreparedQueryV1, QUERY_RANKING_REVISION_V1, QueryAuthorityV1,
     authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
 };
@@ -36,14 +37,21 @@ where
     id(&format!("sha256:{}", byte.to_string().repeat(64)))
 }
 
-fn query_binding(projection: &str) -> PreparedQueryBindingV1 {
-    PreparedQueryBindingV1::new(vec![
-        ("node_id", digest::<ManifestDigest>('9')),
-        (
-            "meta.projection",
-            tracedecay_domain::canonical_sha256(&projection).expect("projection digest"),
-        ),
-    ])
+fn query_binding(projection: &str) -> CursorBindingV1 {
+    query_binding_for("code_canonical_query", projection)
+}
+
+fn query_binding_for(operation: &str, projection: &str) -> CursorBindingV1 {
+    CursorBindingV1::new(
+        operation,
+        vec![
+            ("node_id", digest::<ManifestDigest>('9')),
+            (
+                "meta.projection",
+                tracedecay_domain::canonical_sha256(&projection).expect("projection digest"),
+            ),
+        ],
+    )
     .expect("query binding")
 }
 
@@ -525,7 +533,6 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     let authority = query_authority();
     let request = retrieval_request();
     let bindings = PreparedQueryBindingsV1::new(
-        "code_canonical_query",
         digest::<ManifestDigest>('8'),
         generation(),
         query_binding("evidence"),
@@ -568,7 +575,6 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     );
 
     let routing_bindings = PreparedQueryRoutingBindingsV1 {
-        operation: "code_canonical_query".to_owned(),
         scope_digest: digest::<ManifestDigest>('8'),
         principal: request.principal.clone(),
         root: request.scope.root.clone(),
@@ -697,7 +703,6 @@ fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
     let authority = query_authority();
     let request = retrieval_request();
     let bindings = PreparedQueryBindingsV1::new(
-        "code_canonical_query",
         digest::<ManifestDigest>('8'),
         generation(),
         query_binding("evidence"),
@@ -710,7 +715,6 @@ fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
         .next_cursor
         .expect("continuation cursor");
     let routing = PreparedQueryRoutingBindingsV1 {
-        operation: "code_canonical_query".to_owned(),
         scope_digest: digest::<ManifestDigest>('8'),
         principal: request.principal.clone(),
         root: request.scope.root.clone(),
@@ -747,7 +751,7 @@ fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
         })
     );
     let mut other_operation = routing.clone();
-    other_operation.operation = "code_other_query".to_owned();
+    other_operation.query_binding = query_binding_for("code_other_query", "evidence");
     assert_eq!(
         route(&authority, &other_operation, UtcMicros(100)),
         Err(PreparedQueryErrorV1::Invalid)
@@ -759,7 +763,6 @@ fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
     );
 
     let other_scope_bindings = PreparedQueryBindingsV1::new(
-        "code_canonical_query",
         digest::<ManifestDigest>('7'),
         generation(),
         query_binding("evidence"),

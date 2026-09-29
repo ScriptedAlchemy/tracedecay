@@ -324,6 +324,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     let (relative, root) = match case.host {
         HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
         HostKindV1::Devin => (".config/devin/mcp_config.json", "mcpServers"),
+        HostKindV1::Kiro => (".kiro/settings/mcp.json", "mcpServers"),
         HostKindV1::Zed => (ZED_SETTINGS_RELATIVE, "context_servers"),
         HostKindV1::Antigravity => (".gemini/antigravity/mcp_config.json", "mcpServers"),
         HostKindV1::RooCode => (
@@ -398,9 +399,11 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     );
     let theme = match case.host {
         HostKindV1::Zed => &config["theme"],
-        HostKindV1::Cline | HostKindV1::Devin | HostKindV1::Antigravity | HostKindV1::RooCode => {
-            &config["ui"]["theme"]
-        }
+        HostKindV1::Cline
+        | HostKindV1::Devin
+        | HostKindV1::Kiro
+        | HostKindV1::Antigravity
+        | HostKindV1::RooCode => &config["ui"]["theme"],
         HostKindV1::Kilo => &config["theme"],
         _ => unreachable!(),
     };
@@ -446,6 +449,16 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
         HostKindV1::Zed => {
             assert_eq!(entry["command"], serde_json::json!(cli.installed_bin()));
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
+        }
+        HostKindV1::Kiro => {
+            assert_eq!(
+                *entry,
+                serde_json::json!({
+                    "command": cli.installed_bin(),
+                    "args": ["serve"],
+                    "disabled": false
+                })
+            );
         }
         HostKindV1::RooCode => {
             assert_eq!(entry["command"], serde_json::json!(cli.installed_bin()));
@@ -700,8 +713,8 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
 }
 
 /// Hosts whose install/uninstall lifecycle drives a *host-owned* binary
-/// (`claude plugin`, `codex mcp`, `kiro-cli mcp`, `gemini extensions`,
-/// `copilot mcp`, `droid mcp`) or defers activation to an interactive host flow (Kimi).
+/// (`claude plugin`, `codex mcp`, `gemini extensions`, `copilot mcp`,
+/// `droid mcp`) or defers activation to an interactive host flow (Kimi).
 ///
 /// This suite runs the production CLI against an isolated `HOME` that contains
 /// no host binaries at all, so for these hosts the lifecycle correctly refuses
@@ -714,7 +727,6 @@ fn lifecycle_requires_absent_host_binary(host: HostKindV1) -> bool {
         HostKindV1::ClaudeCode
             | HostKindV1::Codex
             | HostKindV1::KimiCode
-            | HostKindV1::Kiro
             | HostKindV1::Gemini
             | HostKindV1::Copilot
             | HostKindV1::FactoryDroid
@@ -731,6 +743,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         HostKindV1::OpenCode,
         HostKindV1::Cline,
         HostKindV1::Devin,
+        HostKindV1::Kiro,
         HostKindV1::Zed,
         HostKindV1::Antigravity,
         HostKindV1::Vibe,

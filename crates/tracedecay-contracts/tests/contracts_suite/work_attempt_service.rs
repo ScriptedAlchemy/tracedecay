@@ -10,21 +10,24 @@ use std::ops::Deref;
 use common::{id, work_attempt_context, work_digest};
 
 use tracedecay_contracts::{
-    ApplicationProblem, ApplicationProblemKind, CancelWorkAttemptCommand,
-    MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, RequestContext, ResumeWorkAttemptsCommand,
-    StartWorkAttemptCommand, WorkAttemptCapacityScopeV1, WorkAttemptCapacityVerdictV1,
-    WorkAttemptEvidenceRecordV1, WorkAttemptListCoverageV1, WorkAttemptListCursorV1,
-    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptProviderOutcomeV1, WorkAttemptService,
-    WorkAttemptStatusRequestV1, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
-    WorkProductAttemptServiceV1,
+    ApplicationProblem, ApplicationProblemKind, CancelWorkAttemptCommand, LegalAction,
+    MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, RequestContext, ResumeWorkAttemptsCommand, RetryDirective,
+    SafeDiagnostic, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
+    WorkArtifactHydrationService, WorkAttemptCapacityScopeV1, WorkAttemptCapacityVerdictV1,
+    WorkAttemptEvidencePageV1, WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1,
+    WorkAttemptEvidenceRowV1, WorkAttemptListCoverageV1, WorkAttemptListCursorV1,
+    WorkAttemptListOperationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
+    WorkAttemptProviderOutcomeV1, WorkAttemptService, WorkAttemptStatusRequestV1,
+    WorkAttemptStorageError, WorkAttemptStoragePort, WorkAttemptTopologyBindingV1,
+    WorkAttemptTopologyStateV1, WorkProductAttemptServiceV1,
 };
 use tracedecay_domain::{
     CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProviderId, RefId, TaskId,
     UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1,
-    WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
-    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
-    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkSandboxPolicy, WorkflowOperationRef,
+    WorkAuthority, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
+    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
+    WorkFilesystemPolicy, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
+    WorkProviderRouteV1, WorkSandboxPolicy, WorkflowOperationRef,
 };
 
 type Store = common::WorkProductAttemptStore;
@@ -646,6 +649,7 @@ fn list_page_bounds_are_refused_before_any_topology_read() {
         let refused = attempts
             .list(
                 &context,
+                WorkAttemptListOperationV1::ListAttempts,
                 &WorkAttemptListRequestV1 {
                     page_size,
                     cursor: None,
@@ -672,6 +676,7 @@ fn list_pages_attempts_in_stable_order_and_resumes_from_the_cursor() {
     let first = attempts
         .list(
             &context,
+            WorkAttemptListOperationV1::ListAttempts,
             &WorkAttemptListRequestV1 {
                 page_size: 2,
                 cursor: None,
@@ -702,12 +707,55 @@ fn list_pages_attempts_in_stable_order_and_resumes_from_the_cursor() {
         panic!("a capped page must carry a resume cursor");
     };
     assert_eq!((returned, remaining), (2, 1));
-    assert_eq!(resume.generation, "generation.work.list.1");
-    assert_eq!(&resume.start_after, page[1].identity());
+
+    let replay = |operation, page_size, cursor: &WorkAttemptListCursorV1| {
+        attempts.list(
+            &context,
+            operation,
+            &WorkAttemptListRequestV1 {
+                page_size,
+                cursor: Some(cursor.clone()),
+            },
+            || Ok(verified_topology("generation.work.list.1", 1)),
+        )
+    };
+    assert_eq!(
+        replay(WorkAttemptListOperationV1::ListAttempts, 3, &resume).unwrap_err(),
+        cursor_parameter_changed("page_size")
+    );
+    assert_eq!(
+        WorkArtifactHydrationService::new(EvidenceRows(work.clone()))
+            .hydrate(
+                &context,
+                &WorkArtifactHydrationRequestV1 {
+                    page_size: 2,
+                    cursor: Some(resume.clone()),
+                },
+                |_| Ok(verified_topology("generation.work.list.1", 1)),
+            )
+            .unwrap_err(),
+        cursor_invalid(),
+        "a list-attempts cursor is refused by artifact hydration"
+    );
+    for foreign_operation in [
+        WorkAttemptListOperationV1::ExecutionHistory,
+        WorkAttemptListOperationV1::Topology,
+    ] {
+        assert_eq!(
+            replay(foreign_operation, 2, &resume).unwrap_err(),
+            cursor_invalid()
+        );
+    }
+    let malformed: WorkAttemptListCursorV1 = serde_json::from_str("\"bc1.zz\"").unwrap();
+    assert_eq!(
+        replay(WorkAttemptListOperationV1::ListAttempts, 2, &malformed).unwrap_err(),
+        cursor_invalid()
+    );
 
     let second = attempts
         .list(
             &context,
+            WorkAttemptListOperationV1::ListAttempts,
             &WorkAttemptListRequestV1 {
                 page_size: 2,
                 cursor: Some(resume),
@@ -738,6 +786,7 @@ fn list_of_an_authorized_scope_without_attempts_is_an_explicit_zero_complete_pag
     let listed = attempts
         .list(
             &context,
+            WorkAttemptListOperationV1::ListAttempts,
             &WorkAttemptListRequestV1 {
                 page_size: 10,
                 cursor: None,
@@ -766,6 +815,7 @@ fn list_without_any_work_is_a_typed_absent_state() {
     let listed = attempts
         .list(
             &context,
+            WorkAttemptListOperationV1::ListAttempts,
             &WorkAttemptListRequestV1 {
                 page_size: 10,
                 cursor: None,
@@ -780,20 +830,39 @@ fn list_without_any_work_is_a_typed_absent_state() {
 fn list_cursor_from_a_superseded_topology_generation_is_stale() {
     let (attempts, work, context) = fixture("project.attempt.list.stale");
     admit_work(&work, &context, "task.attempt.list.stale");
-    work.persist_leased_attempt(
-        &context,
-        &start_command("task.attempt.list.stale", "attempt.1"),
-    );
-    let cursor = WorkAttemptListCursorV1 {
-        generation: "generation.work.list.old".to_owned(),
-        start_after: identity_of("task.attempt.list.stale", "attempt.1"),
+    for attempt_id in ["attempt.1", "attempt.2"] {
+        work.persist_leased_attempt(
+            &context,
+            &StartWorkAttemptCommand {
+                attempt_id: id(attempt_id),
+                ..start_command("task.attempt.list.stale", attempt_id)
+            },
+        );
+    }
+    let WorkAttemptListV1::Listed {
+        coverage: WorkAttemptListCoverageV1::Capped { resume: cursor, .. },
+        ..
+    } = attempts
+        .list(
+            &context,
+            WorkAttemptListOperationV1::ListAttempts,
+            &WorkAttemptListRequestV1 {
+                page_size: 1,
+                cursor: None,
+            },
+            || Ok(verified_topology("generation.work.list.old", 1)),
+        )
+        .unwrap()
+    else {
+        panic!("a capped page under the old generation must mint a cursor");
     };
     // A newer verified generation refuses the old cursor.
     let stale = attempts
         .list(
             &context,
+            WorkAttemptListOperationV1::ListAttempts,
             &WorkAttemptListRequestV1 {
-                page_size: 2,
+                page_size: 1,
                 cursor: Some(cursor.clone()),
             },
             || Ok(verified_topology("generation.work.list.new", 1)),
@@ -804,8 +873,9 @@ fn list_cursor_from_a_superseded_topology_generation_is_stale() {
     let gone = attempts
         .list(
             &context,
+            WorkAttemptListOperationV1::ListAttempts,
             &WorkAttemptListRequestV1 {
-                page_size: 2,
+                page_size: 1,
                 cursor: Some(cursor),
             },
             || Ok(WorkAttemptTopologyStateV1::Absent),
@@ -829,6 +899,7 @@ fn list_conceals_foreign_scopes_behind_their_own_typed_states() {
     let absent = attempts
         .list(
             &foreign,
+            WorkAttemptListOperationV1::ListAttempts,
             &WorkAttemptListRequestV1 {
                 page_size: 10,
                 cursor: None,
@@ -843,6 +914,7 @@ fn list_conceals_foreign_scopes_behind_their_own_typed_states() {
     let empty = attempts
         .list(
             &foreign,
+            WorkAttemptListOperationV1::ListAttempts,
             &WorkAttemptListRequestV1 {
                 page_size: 10,
                 cursor: None,
@@ -865,6 +937,62 @@ fn list_conceals_foreign_scopes_behind_their_own_typed_states() {
     );
 }
 
-fn identity_of(task: &str, attempt: &str) -> WorkAttemptIdentityV1 {
-    WorkAttemptIdentityV1::new(id(task), id(&format!("run.{task}")), id(attempt)).unwrap()
+/// The attempt rows as the hydration read port sees them, so one store backs
+/// both the attempt list and artifact hydration.
+struct EvidenceRows(Store);
+
+impl WorkAttemptEvidenceReadPort for EvidenceRows {
+    fn evidence_page(
+        &self,
+        authority: &WorkAuthority,
+        start_after: Option<&WorkAttemptIdentityV1>,
+        limit: u32,
+    ) -> Result<WorkAttemptEvidencePageV1, WorkAttemptStorageError> {
+        let page = WorkAttemptStoragePort::list(&self.0, authority, start_after, limit)?;
+        Ok(WorkAttemptEvidencePageV1 {
+            rows: page
+                .attempts
+                .into_iter()
+                .map(|attempt| WorkAttemptEvidenceRowV1 {
+                    identity: attempt.identity().clone(),
+                    artifacts: attempt.artifacts().to_vec(),
+                    evidence: None,
+                })
+                .collect(),
+            remaining: page.remaining,
+        })
+    }
+}
+
+/// The one refusal of a cursor replayed with `parameter` changed.
+pub(crate) fn cursor_parameter_changed(parameter: &str) -> ApplicationProblem {
+    ApplicationProblem::InvalidRequest {
+        diagnostic: SafeDiagnostic {
+            code: "cursor.parameter_changed".to_owned(),
+            message: format!(
+                "The cursor was issued for a request with a different `{parameter}`. Repeat the \
+                 request with the parameters that returned the cursor, or restart without it."
+            ),
+        },
+        retry: RetryDirective::Never,
+        legal_actions: vec![
+            LegalAction::CorrectRequest,
+            LegalAction::RestartWithoutCursor,
+        ],
+    }
+}
+
+/// The one refusal of a cursor another operation minted, or none did.
+pub(crate) fn cursor_invalid() -> ApplicationProblem {
+    ApplicationProblem::InvalidRequest {
+        diagnostic: SafeDiagnostic {
+            code: "cursor.invalid".to_owned(),
+            message: "The cursor was not issued by this operation. Restart without it.".to_owned(),
+        },
+        retry: RetryDirective::Never,
+        legal_actions: vec![
+            LegalAction::CorrectRequest,
+            LegalAction::RestartWithoutCursor,
+        ],
+    }
 }

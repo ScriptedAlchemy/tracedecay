@@ -130,7 +130,6 @@ pub fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionEr
         | TraceDecayError::Search { .. }
         | TraceDecayError::File { .. }
         | TraceDecayError::HostCliUnavailable { .. }
-        | TraceDecayError::HostCliNotSignedIn { .. }
         | TraceDecayError::ToolRefused { .. }
         | TraceDecayError::Io(_)
         | TraceDecayError::Sqlite(_)
@@ -148,8 +147,8 @@ mod tests {
     #[test]
     fn host_cli_requirement_maps_to_unavailable() {
         let error = TraceDecayError::HostCliUnavailable {
-            program: "kiro-cli".to_string(),
-            lifecycle: "kiro MCP registry lifecycle".to_string(),
+            program: "droid".to_string(),
+            lifecycle: "Factory Droid MCP registry lifecycle".to_string(),
         };
 
         let RetainedSurfaceExecutionErrorV1::Unavailable { detail } = map_execution_error(error)
@@ -157,7 +156,7 @@ mod tests {
             panic!("host CLI unavailability must map to the unavailable terminal");
         };
         assert!(
-            detail.contains("kiro-cli"),
+            detail.contains("droid"),
             "the detail must name the missing host CLI, got: {detail}"
         );
     }

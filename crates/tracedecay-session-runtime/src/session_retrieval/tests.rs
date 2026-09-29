@@ -1026,6 +1026,19 @@ fn admitted_lookup_context(scope: tracedecay_contracts::ResolvedScope) -> Reques
     .expect("request context")
 }
 
+fn session_lookup_operation() -> ApplicationOperation {
+    ApplicationOperation::new(
+        CapabilityId::new("capability.session.lookup").expect("capability"),
+        UseCaseId::new("use-case.session.lookup").expect("use case"),
+        ResultContractRef::new(
+            SchemaId::new("schema.application.primitive.session-lookup.result").expect("schema"),
+            1,
+        )
+        .expect("result contract"),
+        true,
+    )
+}
+
 async fn admitted_session_lookup(
     label: &str,
     request: SessionLookupRequest,
@@ -1042,16 +1055,7 @@ async fn admitted_session_lookup(
             .expect("registered retrieval service"),
     );
     let context = admitted_lookup_context(scope);
-    let operation = ApplicationOperation::new(
-        CapabilityId::new("capability.session.lookup").expect("capability"),
-        UseCaseId::new("use-case.session.lookup").expect("use case"),
-        ResultContractRef::new(
-            SchemaId::new("schema.application.primitive.session-lookup.result").expect("schema"),
-            1,
-        )
-        .expect("result contract"),
-        true,
-    );
+    let operation = session_lookup_operation();
     DaemonSessionLookupPrimitiveV1::new(service)
         .session_lookup(
             RetrievalPortContext {
@@ -1061,6 +1065,186 @@ async fn admitted_session_lookup(
             &request,
         )
         .await
+}
+
+fn session_lookup_page_request(
+    session_id: &str,
+    page_size: u32,
+    cursor: Option<&str>,
+) -> SessionLookupRequest {
+    let mut page = json!({"page_size": page_size});
+    if let Some(cursor) = cursor {
+        page["cursor"] = json!(cursor);
+    }
+    serde_json::from_value(json!({
+        "session_id": session_id,
+        "meta": {
+            "order": "relevance",
+            "page": page,
+            "projection": "summary",
+            "temporal": {"kind": "current"}
+        }
+    }))
+    .expect("session lookup page request")
+}
+
+/// A session lookup continuation pages only the lookup that minted it: a
+/// changed page size, a malformed cursor, or another operation's cursor is the
+/// one typed cursor refusal, and the unchanged replay serves the next page.
+#[tokio::test]
+async fn session_lookup_cursor_pages_only_the_request_that_minted_it() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-cursor-binding",
+    )
+    .await;
+    let seeded_root = real_page_root("root.binding");
+    let session_id = "session.page.binding";
+    let mut anchors = Vec::new();
+    for rank in 0..4 {
+        let fixture = seed_real_page_fixture_in_session(
+            harness.registered.as_ref(),
+            &seeded_root,
+            rank,
+            "codex".to_owned(),
+            session_id.to_owned(),
+            rank == 3,
+        )
+        .await;
+        anchors.push(fixture.anchor_id);
+    }
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service = Arc::new(
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service"),
+    );
+    let context = admitted_lookup_context(scope);
+    let operation = session_lookup_operation();
+    let primitive = DaemonSessionLookupPrimitiveV1::new(service.clone());
+    let lookup = |request: SessionLookupRequest| {
+        let primitive = &primitive;
+        let context = &context;
+        let operation = &operation;
+        async move {
+            primitive
+                .session_lookup(
+                    RetrievalPortContext {
+                        request: context,
+                        operation,
+                    },
+                    &request,
+                )
+                .await
+        }
+    };
+    let served =
+        |outcome: Result<RetrievalPortOutcome<SessionLookupResult>, TemporalRetrievalFailure>| {
+            match outcome {
+                Ok(
+                    RetrievalPortOutcome::Partial(evidence)
+                    | RetrievalPortOutcome::Completed(evidence),
+                ) => (
+                    evidence.payload.expect("page payload").anchors,
+                    evidence
+                        .page
+                        .cursor
+                        .as_ref()
+                        .and_then(tracedecay_contracts::PageCursor::as_opaque)
+                        .map(|cursor| cursor.as_str().to_owned()),
+                ),
+                other => panic!("the lookup page must be served: {other:?}"),
+            }
+        };
+    let refused =
+        |outcome: Result<RetrievalPortOutcome<SessionLookupResult>, TemporalRetrievalFailure>| {
+            let Ok(RetrievalPortOutcome::Refused(_, problem)) = outcome else {
+                panic!("the cursor must be refused: {outcome:?}");
+            };
+            assert_eq!(problem.retry(), tracedecay_contracts::RetryDirective::Never);
+            assert_eq!(
+                problem.legal_actions(),
+                &[
+                    tracedecay_contracts::LegalAction::CorrectRequest,
+                    tracedecay_contracts::LegalAction::RestartWithoutCursor
+                ]
+            );
+            let diagnostic = problem.diagnostic().expect("cursor diagnostic");
+            (diagnostic.code.clone(), diagnostic.message.clone())
+        };
+
+    let (first_anchors, cursor) =
+        served(lookup(session_lookup_page_request(session_id, 2, None)).await);
+    assert_eq!(first_anchors.len(), 2);
+    let cursor = cursor.expect("page one continues");
+
+    assert_eq!(
+        refused(lookup(session_lookup_page_request(session_id, 3, Some(&cursor))).await),
+        (
+            "cursor.parameter_changed".to_owned(),
+            "The cursor was issued for a request with a different `page_size`. Repeat the \
+             request with the parameters that returned the cursor, or restart without it."
+                .to_owned()
+        )
+    );
+    let invalid = (
+        "cursor.invalid".to_owned(),
+        "The cursor was not issued by this operation. Restart without it.".to_owned(),
+    );
+    assert_eq!(
+        refused(
+            lookup(session_lookup_page_request(
+                session_id,
+                2,
+                Some("4.00.1.00.00")
+            ))
+            .await
+        ),
+        invalid
+    );
+    let internal = SessionTemporalQuery::new(
+        SessionId::new(session_id).expect("session"),
+        None,
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        2,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("internal retrieval query")
+    .with_execution_limits(admitted_execution_limits(2));
+    let foreign = match service.retrieve_admitted(&context, internal).await {
+        SessionRetrievalServiceOutcome::Partial { page, .. } => {
+            page.temporal.cursor.expect("internal continuation")
+        }
+        other => panic!("the internal retrieval must page: {other:?}"),
+    };
+    assert_eq!(
+        refused(lookup(session_lookup_page_request(session_id, 2, Some(&foreign))).await),
+        invalid
+    );
+
+    let (second_anchors, _) =
+        served(lookup(session_lookup_page_request(session_id, 2, Some(&cursor))).await);
+    assert_eq!(second_anchors.len(), 2);
+    let paged = first_anchors
+        .iter()
+        .chain(&second_anchors)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        paged,
+        anchors.into_iter().collect::<BTreeSet<_>>(),
+        "pages one and two partition the seeded session without overlap"
+    );
 }
 
 /// The exact minimal request the CLI help and MCP schema advertise. `meta`

@@ -154,6 +154,7 @@ async fn tracedecay_similar_reports_verified_copy_paths_and_typed_denials() {
 
     let mut seen_rename_paths = Vec::new();
     let mut cursor = Value::Null;
+    let mut first_cursor = Value::Null;
     for page_index in 0..8 {
         let target = if page_index == 0 {
             json!({
@@ -191,6 +192,9 @@ async fn tracedecay_similar_reports_verified_copy_paths_and_typed_denials() {
         assert_eq!(paths.len(), 1, "{page}");
         seen_rename_paths.push(paths[0].to_owned());
         cursor = page["families"][0]["next_cursor"].clone();
+        if page_index == 0 {
+            first_cursor = cursor.clone();
+        }
         if cursor.is_null() {
             assert_eq!(page["families"][0]["complete"], true);
             assert_eq!(page["coverage"], json!({"status": "complete"}));
@@ -209,6 +213,48 @@ async fn tracedecay_similar_reports_verified_copy_paths_and_typed_denials() {
         "rename pages did not finish: {seen_rename_paths:?}"
     );
     assert_eq!(seen_rename_paths, RENAME_COPY_PATHS);
+
+    // The page-one cursor names the one-member page size it was minted for.
+    let resized = similar_call(
+        &server,
+        json!({
+            "project_id": project_id,
+            "repository_id": repository_id,
+            "target": {"kind": "symbol_occurrence", "symbol_occurrence_id": source},
+            "match_classes": ["rename_normalized_exact"],
+            "result_limit": 2,
+            "work_limit": 20,
+            "cursor": first_cursor,
+        }),
+    )
+    .await;
+    let problem = refusal_problem(&resized["result"]);
+    assert_eq!(problem["kind"], "invalid_request", "{resized}");
+    assert_eq!(problem["code"], "cursor.parameter_changed", "{resized}");
+    assert_eq!(
+        problem["message"],
+        "The cursor was issued for a request with a different `result_limit`. Repeat the \
+         request with the parameters that returned the cursor, or restart without it.",
+        "{resized}"
+    );
+    let redundancy = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_redundancy",
+        json!({
+            "project_id": project_id,
+            "repository_id": repository_id,
+            "match_classes": ["rename_normalized_exact"],
+            "scope": {"kind": "repository"},
+            "include_generated_paths": false,
+            "family_limit": 1,
+            "member_limit": 1,
+            "work_limit": 20,
+            "cursor": first_cursor,
+        }),
+    )
+    .await;
+    let problem = refusal_problem(&redundancy["result"]);
+    assert_eq!(problem["code"], "cursor.invalid", "{redundancy}");
 
     let excluded = similar_payload(
         &server,

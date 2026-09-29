@@ -3,6 +3,9 @@
 use serde_json::{Value, json};
 use tracedecay_contracts::ApplicationProblem;
 use tracedecay_domain::errors::{PROFILE_RESET_COMMAND, TraceDecayError};
+use tracedecay_domain::{
+    CURSOR_INVALID_CODE, CURSOR_PARAMETER_CHANGED_CODE, CursorBindingMismatchV1,
+};
 
 use crate::response_handles::{
     RESPONSE_RETRIEVE_TOOL, RETRIEVE_CORRUPT_RECORD_REASON, RETRIEVE_READ_FAILED_REASON,
@@ -151,6 +154,13 @@ pub fn mark_semantic_tool_error(result: &mut ToolResult) {
     }
 }
 
+/// The refusal of a continuation cursor minted for another operation or
+/// request: the caller corrects the request or restarts without the cursor.
+#[must_use]
+pub fn cursor_refusal(mismatch: &CursorBindingMismatchV1) -> TraceDecayError {
+    TraceDecayError::project_route(mismatch.code(), false, mismatch.message())
+}
+
 /// Canonical wire problem kind for reason codes minted inside MCP dispatch
 /// and application-surface layers. The boundary owns this translation so
 /// clients (and the catalog sweep) can read a truthful `kind` alongside the
@@ -171,7 +181,9 @@ pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         | TOOL_ARGUMENTS_INVALID
         | "project_required"
         | "project_not_enrolled"
-        | "unknown_tool" => Some("invalid_request"),
+        | "unknown_tool"
+        | CURSOR_PARAMETER_CHANGED_CODE
+        | CURSOR_INVALID_CODE => Some("invalid_request"),
         "application_surface_not_found_or_not_authorized" => Some("denied"),
         _ => None,
     }

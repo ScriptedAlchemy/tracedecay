@@ -14,7 +14,11 @@ fn test_file_stat_returns_mtime_and_size() {
 
 #[test]
 fn test_file_stat_nonexistent() {
-    assert!(file_stat(std::path::Path::new("/nonexistent/file.rs")).is_none());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("file.rs");
+    assert!(file_stat(&path).is_none());
+    std::fs::write(&path, b"abc").unwrap();
+    assert_eq!(file_stat(&path).map(|(_, size)| size), Some(3));
 }
 
 #[test]
@@ -56,5 +60,9 @@ fn test_read_source_file_invalid_encoding() {
     let mut f = NamedTempFile::new().unwrap();
     // Invalid UTF-8 sequence without any BOM
     f.write_all(b"\x80\x81\x82\x83").unwrap();
-    assert!(read_source_file(f.path()).is_err());
+    let error = read_source_file(f.path()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid utf-8 sequence of 1 bytes from index 0"
+    );
 }

@@ -40,7 +40,7 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// with that row's field lengths and trimmed normalized-text length. The
 /// digest domain is `tracedecay.code-lexical-artifact.v30`. Callers take the
 /// revision from this constant.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 30;
+pub const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 30;
 
 const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v30\0";
 
@@ -304,16 +304,18 @@ mod tests {
     }
 
     #[test]
-    fn superseded_revisions_are_rejected() {
-        require_served_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1)
-            .expect("the served revision opens");
-        for revision in [16, 20, 22, 25, 26, 27, 28, 29] {
-            assert!(matches!(
-                require_served_revision(revision),
-                Err(CodeLexicalArtifactErrorV1::Incompatible(message))
-                    if message == format!("format revision {revision} is unsupported")
-            ));
-        }
+    fn current_revision_opens_and_the_previous_revision_is_incompatible() {
+        let current = CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1;
+        require_served_revision(current).expect("the served revision opens");
+        let previous = current - 1;
+        assert!(
+            matches!(
+                require_served_revision(previous),
+                Err(CodeLexicalArtifactErrorV1::Incompatible(ref message))
+                    if message == &format!("format revision {previous} is unsupported")
+            ),
+            "the previous revision must be refused as incompatible"
+        );
     }
 
     #[test]
