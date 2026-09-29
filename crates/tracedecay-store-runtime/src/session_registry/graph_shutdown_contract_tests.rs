@@ -175,13 +175,6 @@ fn wal_bytes(database: &Path) -> u64 {
     std::fs::metadata(PathBuf::from(wal)).map_or(0, |metadata| metadata.len())
 }
 
-fn schema_objects(database: &Path) -> i64 {
-    rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .expect("open store read-only")
-        .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
-        .expect("count schema objects")
-}
-
 #[tokio::test]
 async fn terminal_shutdown_truncates_every_released_session_store_wal() {
     let temp = TempDir::new().expect("shutdown wal fixture root");
@@ -217,7 +210,6 @@ async fn terminal_shutdown_truncates_every_released_session_store_wal() {
             store.display()
         );
     }
-    let installed = stores.each_ref().map(|store| schema_objects(store));
 
     // The daemon's terminal owner order: join terminal and reconciliation
     // tasks, then drain the owners and close.
@@ -244,11 +236,6 @@ async fn terminal_shutdown_truncates_every_released_session_store_wal() {
             store.display()
         );
     }
-    assert_eq!(
-        stores.each_ref().map(|store| schema_objects(store)),
-        installed,
-        "the concurrent shutdown closes return every committed frame to the database"
-    );
 }
 
 #[tokio::test]

@@ -117,13 +117,12 @@ impl StoreRuntimeRegistry {
         let closed = closes.len();
         let mut first_failure = reserve_failure;
         for close in closes {
-            let outcome = close.await.unwrap_or_else(|error| {
+            if let Err(failure) = close.await.unwrap_or_else(|error| {
                 Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "join shutdown close of idle registered runtimes",
                     message: error.to_string(),
                 })
-            });
-            if let Err(failure) = outcome {
+            }) {
                 first_failure.get_or_insert(failure);
             }
         }
