@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
+use tokio_util::task::TaskTracker;
 use tracedecay_application::observability::{
     BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
     DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1, WorkOwnerObservationRecoveryV1,
@@ -197,6 +198,10 @@ impl fmt::Display for StoreObservabilityMountErrorV1 {
 #[derive(Clone, Default)]
 pub struct StoreObservabilityRegistryV1 {
     entries: Arc<StdMutex<Vec<StoreObservabilityEntryV1>>>,
+    /// Background drains started by a last alias dropped on a live runtime.
+    /// Each holds its store's lease until the drain settles, so shutdown
+    /// joins them before the stores close.
+    retirement_drains: TaskTracker,
 }
 
 impl StoreObservabilityRegistryV1 {
@@ -377,15 +382,28 @@ impl StoreObservabilityRegistryV1 {
         core: Arc<StoreObservabilityCoreV1>,
     ) {
         let registry = self.clone();
-        runtime.spawn(async move {
-            let result = core.shutdown().await;
-            if let Err(error) = &result {
-                tracing::warn!(%error, "background observability owner drain was incomplete");
-            }
-            if let Err(error) = registry.finish_retirement(&core, result.is_ok()) {
-                tracing::warn!(%error, "background observability retirement was incomplete");
-            }
-        });
+        self.retirement_drains.spawn_on(
+            async move {
+                let result = core.shutdown().await;
+                if let Err(error) = &result {
+                    tracing::warn!(%error, "background observability owner drain was incomplete");
+                }
+                if let Err(error) = registry.finish_retirement(&core, result.is_ok()) {
+                    tracing::warn!(%error, "background observability retirement was incomplete");
+                }
+            },
+            runtime,
+        );
+    }
+
+    /// Shutdown's join of every background retirement drain started so far.
+    #[hotpath::measure(
+        label = "daemon.service.project_runtime.observability_join_retirements",
+        future = true
+    )]
+    pub async fn join_retirement_drains(&self) {
+        self.retirement_drains.close();
+        self.retirement_drains.wait().await;
     }
 
     /// Settles a `Stopping` entry: a releasable retirement removes it so a

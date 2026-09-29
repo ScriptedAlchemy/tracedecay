@@ -100,6 +100,24 @@ pub fn daemon_log_for_failure() -> String {
     })
 }
 
+/// Waits until the daemon log at `log_path` reports `phase` for the open of
+/// `project`.
+pub async fn wait_for_open_phase(log_path: &Path, project: &Path, phase: &str) {
+    let marker = format!("project={} phase={phase}", project.display());
+    let mut log = String::new();
+    tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            log = fs::read_to_string(log_path).unwrap_or_default();
+            if log.contains(&marker) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("project open never reached {phase}; log={log}"));
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactIndexIdentity {
     pub project_id: String,
