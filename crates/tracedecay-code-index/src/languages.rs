@@ -266,12 +266,20 @@ impl StaticLanguageRegistry {
             // calls; Python v7 gives constants, class bodies and arguments,
             // decorators, and default values theirs and module-scope
             // statements a `<module>` init block.
+            // Go v9 emits interface method specs as methods the interface
+            // contains. Java v7, Kotlin and C# v6, and TypeScript v11 (with the
+            // Svelte and Astro scripts it extracts, v7) start a declaration
+            // past its leading annotations, attributes, or decorators, which
+            // `attrs_start_line` keeps, as Rust always has. Java v8 records
+            // call argument counts and declared parameter lists, so a call
+            // binds the one overload that accepts its arguments.
             let extractor_revision = match language.as_str() {
                 "rust" => 18,
-                "typescript" => 10,
-                "go" => 8,
-                "ruby" | "protobuf" | "python" => 7,
-                "sql" | "java" | "dart" | "svelte" | "astro" => 6,
+                "typescript" => 11,
+                "go" => 9,
+                "java" => 8,
+                "ruby" | "protobuf" | "python" | "svelte" | "astro" => 7,
+                "sql" | "dart" | "kotlin" | "csharp" => 6,
                 "c" | "cpp" | "metal" | "objc" | "glsl" | "pascal" | "qbasic" | "quickbasic" => 6,
                 _ => 5,
             };

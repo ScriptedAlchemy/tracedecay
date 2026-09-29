@@ -201,6 +201,22 @@ fn brokered_index_commands_refuse_flags_the_daemon_never_honors_at_parse_time() 
 }
 
 #[test]
+fn bench_is_not_a_subcommand() {
+    let error = match Cli::try_parse_from(["tracedecay", "bench", "--json"]) {
+        Ok(_) => panic!("`tracedecay bench` must be a usage error"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    assert_eq!(error.exit_code(), 2);
+    assert!(matches!(
+        Cli::try_parse_from(["tracedecay", "gain", "--json"])
+            .expect("a sibling diagnostics command parses")
+            .command,
+        Some(Commands::Gain { json: true, .. })
+    ));
+}
+
+#[test]
 fn reset_project_store_requires_one_project_selector_at_parse_time() {
     let missing = match Cli::try_parse_from(["tracedecay", "storage", "reset-project-store"]) {
         Ok(_) => panic!("reset-project-store without a selector must be a usage error"),

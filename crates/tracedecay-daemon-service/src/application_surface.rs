@@ -153,7 +153,7 @@ fn application_invoker_for_surface(
     let composition = Arc::new(compose_application_catalog_with(|catalog| {
         HttpApplicationCatalogDispatcher {
             executor,
-            catalog: Arc::new(catalog.clone()),
+            catalog: Arc::clone(catalog),
         }
     })?);
     let resolver = CatalogBindingResolver::new(composition.snapshot());

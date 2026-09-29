@@ -554,6 +554,7 @@ impl RubyExtractor {
                     column,
                     file_path: state.file_path.clone(),
                     unmodeled_import: None,
+                    argument_count: None,
                 });
             }
         } else {
@@ -579,6 +580,7 @@ impl RubyExtractor {
                                 column,
                                 file_path: state.file_path.clone(),
                                 unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
                     }
@@ -703,6 +705,7 @@ impl RubyExtractor {
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
                                 unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);

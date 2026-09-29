@@ -23,7 +23,7 @@ use tracedecay_store::{
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Dispatch, Event, Metadata, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
 
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
@@ -89,16 +89,11 @@ async fn persist_with_work_census(
     store: &impl ObservationStore,
     writes: Vec<AnchoredObservationWrite>,
 ) -> (Vec<ObservationBatchPersistOutcome>, u64, u64) {
-    // Keeps this census immune to another test thread poisoning the
-    // process-global callsite interest cache; see the helper's documentation.
-    tracedecay_runtime_core::logging::install_tracing_callsite_keepalive();
     let trace = Arc::new(ObservationWorkTrace::default());
-    let dispatch = Dispatch::new(ObservationWorkSubscriber {
+    let _guard = tracedecay_runtime_core::logging::set_tracing_capture(ObservationWorkSubscriber {
         trace: Arc::clone(&trace),
     });
-    let guard = tracing::dispatcher::set_default(&dispatch);
     let outcomes = store.persist_observations(writes).await.unwrap();
-    drop(guard);
     (
         outcomes,
         trace.commands.load(Ordering::Relaxed),

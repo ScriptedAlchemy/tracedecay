@@ -203,6 +203,7 @@ fn resolution_file(
         edges,
         imports,
         unresolved_references,
+        callable_arities,
         ..
     } = artifacts;
     let mut document = chunks.document;
@@ -225,6 +226,7 @@ fn resolution_file(
             clone_bodies: Vec::new(),
             schema_evidence: None,
             unresolved_references,
+            callable_arities,
         },
         exact_authority,
     }))

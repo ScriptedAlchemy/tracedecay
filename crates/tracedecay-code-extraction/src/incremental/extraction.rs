@@ -238,11 +238,19 @@ fn merge_changed_artifact_unmeasured(
         .map(|row| shift_unaffected_clone_body(row, edit))
         .collect::<Option<Vec<_>>>()?;
     clone_bodies.extend(delta.clone_bodies);
+    let mut callable_arities = previous
+        .callable_arities
+        .iter()
+        .filter(|row| !superseded.contains(row.node_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    callable_arities.extend(delta.callable_arities);
     let mut artifact = ExtractionArtifactV1 {
         result,
         imports,
         clone_bodies,
         schema_evidence: None,
+        callable_arities,
     };
     artifact.canonicalize_order();
     Some(artifact)
