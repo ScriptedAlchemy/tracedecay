@@ -82,13 +82,14 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::db::{
     Database, DatabaseWriteTransaction,
     engine::{Executor, IntoParams, Params, QueryExecutor, Value, opt_text, params},
 };
 
-const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+const MICROS_PER_DAY: i64 = 24 * 60 * 60 * 1_000_000;
 
 const OPERATION: &str = "observation evidence retention";
 
@@ -246,7 +247,7 @@ pub struct ObservationRetentionPhaseReport {
     pub bytes_reclaimed: u64,
     /// Oldest governing disposition timestamp among the bounded eligible rows.
     #[serde(default)]
-    pub oldest_eligible_at: Option<i64>,
+    pub oldest_eligible_at: Option<UtcMicros>,
 }
 
 /// Aggregate report for a retention run, including measurable reclaim (row and
@@ -256,8 +257,8 @@ pub struct ObservationRetentionReport {
     /// Projection-generation scope (`None` spans every generation).
     pub generation: Option<String>,
     pub applied: bool,
-    pub started_at: i64,
-    pub ended_at: i64,
+    pub started_at: UtcMicros,
+    pub ended_at: UtcMicros,
     pub anchors_released: ObservationRetentionPhaseReport,
     pub observations_released: ObservationRetentionPhaseReport,
     pub provenance_released: ObservationRetentionPhaseReport,
@@ -281,8 +282,14 @@ impl ObservationRetentionReport {
     }
 }
 
-fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
-    now_secs.saturating_sub(i64::from(window_days).saturating_mul(SECONDS_PER_DAY))
+/// The instant a released disposition must predate to release its evidence.
+/// Dispositions record `effective_at` as [`UtcMicros`], so the window is
+/// measured in the same unit.
+fn release_cutoff(window_days: u32, now: UtcMicros) -> UtcMicros {
+    UtcMicros(
+        now.0
+            .saturating_sub(i64::from(window_days).saturating_mul(MICROS_PER_DAY)),
+    )
 }
 
 async fn query_u64(
@@ -398,7 +405,7 @@ const LATEST_DISPOSITION_SQL: &str = "(SELECT MAX(latest.sequence)
 async fn released_anchors_since(
     database: &Database,
     cursor: LedgerCursor,
-    cutoff: i64,
+    cutoff: UtcMicros,
     limit: usize,
 ) -> Result<(Vec<String>, LedgerCursor)> {
     let reader = database.read_connection();
@@ -436,7 +443,7 @@ async fn released_anchors_since(
 async fn released_anchors_appended(
     reader: &(impl QueryExecutor + ?Sized),
     after: i64,
-    cutoff: i64,
+    cutoff: UtcMicros,
     limit: usize,
     anchors: &mut BTreeSet<String>,
 ) -> Result<i64> {
@@ -462,7 +469,7 @@ async fn released_anchors_appended(
             let sequence = row.get::<i64>(0).map_err(db_error)?;
             let state = row.get::<String>(2).map_err(db_error)?;
             if matches!(state.as_str(), "superseded" | "deleted")
-                && row.get::<i64>(3).map_err(db_error)? < cutoff
+                && UtcMicros(row.get::<i64>(3).map_err(db_error)?) < cutoff
                 && row.get::<i64>(4).map_err(db_error)? == sequence
             {
                 anchors.insert(row.get::<String>(1).map_err(db_error)?);
@@ -484,7 +491,7 @@ async fn released_anchors_appended(
 async fn released_anchors_aged(
     reader: &(impl QueryExecutor + ?Sized),
     aged_through: (i64, i64),
-    cutoff: i64,
+    cutoff: UtcMicros,
     remaining: usize,
     anchors: &mut BTreeSet<String>,
 ) -> Result<(i64, i64)> {
@@ -501,7 +508,7 @@ async fn released_anchors_aged(
                  ORDER BY d.effective_at, d.sequence
                  LIMIT ?4"
             ),
-            params![cutoff, aged_effective_at, aged_sequence, remaining],
+            params![cutoff.0, aged_effective_at, aged_sequence, remaining],
         )
         .await
         .map_err(db_error)?;
@@ -518,7 +525,7 @@ async fn released_anchors_aged(
     Ok(match last_aged {
         Some(last) if aged == remaining => last,
         // Every released row older than the cutoff has been examined.
-        _ => (cutoff.saturating_sub(1), i64::MAX),
+        _ => (cutoff.0.saturating_sub(1), i64::MAX),
     })
 }
 
@@ -531,7 +538,7 @@ pub async fn run_observation_retention(
     generation: Option<&str>,
     config: &ObservationRetentionConfig,
     mode: RetentionMode,
-    now: i64,
+    now: UtcMicros,
 ) -> Result<ObservationRetentionReport> {
     crate::hotpath_observe::record_snapshot_admissions(1);
     let reader = database.read_connection();
@@ -610,7 +617,7 @@ fn reclaimed_bytes(original_len: u64, marker: &str) -> u64 {
 struct ReleaseTarget {
     id: String,
     original_len: u64,
-    effective_at: i64,
+    effective_at: UtcMicros,
 }
 
 /// The in-place payload rewrite one pass applies to its selected batch.
@@ -624,7 +631,7 @@ struct PayloadRelease {
     update: String,
     label: &'static str,
     window_days: Option<u32>,
-    cutoff: i64,
+    cutoff: UtcMicros,
 }
 
 /// Reads one pass's candidates on the reader. Selection scans the evidence
@@ -642,7 +649,7 @@ async fn select_release_targets(
         targets.push(ReleaseTarget {
             id: row.get(0).map_err(db_error)?,
             original_len: row.get::<i64>(1).map_err(db_error)?.max(0) as u64,
-            effective_at: row.get(2).map_err(db_error)?,
+            effective_at: UtcMicros(row.get(2).map_err(db_error)?),
         });
     }
     Ok(targets)
@@ -702,7 +709,7 @@ async fn release_payload_batch(
         let sql = release.update.replace("{ids}", &ids);
         let mut values = Vec::with_capacity(chunk.len() + 2);
         values.push(Value::Text(release.marker.to_owned()));
-        values.push(Value::Integer(release.cutoff));
+        values.push(Value::Integer(release.cutoff.0));
         values.extend(chunk.iter().map(|target| Value::Text(target.id.clone())));
         let mut rows = match txn.query(&sql, values).await {
             Ok(rows) => rows,
@@ -751,7 +758,7 @@ impl LedgerPass<'_> {
     async fn run(
         &mut self,
         pass: &'static str,
-        cutoff: i64,
+        cutoff: UtcMicros,
         sql: &str,
         release: PayloadRelease,
     ) -> Result<ObservationRetentionPhaseReport> {
@@ -778,7 +785,7 @@ impl LedgerPass<'_> {
                     sql,
                     params![
                         opt_text(self.generation),
-                        cutoff,
+                        cutoff.0,
                         self.config.batch_limit(),
                         anchors
                     ],
@@ -804,13 +811,13 @@ impl LedgerPass<'_> {
 
 async fn run_anchor_pass(
     pass: &mut LedgerPass<'_>,
-    now: i64,
+    now: UtcMicros,
 ) -> Result<ObservationRetentionPhaseReport> {
     let window_days = pass.config.anchor_release_after_days;
     let Some(window) = window_days else {
         return Ok(ObservationRetentionPhaseReport::default());
     };
-    let cutoff = cutoff_secs(window, now);
+    let cutoff = release_cutoff(window, now);
     let sql = format!(
         "SELECT a.anchor_id, LENGTH(a.anchor_json) AS len,
                 (
@@ -877,13 +884,13 @@ fn no_live_binding(observation: &str) -> String {
 
 async fn run_observation_pass(
     pass: &mut LedgerPass<'_>,
-    now: i64,
+    now: UtcMicros,
 ) -> Result<ObservationRetentionPhaseReport> {
     let window_days = pass.config.observation_release_after_days;
     let Some(window) = window_days else {
         return Ok(ObservationRetentionPhaseReport::default());
     };
-    let cutoff = cutoff_secs(window, now);
+    let cutoff = release_cutoff(window, now);
     // An observation is released once per observation only when every anchor
     // bound to it has reached a released disposition past the window. One
     // active, unavailable, missing-disposition, or not-yet-due binding keeps
@@ -946,13 +953,13 @@ async fn run_observation_pass(
 
 async fn run_provenance_pass(
     pass: &mut LedgerPass<'_>,
-    now: i64,
+    now: UtcMicros,
 ) -> Result<ObservationRetentionPhaseReport> {
     let window_days = pass.config.provenance_release_after_days;
     let Some(window) = window_days else {
         return Ok(ObservationRetentionPhaseReport::default());
     };
-    let cutoff = cutoff_secs(window, now);
+    let cutoff = release_cutoff(window, now);
     // Only rows that carry a provenance anchor are released; the anchor linkage
     // (`retrieval_anchor_id`/`owner_json`) is preserved so the row's CHECK
     // couplings and foreign key stay valid. `capture_json` is rewritten to a
