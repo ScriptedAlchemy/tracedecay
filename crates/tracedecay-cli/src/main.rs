@@ -1094,7 +1094,6 @@ impl CommandFamily {
             | Commands::EnableUploadCounter => Self::Configuration,
             Commands::Doctor { .. }
             | Commands::Cost { .. }
-            | Commands::Bench { .. }
             | Commands::Gain { .. }
             | Commands::Monitor => Self::Diagnostics,
             Commands::Git { .. }
@@ -1918,14 +1917,6 @@ async fn dispatch_diagnostics_command(
         } => {
             cost_cmd::handle_cost(profile, range, by_model, export).await?;
         }
-        Commands::Bench {
-            queries,
-            json,
-            path,
-            max_nodes,
-        } => {
-            commands::handle_bench(profile, queries, json, path, max_nodes).await?;
-        }
         Commands::Gain {
             all,
             history,
@@ -2031,7 +2022,6 @@ impl CommandStartupPolicy {
             Commands::Status { .. }
             | Commands::CurrentCounter { .. }
             | Commands::Cost { .. }
-            | Commands::Bench { .. }
             | Commands::Gain { .. }
             | Commands::Monitor
             | Commands::List { .. }

@@ -1,5 +1,4 @@
 mod admin_project;
-mod bench;
 mod branch;
 mod daemon;
 mod gain;
@@ -12,7 +11,6 @@ mod storage;
 pub(crate) use admin_project::{
     admin_project, admin_project_until, local_counter, unexpected_admin_project_result,
 };
-pub(crate) use bench::handle_bench;
 pub(crate) use branch::handle_branch_action;
 pub(crate) use daemon::{
     admin_cli_result, admin_cli_result_mismatch, admin_cli_scope, client_handshake,

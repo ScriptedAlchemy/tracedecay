@@ -438,3 +438,65 @@ func run() {
         ]
     );
 }
+
+#[test]
+fn go_interface_method_specs_are_methods_the_interface_contains() {
+    let source = "package shapes\n\
+\n\
+type Shape interface {\n\
+\t// Area is the enclosed area.\n\
+\tArea() float64\n\
+\tScale(factor float64) Shape\n\
+}\n\
+\n\
+type Circle struct{ R float64 }\n\
+\n\
+func (c Circle) Area() float64 { return c.R }\n";
+    let result = GoExtractor
+        .extract_artifact("shapes/shapes.go", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::AbstractMethod | NodeKind::StructMethod))
+        .map(|n| {
+            (
+                n.kind.clone(),
+                n.qualified_name.as_str(),
+                n.start_line,
+                n.signature.as_deref(),
+                n.docstring.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        vec![
+            (
+                NodeKind::AbstractMethod,
+                "shapes/shapes.go::Shape::Area",
+                4,
+                Some("Area() float64"),
+                Some("Area is the enclosed area."),
+            ),
+            (
+                NodeKind::AbstractMethod,
+                "shapes/shapes.go::Shape::Scale",
+                5,
+                Some("Scale(factor float64) Shape"),
+                None,
+            ),
+            (
+                NodeKind::StructMethod,
+                "shapes/shapes.go::Area",
+                10,
+                Some("func (c Circle) Area() float64"),
+                None,
+            ),
+        ]
+    );
+    let contains = edge_pairs(&result, EdgeKind::Contains);
+    assert!(contains.contains(&("Shape", "Area")), "{contains:?}");
+    assert!(contains.contains(&("Shape", "Scale")), "{contains:?}");
+}

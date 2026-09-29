@@ -145,6 +145,33 @@ pub(crate) fn local_node_id(
     }
 }
 
+/// The `(start_line, start_column)` where a declaration's own syntax begins,
+/// past the leading `prefix_kinds` children (annotations, decorators,
+/// attribute lists) and comments, including those inside a leading `modifiers`
+/// node. `node`'s own start row is its `attrs_start_line`, as a Rust item is
+/// kept apart from its preceding attributes.
+pub(crate) fn declaration_start(node: TsNode<'_>, prefix_kinds: &[&str]) -> (u32, u32) {
+    let is_prefix = |child: &TsNode<'_>| child.is_extra() || prefix_kinds.contains(&child.kind());
+    let mut cursor = node.walk();
+    let mut start = node.start_position();
+    for child in node.children(&mut cursor) {
+        if is_prefix(&child) {
+            continue;
+        }
+        if child.kind() == "modifiers" {
+            let mut modifiers = child.walk();
+            match child.children(&mut modifiers).find(|m| !is_prefix(m)) {
+                Some(modifier) => start = modifier.start_position(),
+                None => continue,
+            }
+        } else {
+            start = child.start_position();
+        }
+        break;
+    }
+    (start.row as u32, start.column as u32)
+}
+
 /// Whether only blanks precede `node` on its first line.
 fn begins_line(source: &[u8], node: TsNode<'_>) -> bool {
     let start_byte = node.start_byte().min(source.len());

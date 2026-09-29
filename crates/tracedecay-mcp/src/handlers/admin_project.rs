@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_contracts::retrieval::{
-    AdminProjectBenchV1, AdminProjectCounterResetV1, AdminProjectCounterV1, AdminProjectResultV1,
+    AdminProjectCounterResetV1, AdminProjectCounterV1, AdminProjectResultV1,
     AdminProjectStatusAccountingV1, AdminProjectSurfaceRequestV1, AutomaticFactAddRequestV1,
     AutomaticFactEvidenceV1, AutomaticFactReceiptAvailabilityV1, AutomaticFactReceiptListV1,
     AutomaticFactReceiptStateV1, AutomaticFactReceiptV1, AutomaticFactReceiptViewV1,
@@ -152,29 +152,6 @@ pub async fn compute_admin_project(
             AdminProjectResultV1::StatusAccounting(AdminProjectStatusAccountingV1 {
                 tokens_saved,
                 global_tokens_saved,
-            })
-        }
-        AdminProjectSurfaceRequestV1::Bench {
-            queries_toml,
-            json,
-            max_nodes,
-        } => {
-            let report = crate::bench::run_bench_with_toml(
-                cg,
-                queries_toml
-                    .as_deref()
-                    .unwrap_or(crate::bench::DEFAULT_QUERIES_TOML),
-                crate::bench::BenchOptions {
-                    format: crate::bench::OutputFormat::Json,
-                    max_nodes,
-                },
-            )?;
-            AdminProjectResultV1::Bench(AdminProjectBenchV1 {
-                output: if json {
-                    crate::bench::format_report_json(&report)
-                } else {
-                    crate::bench::format_report_console(&report)
-                },
             })
         }
         AdminProjectSurfaceRequestV1::AutomaticFactReceiptList { state, limit } => {

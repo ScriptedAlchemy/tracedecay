@@ -821,6 +821,73 @@ impl GoExtractor {
 
         // Extract embedded interfaces (type_elem children).
         Self::extract_interface_embeddings(state, iface_type, &id);
+        state.node_stack.push((name.to_string(), id));
+        Self::extract_interface_methods(state, iface_type);
+        state.node_stack.pop();
+    }
+
+    /// Extract the `method_elem` children of an `interface_type`.
+    fn extract_interface_methods(state: &mut ExtractionState, iface_type: TsNode<'_>) {
+        let mut cursor = iface_type.walk();
+        for child in iface_type.named_children(&mut cursor) {
+            if child.kind() == "method_elem" {
+                Self::visit_interface_method(state, child);
+            }
+        }
+    }
+
+    /// Extract a `method_elem` of an interface as a bodiless method the
+    /// interface contains.
+    fn visit_interface_method(state: &mut ExtractionState, node: TsNode<'_>) {
+        let Some(name_node) = node.child_by_field_name("name") else {
+            return;
+        };
+        let name = state.node_text(name_node).to_string();
+        let visibility = Self::go_visibility(&name);
+        let docstring = Self::extract_docstring(state, node);
+        let start_line = node.start_position().row as u32;
+        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::AbstractMethod,
+            &name,
+            node,
+        );
+        state.nodes.push(Node {
+            id: id.clone(),
+            kind: NodeKind::AbstractMethod,
+            name,
+            qualified_name,
+            file_path: state.file_path.clone(),
+            start_line,
+            attrs_start_line: start_line,
+            end_line: node.end_position().row as u32,
+            start_column: node.start_position().column as u32,
+            end_column: node.end_position().column as u32,
+            signature: Some(state.node_text(node).trim().to_string()),
+            docstring,
+            visibility,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            updated_at: state.timestamp,
+            parent_id: None,
+        });
+        if let Some(parent_id) = state.parent_node_id() {
+            state.edges.push(Edge {
+                source: parent_id.to_string(),
+                target: id,
+                kind: EdgeKind::Contains,
+                line: Some(start_line),
+            });
+        }
     }
 
     /// Extract embedded interface types from an `interface_type` node.

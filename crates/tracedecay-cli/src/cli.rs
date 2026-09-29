@@ -162,7 +162,7 @@ pub enum Commands {
         path: Option<String>,
         /// Project path, as an explicit flag. Equivalent to the positional
         /// PATH argument above; accepted for consistency with `-p`/`--path`
-        /// on other project-scoped commands (e.g. `dashboard`, `bench`).
+        /// on other project-scoped commands (e.g. `dashboard`).
         /// Conflicts with the positional PATH, pass one or the other, not
         /// both.
         #[arg(
@@ -579,22 +579,6 @@ pub enum Commands {
         /// Export format: csv or json
         #[arg(long)]
         export: Option<String>,
-    },
-    /// Run a reproducible retrieval benchmark against the current project.
-    #[command(long_about = BENCH_LONG_ABOUT, after_help = BENCH_AFTER_HELP)]
-    Bench {
-        /// Path to a TOML query file (defaults to the shipped default set).
-        #[arg(long)]
-        queries: Option<String>,
-        /// Output as JSON instead of the colored console table.
-        #[arg(long)]
-        json: bool,
-        /// Project path (default: current directory).
-        #[arg(short, long)]
-        path: Option<String>,
-        /// Max nodes per query (default: 20).
-        #[arg(long, default_value = "20")]
-        max_nodes: usize,
     },
     /// Show token savings (and dollar estimates) recorded in the global ledger.
     #[command(long_about = GAIN_LONG_ABOUT, after_help = GAIN_AFTER_HELP)]

@@ -15,7 +15,7 @@ use tracedecay_contracts::retrieval::{
     ContextSurfaceRequestV1, LexicalAnchorDropReasonV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{ExactClass, RelationEdgeKindV1};
+use tracedecay_domain::{ExactClass, RankedCandidate, RelationEdgeKindV1, RetrieverKind};
 
 use crate::McpToolContext;
 #[cfg(test)]
@@ -80,6 +80,17 @@ struct ContextGraphProjection {
     touched_files: Vec<String>,
 }
 
+/// Whether only the graph lane ranked this candidate. Such a candidate is a
+/// neighbor of the task's matches, not a match; context ranks the neighbors
+/// of its matches itself.
+fn graph_lane_only(ranked: &RankedCandidate) -> bool {
+    let contributions = &ranked.candidate.contributions;
+    !contributions.is_empty()
+        && contributions
+            .iter()
+            .all(|contribution| contribution.retriever == RetrieverKind::Graph)
+}
+
 fn context_search_matches(
     complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
     scope_prefix: Option<&str>,
@@ -87,6 +98,7 @@ fn context_search_matches(
     complete
         .ordered_candidates
         .iter()
+        .filter(|ranked| !graph_lane_only(ranked))
         .filter_map(|ranked| {
             let display = complete
                 .display_by_anchor
@@ -147,7 +159,11 @@ fn context_graph_projection(
     max_code_blocks: usize,
 ) -> Result<ContextGraphProjection> {
     let mut selected = Vec::new();
-    for ranked in &complete.ordered_candidates {
+    for ranked in complete
+        .ordered_candidates
+        .iter()
+        .filter(|ranked| !graph_lane_only(ranked))
+    {
         let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) else {
             continue;
         };
