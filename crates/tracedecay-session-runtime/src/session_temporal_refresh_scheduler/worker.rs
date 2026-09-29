@@ -789,14 +789,10 @@ pub async fn begin_admitted_session_refreshes(
         report.saturated = true;
         return;
     }
-    let active_after = state.projection_discovery_after();
+    let cursor = state.projection_discovery_cursor();
     let active_scan_slots = state.projection_discovery_active_slots(limit);
     let page = match SessionTemporalAccess::new(database)
-        .pending_session_temporal_refresh_page_result(
-            limit,
-            active_scan_slots,
-            active_after.as_ref(),
-        )
+        .pending_session_temporal_refresh_page_result(limit, active_scan_slots, &cursor)
         .await
     {
         Ok(page) => page,
@@ -811,13 +807,13 @@ pub async fn begin_admitted_session_refreshes(
             return;
         }
     };
-    let (requests, active_scanned_through, has_more) = page.into_parts();
+    let (requests, next_cursor, has_more) = page.into_parts();
     for request in requests.into_iter().rev() {
         if !state.suppresses_discovered_request(&request) {
             state.requeue_request(request);
         }
     }
-    state.update_projection_discovery_cursor(active_scanned_through);
+    state.update_projection_discovery_cursor(next_cursor);
     report.saturated |= has_more;
     process_refresh_begin_requests(store, state, limit, report).await;
 }
@@ -1109,8 +1105,8 @@ async fn recoveries_for_pass(
 ) -> Option<(Vec<SessionRefreshRecoveryV1>, bool)> {
     let mut recoveries = running_refreshes(store, report).await?;
     if !recoveries.is_empty() {
-        // Existing durable work owns this pass. Rediscovery scans the complete
-        // observation-effect index, so defer it until these recoveries drain.
+        // Existing durable work owns this pass; discovery waits until these
+        // recoveries drain.
         return Some((recoveries, true));
     }
     begin_admitted_session_refreshes(

@@ -228,6 +228,8 @@ const TRANSCRIPT_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_activity_fallback
         ON sessions(COALESCE(ended_at, started_at));
+    CREATE INDEX IF NOT EXISTS idx_sessions_session_provider
+        ON sessions(session_id, provider, parent_session_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_active_project_path
         ON sessions(project_path, provider, session_id)
         WHERE ended_at IS NULL;
@@ -236,6 +238,15 @@ const TRANSCRIPT_SCHEMA: &str = "
         value TEXT NOT NULL,
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
+";
+
+// The host drain picks the next pending projection across every binding in
+// this order; without the index each pick scans and sorts the whole pending
+// table. The canonical project database admits only its exact final shape and
+// never runs that pick, so the index lives with the registered stores.
+const EXTERNAL_SOURCE_PENDING_ORDER_INDEX: &str = "
+    CREATE INDEX IF NOT EXISTS idx_external_source_pending_order_v1
+        ON external_source_pending_projections_v1(successor_sequence, binding_id);
 ";
 
 const DELIVERY_SETTLEMENT_SCHEMA: &str = "
@@ -821,6 +832,12 @@ async fn install_registered_schema_stage_sequence(
         "initialize registered external source state",
     )
     .await?;
+    transaction
+        .execute_batch(EXTERNAL_SOURCE_PENDING_ORDER_INDEX)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("initialize external source pending order", error)
+        })?;
     transaction
         .execute_batch(RUNTIME_LEDGER_SCHEMA)
         .await

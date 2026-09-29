@@ -30,7 +30,7 @@ use super::persist::persist_occurrences;
 use super::record_canonical_observation_effect;
 use crate::handle::SessionTemporalRegisteredDb;
 use crate::test_support::QueryCountingConnection;
-use crate::{SessionTemporalAccess, SessionTemporalStore};
+use crate::{SessionTemporalAccess, SessionTemporalRefreshDiscoveryCursor, SessionTemporalStore};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
@@ -2092,7 +2092,11 @@ async fn explicit_discovery_visits_only_output_effects_past_frontier() {
             .registered_database(HostAdmissionScope::Profile)
             .expect("profile registered database"),
     )
-    .pending_session_temporal_refresh_page_result(128, 1, None)
+    .pending_session_temporal_refresh_page_result(
+        128,
+        1,
+        &SessionTemporalRefreshDiscoveryCursor::default(),
+    )
     .await
     .unwrap()
     .into_parts()
@@ -2100,6 +2104,97 @@ async fn explicit_discovery_visits_only_output_effects_past_frontier() {
 
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].session_id(), &session_id);
+}
+
+/// Discovery reads only effects past its cursor, so an effect that commits
+/// while its session's refresh is running must be rediscovered once that
+/// refresh ends, and an unchanged store must yield no request.
+#[tokio::test]
+async fn discovery_cursor_rediscovers_effects_that_arrived_during_a_refresh() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database");
+    let session_id = fixture_session("session.projector.cursor-running");
+    let discover = |cursor: SessionTemporalRefreshDiscoveryCursor| async move {
+        SessionTemporalAccess::new(db)
+            .pending_session_temporal_refresh_page_result(8, 1, &cursor)
+            .await
+            .unwrap()
+            .into_parts()
+    };
+    let frontiers = |requests: &[tracedecay_store::SessionRefreshBeginOrJoinRequestV1]| {
+        requests
+            .iter()
+            .map(|request| {
+                (
+                    request.session_id().as_str().to_owned(),
+                    request.target_frontier().committed_through(),
+                    request.target_frontier().observed_through(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let (observation, write) = fixture_observation(&session_id, 0, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let (requests, cursor, _) = discover(SessionTemporalRefreshDiscoveryCursor::default()).await;
+    let first = frontiers(&requests);
+    assert_eq!(first.len(), 1, "{first:?}");
+    let first_observed = first[0].2;
+    assert_eq!(
+        first[0],
+        (session_id.as_str().to_owned(), 0, first_observed)
+    );
+    let store = temporal_store(&runtime);
+    store
+        .begin_or_join_session_refresh(requests.into_iter().next().unwrap())
+        .await
+        .unwrap();
+
+    let (observation, write) = fixture_observation(&session_id, 1, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let (requests, cursor, _) = discover(cursor).await;
+    assert!(
+        requests.is_empty(),
+        "a running session is not offered again: {:?}",
+        frontiers(&requests)
+    );
+
+    store
+        .complete_running_session_refresh_for_test(&session_id)
+        .await
+        .unwrap();
+    let (requests, cursor, _) = discover(cursor).await;
+    let resumed = frontiers(&requests);
+    assert_eq!(resumed.len(), 1, "{resumed:?}");
+    assert_eq!(resumed[0].0, session_id.as_str());
+    assert_eq!(
+        resumed[0].1, first_observed,
+        "the completed refresh committed the first effect"
+    );
+    assert!(
+        resumed[0].2 > first_observed,
+        "the effect that arrived during the refresh is rediscovered: {resumed:?}"
+    );
+
+    store
+        .begin_or_join_session_refresh(requests.into_iter().next().unwrap())
+        .await
+        .unwrap();
+    store
+        .complete_running_session_refresh_for_test(&session_id)
+        .await
+        .unwrap();
+    let (requests, _, has_more) = discover(cursor).await;
+    assert!(requests.is_empty(), "{:?}", frontiers(&requests));
+    assert!(
+        !has_more,
+        "an unchanged, swept store has nothing more to discover"
+    );
 }
 
 #[tokio::test]
@@ -2155,18 +2250,18 @@ async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
     ))
     .await;
 
-    let mut cursor = None;
+    let mut cursor = SessionTemporalRefreshDiscoveryCursor::default();
     let mut discovered = Vec::new();
     let mut pending_pages = 0usize;
     let mut active_rows_scanned = 0usize;
     let mut pages = 0usize;
     loop {
         let page = SessionTemporalAccess::new(db)
-            .pending_session_temporal_refresh_page_result(2, 1, cursor.as_ref())
+            .pending_session_temporal_refresh_page_result(2, 1, &cursor)
             .await
             .expect("discover missing native relation projection");
         active_rows_scanned = active_rows_scanned.saturating_add(page.active_rows_scanned());
-        let (requests, scanned_through, has_more) = page.into_parts();
+        let (requests, next_cursor, has_more) = page.into_parts();
         pages = pages.saturating_add(1);
         for request in requests {
             if request.session_id() == &pending_session_id {
@@ -2182,7 +2277,7 @@ async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
         if !has_more {
             break;
         }
-        cursor = scanned_through;
+        cursor = next_cursor;
     }
 
     assert_eq!(
@@ -2199,8 +2294,8 @@ async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
         "cursor paging must visit each active row exactly once per sweep"
     );
     assert_eq!(
-        pending_pages, 4,
-        "a full pending-effect lane must not consume the reserved active scan slot"
+        pending_pages, 1,
+        "the pending lane reports its session once, beside the reserved active scan slot"
     );
     let snapshot = db.read_snapshot().await.expect("relation receipt snapshot");
     let mut rows = snapshot
