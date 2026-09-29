@@ -1197,6 +1197,105 @@ mod goal_event_tests {
         );
     }
 
+    /// A session that appends to today's rollout between passes must not keep
+    /// the pass yielding at yesterday's out-of-project day. The yield exists
+    /// for a rollout opened this pass; a resumed live tail already has its
+    /// earlier window searchable, so the pass walks on, admits the older
+    /// in-project day, and commits its frontier.
+    #[tokio::test]
+    async fn a_live_tail_does_not_starve_older_in_project_days() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        write_scoped_rollout(&home, "2026", "08", "29", "live", &project, "live day");
+        write_scoped_rollout(&home, "2026", "08", "28", "other-a", &other, "other day");
+        write_scoped_rollout(&home, "2026", "08", "27", "oldest", &project, "oldest day");
+        let live_rollout = home.join(".codex/sessions/2026/08/29/rollout-live.jsonl");
+
+        let project_id = ProjectId::new("project-live-tail").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let run_pass = || {
+            with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
+            )
+        };
+
+        let first = run_pass().await;
+        assert!(first.failures.is_empty(), "{:?}", first.failures);
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            BTreeSet::from(["live".to_owned()]),
+            "the newest day yields before the older out-of-project day is opened"
+        );
+
+        let appends = 3;
+        for ordinal in 0..appends {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&live_rollout)
+                .unwrap();
+            std::io::Write::write_all(
+                &mut file,
+                format!(
+                    "{}\n",
+                    json!({
+                        "timestamp": format!("2026-08-29T12:00:{:02}.000Z", ordinal + 2),
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": format!("live append {ordinal}")}
+                    })
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let outcome = run_pass().await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        }
+
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            BTreeSet::from(["live".to_owned(), "oldest".to_owned()]),
+            "a live tail appending every pass starved the older in-project day"
+        );
+        assert_eq!(
+            admission
+                .observations()
+                .iter()
+                .filter(|stored| {
+                    let envelope: CanonicalObservationEnvelopeV1 =
+                        serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                    envelope.relations().session_id().as_str() == "live"
+                })
+                .count(),
+            2 + appends,
+            "every live append is admitted exactly once"
+        );
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Complete)
+        );
+    }
+
     fn write_scoped_rollout(
         home: &std::path::Path,
         year: &str,

@@ -265,9 +265,13 @@ impl<'a> ProjectProviderRun<'a> {
         // Out-of-scope rollouts consume no byte budget, so a newest-first page
         // would otherwise write a cursor for every older out-of-scope day
         // before the admitted window is projected into search. Once in-scope
-        // frames persisted, a day directory that opens out of scope belongs to
-        // the next pass. In-scope days and mixed days keep the pass going, so
-        // a project whose history is all in scope still commits its frontier.
+        // frames persisted from a rollout opened this pass, a day directory
+        // that opens out of scope belongs to the next pass. In-scope days and
+        // mixed days keep the pass going, so a project whose history is all in
+        // scope still commits its frontier. A rollout resumed from its cursor
+        // is a live tail whose earlier window is already searchable; letting
+        // its appends end the pass would replay the same page while the
+        // session stays active and never reach an older in-scope day.
         let mut persisted_day: Option<&Path> = None;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         for path in &discovery.paths {
@@ -302,7 +306,7 @@ impl<'a> ProjectProviderRun<'a> {
             .await
             {
                 Ok(progress) => {
-                    if progress.frames_persisted > 0 {
+                    if progress.frames_persisted > 0 && !progress.resumed {
                         persisted_day = path.parent();
                     }
                     deferred |= progress.source_deferred || progress.bytes_consumed > remaining;
