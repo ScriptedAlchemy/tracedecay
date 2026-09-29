@@ -56,6 +56,7 @@ fn generation_bits(generation: libc::c_long) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use super::inode_generation;
 
     #[cfg(target_os = "linux")]

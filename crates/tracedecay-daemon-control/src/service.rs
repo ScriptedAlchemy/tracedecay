@@ -8,6 +8,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use sha2::Digest;
 
+use tracedecay_daemon_identity::DAEMON_AUTHORITY_UNAVAILABLE;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -540,6 +541,29 @@ pub fn unavailable_daemon_socket_advice(
             Err(_) => "This client cannot see whether a managed TraceDecay daemon service is installed. Check `tracedecay daemon status` before starting or installing a daemon."
                 .to_string(),
         },
+    }
+}
+
+/// Completes a missing-authority refusal with the advice for `socket_path`,
+/// read from the boundary profile's managed service, so a held daemon is named
+/// as held rather than as one to start. Every other error is returned as is.
+pub fn with_unavailable_daemon_advice(
+    profile: &ProfileRoot,
+    socket_path: &Path,
+    error: TraceDecayError,
+) -> TraceDecayError {
+    match error.project_route_context() {
+        Some((code, true, detail)) if code == DAEMON_AUTHORITY_UNAVAILABLE => {
+            TraceDecayError::project_route(
+                code,
+                true,
+                format!(
+                    "{detail} {}",
+                    unavailable_daemon_socket_advice(profile, socket_path, None)
+                ),
+            )
+        }
+        _ => error,
     }
 }
 

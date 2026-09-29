@@ -8,8 +8,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
-    CompactContextLineageEdgeV1, CursorManifestLimitKindV1, HydrationStateV1, RetrievalAnchorId,
-    RetrievalGrainV1, SessionId, SessionSourceCoverageV1, TemporalCoverageCountsV1,
+    CompactContextLineageEdgeV1, CursorBindingMismatchV1, CursorManifestLimitKindV1,
+    HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
+    TemporalCoverageCountsV1,
 };
 use tracedecay_lcm::contracts::LcmRetrievalOutcome;
 use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
@@ -21,8 +22,8 @@ use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
 use tracedecay_session_memory::session::{
-    SessionDataFreshness, SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
-    SessionTemporalQuery,
+    SessionCursorRequest, SessionDataFreshness, SessionRetrievalBudgetAccountingV1,
+    SessionRetrievalBudgetStageV1, SessionTemporalQuery,
 };
 use tracedecay_sessions::WorkflowScopeFilter;
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
@@ -203,6 +204,7 @@ pub struct LcmExpandServiceCommand {
     source_limit: Option<usize>,
     cursor: Option<String>,
     store_scope: SessionRetrievalStoreScope,
+    cursor_request: SessionCursorRequest,
 }
 
 impl LcmExpandServiceCommand {
@@ -226,6 +228,7 @@ impl LcmExpandServiceCommand {
             source_limit,
             cursor,
             store_scope,
+            cursor_request: SessionCursorRequest::new("lcm_expand"),
         }
     }
 
@@ -263,6 +266,18 @@ impl LcmExpandServiceCommand {
     #[hotpath::skip]
     pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
+    }
+
+    /// Names the user-facing operation, and its request fields, a summary
+    /// source continuation from this expansion is minted for.
+    #[must_use]
+    pub fn with_cursor_request(mut self, cursor_request: SessionCursorRequest) -> Self {
+        self.cursor_request = cursor_request;
+        self
+    }
+
+    pub fn cursor_request(&self) -> &SessionCursorRequest {
+        &self.cursor_request
     }
 }
 
@@ -410,6 +425,9 @@ pub enum LcmDescribeServiceOutcome {
         retrieval: LcmRetrievalOutcome,
     },
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     WrongScope,
     Locked,
     Redacted,
@@ -455,6 +473,9 @@ pub enum LcmExpandServiceOutcome {
         retrieval: LcmRetrievalOutcome,
     },
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     WrongScope,
     Locked,
     Redacted,
@@ -499,6 +520,9 @@ pub enum SessionRetrievalServiceOutcome {
         freshness: SessionDataFreshness,
     },
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     Partial {
         page: SessionRetrievalPageView,
         freshness: SessionDataFreshness,

@@ -6,9 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ActorId, ManifestDigest, RootGenerationV1, RootScopeOutcomeV1, ScopeOutcome,
-    ScopePartialReasonV1, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UtcMicros,
-    canonical_sha256,
+    ActorId, CursorBindingMismatchV1, ManifestDigest, RootGenerationV1, RootScopeOutcomeV1,
+    ScopeOutcome, ScopePartialReasonV1, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1,
+    UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -166,10 +166,14 @@ impl MultiRootExecuteRequestV1 {
         if let Some(cursor) = &continuation {
             cursor.validate()?;
             if page != cursor.next_page() {
-                return Err(MultiRootQueryError::CursorMismatch { field: "page" });
+                return Err(MultiRootQueryError::CursorRefused(
+                    CursorBindingMismatchV1::ParameterChanged { parameter: "page" },
+                ));
             }
         } else if page != 0 {
-            return Err(MultiRootQueryError::CursorMismatch { field: "page" });
+            return Err(MultiRootQueryError::CursorRefused(
+                CursorBindingMismatchV1::ParameterChanged { parameter: "page" },
+            ));
         }
         Ok(Self {
             scope_set_id,
@@ -490,8 +494,12 @@ pub enum MultiRootQueryError {
     RootSetMismatch,
     #[error("multi-root request authorization was denied")]
     Denied,
-    #[error("multi-root continuation binding changed: {field}")]
-    CursorMismatch { field: &'static str },
+    #[error("multi-root continuation was refused: {0}")]
+    CursorRefused(CursorBindingMismatchV1),
+    /// A participating root's generation moved since the continuation was
+    /// minted, so the page it names no longer exists.
+    #[error("multi-root continuation is stale")]
+    ContinuationStale,
     #[error("multi-root query contract is invalid: {0}")]
     Invalid(String),
 }
@@ -690,9 +698,9 @@ impl MultiRootContinuationV1 {
             self.next_page,
         )?;
         if canonical != *self {
-            return Err(MultiRootQueryError::CursorMismatch {
-                field: "continuation digest",
-            });
+            return Err(MultiRootQueryError::CursorRefused(
+                CursorBindingMismatchV1::Foreign,
+            ));
         }
         Ok(())
     }
@@ -1032,34 +1040,42 @@ fn validate_continuation<Q>(
         return if request.page == 0 {
             Ok(())
         } else {
-            Err(MultiRootQueryError::CursorMismatch { field: "page" })
+            Err(MultiRootQueryError::CursorRefused(
+                CursorBindingMismatchV1::ParameterChanged { parameter: "page" },
+            ))
         };
     };
     continuation.validate()?;
     if continuation.scope_set_digest != *request.scope_set.digest() {
-        return Err(MultiRootQueryError::CursorMismatch {
-            field: "scope set digest",
-        });
+        return Err(MultiRootQueryError::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged {
+                parameter: "scope_set_digest",
+            },
+        ));
     }
     let mut generations = request.root_generations.clone();
     generations.sort_by(|left, right| left.scope_digest.cmp(&right.scope_digest));
     if continuation.root_generations != generations {
-        return Err(MultiRootQueryError::CursorMismatch {
-            field: "root generations",
-        });
+        return Err(MultiRootQueryError::ContinuationStale);
     }
     if continuation.query_digest != request.query_digest {
-        return Err(MultiRootQueryError::CursorMismatch {
-            field: "query digest",
-        });
+        return Err(MultiRootQueryError::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged {
+                parameter: "operation",
+            },
+        ));
     }
     if continuation.order_digest != request.order_digest {
-        return Err(MultiRootQueryError::CursorMismatch {
-            field: "order digest",
-        });
+        return Err(MultiRootQueryError::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged {
+                parameter: "scope_set_digest",
+            },
+        ));
     }
     if continuation.next_page != request.page {
-        return Err(MultiRootQueryError::CursorMismatch { field: "page" });
+        return Err(MultiRootQueryError::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged { parameter: "page" },
+        ));
     }
     Ok(())
 }

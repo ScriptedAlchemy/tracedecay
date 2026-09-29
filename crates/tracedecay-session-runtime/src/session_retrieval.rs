@@ -611,6 +611,9 @@ impl DaemonSessionRetrievalService {
                 freshness,
             },
             SessionRetrievalOutcome::CursorStale => SessionRetrievalServiceOutcome::CursorStale,
+            SessionRetrievalOutcome::CursorRefused(mismatch) => {
+                SessionRetrievalServiceOutcome::CursorRefused(mismatch)
+            }
             SessionRetrievalOutcome::Partial {
                 items,
                 freshness,

@@ -303,6 +303,9 @@ Inadequacy reason codes used below:
 - **(d) driving it would misbehave**, adoption would duplicate, double-load,
   or otherwise corrupt a registration the host already derives from a file it
   auto-discovers.
+- **(e) requires an account sign-in**, the command refuses to run until the
+  operator signs in to the host's service, so a lifecycle would depend on an
+  account unrelated to the registration it writes.
 
 ### Verdicts (verified 2026-08-08 unless a different date is given)
 
@@ -312,7 +315,7 @@ Inadequacy reason codes used below:
 | Gemini CLI | ADOPT-CLI | `gemini extensions install <staged dir>` / `uninstall tracedecay` | `agents/gemini/extension.rs`; <https://github.com/google-gemini/gemini-cli/blob/main/docs/extensions/index.md> |
 | Codex | ADOPT-CLI | `codex plugin add` / `remove` for Core (probed non-interactive on Codex CLI 0.147.0, 2026-08-14); `codex mcp add` / `remove` for the MCP-only set. Hook trust stays interactive (`/hooks`), no non-interactive trust surface. | `agents/codex/plugin_registry.rs`; `agents/codex/mcp_registry.rs`; <https://developers.openai.com/codex/cli> |
 | Copilot CLI | ADOPT-CLI | `copilot mcp add NAME -- CMD ARGS` / `remove` | `agents/copilot.rs`; <https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers> |
-| Kiro | ADOPT-CLI | `kiro-cli mcp add --name … --command … --args …` / `remove`; steering + managed agent stay TraceDecay-written (c) | `agents/kiro.rs`; <https://kiro.dev/docs/cli/mcp/registry/> |
+| Kiro | MANUAL-ONLY (e) | `kiro-cli mcp add` / `remove` exist, but every `kiro-cli mcp` command refuses with `You are not logged in, please log in with kiro-cli login` while signed out (kiro-cli 2.24.1, 2026-09-28). Kiro documents user-level `~/.kiro/settings/mcp.json` and workspace-level `.kiro/settings/mcp.json` as its MCP config files and hot-reloads them | `agents/kiro.rs`; <https://kiro.dev/docs/cli/mcp/configuration/> |
 | OpenCode | MANUAL-ONLY (d) | `opencode plugin` de-duplicates by resolved `file://` URL, so driving it beside the auto-discovered `plugin/*.ts` deployment double-loads every hook, and it has no removal counterpart (b) | shipped host v1.18.4 config loader; recorded as executable invariants in `agents/opencode/plugin_cli.rs` |
 | Kilo | MANUAL-ONLY (b + c) | `kilo mcp add` exposes only `--url`/`--env`/`--header`, no `--command`/`--args` for a local stdio server, and the subcommand set is `add \| list \| auth \| logout \| debug` with no remove/delete | <https://kilo.ai/docs/code-with-ai/platforms/cli-reference>; <https://kilo.ai/docs/automate/mcp/using-in-cli>; <https://github.com/Kilo-Org/kilocode/issues/7079> |
 | Cursor | MANUAL-ONLY (a + c) | probed `cursor-agent mcp --help`: `login \| list \| list-tools \| enable \| disable` only. `enable` toggles approval for a server that already exists in `mcp.json`; there is no `add` and no CLI plugin install | probed 2026-08-08; <https://cursor.com/docs/cli/mcp> |

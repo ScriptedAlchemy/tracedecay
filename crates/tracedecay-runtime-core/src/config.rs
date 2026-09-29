@@ -350,7 +350,7 @@ fn paths_same(left: &Path, right: &Path) -> bool {
 
 pub use tracedecay_domain::source_path_policy::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
 
-/// The search path for host and service program resolution (`kiro-cli`,
+/// The search path for host and service program resolution (`droid`,
 /// `gemini`, `systemctl`, env-shebang interpreters, ...).
 ///
 /// Production reads the ambient `PATH` at each call.

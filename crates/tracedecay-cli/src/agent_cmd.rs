@@ -29,7 +29,7 @@ pub(crate) enum HostBundleCliOperation {
 
 /// Exit status of a lifecycle pass in which no host failed but at least one
 /// waits on an interactive operator step (`EX_TEMPFAIL`: act, then rerun).
-/// A host that is not installed or not signed in is never such a step.
+/// A host that is not installed is never such a step.
 pub(crate) const PENDING_OPERATOR_ACTION_EXIT_CODE: i32 = 75;
 
 /// One host's typed result in a lifecycle pass.
@@ -61,7 +61,7 @@ pub(crate) enum HostLifecycleResult {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostSkipReason {
-    /// The host is not installed or not signed in on this machine; tracked,
+    /// The host is not installed on this machine; tracked,
     /// named, or merely detected alike, that is informational.
     Absent(tracedecay_domain::errors::HostAbsence),
     /// The host has no component set for this request.
@@ -1394,48 +1394,31 @@ mod tests {
 
     fn cli_missing() -> super::HostLifecycleError {
         tracedecay_domain::errors::TraceDecayError::HostCliUnavailable {
-            program: "kiro-cli".to_string(),
-            lifecycle: "kiro MCP registry lifecycle".to_string(),
+            program: "droid".to_string(),
+            lifecycle: "Factory Droid MCP registry lifecycle".to_string(),
         }
         .into()
     }
 
+    const DROID_CLI_MISSING: &str = "host CLI `droid` is unavailable for Factory Droid MCP \
+                                     registry lifecycle; install it or add it to PATH and retry";
+
     #[test]
     fn an_absent_host_is_skipped_and_only_a_full_tracked_uninstall_untracks_it() {
-        let signed_out = || -> super::HostLifecycleError {
-            tracedecay_domain::errors::TraceDecayError::HostCliNotSignedIn {
-                program: "kiro-cli".to_string(),
-                login: "kiro-cli login".to_string(),
-            }
-            .into()
-        };
         assert_eq!(
             super::settle_host_lifecycle(Err(cli_missing()), false),
             HostLifecycleResult::Skipped {
                 reason: super::HostSkipReason::Absent(
                     tracedecay_domain::errors::HostAbsence::NotInstalled
                 ),
-                detail: "host CLI `kiro-cli` is unavailable for kiro MCP registry lifecycle; \
-                         install it or add it to PATH and retry"
-                    .to_string(),
+                detail: DROID_CLI_MISSING.to_string(),
             }
         );
         assert_eq!(
-            super::settle_host_lifecycle(Err(signed_out()), false),
-            HostLifecycleResult::Skipped {
-                reason: super::HostSkipReason::Absent(
-                    tracedecay_domain::errors::HostAbsence::NotSignedIn
-                ),
-                detail: "host CLI `kiro-cli` is not signed in; run `kiro-cli login` to use it"
-                    .to_string(),
-            }
-        );
-        assert_eq!(
-            super::settle_host_lifecycle(Err(signed_out()), true),
+            super::settle_host_lifecycle(Err(cli_missing()), true),
             HostLifecycleResult::Untracked {
-                absence: tracedecay_domain::errors::HostAbsence::NotSignedIn,
-                detail: "host CLI `kiro-cli` is not signed in; run `kiro-cli login` to use it"
-                    .to_string(),
+                absence: tracedecay_domain::errors::HostAbsence::NotInstalled,
+                detail: DROID_CLI_MISSING.to_string(),
             }
         );
         let attempted = || tracedecay_domain::errors::TraceDecayError::Config {
@@ -1851,14 +1834,6 @@ mod tests {
     /// mid-test.
     const KIRO_FIXTURE_BIN: &str = "/usr/local/bin/tracedecay";
 
-    /// Keep Kiro lifecycle tests on the native `kiro-cli` route. The compiled
-    /// fixture is a real executable so Windows runners do not rename a shell
-    /// script to `.exe` or depend on an ambient Kiro install.
-    fn write_fake_kiro_cli(path: &Path) {
-        let dir = path.parent().expect("kiro-cli fixture path has a parent");
-        super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "kiro-cli");
-    }
-
     /// Install a compiled host CLI fixture (`codex`, `kimi`) on `PATH` for Core
     /// lifecycle tests.
     ///
@@ -1867,9 +1842,9 @@ mod tests {
     /// not a preference: the host-capability doctrine forbids a fallback that
     /// edits Codex-owned files behind the host's back. CI runners carry no
     /// `codex` binary, so a test that exercises activation has to supply the
-    /// host CLI the same way the Kiro tests supply theirs. Only host program
-    /// resolution sees the fixture directory; the process `PATH` is untouched,
-    /// so `which_tracedecay` and sibling tests keep the ambient environment.
+    /// host CLI itself. Only host program resolution sees the fixture
+    /// directory; the process `PATH` is untouched, so `which_tracedecay` and
+    /// sibling tests keep the ambient environment.
     fn install_fake_host_cli(
         dir: &std::path::Path,
         program: &str,
@@ -1885,7 +1860,7 @@ mod tests {
     fn installing_the_host_cli_fixture_resolves_to_an_executable() {
         let dir = tempfile::tempdir().unwrap();
         let installed =
-            super::host_cli_fixture::install_compiled_host_cli_fixture(dir.path(), "kiro-cli");
+            super::host_cli_fixture::install_compiled_host_cli_fixture(dir.path(), "codex");
         assert!(
             installed.is_file(),
             "installed host-CLI fixture at {} resolves to nothing",
@@ -2104,21 +2079,8 @@ mod tests {
         assert_opencode_non_context_state(&preserved);
     }
 
-    /// Kiro's global MCP registry is owned by `kiro-cli`; the component
-    /// transaction must drive that native command while retaining peer
-    /// servers instead of editing the registry behind Kiro's back.
-    #[cfg(unix)]
     #[test]
     fn kiro_context_mcp_component_set_applies_non_interactively_and_repeats() {
-        #[cfg(unix)]
-        let kiro_cli_dir = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
-        let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
-        #[cfg(unix)]
-        write_fake_kiro_cli(&kiro_cli_path);
-        #[cfg(unix)]
-        let _kiro_path =
-            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
@@ -2164,17 +2126,12 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn kiro_doctor_accepts_the_canonical_mcp_only_install() {
         use tracedecay_agent_hosts::agents::{
             AgentIntegration, DoctorCounters, HealthcheckContext, KiroIntegration,
         };
 
-        let kiro_cli_dir = tempfile::tempdir().unwrap();
-        write_fake_kiro_cli(&kiro_cli_dir.path().join("kiro-cli"));
-        let _kiro_path =
-            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let project = tempfile::tempdir().unwrap();
@@ -2235,11 +2192,6 @@ mod tests {
     fn confirmed_apply_reports_an_ownership_conflict_as_itself() {
         use tracedecay_agent_hosts::agents::host_bundle::HostBundleError;
 
-        let kiro_cli_dir = tempfile::tempdir().unwrap();
-        let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
-        write_fake_kiro_cli(&kiro_cli_path);
-        let _kiro_path =
-            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
@@ -2322,92 +2274,45 @@ mod tests {
         assert!(matches!(error, HostBundleError::OwnershipConflict(_)));
     }
 
+    /// Kiro's registry is a documented JSON file, so a machine without
+    /// `kiro-cli` installs Kiro like any other file-configured host.
     #[test]
-    fn absent_kiro_cli_is_typed_unavailability_not_an_ownership_conflict() {
+    fn kiro_installs_without_any_kiro_cli() {
         let empty_path = tempfile::tempdir().unwrap();
         let _path =
             tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path.path());
         let home = tempfile::tempdir().unwrap();
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
         let component_set =
             canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
                 .unwrap()
                 .unwrap();
-        let options = crate::cli::HostBundleCliOptions {
-            component: None,
-            dry_run: false,
-            yes: true,
-            adopt: false,
-        };
-        let error = apply_canonical_component_set(
+        let result = apply_canonical_component_set(
             profile,
             "kiro",
             HostBundleCliOperation::Install,
             &component_set,
-            &options,
+            &crate::cli::HostBundleCliOptions {
+                component: None,
+                dry_run: false,
+                yes: true,
+                adopt: false,
+            },
             home.path(),
             lifecycle.path(),
             &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
-        )
-        .expect_err("an absent Kiro CLI must refuse the lifecycle");
-        let message = error.to_string();
-        assert!(
-            message.contains("unavailable"),
-            "missing executable must stay a typed unavailability: {message}"
-        );
-        assert!(
-            !message.contains("ownership conflict"),
-            "absence must not be reported as an ownership conflict: {message}"
-        );
-    }
-
-    #[test]
-    fn malformed_kiro_fixture_output_is_not_unavailability_or_ownership_conflict() {
-        let kiro_cli_dir = tempfile::tempdir().unwrap();
-        write_fake_kiro_cli(&kiro_cli_dir.path().join("kiro-cli"));
-        let _kiro_path =
-            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
-        let home = tempfile::tempdir().unwrap();
-        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
-        std::fs::create_dir_all(home.path().join(".tracedecay-host-cli-fixture")).unwrap();
-        std::fs::write(
-            home.path().join(".tracedecay-host-cli-fixture/malformed"),
-            b"",
         )
         .unwrap();
-        std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
-        let lifecycle = tempfile::tempdir().unwrap();
-        let component_set =
-            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
-                .unwrap()
-                .unwrap();
-        let options = crate::cli::HostBundleCliOptions {
-            component: None,
-            dry_run: false,
-            yes: true,
-            adopt: false,
-        };
-        let error = apply_canonical_component_set(
-            profile,
-            "kiro",
-            HostBundleCliOperation::Install,
-            &component_set,
-            &options,
-            home.path(),
-            lifecycle.path(),
-            &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
+
+        assert_eq!(result, HostLifecycleResult::Applied);
+        let registered: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.path().join(".kiro/settings/mcp.json")).unwrap(),
         )
-        .expect_err("malformed helper output must fail the lifecycle");
-        let message = error.to_string();
-        assert!(
-            !message.contains("unavailable"),
-            "a present helper that writes garbage must not look like a missing CLI: {message}"
-        );
-        assert!(
-            !message.contains("ownership conflict"),
-            "malformed helper output must not be laundered into an ownership conflict: {message}"
+        .unwrap();
+        assert_eq!(
+            registered["mcpServers"]["tracedecay"],
+            serde_json::json!({"command": KIRO_FIXTURE_BIN, "args": ["serve"], "disabled": false})
         );
     }
 
@@ -2953,22 +2858,11 @@ mod tests {
         }
     }
 
-    /// Kiro's canonical component set drives the global registry through the
-    /// native CLI and keeps its own descriptor under `.kiro/tracedecay`. The
-    /// non-interactive apply must still converge while preserving a peer MCP
-    /// server in Kiro's shared registry.
-    #[cfg(unix)]
+    /// Kiro's canonical component set edits the global registry and keeps its
+    /// own descriptor under `.kiro/tracedecay`. The non-interactive apply must
+    /// converge while preserving a peer MCP server in Kiro's shared registry.
     #[tokio::test]
     async fn kiro_context_mcp_apply_converges_without_rollback() {
-        #[cfg(unix)]
-        let kiro_cli_dir = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
-        let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
-        #[cfg(unix)]
-        write_fake_kiro_cli(&kiro_cli_path);
-        #[cfg(unix)]
-        let _kiro_path =
-            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let tracedecay_bin = std::env::current_exe()
             .unwrap()
             .to_string_lossy()

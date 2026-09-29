@@ -307,7 +307,13 @@ mod tests {
 
     #[test]
     fn emitter_rejects_tampered_source_binding_receipts() {
-        let mut retry = retry_receipt("runtime-terminal:retry-evidence");
+        let pristine = retry_receipt("runtime-terminal:retry-evidence");
+        assert!(matches!(
+            work_retry_observation_envelope(&identity(), "project:retry-leak", &pristine)
+                .map(|envelope| envelope.payload),
+            Some(ObservabilityPayloadV1::WorkRerun(_))
+        ));
+        let mut retry = pristine;
         retry.failure.evidence_digest =
             canonical_sha256(&("tampered-retry-evidence.v1", 1_u8)).expect("digest");
         assert!(
@@ -318,6 +324,11 @@ mod tests {
             WorkExecutionLeakKindV1::UnboundedDelivery,
             LeakOwnerClassV1::Delivery,
         );
+        assert!(matches!(
+            work_leak_observation_envelope(&identity(), "project:retry-leak", &leak)
+                .map(|envelope| envelope.payload),
+            Some(ObservabilityPayloadV1::WorkExecutionLeak(_))
+        ));
         leak.evidence.attempt = attempt("attempt.other");
         assert!(work_leak_observation_envelope(&identity(), "project:retry-leak", &leak).is_none());
     }

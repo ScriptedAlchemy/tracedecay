@@ -11,14 +11,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    AttemptId, CommitId, ManifestDigest, ObservationSourceIdentityV1, ProjectId, RefId,
-    RepositoryId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptStateV1,
+    AttemptId, CommitId, CursorBindingV1, ManifestDigest, ObservationSourceIdentityV1, ProjectId,
+    RefId, RepositoryId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptStateV1,
     WorkAttemptV1, WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1,
     WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1,
     WorkEffectStateV1, WorkExecutionSnapshot, WorkFenceEpochV1, WorkLeaseFenceV1,
     WorkProviderBackendV1, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1,
     WorkRuntimeContractError, WorkTerminalEvidenceV1, WorkTopologyPolicyV1, WorkflowOperationRef,
-    WorktreeId, canonical_sha256,
+    WorktreeId, canonical_sha256, decode_bound_cursor, encode_bound_cursor,
 };
 
 use crate::work::work_authority;
@@ -34,8 +34,8 @@ pub use capacity::{
     WorkAttemptCapacityVerdictV1,
 };
 use problem::{
-    contract_problem, denied_problem, list_page_contract_problem, not_found_problem,
-    stale_cursor_problem, storage_problem,
+    contract_problem, cursor_binding_problem, denied_problem, list_page_contract_problem,
+    not_found_problem, stale_cursor_problem, storage_problem,
 };
 pub use product_admission::WorkProductAttemptServiceV1;
 pub(crate) use product_admission::{
@@ -391,15 +391,95 @@ pub enum WorkAttemptTopologyStateV1 {
     Verified(WorkAttemptTopologyBindingV1),
 }
 
-/// Resume point for the next attempt-list page, bound to the exact verified
-/// topology generation it was minted under.
+/// The attempt-list-family read a [`WorkAttemptListCursorV1`] pages. A cursor
+/// minted by one of them is refused by every other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkAttemptListOperationV1 {
+    ListAttempts,
+    ExecutionHistory,
+    HydrateArtifacts,
+    Topology,
+}
+
+impl WorkAttemptListOperationV1 {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ListAttempts => "work_list_attempts",
+            Self::ExecutionHistory => "work_execution_history",
+            Self::HydrateArtifacts => "work_hydrate_artifacts",
+            Self::Topology => "work_topology",
+        }
+    }
+}
+
+/// Opaque resume point for the next page of one attempt-list-family read,
+/// bound to the operation and `page_size` that minted it and pinned to the
+/// verified topology generation the page was read under.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct WorkAttemptListCursorV1(String);
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkAttemptListCursorV1 {
-    /// The verified topology generation the cursor was minted under.
-    pub generation: String,
-    /// The last attempt identity the prior page returned.
-    pub start_after: WorkAttemptIdentityV1,
+struct WorkAttemptListPositionV1 {
+    generation: String,
+    start_after: WorkAttemptIdentityV1,
+}
+
+/// One attempt-list-family page request resolved against its cursor binding.
+pub(crate) struct WorkAttemptListPagingV1 {
+    binding: CursorBindingV1,
+    start: Option<WorkAttemptListPositionV1>,
+}
+
+impl WorkAttemptListPagingV1 {
+    /// Refuses a cursor another operation or another `page_size` minted.
+    pub(crate) fn resolve(
+        operation: WorkAttemptListOperationV1,
+        page_size: u32,
+        cursor: Option<&WorkAttemptListCursorV1>,
+    ) -> Result<Self, ApplicationProblem> {
+        let binding = CursorBindingV1::builder(operation.name())
+            .parameter("page_size", &page_size)
+            .build()
+            .map_err(|_| cursor_binding_problem())?;
+        let start = cursor
+            .map(|cursor| decode_bound_cursor(&binding, &cursor.0))
+            .transpose()
+            .map_err(|mismatch| ApplicationProblem::cursor_refused(&mismatch))?;
+        Ok(Self { binding, start })
+    }
+
+    pub(crate) const fn has_cursor(&self) -> bool {
+        self.start.is_some()
+    }
+
+    /// Whether the cursor, if any, was minted under `generation`.
+    pub(crate) fn resumes_under(&self, generation: &str) -> bool {
+        self.start
+            .as_ref()
+            .is_none_or(|start| start.generation == generation)
+    }
+
+    pub(crate) fn start_after(&self) -> Option<&WorkAttemptIdentityV1> {
+        self.start.as_ref().map(|start| &start.start_after)
+    }
+
+    pub(crate) fn resume(
+        &self,
+        generation: &str,
+        last: &WorkAttemptIdentityV1,
+    ) -> Result<WorkAttemptListCursorV1, ApplicationProblem> {
+        encode_bound_cursor(
+            &self.binding,
+            &WorkAttemptListPositionV1 {
+                generation: generation.to_owned(),
+                start_after: last.clone(),
+            },
+        )
+        .map(WorkAttemptListCursorV1)
+        .map_err(|_| cursor_binding_problem())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -487,6 +567,7 @@ where
     pub fn list(
         &self,
         context: &RequestContext,
+        operation: WorkAttemptListOperationV1,
         request: &WorkAttemptListRequestV1,
         topology: impl FnOnce() -> Result<WorkAttemptTopologyStateV1, ApplicationProblem>,
     ) -> Result<WorkAttemptListV1, ApplicationProblem> {
@@ -496,10 +577,15 @@ where
                 "The Work attempt list page size must be between 1 and 1000.",
             ));
         }
+        let paging = WorkAttemptListPagingV1::resolve(
+            operation,
+            request.page_size,
+            request.cursor.as_ref(),
+        )?;
         let authority = work_authority(context)?;
         let binding = match topology()? {
             WorkAttemptTopologyStateV1::Absent => {
-                return if request.cursor.is_some() {
+                return if paging.has_cursor() {
                     // The snapshot the cursor was minted under no longer
                     // exists for this scope; resuming would fabricate a page.
                     Err(stale_cursor_problem())
@@ -509,18 +595,12 @@ where
             }
             WorkAttemptTopologyStateV1::Verified(binding) => binding,
         };
-        if let Some(cursor) = &request.cursor
-            && cursor.generation != binding.generation
-        {
+        if !paging.resumes_under(&binding.generation) {
             return Err(stale_cursor_problem());
         }
         let page = self
             .attempts
-            .list(
-                &authority,
-                request.cursor.as_ref().map(|cursor| &cursor.start_after),
-                request.page_size,
-            )
+            .list(&authority, paging.start_after(), request.page_size)
             .map_err(storage_problem)?;
         let returned = u32::try_from(page.attempts.len())
             .ok()
@@ -536,10 +616,7 @@ where
             WorkAttemptListCoverageV1::Capped {
                 returned,
                 remaining: page.remaining - returned,
-                resume: WorkAttemptListCursorV1 {
-                    generation: binding.generation.clone(),
-                    start_after: last.identity().clone(),
-                },
+                resume: paging.resume(&binding.generation, last.identity())?,
             }
         };
         Ok(WorkAttemptListV1::Listed {

@@ -109,8 +109,9 @@ pub struct BranchDiffSurfaceRequestV1 {
 pub struct BranchListSurfaceRequestV1 {
     /// Maximum local refs to return (default: 100, at most 128).
     pub limit: Option<u32>,
-    /// Return the stable lexical page after this branch name.
-    pub after: Option<String>,
+    /// Continuation cursor returned as `next_cursor` by the preceding page
+    /// with the same `limit`.
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -582,7 +583,7 @@ pub struct BranchListPageV1 {
     pub snapshot_count: usize,
     pub examined: usize,
     pub limit: usize,
-    pub next_after: Option<String>,
+    pub next_cursor: Option<String>,
     pub snapshots: Vec<BranchSnapshotEntryV1>,
 }
 

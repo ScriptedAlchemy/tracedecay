@@ -1,11 +1,12 @@
 use tracedecay_contracts::feedback::FeedbackPublicationV1;
 use tracedecay_contracts::{
-    CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
-    EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState,
-    Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageCursor, PageState,
-    RequestAdmission, RequestContext, RetrievalEvidence, RetrievalPortOutcome, TemporalState,
+    ApplicationProblem, CancellationObservation, CancellationStage, CoverageCompleteness,
+    CoverageDomainState, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity,
+    FreshnessState, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageCursor,
+    PageState, RequestAdmission, RequestContext, RetrievalEvidence, RetrievalPortOutcome,
+    TemporalState,
 };
-use tracedecay_domain::{ComponentVersion, UtcMicros};
+use tracedecay_domain::{ComponentVersion, CursorBindingMismatchV1, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
 
 const FEEDBACK_SORT_CONTRACT_ID: &str = "sort.application.feedback.finding-id.v1";
@@ -85,8 +86,27 @@ pub(super) fn complete<T>(
 
 pub(super) fn unavailable<T>(
     finished_at: UtcMicros,
-    mut domains: Vec<EvidenceDomain>,
+    domains: Vec<EvidenceDomain>,
 ) -> RetrievalPortOutcome<T> {
+    RetrievalPortOutcome::Unavailable(unknown_evidence(finished_at, domains))
+}
+
+/// A continuation this read cannot redeem as presented.
+pub(super) fn cursor_refused<T>(
+    finished_at: UtcMicros,
+    domains: Vec<EvidenceDomain>,
+    mismatch: &CursorBindingMismatchV1,
+) -> RetrievalPortOutcome<T> {
+    RetrievalPortOutcome::Refused(
+        unknown_evidence(finished_at, domains),
+        Box::new(ApplicationProblem::cursor_refused(mismatch)),
+    )
+}
+
+fn unknown_evidence<T>(
+    finished_at: UtcMicros,
+    mut domains: Vec<EvidenceDomain>,
+) -> RetrievalEvidence<T> {
     domains.sort_unstable();
     domains.dedup();
     let coverage = EvidenceCoverage {
@@ -104,7 +124,7 @@ pub(super) fn unavailable<T>(
             })
             .collect(),
     };
-    RetrievalPortOutcome::Unavailable(RetrievalEvidence {
+    RetrievalEvidence {
         payload: None,
         temporal: TemporalState {
             freshness: FreshnessState::Unknown,
@@ -127,7 +147,7 @@ pub(super) fn unavailable<T>(
         budget: OperationBudgetUsage::default(),
         cancellation: None,
         cost: None,
-    })
+    }
 }
 
 fn terminal_interruption<T>(

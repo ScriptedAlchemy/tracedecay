@@ -1137,6 +1137,7 @@ fn allocator_release_runs_the_installed_allocator_release() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
     let status = "Name:\ttracedecay\nVmHWM:\t 6553600 kB\nVmRSS:\t 3355444 kB\n\
@@ -1164,6 +1165,7 @@ fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cgroup_committed_bytes_refuse_growth_that_unreclaimable_bytes_would_admit() {
     let limit_bytes = 100 * 1024 * 1024;

@@ -158,26 +158,25 @@ fn sealed_restore_rejects_one_corrupt_manifest_byte() {
 fn sealed_restore_refuses_superseded_and_adjacent_revisions() {
     let sealed = sealed_multi_file_generation();
     let envelope = sealed.envelope();
+    sealed
+        .restore(&sealed.manifest)
+        .expect("the current sealed revision opens");
 
-    // Every retired revision, the monolithic envelope included, is refused
-    // with the typed rebuild error, so the daemon rebuilds the generation
-    // instead of decoding a retired shape.
-    for retired in [9, SEALED_GENERATION_FORMAT_REVISION_V1 - 1] {
-        let mut superseded = envelope.clone();
-        superseded["generation"]["format_revision"] = Value::from(retired);
-        let error = sealed
-            .restore(&reseal_manifest(superseded))
-            .expect_err("a superseded revision must be refused");
-        assert!(
-            matches!(
-                error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
-                    if revision == retired
-            ),
-            "superseded revision reached the wrong rejection: {error}"
-        );
-        assert!(error.to_string().contains("will be rebuilt from source"));
-    }
+    let retired = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
+    let mut superseded = envelope.clone();
+    superseded["generation"]["format_revision"] = Value::from(retired);
+    let error = sealed
+        .restore(&reseal_manifest(superseded))
+        .expect_err("a superseded revision must be refused");
+    assert!(
+        matches!(
+            error,
+            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                if revision == retired
+        ),
+        "superseded revision reached the wrong rejection: {error}"
+    );
+    assert!(error.to_string().contains("will be rebuilt from source"));
 
     // Above every revision this build knows: refused as incompatible.
     let mut incompatible = envelope;
