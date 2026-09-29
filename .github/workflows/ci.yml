@@ -956,7 +956,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          targets: x86_64-pc-windows-gnu
+
+      - name: Install Windows target for the pinned toolchain
+        run: rustup target add x86_64-pc-windows-gnu
 
       - uses: ./.github/actions/setup-linux-mold
 
