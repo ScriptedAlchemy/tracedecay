@@ -737,11 +737,11 @@ fn test_codex_subagent_start_dedupes_context_per_session() {
     .to_string();
 
     assert_eq!(
-        evaluate_codex_subagent_start(&profile, &input),
+        evaluate_codex_subagent_start(profile, &input),
         Some(codex_subagent_redirect(true))
     );
     assert_eq!(
-        evaluate_codex_subagent_start(&profile, &input),
+        evaluate_codex_subagent_start(profile, &input),
         None,
         "repeated SubagentStart context should be suppressed per session"
     );
@@ -772,11 +772,11 @@ fn test_codex_subagent_start_no_history_does_not_suppress_later_research_context
     .to_string();
 
     assert_eq!(
-        evaluate_codex_subagent_start(&profile, &no_history_input),
+        evaluate_codex_subagent_start(profile, &no_history_input),
         Some(codex_subagent_redirect(true))
     );
     assert_eq!(
-        evaluate_codex_subagent_start(&profile, &research_input),
+        evaluate_codex_subagent_start(profile, &research_input),
         Some(codex_subagent_redirect(false))
     );
 }
