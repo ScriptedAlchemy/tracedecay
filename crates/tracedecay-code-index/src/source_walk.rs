@@ -9,7 +9,7 @@
 //! walk is therefore public rather than crate-private, the audit in the root
 //! crate reuses this policy instead of restating it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ignore::overrides::{Override, OverrideBuilder};
@@ -22,6 +22,70 @@ pub struct SourceWalkError {
     pub message: String,
 }
 
+/// The directories a positive `path_glob` may descend into on its way to a
+/// match, so a scope such as `dist/**/*.js` or `*.js` reaches generated
+/// directories the default policy would otherwise prune before listing.
+struct GeneratedDirScope {
+    literal_prefix: PathBuf,
+    may_match_descendants: bool,
+}
+
+impl GeneratedDirScope {
+    fn from_path_glob(path_glob: &str) -> Option<Self> {
+        let path_glob = path_glob.trim();
+        if path_glob.is_empty() || path_glob.starts_with('!') {
+            return None;
+        }
+        let segments = path_glob
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let matches_basename_at_any_depth = !path_glob.contains('/');
+        let wildcard_start = segments
+            .iter()
+            .position(|segment| {
+                segment.contains('*')
+                    || segment.contains('?')
+                    || segment.contains('[')
+                    || segment.contains('{')
+            })
+            .unwrap_or(segments.len());
+        let literal_prefix = if matches_basename_at_any_depth {
+            PathBuf::new()
+        } else {
+            segments[..wildcard_start]
+                .iter()
+                .fold(PathBuf::new(), |mut prefix, segment| {
+                    prefix.push(segment);
+                    prefix
+                })
+        };
+        let wildcard_suffix = &segments[wildcard_start..];
+        let may_match_descendants = matches_basename_at_any_depth
+            || wildcard_suffix
+                .iter()
+                .enumerate()
+                .any(|(index, segment)| index > 0 || *segment == "**");
+        Some(Self {
+            literal_prefix,
+            may_match_descendants,
+        })
+    }
+
+    fn allows(&self, project_root: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(project_root) else {
+            return false;
+        };
+        if self.literal_prefix.as_os_str().is_empty() {
+            return self.may_match_descendants;
+        }
+        self.literal_prefix.starts_with(relative)
+            || relative == self.literal_prefix
+            || (self.may_match_descendants && relative.starts_with(&self.literal_prefix))
+    }
+}
+
 #[hotpath::measure(label = "code_index.capture.source_walk")]
 pub fn source_walk(
     project_root: &Path,
@@ -29,6 +93,11 @@ pub fn source_walk(
     path_policy: &IndexPathPolicyV1,
 ) -> Result<Walk, SourceWalkError> {
     let overrides = build_overrides(project_root, path_glob)?;
+    let has_positive_override = overrides
+        .as_ref()
+        .is_some_and(|overrides| overrides.num_whitelists() > 0);
+    let generated_dir_overrides = overrides.clone();
+    let generated_dir_scope = path_glob.and_then(GeneratedDirScope::from_path_glob);
     let filter_root = project_root.to_path_buf();
     let path_policy = path_policy.clone();
 
@@ -53,6 +122,22 @@ pub fn source_walk(
             };
             let relative = forward_slash_path(relative);
             let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+            // An entry the glob names, or a directory it must pass through,
+            // is judged without the generated-directory defaults: the scope
+            // is the operator asking for that noise. Every other exclusion
+            // still applies; only `index.include.v1` lifts those.
+            let explicitly_requested = has_positive_override
+                && (generated_dir_overrides.as_ref().is_some_and(|overrides| {
+                    overrides.matched(entry.path(), is_dir).is_whitelist()
+                }) || (is_dir
+                    && generated_dir_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.allows(&filter_root, entry.path()))));
+            let path_policy = if explicitly_requested {
+                path_policy.without_generated_dir_defaults()
+            } else {
+                &path_policy
+            };
             if !is_dir {
                 return !path_policy.excludes(&relative);
             }
@@ -195,6 +280,71 @@ mod tests {
             IndexPathPolicyV1::new(vec!["secrets/**".into()], vec!["secrets/token.rs".into()])
                 .unwrap();
         assert_eq!(walk(&included), vec![PathBuf::from("secrets/token.rs")]);
+    }
+
+    #[test]
+    fn explicit_glob_reaches_directories_only_the_generated_defaults_exclude() {
+        let root = TempDir::new().expect("project root");
+        for path in ["dist/bundle.js", "dist/secrets/token.js", "src/app.js"] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().expect("parent")).expect("fixture directory");
+            fs::write(path, "generated\n").expect("fixture file");
+        }
+        let walk = |glob: &str, policy: &IndexPathPolicyV1| {
+            let mut files = source_walk(root.path(), Some(glob), policy)
+                .expect("source walk")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                .map(|entry| {
+                    entry
+                        .path()
+                        .strip_prefix(root.path())
+                        .unwrap()
+                        .to_path_buf()
+                })
+                .collect::<Vec<_>>();
+            files.sort();
+            files
+        };
+        let defaults =
+            IndexPathPolicyV1::new(vec!["dist/**".into(), "**/dist/**".into()], vec![]).unwrap();
+        assert!(
+            walked_files(root.path(), &defaults)
+                .iter()
+                .all(|f| f.starts_with("src"))
+        );
+        assert_eq!(
+            walk("dist/**/*.js", &defaults),
+            vec![
+                PathBuf::from("dist/bundle.js"),
+                PathBuf::from("dist/secrets/token.js")
+            ],
+            "a scope naming a generated directory reaches it"
+        );
+        assert_eq!(
+            walk("*.js", &defaults),
+            vec![
+                PathBuf::from("dist/bundle.js"),
+                PathBuf::from("dist/secrets/token.js"),
+                PathBuf::from("src/app.js")
+            ],
+            "a slashless glob reaches generated descendants"
+        );
+
+        let with_operator_rule = IndexPathPolicyV1::new(
+            vec![
+                "dist/**".into(),
+                "**/dist/**".into(),
+                "**/secrets/**".into(),
+            ],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            walk("dist/**/*.js", &with_operator_rule),
+            vec![PathBuf::from("dist/bundle.js")],
+            "the same scope cannot lift an operator's exclusion beneath the generated directory"
+        );
     }
 
     #[test]

@@ -27,6 +27,18 @@ pub fn is_generated_dir_segment(segment: &str) -> bool {
     GENERATED_DIR_SEGMENTS.contains(&segment)
 }
 
+/// Whether `pattern` has the shape the shipped `index.exclude.v1` default
+/// uses for a generated directory: `dist/**` or `**/dist/**`. A configured
+/// list replaces the default wholesale, so the shape is the only evidence
+/// that a pattern is that noise filter rather than an operator's own rule.
+#[must_use]
+pub fn is_generated_dir_default_pattern(pattern: &str) -> bool {
+    normalize(pattern)
+        .strip_suffix("/**")
+        .map(|stem| stem.strip_prefix("**/").unwrap_or(stem))
+        .is_some_and(is_generated_dir_segment)
+}
+
 /// A pattern `index.exclude.v1` or `index.include.v1` cannot compile.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("index path pattern '{pattern}' is invalid: {message}")]
@@ -58,6 +70,10 @@ pub struct IndexPathPolicyV1 {
     /// Literal leading segments of each include pattern; `None` when the
     /// pattern starts with a wildcard and may match anywhere.
     include_prefixes: Vec<Option<String>>,
+    /// This policy minus the generated-directory default patterns: what an
+    /// explicit search scope must still honor. `None` when no exclude pattern
+    /// is such a default, so `self` already is that policy.
+    without_generated_dir_defaults: Option<Box<IndexPathPolicyV1>>,
 }
 
 impl PartialEq for IndexPathPolicyV1 {
@@ -84,6 +100,14 @@ impl IndexPathPolicyV1 {
             .iter()
             .map(|pattern| literal_prefix(normalize(pattern)))
             .collect();
+        let configured = exclude
+            .iter()
+            .filter(|pattern| !is_generated_dir_default_pattern(pattern))
+            .cloned()
+            .collect::<Vec<_>>();
+        let without_generated_dir_defaults = (configured.len() != exclude.len())
+            .then(|| Self::new(configured, include.clone()).map(Box::new))
+            .transpose()?;
         Ok(Self {
             exclude,
             include,
@@ -91,7 +115,21 @@ impl IndexPathPolicyV1 {
             excluded_dir_stems,
             include_set,
             include_prefixes,
+            without_generated_dir_defaults,
         })
+    }
+
+    /// The exclusions an explicit search scope (a positive `path_glob`) must
+    /// still honor: every pattern except the shipped generated-directory
+    /// defaults (`dist/**`, `**/node_modules/**`, ...). Those defaults only
+    /// keep noise out of unscoped walks; a scope naming such a directory
+    /// reaches it. Any other exclusion, and `index.include.v1` as its sole
+    /// override, applies unchanged.
+    #[must_use]
+    pub fn without_generated_dir_defaults(&self) -> &Self {
+        self.without_generated_dir_defaults
+            .as_deref()
+            .unwrap_or(self)
     }
 
     pub fn exclude_patterns(&self) -> &[String] {
@@ -180,7 +218,7 @@ fn literal_prefix(pattern: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::IndexPathPolicyV1;
+    use super::{IndexPathPolicyV1, is_generated_dir_default_pattern};
 
     fn policy(exclude: &[&str], include: &[&str]) -> IndexPathPolicyV1 {
         IndexPathPolicyV1::new(
@@ -248,6 +286,42 @@ mod tests {
         assert!(!policy.excludes("vendor/a/keep.rs"));
         assert!(policy.excludes("vendor/a/drop.rs"));
         assert!(!policy.excludes_directory("vendor/a"));
+    }
+
+    #[test]
+    fn only_the_shipped_generated_directory_shapes_are_defaults() {
+        for pattern in ["dist/**", "**/dist/**", "./node_modules/**", "/target/**/"] {
+            assert!(is_generated_dir_default_pattern(pattern), "{pattern}");
+        }
+        for pattern in ["secrets/**", "dist", "dist/*", "dist/**/*.js", "**/dist"] {
+            assert!(!is_generated_dir_default_pattern(pattern), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn without_generated_dir_defaults_keeps_every_other_rule_and_the_includes() {
+        let full = policy(
+            &["dist/**", "**/node_modules/**", "secrets/**", "**/*.min.*"],
+            &["secrets/token.rs"],
+        );
+        let scoped = full.without_generated_dir_defaults();
+        assert_eq!(scoped.exclude_patterns(), ["secrets/**", "**/*.min.*"]);
+        assert_eq!(scoped.include_patterns(), ["secrets/token.rs"]);
+        assert!(!scoped.excludes("dist/bundle.js"));
+        assert!(!scoped.excludes_directory("web/node_modules"));
+        assert!(scoped.excludes("secrets/key.rs"));
+        assert!(scoped.excludes("dist/app.min.js"));
+        assert!(!scoped.excludes("secrets/token.rs"));
+        assert!(
+            full.excludes("dist/bundle.js"),
+            "the full policy is unchanged"
+        );
+
+        let configured_only = policy(&["secrets/**"], &[]);
+        assert!(std::ptr::eq(
+            configured_only.without_generated_dir_defaults(),
+            &configured_only
+        ));
     }
 
     #[test]
