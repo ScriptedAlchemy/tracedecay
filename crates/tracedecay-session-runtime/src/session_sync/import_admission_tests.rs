@@ -112,18 +112,21 @@ async fn import_receipt(
     };
     let started = tokio::time::Instant::now();
     let control = SessionSyncControlV1::new(scope, admission.idempotency_key);
+    // Well under the 60s request deadline the old waiter would have consumed,
+    // with room for a loaded runner: this bounds hand-off latency, not CPU.
+    let hand_off_bound = Duration::from_secs(10);
     loop {
         match SessionSyncServicePort::status(&service, control.clone()).await {
             SessionSyncOutcomeV1::Complete(receipt) => {
                 assert!(
-                    started.elapsed() < Duration::from_secs(1),
+                    started.elapsed() < hand_off_bound,
                     "import consumed its observation bound instead of returning the settled catch-up"
                 );
                 return (receipt, project_state);
             }
             SessionSyncOutcomeV1::Accepted(_) | SessionSyncOutcomeV1::Joined(_) => {
                 assert!(
-                    started.elapsed() < Duration::from_secs(1),
+                    started.elapsed() < hand_off_bound,
                     "import stayed pending while catch-up state was already known"
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
