@@ -100,8 +100,12 @@ mod decoded_content;
 pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1};
 mod graph_build_bound;
 pub use graph_build_bound::CodeGraphBuildBoundV1;
+mod graph_base_inputs;
+pub(crate) use graph_base_inputs::CodeGraphBaseInputsWriterV1;
 mod graph_inputs;
-pub(crate) use graph_inputs::CodeGraphResolutionV1;
+pub(crate) use graph_inputs::{
+    CodeGraphLayeredResolutionV1, CodeGraphRemovedFileV1, CodeGraphResolutionV1,
+};
 mod partitioned_codec;
 pub(crate) mod resident_bytes;
 pub use partitioned_codec::{

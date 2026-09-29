@@ -306,6 +306,12 @@ impl GraphGenerationRowSpill {
         self.directory.path().join(ATTACHMENT_FILE)
     }
 
+    /// The distinct entity identities pushed so far, ascending.
+    pub(crate) fn sorted_entity_identities(&mut self) -> &[GraphEntityId] {
+        self.distinct_entities();
+        &self.entity_identities
+    }
+
     /// Relation endpoints pushed so far that no pushed entity carries.
     pub(crate) fn missing_endpoints(&mut self) -> Vec<GraphEntityId> {
         self.distinct_entities();

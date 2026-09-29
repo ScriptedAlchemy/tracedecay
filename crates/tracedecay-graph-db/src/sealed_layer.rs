@@ -340,6 +340,31 @@ impl GraphLayeredRowSpill {
         self.hidden_relations.extend(relations);
     }
 
+    /// The generation's entity count with the rows pushed and hidden so
+    /// far: what a cold build of the same rows counts.
+    pub fn entity_count(
+        &mut self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<usize, GraphDbError> {
+        let delta = self.spill.sorted_entity_identities().to_vec();
+        let mut present = 0_usize;
+        for id in delta
+            .iter()
+            .chain(self.hidden_entities.iter())
+            .collect::<BTreeSet<_>>()
+        {
+            check()?;
+            if self.base.entity(id)?.is_some() {
+                present += 1;
+            }
+        }
+        (self.base.inner.entities + delta.len())
+            .checked_sub(present)
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: "a layered generation hides more entities than its base holds".to_owned(),
+            })
+    }
+
     /// Copies every base endpoint the delta's relations reach, merges the
     /// delta, and derives the layered generation's row sum and digest from
     /// the base's without reading any other base row.
