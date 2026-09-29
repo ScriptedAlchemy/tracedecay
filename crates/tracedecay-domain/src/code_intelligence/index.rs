@@ -485,21 +485,35 @@ mod tests {
     fn generation_manifest_requires_fingerprinted_identities() {
         let mut unfingerprinted = generation_manifest();
         unfingerprinted.generation_id = id("generation.v1.aaaaaaaa.00000002");
-        assert!(unfingerprinted.validate().is_err());
+        assert_eq!(
+            unfingerprinted.validate().unwrap_err().to_string(),
+            "code generation identity fingerprint is not canonical"
+        );
 
         let mut unfingerprinted_parent = generation_manifest();
         unfingerprinted_parent.parent_generation = Some(id("generation.v1.aaaaaaaa.00000001"));
-        assert!(unfingerprinted_parent.validate().is_err());
+        assert_eq!(
+            unfingerprinted_parent.validate().unwrap_err().to_string(),
+            "code generation identity fingerprint is not canonical"
+        );
 
         let mut mismatched = generation_manifest();
         mismatched.invalidation_digest = id(&digest('e'));
-        assert!(mismatched.validate().is_err());
+        assert_eq!(
+            mismatched.validate().unwrap_err().to_string(),
+            "manifest digest does not match its canonical domain-separated payload"
+        );
 
         let mut wire = serde_json::to_value(generation_manifest()).expect("serialize");
         wire.as_object_mut()
             .expect("manifest object")
             .remove("invalidation_digest");
-        assert!(serde_json::from_value::<CodeGenerationManifestV1>(wire).is_err());
+        assert_eq!(
+            serde_json::from_value::<CodeGenerationManifestV1>(wire)
+                .unwrap_err()
+                .to_string(),
+            "missing field `invalidation_digest`"
+        );
     }
 
     #[test]
@@ -536,15 +550,24 @@ mod tests {
         duplicate_receipt
             .sanitization_receipts
             .push(id("receipt.b"));
-        assert!(duplicate_receipt.validate().is_err());
+        assert_eq!(
+            duplicate_receipt.validate().unwrap_err().to_string(),
+            "snapshot sanitization receipt order is not canonical"
+        );
 
         let mut reordered_files = snapshot();
         reordered_files.files.reverse();
-        assert!(reordered_files.validate().is_err());
+        assert_eq!(
+            reordered_files.validate().unwrap_err().to_string(),
+            "snapshot file order is not canonical"
+        );
 
         let mut noncanonical_path = snapshot();
         noncanonical_path.files[0].logical_path = "./src/a.rs".to_owned();
-        assert!(noncanonical_path.validate().is_err());
+        assert_eq!(
+            noncanonical_path.validate().unwrap_err().to_string(),
+            "snapshot logical path is not canonical"
+        );
     }
 
     #[test]
@@ -555,10 +578,16 @@ mod tests {
 
         let mut reordered = generation_manifest();
         reordered.grammar_revisions.reverse();
-        assert!(reordered.validate().is_err());
+        assert_eq!(
+            reordered.validate().unwrap_err().to_string(),
+            "generation grammar revisions is not canonical"
+        );
 
         let mut mismatched = generation_manifest();
         mismatched.extractor_revisions.pop();
-        assert!(mismatched.validate().is_err());
+        assert_eq!(
+            mismatched.validate().unwrap_err().to_string(),
+            "generation language revision sets is not pinned to the required snapshot"
+        );
     }
 }

@@ -327,13 +327,19 @@ fn snapshot_deduplicates_shared_schema_identity() {
         ));
 
     let snapshot = builder.build().unwrap();
-    assert!(
-        snapshot
-            .schema(
-                &tracedecay_tool_catalog::SchemaId::new("schema.source.shared.request").unwrap(),
-                1
-            )
-            .is_some()
+    assert_eq!(
+        snapshot.schema(
+            &tracedecay_tool_catalog::SchemaId::new("schema.source.shared.request").unwrap(),
+            1
+        ),
+        Some(&schema("schema.source.shared.request"))
+    );
+    assert_eq!(
+        snapshot.schema(
+            &tracedecay_tool_catalog::SchemaId::new("schema.source.shared.request").unwrap(),
+            2
+        ),
+        None
     );
 }
 

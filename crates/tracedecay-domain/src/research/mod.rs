@@ -218,7 +218,9 @@ mod tests {
                     "future_consistency_field": true
                 }
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `future_consistency_field`")
         );
         assert!(
             serde_json::from_value::<EvidenceRetentionWatermark>(json!({
@@ -226,24 +228,41 @@ mod tests {
                 "cutoffs": {},
                 "future_retention_field": true
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `future_retention_field`")
         );
 
         let mut remote =
             serde_json::from_str::<serde_json::Value>(&remote_coverage_json(1)).unwrap();
         remote["future_remote_field"] = json!(true);
-        assert!(serde_json::from_value::<RemoteCoverageV1>(remote).is_err());
+        assert!(
+            serde_json::from_value::<RemoteCoverageV1>(remote)
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown field `future_remote_field`")
+        );
 
         let mut shard =
             serde_json::from_str::<serde_json::Value>(&remote_coverage_json(1)).unwrap();
         shard["shards"][0]["future_shard_field"] = json!(true);
-        assert!(serde_json::from_value::<RemoteCoverageV1>(shard).is_err());
+        assert!(
+            serde_json::from_value::<RemoteCoverageV1>(shard)
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown field `future_shard_field`")
+        );
 
         let report = offline_cache_report(99, 100);
         let mut serialized = serde_json::to_value(&report).unwrap();
         serialized["remote"]["shards"][0]["cache_grant_snapshot"]["future_grant_field"] =
             json!(true);
-        assert!(serde_json::from_value::<CoverageReportV1>(serialized).is_err());
+        assert!(
+            serde_json::from_value::<CoverageReportV1>(serialized)
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown field `future_grant_field`")
+        );
     }
 
     #[test]

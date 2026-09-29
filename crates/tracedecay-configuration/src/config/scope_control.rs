@@ -192,7 +192,19 @@ mod tests {
         )
         .unwrap();
         let rendered = serde_json::to_value(&plan).unwrap();
-        assert!(rendered.get("source_locator").is_none());
-        assert!(rendered.get("credential").is_none());
+        assert_eq!(rendered["actor_id"], "actor.fixture");
+        assert_eq!(
+            rendered["redacted_changes"],
+            serde_json::json!([{
+                "setting_key": "scope.source_bindings.v1",
+                "operation": "source_bind",
+                "before_digest": format!("sha256:{}", "d".repeat(64)),
+                "after_digest": format!("sha256:{}", "e".repeat(64)),
+            }])
+        );
+        assert!(
+            !rendered.to_string().contains(&"a".repeat(64)),
+            "the source locator digest must not be rendered: {rendered}"
+        );
     }
 }

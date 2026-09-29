@@ -323,14 +323,16 @@ fn routing_rejects_a_substituted_configuration_snapshot() {
         .unwrap();
     request.configuration_digest = digest('f');
 
-    assert!(
+    assert_eq!(
         composition
             .route_local_live(
                 &context,
                 &request,
                 matching_horizon(TruthSourceStateV1::Fresh),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+        "policy evaluation snapshot is inconsistent with the application contract"
     );
 }
 

@@ -40,7 +40,11 @@ fn projectless_hermes_binding_cannot_be_reused_for_other_source_kinds() {
         locator_digest('b'),
         AuthorityRef::ProjectlessHermes(id::<UserProfileId>("profile.hermes")),
     );
-    assert!(invalid.is_err(), "only projectless Hermes is representable");
+    assert_eq!(
+        invalid.unwrap_err().to_string(),
+        "projectless source binding is not canonical",
+        "only projectless Hermes is representable"
+    );
 }
 
 /// A bound source whose id sorts before an existing binding lands in
@@ -173,7 +177,7 @@ fn mutation_receipt_rejects_expiry_and_binding_replay() {
             )
             .is_ok()
     );
-    assert!(
+    assert_eq!(
         receipt
             .validate_for(
                 &receipt.actor_id,
@@ -184,9 +188,11 @@ fn mutation_receipt_rejects_expiry_and_binding_replay() {
                 ConfigurationMutationEffectV1::CommitConfigurationRevision,
                 UtcMicros(19),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+        "configuration mutation grant receipt is not pinned to the required snapshot"
     );
-    assert!(
+    assert_eq!(
         receipt
             .validate_for(
                 &receipt.actor_id,
@@ -197,7 +203,9 @@ fn mutation_receipt_rejects_expiry_and_binding_replay() {
                 ConfigurationMutationEffectV1::CommitConfigurationRevision,
                 UtcMicros(20),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+        "configuration mutation grant receipt is not pinned to the required snapshot"
     );
 }
 
@@ -218,14 +226,19 @@ fn mutation_receipt_rejects_tampered_policy_or_scope() {
     let receipt = mutation_receipt();
     let mut tampered = serde_json::to_value(&receipt).unwrap();
     tampered["policy_epoch"] = serde_json::json!(8);
-    assert!(
+    assert_eq!(
         serde_json::from_value::<ConfigurationMutationGrantReceiptV1>(tampered)
             .unwrap()
             .validate()
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+        "manifest digest does not match its canonical domain-separated payload"
     );
 
     let mut tampered = receipt;
     tampered.scope_digest = digest('f');
-    assert!(tampered.validate().is_err());
+    assert_eq!(
+        tampered.validate().unwrap_err().to_string(),
+        "manifest digest does not match its canonical domain-separated payload"
+    );
 }
