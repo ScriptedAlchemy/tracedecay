@@ -2,6 +2,8 @@ use thiserror::Error;
 
 use crate::ApplicationProblemDetailV1;
 
+const STORE_OPEN_CANCELLED_REASON_CODE: &str = "store_open_cancelled";
+
 #[derive(Error, Debug)]
 #[error("{detail}")]
 struct HookRuntimeErrorContext {
@@ -333,6 +335,21 @@ impl TraceDecayError {
             detail: detail.into(),
             typed_detail: None,
         }
+    }
+
+    /// Daemon shutdown stopped a store open or schema install at a safe point
+    /// and rolled back its uncommitted work.
+    pub fn store_open_cancelled(operation: impl std::fmt::Display) -> Self {
+        Self::project_route(
+            STORE_OPEN_CANCELLED_REASON_CODE,
+            true,
+            format!("{operation} was cancelled by daemon shutdown"),
+        )
+    }
+
+    pub fn is_store_open_cancelled(&self) -> bool {
+        self.project_route_context()
+            .is_some_and(|(reason_code, _, _)| reason_code == STORE_OPEN_CANCELLED_REASON_CODE)
     }
 
     pub fn project_route_with_detail(

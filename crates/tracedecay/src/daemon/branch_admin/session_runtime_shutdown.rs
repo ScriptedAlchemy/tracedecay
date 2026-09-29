@@ -157,6 +157,17 @@ impl StoreAdministration {
         }
     }
 
+    /// Shutdown-only: stops the store opens and schema installs of every
+    /// mounted session runtime registry at their next safe point, so an
+    /// admitted project open returns promptly instead of finishing its mount.
+    pub(in crate::daemon) async fn cancel_store_opens_for_shutdown(&self) {
+        for entry in self.session_runtime_registries.lock().await.values() {
+            if let Some(registry) = entry.registry.get() {
+                registry.cancel_store_opens_for_shutdown();
+            }
+        }
+    }
+
     #[hotpath::skip]
     pub(in crate::daemon) async fn prepare_memory_graph_reconciliation_shutdown(
         &self,

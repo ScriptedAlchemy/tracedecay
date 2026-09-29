@@ -245,6 +245,69 @@ fn cancelled_open_task_wakes_every_joiner_and_allows_retry() {
     }
 }
 
+/// Shutdown during an in-flight open: the shutdown close cancels and joins the
+/// open instead of skipping it, the open ends typed-cancelled with nothing
+/// published, and every idle published runtime still closes.
+#[tokio::test]
+async fn shutdown_close_cancels_and_joins_an_in_flight_open() {
+    let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    publisher.block.store(true, Ordering::SeqCst);
+    let request = project_sessions_request("project.shutdown", &pin);
+    let opening = registry.begin_or_join_open(&request);
+    wait_for_calls(&publisher.calls, 2).await;
+    let opening_key = request.key.clone();
+    drop((request, pin));
+
+    let close = tokio::spawn({
+        let registry = registry.clone();
+        async move { registry.close_idle_for_shutdown().await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !registry.open_cancellation().is_cancelled() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown close cancels in-flight opens");
+    tokio::task::yield_now().await;
+    assert!(
+        !close.is_finished(),
+        "shutdown close must join the open it cancelled, not skip it"
+    );
+    publisher.release.notify_one();
+
+    let opened = opening.wait().await;
+    assert!(
+        matches!(
+            &opened,
+            StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::OpenCancelled { key })
+                if **key == opening_key
+        ),
+        "a cancelled open publishes nothing: {opened:?}"
+    );
+    assert_eq!(close.await.unwrap().unwrap(), 1, "only the profile runtime");
+    let inventory = registry.inventory(AdmissionConfigV1::default(), None);
+    assert_eq!(inventory.opening_shards, 0);
+    assert_eq!(inventory.entries.len(), 0);
+
+    let reopened = registry
+        .open(StoreRuntimeOpenRequest::new(
+            profile_shard(),
+            incarnation(),
+            None,
+        ))
+        .await;
+    assert!(
+        matches!(
+            &reopened,
+            StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::OpenCancelled { .. })
+        ),
+        "a shut-down registry admits no new open: {reopened:?}"
+    );
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
+}
+
 #[tokio::test]
 async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     let config = StoreRuntimeRegistryConfig::new(2).unwrap();
