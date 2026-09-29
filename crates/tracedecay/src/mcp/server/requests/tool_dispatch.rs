@@ -302,7 +302,7 @@ impl McpServer {
                 resolved_project_route,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
                 automation_writer: self.dashboard_automation_writer.clone(),
-                doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
+                doctor_report_reader: self.dashboard_doctor_report_reader.get().cloned(),
                 remote_operational_status: self.remote_operational_status.clone(),
                 code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
                 code_index_readiness_waiter: self.code_index_readiness_waiter.clone(),

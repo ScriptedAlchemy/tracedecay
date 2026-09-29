@@ -395,7 +395,11 @@ pub(super) async fn production_project_server(
                 Box::pin(inputs.activate_core_route(&opened, &core, &resolved)).await?;
             let upgrade =
                 match Box::pin(inputs.construct_full_server(&opened, &core, &resolved)).await {
-                    Ok(PublishedFullServer { server, session_db }) => {
+                    Ok(PublishedFullServer {
+                        server,
+                        session_db,
+                        doctor_report_reader,
+                    }) => {
                         match Box::pin(inputs.finish_full_server(
                             &opened,
                             &core,
@@ -403,6 +407,7 @@ pub(super) async fn production_project_server(
                             &resolved,
                             &server,
                             session_db,
+                            doctor_report_reader,
                         ))
                         .await
                         {
@@ -659,6 +664,7 @@ struct AdmittedSessionDatabases {
 struct PublishedFullServer {
     server: Arc<crate::mcp::McpServer>,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    doctor_report_reader: tracedecay_dashboard_api::DoctorReportReader,
 }
 
 impl ProjectOpenInputs<'_> {
@@ -1409,46 +1415,14 @@ impl ProjectOpenInputs<'_> {
             let remote_credentials = core.graph_runtime.remote_credential_authority();
             Arc::new(move || remote_credentials.operational_status())
         };
-        let remote_operational_read = {
-            let remote_operational_status = Arc::clone(&remote_operational_status);
-            Arc::new(move || remote_operational_status().doctor_read())
-        };
-        // Historical convergence runs in the background after admission, so a
-        // large store can be mid-migration while the daemon serves. Doctor
-        // re-reads that state on every report instead of a snapshot taken
-        // before the migrations were scheduled.
-        let schema_convergence = {
-            let registry = self.store_administration.session_runtime_registry().await?;
-            Arc::new(move || {
-                let unconverged = registry.unconverged_registered_schemas();
-                tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
-                    storage:
-                        tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
-                            &unconverged,
-                        ),
-                    findings: registry.registered_schema_convergence_observations(),
-                }
-            })
-        };
-        let doctor_report_reader =
-            tracedecay_daemon_service::doctor_kernel::production_doctor_report_reader(
-                self.canonical_project_path.to_path_buf(),
-                code_index.project_id.clone(),
-                cg.store_layout().clone(),
-                cg.db().clone(),
-                core.registered_profile_db.clone(),
-                user_session_db.clone(),
-                session_db.clone(),
-                core.profile_identity.profile_root().to_path_buf(),
-                core.transcript_source_profile.clone(),
-                remote_operational_read,
-                schema_convergence,
-                cg.get_config().sync.retention.clone(),
-                self.invocation.code_index_schedulers.clone(),
-                Arc::clone(&core.ports.diagnostic_broker),
-                self.invocation.feedback_runtime_registrar(),
-                store_telemetry_sampling,
-            );
+        let doctor_report_reader = self
+            .doctor_report_reader(
+                cg,
+                core,
+                Some(user_session_db.clone()),
+                Some(session_db.clone()),
+            )
+            .await?;
         let (delivery_settlement_authority, delivery_settlement_recorder) =
             project_delivery_settlement_ports(self.invocation, self.canonical_project_path).await?;
         let full_context = core
@@ -1488,7 +1462,6 @@ impl ProjectOpenInputs<'_> {
                 self.invocation,
             )
             .with_remote_operational_status(remote_operational_status)
-            .with_dashboard_doctor_report_reader(doctor_report_reader)
             .with_startup_catch_up_enabled(self.runtime.startup_catch_up());
         project_open_cancellation_checkpoint(self.cancellation)?;
         let full_construction_started = Instant::now();
@@ -1522,6 +1495,7 @@ impl ProjectOpenInputs<'_> {
         Ok(PublishedFullServer {
             server: full_candidate,
             session_db,
+            doctor_report_reader,
         })
     }
 
@@ -1630,6 +1604,7 @@ impl ProjectOpenInputs<'_> {
         resolved: &Arc<crate::mcp::McpServer>,
         full_server: &Arc<crate::mcp::McpServer>,
         session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+        doctor_report_reader: tracedecay_dashboard_api::DoctorReportReader,
     ) -> Result<()> {
         self.log_phase("session_capabilities_published", None, self.started);
         Box::pin(self.mount_full_server_owners(
@@ -1667,7 +1642,7 @@ impl ProjectOpenInputs<'_> {
             None,
         )
         .await;
-        full_server.publish_doctor_report();
+        full_server.publish_doctor_report(doctor_report_reader);
         let code_index_status = self.activate_code_index(core);
         self.log_phase(
             "full_published",
@@ -1698,6 +1673,57 @@ impl ProjectOpenInputs<'_> {
                 "linked_worktree_disabled"
             }
         }
+    }
+
+    /// The route's Doctor report reader over whichever session stores it
+    /// serves; a store held reset-required is `None`.
+    async fn doctor_report_reader(
+        &self,
+        cg: &Arc<tracedecay_project::project::TraceDecay>,
+        core: &ComposedCoreServer,
+        user_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+        session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    ) -> Result<tracedecay_dashboard_api::DoctorReportReader> {
+        let remote_credentials = core.graph_runtime.remote_credential_authority();
+        let remote_operational_read =
+            Arc::new(move || remote_credentials.operational_status().doctor_read());
+        // Historical convergence runs in the background after admission, so a
+        // large store can be mid-migration while the daemon serves. Doctor
+        // re-reads that state on every report instead of a snapshot taken
+        // before the migrations were scheduled.
+        let schema_convergence = {
+            let registry = self.store_administration.session_runtime_registry().await?;
+            Arc::new(move || {
+                let unconverged = registry.unconverged_registered_schemas();
+                tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
+                    storage:
+                        tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
+                            &unconverged,
+                        ),
+                    findings: registry.registered_schema_convergence_observations(),
+                }
+            })
+        };
+        Ok(
+            tracedecay_daemon_service::doctor_kernel::production_doctor_report_reader(
+                self.canonical_project_path.to_path_buf(),
+                core.ports.code_index.project_id.clone(),
+                cg.store_layout().clone(),
+                cg.db().clone(),
+                core.registered_profile_db.clone(),
+                user_session_db,
+                session_db,
+                core.profile_identity.profile_root().to_path_buf(),
+                core.transcript_source_profile.clone(),
+                remote_operational_read,
+                schema_convergence,
+                cg.get_config().sync.retention.clone(),
+                self.invocation.code_index_schedulers.clone(),
+                Arc::clone(&core.ports.diagnostic_broker),
+                self.invocation.feedback_runtime_registrar(),
+                self.store_administration.store_telemetry_sampling(),
+            ),
+        )
     }
 
     /// Code reads (primitives and callable code) on a route whose full
@@ -1740,6 +1766,39 @@ impl ProjectOpenInputs<'_> {
                 Some(("error", error.to_string())),
                 self.started,
             );
+        }
+    }
+
+    /// The retained core answers Doctor over every store it still serves:
+    /// a session store refused as reset-required only disables session
+    /// features, never the report that names its reset.
+    async fn publish_reset_required_doctor_report(
+        &self,
+        opened: &OpenedProjectGraph,
+        core: &ComposedCoreServer,
+        resolved: &Arc<crate::mcp::McpServer>,
+    ) {
+        let cg = &opened.cg;
+        let session_db = self
+            .store_administration
+            .registered_project_session_database(cg.project_root(), cg.store_layout())
+            .await
+            .ok();
+        let user_session_db = self
+            .store_administration
+            .registered_profile_session_database()
+            .await
+            .ok();
+        match self
+            .doctor_report_reader(cg, core, user_session_db, session_db)
+            .await
+        {
+            Ok(reader) => resolved.publish_doctor_report(reader),
+            Err(error) => self.log_phase(
+                "reset_required_doctor_report_unavailable",
+                Some(("error", error.to_string())),
+                self.started,
+            ),
         }
     }
 
@@ -1810,6 +1869,7 @@ impl ProjectOpenInputs<'_> {
             if reset_refusal.is_some() {
                 let code_index_status = self.activate_code_index(core);
                 Box::pin(self.register_reset_required_code_reads(core, resolved)).await;
+                Box::pin(self.publish_reset_required_doctor_report(opened, core, resolved)).await;
                 self.log_phase(
                     "full_upgrade_reset_required",
                     Some(("code_index", code_index_status.to_owned())),
