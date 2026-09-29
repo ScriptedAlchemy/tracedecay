@@ -569,7 +569,7 @@ async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<
     }
     .normalized();
 
-    let snapshot = read_payload_gc_snapshot(&store.conn, PROVIDER, None)
+    let snapshot = read_payload_gc_snapshot(&store.conn, &store.storage_root, PROVIDER, None)
         .await
         .map_err(|err| err.to_string())?;
     let transaction = store
@@ -1923,7 +1923,7 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
     .normalized();
 
     let counter = WorkCounter::default();
-    let snapshot = read_payload_gc_snapshot(&store.conn, PROVIDER, None)
+    let snapshot = read_payload_gc_snapshot(&store.conn, &store.storage_root, PROVIDER, None)
         .await
         .map_err(|err| err.to_string())?;
     let transaction = store

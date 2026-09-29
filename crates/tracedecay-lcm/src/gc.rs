@@ -25,8 +25,8 @@ pub(crate) use placeholder_scan::{
     PlaceholderScanScope, PlaceholderTextRow, all_placeholder_like_patterns,
     any_placeholder_text_row, bind_placeholder_like_patterns, count_placeholder_text_rows,
     gc_prefix_like_patterns, gc_prefix_ref_like_patterns, live_prefix_like_patterns,
-    live_prefix_ref_like_patterns, placeholder_text_like_sql, scan_placeholder_text_rows,
-    scan_placeholder_text_rows_between,
+    live_prefix_ref_like_patterns, placeholder_text_like_sql, placeholder_text_rows_by_store_id,
+    scan_placeholder_text_rows, scan_placeholder_text_rows_between,
 };
 
 const GC_PAYLOAD_PREFIX: &str = "[gc'd externalized payload:";
@@ -433,7 +433,7 @@ pub async fn run_payload_gc(
     report.last_error = schema::get_gc_meta(conn, "last_error").await?;
 
     let dir = payload::existing_payload_dir_opt(storage_root)?;
-    let snapshot = read_payload_gc_snapshot(conn, provider, session_id).await?;
+    let snapshot = read_payload_gc_snapshot(conn, storage_root, provider, session_id).await?;
     let mut remaining = cfg.max_batch_size.max(1);
 
     if let Some(dir) = dir.as_deref() {
@@ -484,8 +484,10 @@ pub async fn run_payload_gc(
             remaining -= 1;
         }
     }
-    let dangling = plan_dangling(conn, dir.as_deref(), provider, session_id, &mut report).await?;
-    for payload_ref in &dangling.refs {
+    for (payload_ref, detail) in &snapshot.dangling.stat_errors {
+        report.add_error(payload_ref, "dangling_payload_stat_failed", detail.clone());
+    }
+    for payload_ref in &snapshot.dangling.refs {
         report.dangling.add(payload_ref, 0);
     }
     report.ended_at = now;
@@ -682,8 +684,11 @@ async fn plan_missing(
 /// payload with neither metadata nor a file.
 struct DanglingPlan {
     refs: BTreeSet<String>,
-    rows: Vec<PlaceholderTextRow>,
+    /// Rows carrying one of `refs`, re-read by the transaction that rewrites
+    /// them.
+    store_ids: Vec<i64>,
     scanned_through: i64,
+    stat_errors: Vec<(String, String)>,
 }
 
 pub(crate) const DANGLING_SCAN_CURSOR: &str = "dangling_scan_store_id";
@@ -696,7 +701,6 @@ async fn plan_dangling(
     dir: Option<&Path>,
     provider: &str,
     session_id: Option<&str>,
-    report: &mut LcmGcReport,
 ) -> Result<DanglingPlan, LcmError> {
     let after = schema::get_gc_meta(conn, DANGLING_SCAN_CURSOR)
         .await?
@@ -709,7 +713,9 @@ async fn plan_dangling(
         (),
     )
     .await?;
-    let scanned_through = i64::try_from(scanned_through).unwrap_or(i64::MAX);
+    let scanned_through = i64::try_from(scanned_through)
+        .unwrap_or(i64::MAX)
+        .max(after);
     let rows = scan_placeholder_text_rows_between(
         conn,
         PlaceholderScanScope::ProviderOrAll {
@@ -734,6 +740,7 @@ async fn plan_dangling(
         .map(|owner| owner.payload_ref)
         .collect::<BTreeSet<_>>();
     let mut refs = BTreeSet::new();
+    let mut stat_errors = Vec::new();
     for payload_ref in named {
         if with_metadata.contains(&payload_ref) {
             continue;
@@ -743,24 +750,22 @@ async fn plan_dangling(
             Ok(false) => {
                 refs.insert(payload_ref);
             }
-            Err(error) => report.add_error(
-                &payload_ref,
-                "dangling_payload_stat_failed",
-                error.to_string(),
-            ),
+            Err(error) => stat_errors.push((payload_ref, error.to_string())),
         }
     }
-    let rows = rows
-        .into_iter()
+    let store_ids = rows
+        .iter()
         .filter(|row| {
             row.texts()
                 .any(|text| refs.iter().any(|payload_ref| text.contains(payload_ref)))
         })
+        .map(|row| row.store_id)
         .collect();
     Ok(DanglingPlan {
         refs,
-        rows,
+        store_ids,
         scanned_through,
+        stat_errors,
     })
 }
 
@@ -778,7 +783,7 @@ pub async fn run_payload_gc_with_apply(
         return run_payload_gc(conn, storage_root, provider, session_id, cfg, now).await;
     }
 
-    let snapshot = read_payload_gc_snapshot(conn, provider, session_id).await?;
+    let snapshot = read_payload_gc_snapshot(conn, storage_root, provider, session_id).await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -825,18 +830,21 @@ pub async fn finalize_gc_report(
     Ok(())
 }
 
-/// Payload metadata refs payload GC reads on the reader before its write
-/// transaction: every ref, which orphan detection subtracts from the payload
-/// directory, and the refs in scope, whose files the missing phase checks.
-/// The transaction re-reads each payload it acts on.
+/// What payload GC reads on the reader before its write transaction: every
+/// metadata ref, which orphan detection subtracts from the payload directory;
+/// the refs in scope, whose files the missing phase checks; and the dangling
+/// placeholders in rows written since the last applied pass. The transaction
+/// re-reads each payload and row it acts on.
 pub struct PayloadGcSnapshot {
     all_metadata_refs: BTreeSet<String>,
     scoped_metadata_refs: BTreeSet<String>,
+    dangling: DanglingPlan,
 }
 
 #[hotpath::measure(label = "sessions.lcm.gc.snapshot", future = true)]
 pub async fn read_payload_gc_snapshot(
     conn: &(impl QueryExecutor + ?Sized),
+    storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<PayloadGcSnapshot, LcmError> {
@@ -846,9 +854,12 @@ pub async fn read_payload_gc_snapshot(
     } else {
         payload_metadata_refs_for_scope(conn, provider, session_id).await?
     };
+    let dir = payload::existing_payload_dir_opt(storage_root)?;
+    let dangling = plan_dangling(conn, dir.as_deref(), provider, session_id).await?;
     Ok(PayloadGcSnapshot {
         all_metadata_refs,
         scoped_metadata_refs,
+        dangling,
     })
 }
 
@@ -880,6 +891,7 @@ pub async fn run_payload_gc_in_transaction(
     let PayloadGcSnapshot {
         all_metadata_refs,
         scoped_metadata_refs,
+        dangling,
     } = snapshot;
 
     let mut remaining = cfg.max_batch_size.max(1);
@@ -937,15 +949,7 @@ pub async fn run_payload_gc_in_transaction(
         scoped_metadata_refs,
     )
     .await?;
-    rewrite_dangling_placeholders(
-        conn,
-        dir.as_deref(),
-        provider,
-        session_id,
-        apply,
-        &mut report,
-    )
-    .await?;
+    rewrite_dangling_placeholders(conn, dangling, provider, session_id, apply, &mut report).await?;
 
     report.ended_at = now;
     if apply {
@@ -1135,29 +1139,50 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     Ok(())
 }
 
-/// Tombstones dangling placeholders in the rows written since the last
-/// applied pass. Only an unscoped pass advances the scan cursor, so a scoped
-/// pass never hides rows outside its scope from the next full pass.
+/// Tombstones the dangling placeholders the reader snapshot found in rows
+/// written since the last applied pass. Only an unscoped pass advances the
+/// scan cursor, so a scoped pass never hides rows outside its scope from the
+/// next full pass.
 async fn rewrite_dangling_placeholders(
     conn: &(impl Executor + ?Sized),
-    dir: Option<&Path>,
+    plan: &DanglingPlan,
     provider: &str,
     session_id: Option<&str>,
     apply: bool,
     report: &mut LcmGcReport,
 ) -> Result<(), LcmError> {
-    let plan = plan_dangling(conn, dir, provider, session_id, report).await?;
-    for payload_ref in &plan.refs {
+    for (payload_ref, detail) in &plan.stat_errors {
+        report.add_error(payload_ref, "dangling_payload_stat_failed", detail.clone());
+    }
+    let mut refs = plan.refs.clone();
+    if apply && !refs.is_empty() {
+        // A payload written since the snapshot owns its placeholders again.
+        let probe =
+            pending_delete::probe_metadata_rows(conn, &refs.iter().cloned().collect::<Vec<_>>())
+                .await;
+        for (payload_ref, detail) in &probe.failures {
+            report.add_error(payload_ref, "metadata_check_failed", detail.clone());
+        }
+        refs.retain(|payload_ref| {
+            !probe.existing.contains(payload_ref) && !probe.failures.contains_key(payload_ref)
+        });
+    }
+    for payload_ref in &refs {
         report.dangling.add(payload_ref, 0);
     }
     if !apply {
         return Ok(());
     }
+    let rows = if refs.is_empty() {
+        Vec::new()
+    } else {
+        placeholder_text_rows_by_store_id(conn, &plan.store_ids).await?
+    };
     let mut total = 0usize;
-    for row in plan.rows {
+    for row in rows {
         let store_id = row.store_id;
         let (content, placeholder_text, metadata_json, changed) =
-            tombstone_row_for_refs(row, &plan.refs);
+            tombstone_row_for_refs(row, &refs);
         if changed == 0 {
             continue;
         }

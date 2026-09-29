@@ -154,6 +154,37 @@ pub(crate) async fn scan_placeholder_text_rows_between(
     Ok(rows_out)
 }
 
+/// Re-reads the placeholder text of the rows with `store_ids`.
+pub(crate) async fn placeholder_text_rows_by_store_id(
+    conn: &(impl QueryExecutor + ?Sized),
+    store_ids: &[i64],
+) -> Result<Vec<PlaceholderTextRow>, LcmError> {
+    let store_ids = serde_json::to_string(store_ids)
+        .map_err(|error| LcmError::Db(format!("encode placeholder rows: {error}")))?;
+    let mut rows = conn
+        .query(
+            "SELECT store_id, content, snippet_text, index_text, metadata_json,
+                    placeholder_text
+             FROM lcm_raw_messages
+             WHERE store_id IN (SELECT value FROM json_each(?1))
+             ORDER BY store_id",
+            vec![SqlValue::Text(store_ids)],
+        )
+        .await?;
+    let mut rows_out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        rows_out.push(PlaceholderTextRow {
+            store_id: row.get(0)?,
+            content: row.get(1)?,
+            placeholder_text: row.get(5)?,
+            snippet_text: row.get(2)?,
+            index_text: row.get(3)?,
+            metadata_json: row.get(4)?,
+        });
+    }
+    Ok(rows_out)
+}
+
 /// Streams the same prefiltered candidate rows and stops at the first row
 /// `confirm` accepts, retaining none of them.
 ///
