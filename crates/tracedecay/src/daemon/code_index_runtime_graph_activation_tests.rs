@@ -15,8 +15,8 @@ use tempfile::TempDir;
 use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1, CodeIndexDemandAdmissionV1,
-    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
-    SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
+    CodeIndexOwnerSignalsV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantId,
@@ -246,35 +246,31 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
         .scheduler_handle(fixture.path())
         .await
         .expect("mounted scheduler");
+    let mut signals = CodeIndexOwnerSignalsV1::subscribe(&registry, fixture.path()).await;
     drop(admission);
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if scheduler
-            .try_lock()
-            .is_ok_and(|scheduler| scheduler.sealed_decode_count() > 0)
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "worker did not decode the retained generation for graph replay"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    while scheduler
+        .lock()
+        .expect("scheduler lock")
+        .sealed_decode_count()
+        == 0
+    {
+        signals
+            .changed()
+            .await
+            .expect("worker did not decode the retained generation for graph replay");
     }
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let text = loop {
         if let Some(text) = registry.latest_text_serving_for_scope(&scope).await
             && text.query_owners_are_ready()
         {
             break text;
         }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "permanently refused graph replay withheld exact and lexical readiness"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        signals
+            .changed()
+            .await
+            .expect("permanently refused graph replay withheld exact and lexical readiness");
     };
     assert!(text.production_query_owners().is_ok());
 
@@ -286,16 +282,14 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     // A retryable activation failure no longer withholds the seat: the sealed
     // generation is installed while native graph keeps retrying, so the
     // contract lives on the seated generation's typed graph state.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let seated = loop {
         if let Some(seated) = registry.latest_complete_serving_for_scope(&scope).await {
             break seated;
         }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "persistent graph replay failure must still seat the retained generation"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        signals
+            .changed()
+            .await
+            .expect("persistent graph replay failure must still seat the retained generation");
     };
     assert_eq!(
         seated.generation().manifest().generation_id,
