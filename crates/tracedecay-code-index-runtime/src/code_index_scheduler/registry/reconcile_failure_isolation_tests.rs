@@ -658,7 +658,11 @@ async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix
         CodeIndexDemandAdmissionV1::Queued,
         "the operator reconcile is admitted on a parked worktree"
     );
-    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    // The admitted reconcile alone must converge. Injecting arrivals here
+    // would keep a wake pending behind every pass that outlasts the spacing,
+    // and a pending wake never reads as fresh.
+    let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
+    let mut signals = OwnerSignals::subscribe(&restarted.registry, &restarted.project).await;
     let freshness = loop {
         let freshness = restarted
             .registry
@@ -669,11 +673,10 @@ async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix
             break freshness;
         }
         assert!(
-            tokio::time::Instant::now() < deadline,
+            std::time::Instant::now() < deadline,
             "the fixed worktree never reached fresh: {freshness:?}"
         );
-        restarted.wake_with_pending_arrival().await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        signals.changed_before(deadline).await;
     };
     assert!(freshness.parked.is_none(), "{freshness:?}");
     let serving = restarted
