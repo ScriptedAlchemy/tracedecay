@@ -69,9 +69,24 @@ pub enum CommittedPayloadRemoval {
 #[derive(Debug, Default)]
 pub struct ReferencedClosureCache {
     by_provider: BTreeMap<String, BTreeSet<String>>,
+    /// Every provider's references, read before the transaction by a caller
+    /// that deletes only payloads whose GC mark survived into it.
+    all_providers: Option<BTreeSet<String>>,
 }
 
 impl ReferencedClosureCache {
+    /// Answers every provider from `referenced`, the complete closure payload
+    /// GC read before its write transaction. That is exact for a payload whose
+    /// unreferenced GC mark is still present in the transaction: every writer
+    /// that adds a reference clears the referenced payload's mark in the same
+    /// transaction (`payload::upsert_payload_metadata`).
+    pub(crate) fn from_closure(referenced: &BTreeSet<String>) -> Self {
+        Self {
+            by_provider: BTreeMap::new(),
+            all_providers: Some(referenced.clone()),
+        }
+    }
+
     #[hotpath::skip]
     async fn is_referenced(
         &mut self,
@@ -79,6 +94,9 @@ impl ReferencedClosureCache {
         provider: &str,
         payload_ref: &str,
     ) -> Result<bool, LcmError> {
+        if let Some(referenced) = &self.all_providers {
+            return Ok(referenced.contains(payload_ref));
+        }
         if !self.by_provider.contains_key(provider) {
             let refs = gc::referenced_payload_refs(conn, provider, None).await?;
             self.by_provider.insert(provider.to_string(), refs);
@@ -93,7 +111,7 @@ impl ReferencedClosureCache {
     /// database, so a repeated ref in the same batch reads the post-rewrite
     /// truth instead of the pre-rewrite snapshot.
     fn forget(&mut self, payload_ref: &str) {
-        for refs in self.by_provider.values_mut() {
+        for refs in self.by_provider.values_mut().chain(&mut self.all_providers) {
             refs.remove(payload_ref);
         }
     }
