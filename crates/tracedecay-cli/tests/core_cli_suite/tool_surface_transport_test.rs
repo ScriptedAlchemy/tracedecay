@@ -283,6 +283,29 @@ fn assert_surface_resolves_project(
     payload
 }
 
+/// Holds until the cold daemon serves a published generation's code graph.
+/// Graph-backed surfaces answer the retryable `application.code-graph.unavailable`
+/// before that, which is the truthful state of a daemon still activating.
+fn await_graph_ready(home: &Path, project: &Path) {
+    let outcome = run_surface_tool_from(
+        home,
+        project,
+        "status",
+        r#"{"format":"json","wait_for":{"state":"graph_ready","timeout_ms":50000}}"#,
+    );
+    assert!(
+        outcome.success,
+        "status wait failed\nstdout:\n{}\nstderr:\n{}",
+        outcome.stdout, outcome.stderr
+    );
+    assert_eq!(
+        outcome.payload()["wait"],
+        serde_json::json!({ "outcome": "reached" }),
+        "the daemon never served a published code graph: {}",
+        outcome.stdout
+    );
+}
+
 fn surface_fixture() -> (TempDir, TempDir, PathBuf, PathBuf) {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -303,6 +326,7 @@ fn application_surface_primitive_tools_resolve_the_working_directory_project() {
         "storage_status",
         r#"{"format":"json"}"#,
     );
+    await_graph_ready(&home_path, &project_path);
     assert_surface_resolves_project(
         &home_path,
         &project_path,

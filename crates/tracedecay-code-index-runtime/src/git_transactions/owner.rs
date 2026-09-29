@@ -231,6 +231,14 @@ impl DaemonGitAuthoritySlot {
         Ok(())
     }
 
+    fn installed(&self) -> Result<bool, GitIndexTransactionPortError> {
+        Ok(self
+            .source
+            .read()
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?
+            .is_some())
+    }
+
     fn clear(&self) -> Result<(), GitIndexTransactionPortError> {
         self.source
             .write()
@@ -646,6 +654,9 @@ impl DaemonGitIndexTransactionServiceRegistry {
 
     /// Resolve only an owner already mounted by project-open admission.
     /// Missing and ambiguous roots deliberately share the same outcome.
+    /// Project open publishes the service before it installs the service's
+    /// authority; until then the owner is still mounting, and resolving it
+    /// would answer every read as a policy denial.
     pub async fn for_repository_root(
         &self,
         repository_root: &std::path::Path,
@@ -662,7 +673,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         let Some(entry) = matches.next() else {
             return Ok(None);
         };
-        if matches.next().is_some() {
+        if matches.next().is_some() || !entry.authority.installed()? {
             return Ok(None);
         }
         Ok(Some(DaemonGitInvocationOwner {

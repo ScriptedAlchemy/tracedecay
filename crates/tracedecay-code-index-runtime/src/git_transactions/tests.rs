@@ -6,16 +6,20 @@ use std::time::Duration;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
+use tracedecay_application::ProjectSourceAccessSnapshot;
 use tracedecay_contracts::catalog_composition::CatalogCompositionError;
 use tracedecay_contracts::{
     CancellationStage, GitIndexApplyRequestV1, GitIndexTransactionPort,
     GitIndexTransactionPortError, OperationTermination,
 };
+use tracedecay_domain::configuration::{
+    AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
+};
 use tracedecay_domain::{
-    GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewInputV1,
-    GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
-    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, GitOperationStateV1, ProjectId,
-    RepositoryId, RepositoryIndexStateV1, UtcMicros,
+    ActorId, GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId,
+    GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
+    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, GitOperationStateV1, LocatorDigest,
+    ManifestDigest, ProjectId, RepositoryId, RepositoryIndexStateV1, UtcMicros, WorktreeId,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectClassifierV1};
 use tracedecay_store::{
@@ -960,7 +964,7 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
         .ensure(
             database.registered.clone(),
             alternate.path().to_path_buf(),
-            project_id,
+            project_id.clone(),
             fixture_time(21),
         )
         .await
@@ -977,6 +981,25 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
         ),
         "all Git mutation services must serialize through the daemon registry queue"
     );
+    assert!(
+        registry
+            .for_repository_root(directory.path())
+            .await
+            .expect("mounting owner lookup")
+            .is_none(),
+        "an owner whose authority project open has not installed yet is still mounting"
+    );
+    for root in [directory.path(), alternate.path()] {
+        registry
+            .install_authority(
+                root,
+                source_access(&project_id),
+                database.registered.clone(),
+                tokio::runtime::Handle::current(),
+            )
+            .await
+            .expect("project open installs each worktree's authority");
+    }
     let primary_owner = registry
         .for_repository_root(directory.path())
         .await
@@ -989,6 +1012,34 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
         .expect("linked owner");
     assert!(Arc::ptr_eq(&primary_owner.service, &primary));
     assert!(Arc::ptr_eq(&linked_owner.service, &linked));
+}
+
+fn source_access(project_id: &ProjectId) -> ProjectSourceAccessSnapshot {
+    ProjectSourceAccessSnapshot {
+        scope: tracedecay_contracts::ResolvedScope::new(
+            project_id.clone(),
+            RepositoryId::new("repository.singleton.fixture").expect("fixture id"),
+            WorktreeId::new("worktree.singleton.fixture").expect("fixture id"),
+            None,
+        )
+        .expect("scope"),
+        requester: ActorId::new("actor.singleton.fixture").expect("fixture id"),
+        binding: ScopeSourceBinding::new(
+            SourceBindingId::new("binding.singleton.fixture").expect("fixture id"),
+            SourceKindV1::Cursor,
+            LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).expect("locator digest"),
+            AuthorityRef::Project(project_id.clone()),
+        )
+        .expect("binding"),
+        configuration_revision: ConfigurationRevisionId::new("revision.singleton.fixture")
+            .expect("fixture id"),
+        configuration_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
+            .expect("configuration digest"),
+        configuration_provenance_digest: ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
+            .expect("configuration provenance"),
+        effective_capabilities: BTreeSet::new(),
+        grant_expires_at: fixture_time(100),
+    }
 }
 
 /// Symlink alias of an already-mounted root must resolve to the same owner
