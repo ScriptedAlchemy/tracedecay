@@ -264,6 +264,17 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
         &call_callers(&server, json!({"node_id": settle_id, "max_depth": 1})).await,
         "the retired max_depth argument",
     );
+    // The call-chain contract carries no id validation, so the port is the
+    // first to see a blank endpoint.
+    assert_invalid_request(
+        &handle_real_server_tool_call_raw(
+            &server,
+            "tracedecay_call_chain",
+            json!({"from_node_id": "", "to_node_id": settle_id}),
+        )
+        .await,
+        "a blank call-chain from_node_id",
+    );
 
     fixture.harness.shutdown().await;
 }

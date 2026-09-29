@@ -501,8 +501,9 @@ where
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
-                let Ok(root_id) = SymbolOccurrenceId::new(request.node_id.clone()) else {
-                    return failed(context, "type hierarchy node identity was invalid");
+                let root_id = match relation_seed(&request.node_id) {
+                    Ok(root_id) => root_id,
+                    Err(failure) => return failed_with(context, failure),
                 };
                 let root = match graph
                     .reader
