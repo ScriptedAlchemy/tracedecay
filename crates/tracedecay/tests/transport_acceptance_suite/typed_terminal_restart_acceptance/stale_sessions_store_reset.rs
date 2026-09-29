@@ -667,3 +667,162 @@ fn project_session_store_with_another_workflow_schema_identity_refuses_sessions_
         session_tool_args: || json!({}),
     });
 }
+
+/// Records one Cursor identity-collision refusal in a stopped session store's
+/// cursor-advance ledger, the row the daemon's admission writes when it
+/// settles a colliding record past its frontier.
+fn seed_cursor_identity_collision_refusal(db_path: &Path, project_id: &str) {
+    let scope_json = json!({ "kind": "project", "project_id": project_id }).to_string();
+    rusqlite::Connection::open(db_path)
+        .expect("open the session store")
+        .execute(
+            "INSERT INTO source_cursor_advances \
+             (source_json, scope_json, coverage_json, reason, receipt_id) VALUES (\
+             '{\"provider\":\"cursor\",\"session_id\":\"445777ad-0c9a-4c0e-bb98-7e8f7fb500ce\"}', \
+             ?1, \
+             '{\"generation\":7,\"ordering_domain\":\"file_bytes\",\
+               \"range\":{\"start\":364052,\"end\":364900}}', \
+             'observation_identity_collision', NULL)",
+            [scope_json],
+        )
+        .expect("seed the refusal");
+}
+
+/// `tracedecay doctor --json` exit code and its ingest-coverage finding, once
+/// the project runtime that owns the canonical report has mounted.
+fn doctor_ingest_coverage(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
+    let started = Instant::now();
+    let (doctor, stderr, report) = loop {
+        let doctor = tracedecay_command_with_home(home)
+            .args(["doctor", "--json"])
+            .current_dir(project)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run doctor");
+        let stderr = String::from_utf8_lossy(&doctor.stderr).into_owned();
+        let report: Value = serde_json::from_slice(&doctor.stdout).unwrap_or_else(|error| {
+            panic!("doctor --json printed no document ({error}):\n{stderr}")
+        });
+        if report["daemon_findings"]["state"] != "mounting" {
+            break (doctor, stderr, report);
+        }
+        assert!(
+            started.elapsed() < SERVE_TIMEOUT,
+            "the canonical Doctor report never mounted within {SERVE_TIMEOUT:?}:\n{stderr}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    let finding = report["daemon_findings"]["payload"]["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| &entry["finding"])
+        .find(|finding| {
+            finding["evidence"][0]["reference"]
+                .as_str()
+                .is_some_and(|reference| reference.starts_with("observability.ingest-coverage."))
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("doctor reported no ingest-coverage finding: {report}"));
+    (
+        doctor.status.code(),
+        json!({
+            "state": finding["state"],
+            "reference": finding["evidence"][0]["reference"],
+            "statement": finding["coverage"]["statement"],
+        }),
+        stderr,
+    )
+}
+
+/// A durable Cursor refusal is named with its typed cause, session, range,
+/// and the fact that nothing needs doing, without making doctor fail; the
+/// scoped reset of its store drops it with the store.
+#[test]
+fn doctor_names_a_live_refusal_informationally_and_drops_it_with_its_reset_store() {
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = canonical_existing_path(home.path());
+    let project = tempfile::TempDir::new().expect("project");
+    let project_path = canonical_existing_path(project.path());
+    let project_id = tracedecay_runtime_core::storage::default_profile_project_id(&project_path);
+    let project_sessions = home_path
+        .join(".tracedecay")
+        .join("projects")
+        .join(&project_id)
+        .join("sessions.db");
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    super::initialize_project(&home_path, &project_path, "refusal-census");
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that wrote the profile");
+    seed_cursor_identity_collision_refusal(&project_sessions, &project_id);
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    let (exit, finding, stderr) = doctor_ingest_coverage(&home_path, &project_path);
+    assert_eq!(
+        finding,
+        json!({
+            "state": "healthy_complete_coverage",
+            "reference": "observability.ingest-coverage.refused-informational",
+            "statement": "durable ingest coverage converged past 1 refused source record(s), \
+                informational, nothing needs doing: each was skipped by design and re-reading \
+                it would refuse it again; cursor session 445777ad-0c9a-4c0e-bb98-7e8f7fb500ce \
+                range 364052..364900 observation_identity_collision (a different record with \
+                the same identity is already retained)",
+        }),
+        "{stderr}"
+    );
+    assert_eq!(
+        exit,
+        Some(0),
+        "an informational refusal is not an issue:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("config error") && !stderr.contains("to fix most issues"),
+        "doctor must not label or route an informational refusal:\n{stderr}"
+    );
+
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon before aging its store");
+    seed_pre_unified_observation_rows(&project_sessions);
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    wait_for_reset_required_stores(
+        &home_path,
+        &project_path,
+        &[json!({
+            "store": format!("project sessions {project_id}"),
+            "authority": "observations",
+            "found_version": null,
+            "required_version": null,
+            "reason": OBSERVATIONS_RESET_REASON,
+            "remedy": STALE_STORE_RESET,
+        })],
+    );
+    let (reset_status, reset_output) =
+        super::run_scoped_reset(&home_path, &project_path, &mut daemon, || {});
+    assert!(
+        reset_status.success(),
+        "the scoped reset failed:\n{reset_output}"
+    );
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    let (exit, finding, stderr) = doctor_ingest_coverage(&home_path, &project_path);
+    assert_eq!(
+        (exit, finding),
+        (
+            Some(0),
+            json!({
+                "state": "healthy_complete_coverage",
+                "reference": "observability.ingest-coverage.converged",
+                "statement": "durable ingest coverage records no refused source records",
+            })
+        ),
+        "the reset store's refusal must leave with it:\n{stderr}"
+    );
+
+    let _ = daemon.kill_and_wait();
+}

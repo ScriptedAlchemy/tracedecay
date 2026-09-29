@@ -4,9 +4,7 @@ mod refusal_census;
 pub mod retention;
 mod schema;
 
-pub use refusal_census::{
-    ObservationRefusalCensusV1, ObservationRefusalCountV1, ingest_refusal_read_from_censuses,
-};
+pub use refusal_census::ingest_refusal_read_from_censuses;
 pub(super) use schema::ensure_observation_schema;
 
 use tracedecay_domain::{

@@ -5,7 +5,7 @@
 //! owned here at the composition root.
 
 use tracedecay_contracts::doctor::{
-    DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1, IngestRefusalCountV1,
+    DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1, IngestRefusalV1,
     LanguageServerAnalyzerStateV1, LanguageServerReadV1, LanguageServerStateV1,
     ObservabilityReadV1, ObservabilityStateV1,
 };
@@ -423,10 +423,12 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
             coverage: DoctorCoverageCompletenessV1::Partial,
         },
         ingest_refusals: IngestRefusalCensusReadV1::Observed {
-            refusals: vec![IngestRefusalCountV1 {
+            refusals: vec![IngestRefusalV1 {
                 provider: "cursor".to_owned(),
+                session_id: "cursor-session".to_owned(),
                 reason: "admission_refused".to_owned(),
-                count: 160,
+                start: 0,
+                end: 160,
             }],
         },
         storage: merge_storage_reads(

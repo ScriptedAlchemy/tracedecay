@@ -163,7 +163,7 @@ pub use doctor::{
     DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
     DoctorStorageFindingKindV1, DoctorStorageFindingV1, GitHubSourceDoctorPort, GitHubSourceReadV1,
     GitHubSourceStateV1, HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1,
-    IngestRefusalCensusReadV1, IngestRefusalCountV1, LanguageServerAnalyzerStateV1,
+    IngestRefusalCensusReadV1, IngestRefusalV1, LanguageServerAnalyzerStateV1,
     LanguageServerAnalyzerV1, LanguageServerDoctorPort, LanguageServerReadV1,
     LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1,
     OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,

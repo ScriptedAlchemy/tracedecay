@@ -4,7 +4,7 @@ use std::io::Write;
 use tempfile::TempDir;
 #[cfg(unix)]
 use tracedecay_agent_hosts::hooks::cursor_pre_compact_via_daemon;
-use tracedecay_global_db::observation::ObservationRefusalCensusV1;
+use tracedecay_contracts::doctor::IngestRefusalCensusReadV1;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::hosts::cursor::{
@@ -1442,7 +1442,7 @@ async fn cursor_sweep_skips_toplevel_duplicate_whose_subagent_copy_is_past_the_w
         .await;
     assert_eq!(
         census,
-        ObservationRefusalCensusV1::Observed {
+        IngestRefusalCensusReadV1::Observed {
             refusals: Vec::new()
         }
     );
