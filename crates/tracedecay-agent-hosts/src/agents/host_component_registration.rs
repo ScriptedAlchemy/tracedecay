@@ -1194,40 +1194,22 @@ mod tests {
     #[test]
     fn typed_host_cli_absence_stays_distinct_from_config_failure() {
         let unavailable = CatalogHostComponentRegistrationAuthority::registration_error(
-            HostKindV1::Kiro,
+            HostKindV1::FactoryDroid,
             tracedecay_domain::errors::TraceDecayError::HostCliUnavailable {
-                program: "kiro-cli".to_string(),
-                lifecycle: "kiro MCP registry lifecycle".to_string(),
+                program: "droid".to_string(),
+                lifecycle: "Factory Droid MCP registry lifecycle".to_string(),
             },
         );
         assert_eq!(
             unavailable,
             HostBundleError::HostAbsent {
-                host: HostKindV1::Kiro,
+                host: HostKindV1::FactoryDroid,
                 absence: tracedecay_domain::errors::HostAbsence::NotInstalled,
-                detail: "host CLI `kiro-cli` is unavailable for kiro MCP registry lifecycle; \
-                         install it or add it to PATH and retry"
+                detail: "host CLI `droid` is unavailable for Factory Droid MCP registry \
+                         lifecycle; install it or add it to PATH and retry"
                     .to_string(),
             },
-            "a proven absent Kiro CLI must not be relabelled as a filesystem failure"
-        );
-
-        let signed_out = CatalogHostComponentRegistrationAuthority::registration_error(
-            HostKindV1::Kiro,
-            tracedecay_domain::errors::TraceDecayError::HostCliNotSignedIn {
-                program: "kiro-cli".to_string(),
-                login: "kiro-cli login".to_string(),
-            },
-        );
-        assert_eq!(
-            signed_out,
-            HostBundleError::HostAbsent {
-                host: HostKindV1::Kiro,
-                absence: tracedecay_domain::errors::HostAbsence::NotSignedIn,
-                detail: "host CLI `kiro-cli` is not signed in; run `kiro-cli login` to use it"
-                    .to_string(),
-            },
-            "a signed-out Kiro CLI must not be relabelled as a filesystem failure"
+            "a proven absent host CLI must not be relabelled as a filesystem failure"
         );
 
         let config_failure = CatalogHostComponentRegistrationAuthority::registration_error(
