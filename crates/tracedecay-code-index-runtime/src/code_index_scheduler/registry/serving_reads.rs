@@ -848,7 +848,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 return Some(latest);
             }
             if !self.complete_seat_pending(&root).await {
-                return None;
+                // The seat can land between the miss above and this check.
+                return self.latest_complete_fresh_for_scope(scope).await;
             }
             signals.changed().await.ok()?;
         }
