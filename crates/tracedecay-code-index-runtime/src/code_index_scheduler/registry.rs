@@ -445,6 +445,16 @@ fn published_text_projection_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerSt
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// Holds a published build's task after it sent its completion wake and
+/// before it exits, so its `JoinHandle` still reports it running.
+#[cfg(test)]
+fn published_text_projection_completion_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>
+{
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 /// Holds a worker's graph tail right before it seats the decoded generation.
 #[cfg(test)]
 fn serving_swap_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
@@ -2434,21 +2444,25 @@ impl CodeIndexSchedulerRegistryV1 {
     /// keeps that stamp out of the event-to-ready receipt, which otherwise
     /// charged a suppressed freshness probe that raced it.
     fn note_worker_continuation(pending_wake: &PendingWakeV1, wake: &tokio::sync::Notify) {
+        Self::stamp_worker_continuation(pending_wake);
+        // Replenish the coalesced permit so the worker cannot sleep behind
+        // work it has not claimed.
+        wake.notify_one();
+    }
+
+    /// The slot half of [`Self::note_worker_continuation`], for a caller that
+    /// must publish state between the stamp and the permit.
+    fn stamp_worker_continuation(pending_wake: &PendingWakeV1) {
         let mut state = pending_wake.lock();
         if state.micros != 0 {
             // An arrival is already queued, or a continuation already occupies
-            // the slot. Replenish the coalesced permit so the worker cannot
-            // sleep behind work it has not claimed.
-            drop(state);
-            wake.notify_one();
+            // the slot.
             return;
         }
         state.owner = state.next_owner();
         state.micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
         state.attributable = false;
         state.trigger = Self::pack_trigger(CodeIndexCadenceTriggerV1::BusyFollowUp);
-        drop(state);
-        wake.notify_one();
     }
 
     /// Stamp a continuation while `reconcile_in_progress` still reports this pass.
