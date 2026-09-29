@@ -1913,10 +1913,16 @@ async fn dispatch_diagnostics_command(
                 label = "cli.doctor.run"
             )
             .await?;
-            if completion == tracedecay::doctor::DoctorCompletion::PendingOperatorAction {
-                return Ok(CommandOutcome::Exit(
-                    agent_cmd::PENDING_OPERATOR_ACTION_EXIT_CODE,
-                ));
+            match completion {
+                tracedecay::doctor::DoctorCompletion::Healthy => {}
+                tracedecay::doctor::DoctorCompletion::PendingOperatorAction => {
+                    return Ok(CommandOutcome::Exit(
+                        agent_cmd::PENDING_OPERATOR_ACTION_EXIT_CODE,
+                    ));
+                }
+                tracedecay::doctor::DoctorCompletion::Issues(_) => {
+                    return Ok(CommandOutcome::Exit(1));
+                }
             }
         }
         Commands::Cost {

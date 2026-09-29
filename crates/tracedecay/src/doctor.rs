@@ -94,7 +94,7 @@ pub struct AdmittedDoctorNetworkProbes {
         fn() -> Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
 }
 
-/// What a doctor run that found no issue concluded.
+/// What a completed doctor run concluded; each variant has its own exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoctorCompletion {
     Healthy,
@@ -102,6 +102,8 @@ pub enum DoctorCompletion {
     /// serves in its typed reset-required state, or a host's interactive
     /// activation.
     PendingOperatorAction,
+    /// Doctor found this many issues; each issue line names its own remedy.
+    Issues(u32),
 }
 
 /// Runs a comprehensive health check of the tracedecay installation.
@@ -173,17 +175,20 @@ pub async fn run_doctor(
     check_network(&mut dc, upload_enabled.as_ref(), network);
     print_summary(&dc);
 
-    let result = doctor_result(&dc, &storage_health, pending_reset);
+    if let DatabaseHealth::Failed { reason } = &storage_health {
+        eprintln!("Storage health check failed [{reason}].");
+    }
+    let completion = doctor_result(&dc, &storage_health, pending_reset);
     if emit_json {
         print_doctor_json(
             build_version,
-            &result,
+            completion,
             &dc,
             observed_findings,
             &storage_health,
         )?;
     }
-    result
+    Ok(completion)
 }
 
 /// The current project's section as the daemon answered it; `None` is the
@@ -276,7 +281,7 @@ fn render_daemon_status(
 
 fn print_doctor_json(
     build_version: &str,
-    result: &tracedecay_domain::errors::Result<DoctorCompletion>,
+    completion: DoctorCompletion,
     dc: &DoctorCounters,
     observed_findings: Option<tracedecay_dashboard_api::DoctorFindingsReadV1>,
     storage_health: &DatabaseHealth,
@@ -307,10 +312,10 @@ fn print_doctor_json(
     };
     let document = DoctorJsonReportV1 {
         version: build_version,
-        outcome: match result {
-            Ok(DoctorCompletion::Healthy) => DoctorOutcomeV1::Healthy,
-            Ok(DoctorCompletion::PendingOperatorAction) => DoctorOutcomeV1::PendingOperatorAction,
-            Err(_) => DoctorOutcomeV1::Issue,
+        outcome: match completion {
+            DoctorCompletion::Healthy => DoctorOutcomeV1::Healthy,
+            DoctorCompletion::PendingOperatorAction => DoctorOutcomeV1::PendingOperatorAction,
+            DoctorCompletion::Issues(_) => DoctorOutcomeV1::Issue,
         },
         issues: dc.issues,
         warnings: dc.warnings,
@@ -623,33 +628,22 @@ fn database_health_from_storage_runtime_findings<'a>(
 
 /// Gates the doctor exit code.
 ///
-/// Only an observed storage *failure* is fatal. `DatabaseHealth::Unknown`, a
-/// diagnostic that could not run, is reported to the user but never laundered
-/// into a healthy verdict nor turned into a hard failure. With no issue, a
-/// pending reset or any other operator step is the operator's action, not
-/// health.
+/// An issue, including an observed storage *failure*, is something the
+/// operator must fix. `DatabaseHealth::Unknown`, a diagnostic that could not
+/// run, is reported to the user but never laundered into a healthy verdict
+/// nor turned into an issue. With no issue, a pending reset or any other
+/// operator step is the operator's action, not health.
 fn doctor_result(
     dc: &DoctorCounters,
     storage_health: &DatabaseHealth,
     pending_reset: bool,
-) -> tracedecay_domain::errors::Result<DoctorCompletion> {
-    match storage_health {
-        DatabaseHealth::Failed { reason } => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("doctor storage health check failed [{reason}]"),
-            })
-        }
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } if dc.issues > 0 => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("doctor found {} issue(s)", dc.issues),
-            })
-        }
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. }
-            if pending_reset || dc.pending_actions > 0 =>
-        {
-            Ok(DoctorCompletion::PendingOperatorAction)
-        }
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } => Ok(DoctorCompletion::Healthy),
+) -> DoctorCompletion {
+    if dc.issues > 0 || matches!(storage_health, DatabaseHealth::Failed { .. }) {
+        DoctorCompletion::Issues(dc.issues.max(1))
+    } else if pending_reset || dc.pending_actions > 0 {
+        DoctorCompletion::PendingOperatorAction
+    } else {
+        DoctorCompletion::Healthy
     }
 }
 
@@ -1492,7 +1486,6 @@ fn print_summary(dc: &DoctorCounters) {
             "\x1b[31m{} issue(s), {} warning(s).\x1b[0m",
             dc.issues, dc.warnings
         );
-        eprintln!("Run \x1b[1mtracedecay install\x1b[0m to fix most issues.");
     }
     eprintln!();
 }
