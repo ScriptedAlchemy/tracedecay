@@ -35,7 +35,7 @@ use super::detect::{
 };
 use super::detector_kernel::{NormalizedSensitiveKey, SensitiveKeyPolicy};
 use super::length_prefixed_sha256_hex;
-use super::rules::CredentialPatternSet;
+use super::rules::{CredentialPatternSet, CredentialScanBatchV1};
 use super::structured::{
     ParsedStructuredTextV1, StructuredSanitizationError, StructuredSanitizationLimits,
     StructuredTextFieldV1, StructuredTextFormatV1, StructuredTextParseFailureV1,
@@ -646,6 +646,12 @@ pub fn declared_code_source_shape(language: &LanguageId) -> CodeSourceShapeV1 {
 /// Sanitizes arbitrary source bytes and issues receipt evidence bound to both
 /// raw input and sanitized text. Declared structured source files retain
 /// their shape.
+/// Keeps the code-source detector's search caches warm across one batch of
+/// [`sanitize_code_source_bytes`] calls, such as one snapshot capture.
+pub fn code_source_scan_batch() -> CredentialScanBatchV1 {
+    CredentialScanBatchV1::new(credential_patterns().ok())
+}
+
 pub fn sanitize_code_source_bytes(
     raw: &[u8],
     shape: CodeSourceShapeV1,

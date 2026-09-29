@@ -343,6 +343,33 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
 }
 
 #[test]
+fn a_full_build_leaves_live_only_what_its_generation_charges() {
+    let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
+    // Grammars and extractor registries initialize once per process.
+    drop(
+        CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
+            .expect("owner")
+            .build_and_publish(request(300), &Active)
+            .expect("warm build"),
+    );
+
+    let before = LIVE.load(Ordering::Relaxed);
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), Publication, Projection).expect("owner");
+    let built = owner
+        .build_and_publish(request(300), &Active)
+        .expect("build");
+    let live = LIVE.load(Ordering::Relaxed) - before;
+    let retained = usize::try_from(built.retained_bytes()).expect("retained");
+    eprintln!("ACCOUNTING full build live {live} retained {retained}");
+    assert_eq!(owner.retained_parse_stats().initial_parses, 300);
+    assert!(
+        live * 10 <= retained * 11,
+        "a full build left {live} bytes live but its generation charges {retained}"
+    );
+}
+
+#[test]
 fn retained_bytes_account_for_what_a_decode_leaves_live() {
     let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
     let built = CodeIndexProductionOwnerV1::new(config(), Publication, Projection)

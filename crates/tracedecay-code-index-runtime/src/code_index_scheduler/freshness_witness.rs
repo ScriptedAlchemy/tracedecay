@@ -610,6 +610,7 @@ impl SourceSweepCacheV1 {
         // The few files an edit touches are read on this thread; only a bulk
         // re-derivation (a cold cache) takes the indexing pool and its CPU
         // permits.
+        let _scan_batch = tracedecay_privacy::code_source_scan_batch();
         let derived = if unvouched.len() <= INLINE_DIGEST_LIMIT {
             unvouched
                 .iter()
