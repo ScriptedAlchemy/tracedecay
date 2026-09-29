@@ -546,16 +546,15 @@ impl McpServer {
 
     #[cfg(test)]
     #[hotpath::skip]
-    pub(crate) async fn wait_project_host_admission_replay_idle(&self, timeout: Duration) -> bool {
+    pub(crate) async fn wait_project_host_admission_replay_idle(&self) {
         let worker = self
             .project_host_admission_replay
             .lock()
             .await
             .as_ref()
             .map(|task| Arc::clone(task.worker()));
-        match worker {
-            Some(worker) => worker.wait_idle(timeout).await,
-            None => true,
+        if let Some(worker) = worker {
+            worker.wait_idle().await;
         }
     }
 

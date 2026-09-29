@@ -23,6 +23,22 @@ struct DeliverySettlementFixture {
     _runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
 }
 
+/// Closes the client socket itself rather than this process's descriptor: a
+/// child forked concurrently by another test inherits every open descriptor
+/// until it execs, and a plain drop leaves the peer alive through that window.
+fn close_client_socket(
+    reader: tokio::net::unix::OwnedReadHalf,
+    writer: tokio::net::unix::OwnedWriteHalf,
+) {
+    reader
+        .reunite(writer)
+        .expect("client socket halves")
+        .into_std()
+        .expect("client socket")
+        .shutdown(std::net::Shutdown::Both)
+        .expect("shut down client socket");
+}
+
 async fn delivery_settlement_fixture() -> DeliverySettlementFixture {
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
@@ -149,8 +165,7 @@ async fn rmcp_receive_waits_for_full_close_after_request_half_close() {
         "rmcp receive must not treat a request-half close as full peer loss while a response is owed"
     );
 
-    drop(client_writer);
-    drop(client_reader);
+    close_client_socket(client_reader, client_writer);
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(1), &mut receive)
             .await
@@ -533,8 +548,7 @@ async fn rmcp_peer_disconnect_mid_delivery_settles_dropped_rather_than_unknown()
     );
 
     // The client is gone before the daemon can write its response.
-    drop(client_reader);
-    drop(client_writer);
+    close_client_socket(client_reader, client_writer);
 
     let response = serde_json::from_value(serde_json::json!({
         "jsonrpc": "2.0",
