@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
+#[cfg(test)]
+use super::collection::unbounded_deadline;
 use super::collection::{RegularFileSnapshot, read_regular_file};
 use super::fence::{
     StoreContentFence, StoreDirectoryFence, capture_store_content_fence,
@@ -562,12 +564,15 @@ pub async fn census_unregistered_project_dirs(
             now,
             apply: false,
             cancellation: &cancellation,
-            deadline: MonotonicDeadline::at(
-                std::time::Instant::now() + std::time::Duration::from_secs(5),
-            ),
+            deadline: unbounded_deadline(),
         },
     )
     .await?;
+    assert_eq!(
+        report.completion,
+        UnregisteredSweepCompletionV1::Complete,
+        "an interrupted census must not read as an empty one"
+    );
     Ok(report
         .plan
         .collect
