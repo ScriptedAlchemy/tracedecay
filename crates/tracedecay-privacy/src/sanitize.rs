@@ -205,11 +205,11 @@ fn default_sensitive_keys() -> BTreeSet<String> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ClaudeRecordSanitizerV1 {
+pub struct RecordSanitizerV1 {
     policy: ClaudeSanitizerPolicyV1,
 }
 
-impl ClaudeRecordSanitizerV1 {
+impl RecordSanitizerV1 {
     pub fn new(policy: ClaudeSanitizerPolicyV1) -> Self {
         Self { policy }
     }
@@ -232,7 +232,7 @@ impl ClaudeRecordSanitizerV1 {
         parsed: ParsedObservationRecordV1,
         mut identity: ObservationIdentityMaterialV1,
         retention_class: RetentionClass,
-    ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
+    ) -> Result<ObservationSanitizationOutcomeV1, PrivacySanitizerError> {
         if !self.policy.valid {
             return Err(PrivacySanitizerError::InvalidPolicy);
         }
@@ -339,8 +339,8 @@ impl ClaudeRecordSanitizerV1 {
         )?;
         let observation =
             DurableObservationV1::new(identity, receipt, retention_class, detected.payload)?;
-        let sanitized_record = SanitizedClaudeRecordV1::issue(&observation);
-        Ok(ClaudeSanitizationOutcomeV1::Durable {
+        let sanitized_record = SanitizedObservationRecordV1::issue(&observation);
+        Ok(ObservationSanitizationOutcomeV1::Durable {
             observation: Box::new(observation),
             sanitized_record,
             findings: detected.findings,
@@ -352,7 +352,7 @@ impl ClaudeRecordSanitizerV1 {
         kind: ParsedPolicyLimitViolation,
         raw_digest: &[u8; 32],
         identity: &ObservationIdentityMaterialV1,
-    ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
+    ) -> Result<ObservationSanitizationOutcomeV1, PrivacySanitizerError> {
         let (disposition, detector, action, boundary) = match kind {
             ParsedPolicyLimitViolation::NestingDepth => (
                 SanitizerDispositionV1::Quarantined,
@@ -392,11 +392,11 @@ impl ClaudeRecordSanitizerV1 {
             boundary,
         );
         Ok(match disposition {
-            SanitizerDispositionV1::Rejected => ClaudeSanitizationOutcomeV1::Rejected {
+            SanitizerDispositionV1::Rejected => ObservationSanitizationOutcomeV1::Rejected {
                 receipt,
                 findings: vec![finding],
             },
-            SanitizerDispositionV1::Quarantined => ClaudeSanitizationOutcomeV1::Quarantined {
+            SanitizerDispositionV1::Quarantined => ObservationSanitizationOutcomeV1::Quarantined {
                 receipt,
                 findings: vec![finding],
             },
@@ -411,7 +411,7 @@ impl ClaudeRecordSanitizerV1 {
         raw_digest: &[u8; 32],
         identity: &ObservationIdentityMaterialV1,
         findings: Vec<SanitizationFindingV1>,
-    ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
+    ) -> Result<ObservationSanitizationOutcomeV1, PrivacySanitizerError> {
         let disposition = SanitizerDispositionV1::Quarantined;
         let sensitivity = SensitivityV1::Sensitive;
         let receipt_ref =
@@ -424,7 +424,7 @@ impl ClaudeRecordSanitizerV1 {
             )?
             .derive_receipt_ref()?;
         let receipt = SanitizationReceiptV1::new(receipt_ref, disposition, sensitivity, None)?;
-        Ok(ClaudeSanitizationOutcomeV1::Quarantined { receipt, findings })
+        Ok(ObservationSanitizationOutcomeV1::Quarantined { receipt, findings })
     }
 
     fn parse_limits(&self) -> ParseLimits {
@@ -592,9 +592,9 @@ fn validate_canonical_structural_identity(
 /// Its constructor is private so a raw `serde_json::Value` cannot be relabeled
 /// as sanitized by provider adapters.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SanitizedClaudeRecordV1(Box<DurableObservationV1>);
+pub struct SanitizedObservationRecordV1(Box<DurableObservationV1>);
 
-impl SanitizedClaudeRecordV1 {
+impl SanitizedObservationRecordV1 {
     fn issue(observation: &DurableObservationV1) -> Self {
         Self(Box::new(observation.clone()))
     }
@@ -609,10 +609,10 @@ impl SanitizedClaudeRecordV1 {
 }
 
 #[derive(Clone, Debug)]
-pub enum ClaudeSanitizationOutcomeV1 {
+pub enum ObservationSanitizationOutcomeV1 {
     Durable {
         observation: Box<DurableObservationV1>,
-        sanitized_record: SanitizedClaudeRecordV1,
+        sanitized_record: SanitizedObservationRecordV1,
         findings: Vec<SanitizationFindingV1>,
     },
     Rejected {
@@ -625,11 +625,7 @@ pub enum ClaudeSanitizationOutcomeV1 {
     },
 }
 
-pub type RecordSanitizerV1 = ClaudeRecordSanitizerV1;
-pub type SanitizedObservationRecordV1 = SanitizedClaudeRecordV1;
-pub type ObservationSanitizationOutcomeV1 = ClaudeSanitizationOutcomeV1;
-
-impl ClaudeSanitizationOutcomeV1 {
+impl ObservationSanitizationOutcomeV1 {
     pub fn durable_observation(&self) -> Option<&DurableObservationV1> {
         match self {
             Self::Durable { observation, .. } => Some(observation),
@@ -652,7 +648,7 @@ impl ClaudeSanitizationOutcomeV1 {
         }
     }
 
-    pub fn sanitized_record(&self) -> Option<&SanitizedClaudeRecordV1> {
+    pub fn sanitized_record(&self) -> Option<&SanitizedObservationRecordV1> {
         match self {
             Self::Durable {
                 sanitized_record, ..
