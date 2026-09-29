@@ -54,6 +54,29 @@ async fn current_revision(
         .clone()
 }
 
+async fn profile_revision(
+    harness: &ProductionProjectCompositionHarnessV1,
+) -> ConfigurationRevisionId {
+    let store_administration = &harness
+        .resources
+        .as_ref()
+        .expect("production composition resources")
+        .store_administration;
+    let profile_id = store_administration
+        .profile_identity()
+        .expect("profile identity")
+        .profile_id()
+        .clone();
+    let database = store_administration
+        .registered_profile_session_database()
+        .await
+        .expect("profile sessions store");
+    tracedecay_project::config::read_or_initialize_profile_configuration(database, &profile_id)
+        .await
+        .expect("profile configuration")
+        .revision_id
+}
+
 async fn cli_configuration_set(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
@@ -317,7 +340,8 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("production composition");
-    let expected_revision = current_revision(&harness, &project).await;
+    let expected_revision = profile_revision(&harness).await;
+    let project_revision = current_revision(&harness, &project).await;
     let profile_id = current_profile_id(&harness, &project).await;
     let request = ConfigurationBatchRequestV1 {
         mutations: vec![ConfigurationDirectMutationRequestV1::Set {
@@ -344,8 +368,13 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
         .expect("first CLI user configuration effect"),
     )
     .expect("CLI application envelope");
-    let committed_revision = current_revision(&harness, &project).await;
+    let committed_revision = profile_revision(&harness).await;
     assert_ne!(committed_revision, expected_revision);
+    assert_eq!(
+        current_revision(&harness, &project).await,
+        project_revision,
+        "a user setting commits to the profile store, never the project's"
+    );
     harness.shutdown().await;
 
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
@@ -371,7 +400,7 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
         "dashboard must replay the CLI operation's exact durable user configuration effect"
     );
     assert_eq!(
-        current_revision(&harness, &project).await,
+        profile_revision(&harness).await,
         committed_revision,
         "cross-surface replay must not advance user configuration again"
     );
@@ -394,7 +423,7 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
     .expect_err("same-key changed-input dashboard request must conflict");
     assert_eq!(conflict.problem.code, "configuration.conflict");
     assert_eq!(
-        current_revision(&harness, &project).await,
+        profile_revision(&harness).await,
         committed_revision,
         "user configuration idempotency conflict must not advance configuration"
     );

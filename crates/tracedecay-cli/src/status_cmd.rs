@@ -481,7 +481,7 @@ async fn handle_status_command_within(
     };
     let upload_enabled = timeout_at(
         deadline,
-        commands::canonical_upload_enabled(profile, &project_path),
+        commands::canonical_upload_enabled(profile),
     )
     .await
     .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
