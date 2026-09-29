@@ -229,7 +229,10 @@ impl StaticLanguageRegistry {
             // Rust v16 does the same for a `use` in an inline `mod` body and
             // rewrites a call under a block or inline-module glob into the
             // glob's module, marking it so an unbound one stays a caller gap.
-            // Rust v17 gives `const`/`static` initializers their calls.
+            // Rust v17 gives `const`/`static` initializers their calls. Rust
+            // v18 keeps the path or receiver of a call inside macro arguments
+            // and spells in-file `self::`/`super::`/`crate::` calls by their
+            // bare name, so both bind.
             // TypeScript v7 records `export … from` forwarding as public
             // import evidence and retains explicitly imported ubiquitous names
             // as cross-file candidates, so barrels and workspace packages bind.
@@ -264,7 +267,7 @@ impl StaticLanguageRegistry {
             // decorators, and default values theirs and module-scope
             // statements a `<module>` init block.
             let extractor_revision = match language.as_str() {
-                "rust" => 17,
+                "rust" => 18,
                 "typescript" => 10,
                 "go" => 8,
                 "ruby" | "protobuf" | "python" => 7,
@@ -469,7 +472,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v17");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v18");
 
         assert_eq!(
             registry
