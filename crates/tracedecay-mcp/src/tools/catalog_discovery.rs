@@ -35,12 +35,10 @@ struct DiscoveryCacheKey {
     host_ast_grep: bool,
 }
 
-struct DiscoveryCacheEntry {
-    tools: Arc<Vec<ToolDefinition>>,
-    payload: Arc<Value>,
-}
-
-static DISCOVERY_CACHE: LazyLock<RwLock<HashMap<DiscoveryCacheKey, Arc<DiscoveryCacheEntry>>>> =
+/// Only the serialized `{"tools": [...]}` payload is cached: every
+/// production read serves it, and keeping the definitions it was serialized
+/// from as well held the catalog twice.
+static DISCOVERY_CACHE: LazyLock<RwLock<HashMap<DiscoveryCacheKey, Arc<Value>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[cfg(test)]
@@ -174,7 +172,7 @@ fn discovery_cache_get_or_insert(
     authorized_capabilities: &BTreeSet<CapabilityId>,
     available_scope: &BTreeSet<ScopeDimension>,
     registry_mode: ToolRegistryMode,
-) -> Result<Arc<DiscoveryCacheEntry>, McpDispatchMetadataError> {
+) -> Result<Arc<Value>, McpDispatchMetadataError> {
     let key = discovery_cache_key(
         profile_id,
         authorized_capabilities,
@@ -187,14 +185,13 @@ fn discovery_cache_get_or_insert(
         record_discovery_cache_hit();
         return Ok(Arc::clone(entry));
     }
-    let tools = Arc::new(compose_node_independent_definitions(
+    let tools = compose_node_independent_definitions(
         profile_id,
         authorized_capabilities,
         available_scope,
         registry_mode,
-    )?);
-    let payload = Arc::new(serde_json::json!({ "tools": tools.as_ref() }));
-    let entry = Arc::new(DiscoveryCacheEntry { tools, payload });
+    )?;
+    let entry = Arc::new(serde_json::json!({ "tools": tools }));
     match DISCOVERY_CACHE.write() {
         Ok(mut cache) => {
             if let Some(published) = cache.get(&key) {
@@ -217,14 +214,6 @@ fn context_description_for(node_count: Option<u64>, budget: u8) -> String {
     match node_count {
         None => context_warming_description(budget),
         Some(node_count) => context_description(node_count, budget),
-    }
-}
-
-fn apply_context_description(definitions: &mut [ToolDefinition], description: &str) {
-    for definition in definitions {
-        if definition.name == "tracedecay_context" {
-            description.clone_into(&mut definition.description);
-        }
     }
 }
 
@@ -265,18 +254,24 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
     available_scope: &BTreeSet<ScopeDimension>,
     registry_mode: ToolRegistryMode,
 ) -> Result<Vec<ToolDefinition>, McpDispatchMetadataError> {
-    let entry = discovery_cache_get_or_insert(
+    let mut payload = catalog_discovery_tools_list_payload(
+        Some(node_count),
+        budget,
         profile_id,
         authorized_capabilities,
         available_scope,
         registry_mode,
     )?;
-    let mut definitions = (*entry.tools).clone();
-    apply_context_description(
-        &mut definitions,
-        &context_description_for(Some(node_count), budget),
-    );
-    Ok(definitions)
+    let tools = payload.get_mut("tools").map(Value::take).ok_or_else(|| {
+        McpDispatchMetadataError::Initialization(
+            "cached tools/list payload is missing the tools array".to_owned(),
+        )
+    })?;
+    serde_json::from_value(tools).map_err(|error| {
+        McpDispatchMetadataError::Initialization(format!(
+            "cached tools/list payload does not decode as tool definitions: {error}"
+        ))
+    })
 }
 
 /// Composed `{"tools": [...]}` discovery payload for `tools/list`.
@@ -298,7 +293,7 @@ pub fn catalog_discovery_tools_list_payload(
         available_scope,
         registry_mode,
     )?;
-    let mut payload = (*entry.payload).clone();
+    let mut payload = (*entry).clone();
     patch_context_description_in_payload(
         &mut payload,
         context_description_for(node_count, budget),
