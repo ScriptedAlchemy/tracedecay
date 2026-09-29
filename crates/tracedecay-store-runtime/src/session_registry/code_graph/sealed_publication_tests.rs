@@ -1898,6 +1898,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
     // Back under the low watermark the same runtime publishes the generation
     // it just refused; the refusal poisoned nothing.
     set_sample(&sample, pressure.low_watermark_bytes());
+    std::thread::sleep(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1);
     let published = runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("nominal measured RSS publishes the sealed generation");
