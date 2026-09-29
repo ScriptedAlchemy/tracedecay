@@ -237,6 +237,20 @@ fn publish_cold(
     publish_rows(graph, root, authority, spilled.into(), prior, input)
 }
 
+/// The sealed artifact directory whose receipt names `generation`.
+fn sealed_directory_of(sealed_root: &Path, generation: &str) -> std::path::PathBuf {
+    std::fs::read_dir(sealed_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            std::fs::read(path.join("sealed.json")).is_ok_and(|receipt| {
+                serde_json::from_slice::<serde_json::Value>(&receipt).unwrap()["generation"]
+                    == generation
+            })
+        })
+        .unwrap_or_else(|| panic!("no sealed artifact for {generation}"))
+}
+
 /// Opaque producer inputs a layerable cold generation seals beside its rows.
 const PRODUCER_INPUTS: &[u8] = b"producer resolution inputs";
 
@@ -635,23 +649,22 @@ fn a_layered_generation_serves_and_digests_like_its_cold_build() {
     // 150, 170, 199) the 31 new relations reach.
     assert_eq!(delta, (15, 31));
     assert_same_reads(&cold_child.snapshot, &layered_child.snapshot, &identity);
+    // The base's verify-once proof binds its container's bytes, which the
+    // layer links, so the layer carries it: a restart resolves the base by
+    // marker instead of re-proving every base row.
+    let sealed_root = support::graph_path(layered_root.path()).with_extension("sealed");
+    let parent_directory = sealed_directory_of(&sealed_root, "layered-g1");
+    let layered_directory = sealed_directory_of(&sealed_root, "layered-g2");
+    assert_eq!(
+        std::fs::read(layered_directory.join("base.verified")).unwrap(),
+        std::fs::read(parent_directory.join("generation.verified")).unwrap()
+    );
 
     drop((layered_child, layered_parent));
     assert!(layered_graph.close().unwrap());
     drop(layered_graph);
     // Retirement deletes the parent's artifact; the layered store must not
     // depend on anything but its own directory.
-    let sealed_root = support::graph_path(layered_root.path()).with_extension("sealed");
-    let parent_directory = std::fs::read_dir(&sealed_root)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .find(|path| {
-            std::fs::read(path.join("sealed.json")).is_ok_and(|receipt| {
-                serde_json::from_slice::<serde_json::Value>(&receipt).unwrap()["generation"]
-                    == "layered-g1"
-            })
-        })
-        .expect("the parent's sealed artifact");
     std::fs::remove_dir_all(parent_directory).unwrap();
     // Restart: the sealed-first recovery a cold daemon runs adopts the
     // layered store and re-proves its hard-linked base from disk.

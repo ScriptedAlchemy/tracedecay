@@ -46,6 +46,7 @@ use crate::schema::{
 };
 use crate::state::{latest_projection, load_entity, load_relation};
 use crate::traversal::{GraphTraversalDirection, TraversalRequest};
+use crate::verified_marker::marker_path;
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId,
     GraphEntityRef, GraphGenerationId, GraphGenerationManifestIdentity, GraphGenerationRelation,
@@ -313,11 +314,20 @@ impl GraphLayeredRowSpill {
             ));
         }
         let spill = GraphGenerationRowSpill::create_layered(directory, projection)?;
-        std::fs::hard_link(
-            &base.inner.container,
-            spill.directory().join(LAYERED_BASE_CONTAINER_FILE),
-        )
-        .map_err(|error| layered_io("base container pin", error))?;
+        let pinned_container = spill.directory().join(LAYERED_BASE_CONTAINER_FILE);
+        std::fs::hard_link(&base.inner.container, &pinned_container)
+            .map_err(|error| layered_io("base container pin", error))?;
+        // The base's verify-once marker binds the container's bytes, not its
+        // path, so it vouches for the pinned link too; without it the layer's
+        // first open re-proves every base row.
+        match std::fs::copy(
+            marker_path(&base.inner.container),
+            marker_path(&pinned_container),
+        ) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(layered_io("base marker pin", error)),
+        }
         std::fs::hard_link(
             &base.inner.attachment,
             spill.directory().join(LAYERED_BASE_ATTACHMENT_FILE),
@@ -625,13 +635,17 @@ impl LayeredGraphGeneration {
     pub(crate) fn install_base_files(&self, staging: &Path) -> Result<(), GraphDbError> {
         let pinned = self.delta.directory();
         for file in [LAYERED_BASE_CONTAINER_FILE, LAYERED_BASE_ATTACHMENT_FILE] {
-            match std::fs::hard_link(pinned.join(file), staging.join(file)) {
-                Ok(()) => {}
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        && file == LAYERED_BASE_ATTACHMENT_FILE => {}
-                Err(error) => return Err(layered_io("base link", error)),
-            }
+            std::fs::hard_link(pinned.join(file), staging.join(file))
+                .map_err(|error| layered_io("base link", error))?;
+        }
+        let container = Path::new(LAYERED_BASE_CONTAINER_FILE);
+        match std::fs::copy(
+            pinned.join(marker_path(container)),
+            staging.join(marker_path(container)),
+        ) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(layered_io("base marker link", error)),
         }
         let encoded = serde_json::to_vec(&self.hidden)
             .map_err(|error| GraphDbError::unavailable(format!("hidden rows encode: {error}")))?;

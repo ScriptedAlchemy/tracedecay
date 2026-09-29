@@ -272,7 +272,7 @@ pub(crate) struct ProvenGeneration {
 }
 
 /// The marker path for a container: `graph.grafeo` -> `graph.verified`.
-fn marker_path(container: &Path) -> PathBuf {
+pub(crate) fn marker_path(container: &Path) -> PathBuf {
     container.with_extension("verified")
 }
 

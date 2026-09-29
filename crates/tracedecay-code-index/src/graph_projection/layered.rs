@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use tracedecay_domain::{CanonicalRelationEdgeV1, SymbolOccurrenceId};
+use tracedecay_runtime_core::resident_memory::release_process_allocator_memory_v1;
 
 use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use tracedecay_graph_db::{
@@ -133,8 +134,10 @@ pub fn build_layered_code_graph_rows(
             check,
         )
     )?;
-    // Sealing reads the base engine; the resolution is not needed beside it.
+    // Sealing reopens the base engine, a whole sealed graph. Returning the
+    // resolution's pages first keeps the two from stacking in the peak.
     drop(resolution);
+    let _ = release_process_allocator_memory_v1();
     let identity =
         code_graph_manifest_identity(projection_identity, &generation, projector_revision)?;
     let generation = hotpath::measure_block!(
