@@ -446,16 +446,9 @@ pub async fn run_payload_gc(
             &mut report,
         )?;
     }
-    let unreferenced = plan_unreferenced(conn, provider, session_id, &cfg, now).await?;
-    unreferenced.record_deferred(&mut report);
-    for (owner, bytes) in &unreferenced.unreferenced {
-        if remaining == 0 {
-            report.batch_cap(1);
-            continue;
-        }
-        report.unreferenced.add(&owner.payload_ref, *bytes);
-        remaining -= 1;
-    }
+    plan_unreferenced(conn, provider, session_id, &cfg, now)
+        .await?
+        .preview(&mut remaining, &mut report);
     let missing = plan_missing(
         conn,
         dir.as_deref(),
@@ -463,33 +456,8 @@ pub async fn run_payload_gc(
         &mut report,
     )
     .await?;
-    for payload_ref in &missing.referenced {
-        report.missing.add(payload_ref, 0);
-    }
-    if cfg.reap_missing_enabled && cfg.reap_missing_after != 0 {
-        let marks = gc_marks(conn, &missing.referenced).await?;
-        for payload_ref in &missing.referenced {
-            let Some((state, first_seen_at)) = marks.get(payload_ref.as_str()) else {
-                continue;
-            };
-            if state.as_str() != "missing"
-                || now.saturating_sub(*first_seen_at) < cfg.reap_missing_after as i64
-            {
-                continue;
-            }
-            if remaining == 0 {
-                report.batch_cap(1);
-                continue;
-            }
-            remaining -= 1;
-        }
-    }
-    for (payload_ref, detail) in &snapshot.dangling.stat_errors {
-        report.add_error(payload_ref, "dangling_payload_stat_failed", detail.clone());
-    }
-    for payload_ref in &snapshot.dangling.refs {
-        report.dangling.add(payload_ref, 0);
-    }
+    preview_missing_reaps(conn, &missing, &cfg, now, &mut remaining, &mut report).await?;
+    snapshot.dangling.preview(&mut report);
     report.ended_at = now;
     crate::metrics::record_lcm_gc(report.totals.bytes, report.totals.files);
     Ok(report)
@@ -519,6 +487,54 @@ impl UnreferencedPlan {
         }
         report.batch_cap(usize::try_from(self.beyond_batch).unwrap_or(usize::MAX));
     }
+
+    fn preview(&self, remaining: &mut usize, report: &mut LcmGcReport) {
+        self.record_deferred(report);
+        for (owner, bytes) in &self.unreferenced {
+            if *remaining == 0 {
+                report.batch_cap(1);
+                continue;
+            }
+            report.unreferenced.add(&owner.payload_ref, *bytes);
+            *remaining -= 1;
+        }
+    }
+}
+
+/// Reports the referenced missing payloads and counts the ones an applied
+/// pass would reap.
+async fn preview_missing_reaps(
+    conn: &(impl QueryExecutor + ?Sized),
+    missing: &MissingPlan,
+    cfg: &LcmGcConfig,
+    now: i64,
+    remaining: &mut usize,
+    report: &mut LcmGcReport,
+) -> Result<(), LcmError> {
+    for payload_ref in &missing.referenced {
+        report.missing.add(payload_ref, 0);
+    }
+    if !cfg.reap_missing_enabled || cfg.reap_missing_after == 0 {
+        return Ok(());
+    }
+    let marks = gc_marks(conn, &missing.referenced).await?;
+    for payload_ref in &missing.referenced {
+        let due = marks
+            .get(payload_ref.as_str())
+            .is_some_and(|(state, first_seen_at)| {
+                state == "missing"
+                    && now.saturating_sub(*first_seen_at) >= cfg.reap_missing_after as i64
+            });
+        if !due {
+            continue;
+        }
+        if *remaining == 0 {
+            report.batch_cap(1);
+            continue;
+        }
+        *remaining -= 1;
+    }
+    Ok(())
 }
 
 /// Scope predicate over a mark's metadata row aliased `e`. A mark without
@@ -689,6 +705,17 @@ struct DanglingPlan {
     store_ids: Vec<i64>,
     scanned_through: i64,
     stat_errors: Vec<(String, String)>,
+}
+
+impl DanglingPlan {
+    fn preview(&self, report: &mut LcmGcReport) {
+        for (payload_ref, detail) in &self.stat_errors {
+            report.add_error(payload_ref, "dangling_payload_stat_failed", detail.clone());
+        }
+        for payload_ref in &self.refs {
+            report.dangling.add(payload_ref, 0);
+        }
+    }
 }
 
 pub(crate) const DANGLING_SCAN_CURSOR: &str = "dangling_scan_store_id";

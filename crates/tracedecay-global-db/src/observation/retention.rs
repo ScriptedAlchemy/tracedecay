@@ -403,10 +403,45 @@ async fn released_anchors_since(
 ) -> Result<(Vec<String>, LedgerCursor)> {
     let reader = database.read_connection();
     let mut anchors = BTreeSet::new();
-    let mut next = cursor;
-    // Appended since the last run. A released row not yet due is left for
-    // the aged scan of the run that finds it past the window.
-    'appended: loop {
+    let appended_through = released_anchors_appended(
+        &reader,
+        cursor.appended_through,
+        cutoff,
+        limit,
+        &mut anchors,
+    )
+    .await?;
+    let mut next = LedgerCursor {
+        appended_through,
+        ..cursor
+    };
+    let remaining = limit.saturating_sub(anchors.len());
+    if remaining > 0 {
+        next.aged_through = released_anchors_aged(
+            &reader,
+            cursor.aged_through,
+            cutoff,
+            remaining,
+            &mut anchors,
+        )
+        .await?;
+    }
+    Ok((anchors.into_iter().collect(), next))
+}
+
+/// Adds the anchors whose released disposition was appended after `after`
+/// already past the window, up to `limit` anchors in total, and returns the
+/// sequence examined through. A released row not yet due is left for the aged
+/// scan of the run that finds it past the window.
+async fn released_anchors_appended(
+    reader: &(impl QueryExecutor + ?Sized),
+    after: i64,
+    cutoff: i64,
+    limit: usize,
+    anchors: &mut BTreeSet<String>,
+) -> Result<i64> {
+    let mut examined = after;
+    loop {
         let mut rows = reader
             .query(
                 &format!(
@@ -417,7 +452,7 @@ async fn released_anchors_since(
                      ORDER BY d.sequence
                      LIMIT ?2"
                 ),
-                params![next.appended_through, DISPOSITION_SCAN_PAGE_ROWS],
+                params![examined, DISPOSITION_SCAN_PAGE_ROWS],
             )
             .await
             .map_err(db_error)?;
@@ -432,21 +467,28 @@ async fn released_anchors_since(
             {
                 anchors.insert(row.get::<String>(1).map_err(db_error)?);
             }
-            next.appended_through = sequence;
+            examined = sequence;
             if anchors.len() >= limit {
-                break 'appended;
+                return Ok(examined);
             }
         }
         if page_rows < DISPOSITION_SCAN_PAGE_ROWS {
-            break;
+            return Ok(examined);
         }
     }
-    // Released rows that aged past the window since the last run.
-    let remaining = limit.saturating_sub(anchors.len());
-    if remaining == 0 {
-        return Ok((anchors.into_iter().collect(), next));
-    }
-    let (aged_effective_at, aged_sequence) = cursor.aged_through;
+}
+
+/// Adds up to `remaining` anchors whose released disposition aged past the
+/// window after `aged_through`, and returns the `(effective_at, sequence)`
+/// examined through.
+async fn released_anchors_aged(
+    reader: &(impl QueryExecutor + ?Sized),
+    aged_through: (i64, i64),
+    cutoff: i64,
+    remaining: usize,
+    anchors: &mut BTreeSet<String>,
+) -> Result<(i64, i64)> {
+    let (aged_effective_at, aged_sequence) = aged_through;
     let remaining = i64::try_from(remaining).unwrap_or(i64::MAX);
     let mut rows = reader
         .query(
@@ -473,12 +515,11 @@ async fn released_anchors_since(
             anchors.insert(row.get::<String>(1).map_err(db_error)?);
         }
     }
-    next.aged_through = match last_aged {
+    Ok(match last_aged {
         Some(last) if aged == remaining => last,
         // Every released row older than the cutoff has been examined.
         _ => (cutoff.saturating_sub(1), i64::MAX),
-    };
-    Ok((anchors.into_iter().collect(), next))
+    })
 }
 
 /// `generation` scopes every pass to a single `projection_generation` (`None`
