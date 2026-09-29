@@ -1133,12 +1133,14 @@ fn graph_error_response<T: Serialize>(
             "graph_registry_missing",
             "the exact-project code graph registry is unavailable",
         ),
-        CodeGraphReadError::Unavailable { detail } => unmeasured_response::<T>(
-            state,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "graph_authority_unavailable",
-            &detail,
-        ),
+        CodeGraphReadError::Unavailable { detail } | CodeGraphReadError::Refused { detail } => {
+            unmeasured_response::<T>(
+                state,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "graph_authority_unavailable",
+                &detail,
+            )
+        }
         CodeGraphReadError::Stale { detail } => unmeasured_response::<T>(
             state,
             StatusCode::SERVICE_UNAVAILABLE,

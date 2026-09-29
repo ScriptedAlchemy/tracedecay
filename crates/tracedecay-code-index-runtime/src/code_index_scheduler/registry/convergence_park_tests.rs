@@ -29,14 +29,20 @@ use tracedecay_code_index_retention::code_index_generations::{
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildPhaseV1,
 };
+use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
+use tracedecay_domain::UtcMicros;
+use tracedecay_graph_query::{
+    CodeGraphReadError, CodeGraphReadRequest, map_code_graph_read_runtime_error,
+};
 
 use super::super::graph_activation::{
     GRAPH_PUBLICATION_DEADLINE_REASON, injected_activation_attempt_count,
     install_injected_activation_gate, set_injected_activation_failures,
     set_injected_publication_deadline,
 };
-use super::super::tests::OwnerSignals;
-use super::CodeIndexSchedulerRegistryV1;
+use super::super::tests::{OwnerSignals, application_context};
+use super::{CodeIndexRetainedSeatWaitV1, CodeIndexSchedulerRegistryV1};
+use crate::project_reads::project_code_graph_projection_read_port;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Ceiling on how long a test waits for the worker to reach the asserted
@@ -510,8 +516,7 @@ async fn text_seats_while_graph_activation_keeps_failing_retryably() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_spent_graph_publication_budget_is_refused_once_and_never_replayed() {
     let (fixture, admission) =
-        Fixture::mount_with_poisoned_artifacts_root_held("project.publication-budget", |_| {})
-            .await;
+        Fixture::mount_with_poisoned_artifacts_root_held("project.code-index-tests", |_| {}).await;
     let scope = fixture
         .registry
         .serving_code_scope(&fixture.project)
@@ -554,6 +559,38 @@ async fn a_spent_graph_publication_budget_is_refused_once_and_never_replayed() {
         .await
         .expect("freshness after the retry window");
     assert_eq!(after.code_graph_serving.as_ref(), Some(&refused));
+
+    // A graph read of that generation answers the refusal typed and
+    // terminal: retrying reads the same until another generation seals.
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::Callers).expect("callers operation");
+    let context = application_context(
+        &operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let port = project_code_graph_projection_read_port(
+        fixture.registry.clone(),
+        fixture.project.clone(),
+        context.scope().clone(),
+    );
+    let refusal = port
+        .open(CodeGraphReadRequest::from_context(&context, UtcMicros(1)))
+        .await
+        .expect_err("a refused generation serves no graph read");
+    assert_eq!(
+        refusal,
+        CodeGraphReadError::Refused {
+            detail: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned(),
+        }
+    );
+    let routed = map_code_graph_read_runtime_error(refusal);
+    assert_eq!(
+        routed
+            .project_route_context()
+            .map(|(code, retryable, _)| (code, retryable)),
+        Some(("code-graph-refused", false))
+    );
     set_injected_publication_deadline(&scope.worktree_id, false);
     fixture.registry.shutdown().await;
 }
@@ -614,6 +651,47 @@ async fn progress_names_graph_publication_until_the_graph_seats() {
         seated.progress.as_ref().map(|progress| progress.phase),
         Some(CodeIndexBuildPhaseV1::Ready)
     );
+    fixture.registry.shutdown().await;
+}
+
+/// A read waiting for a retained generation to seat answers warming while
+/// that generation's graph is being published, instead of spending its
+/// deadline on a corpus-sized build that the wait cannot shorten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seat_wait_answers_warming_while_the_graph_publishes() {
+    let (fixture, admission) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.code-index-tests", |_| {}).await;
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    let gate = install_injected_activation_gate(&scope.worktree_id);
+    drop(admission);
+    tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
+        .await
+        .expect("graph activation starts");
+
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::Callers).expect("callers operation");
+    let context = application_context(
+        &operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let answered = tokio::time::timeout(
+        CONVERGENCE_DEADLINE,
+        fixture.registry.wait_for_retained_graph_seat(
+            &fixture.project,
+            context.scope(),
+            Duration::from_mins(10),
+        ),
+    )
+    .await
+    .expect("the seat wait answers while the graph publication is held");
+    assert_eq!(answered, CodeIndexRetainedSeatWaitV1::Warming);
+
+    gate.release();
     fixture.registry.shutdown().await;
 }
 

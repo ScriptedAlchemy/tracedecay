@@ -2199,6 +2199,10 @@ impl LatestCompleteCodeIndexV1 {
     pub(super) fn graph_publication_budget_spent(&self) -> bool {
         self.text.graph_publication_budget_spent()
     }
+
+    pub fn generation_graph_refusal(&self) -> Option<&'static str> {
+        self.text.generation_graph_refusal()
+    }
 }
 
 impl LatestCodeTextGenerationV1 {
@@ -2285,6 +2289,24 @@ impl LatestCodeTextGenerationV1 {
             CodeGraphActivationStateV1::Refused(reason)
                 if reason == super::graph_activation::GRAPH_PUBLICATION_DEADLINE_REASON
         )
+    }
+
+    /// The refusal that holds this generation's graph for its lifetime: a
+    /// spent publication budget or a configuration refusal. A resident-memory
+    /// refusal is retried once memory is given back, so it is not one.
+    pub fn generation_graph_refusal(&self) -> Option<&'static str> {
+        match *self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Refused(reason)
+                if reason != super::graph_activation::RESIDENT_MEMORY_GRAPH_REFUSAL_REASON =>
+            {
+                Some(reason)
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn refuse_graph_activation(&self, reason: &'static str) {
