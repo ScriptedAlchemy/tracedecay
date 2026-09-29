@@ -302,36 +302,35 @@ pub(crate) fn is_proven_unpublished_active_tail(
     {
         return Ok(false);
     }
-    let tail_len = scan.file_len - scan.truncate_to;
-    let mut input = File::open(path).map_err(io_error)?;
-    input
-        .seek(SeekFrom::Start(scan.truncate_to))
-        .map_err(io_error)?;
-    let prefix_len = (tail_len as usize).min(FRAME_HEADER_BYTES);
-    let mut header_prefix = [0u8; FRAME_HEADER_BYTES];
-    input
-        .read_exact(&mut header_prefix[..prefix_len])
-        .map_err(io_error)?;
-    Ok(torn_header_matches(
-        intent,
-        written.len() as u64,
-        &header_prefix[..prefix_len],
-    ))
+    torn_header_matches(path, scan, intent, written.len() as u64)
 }
 
 /// The first frame's header is known exactly. A later frame's lengths are
 /// not recorded, so its magic, version, and sequence must match.
-fn torn_header_matches(intent: &AppendIntentV1, written: u64, prefix: &[u8]) -> bool {
+fn torn_header_matches(
+    path: &Path,
+    scan: &ScanResult,
+    intent: &AppendIntentV1,
+    written: u64,
+) -> Result<bool, SpoolError> {
+    let prefix_len = ((scan.file_len - scan.truncate_to) as usize).min(FRAME_HEADER_BYTES);
+    let mut header_prefix = [0u8; FRAME_HEADER_BYTES];
+    let mut input = File::open(path).map_err(io_error)?;
+    input
+        .seek(SeekFrom::Start(scan.truncate_to))
+        .and_then(|_| input.read_exact(&mut header_prefix[..prefix_len]))
+        .map_err(io_error)?;
+    let prefix = &header_prefix[..prefix_len];
     if written == 0 {
-        return prefix == &intent.header[..prefix.len()];
+        return Ok(prefix == &intent.header[..prefix_len]);
     }
     let mut expected = [0u8; FRAME_HEADER_BYTES];
     expected[0..4].copy_from_slice(FRAME_MAGIC);
     expected[4..6].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
     expected[12..20].copy_from_slice(&(intent.seq + written).to_le_bytes());
-    prefix
+    Ok(prefix
         .iter()
         .zip(expected)
         .enumerate()
-        .all(|(index, (byte, expected))| (6..12).contains(&index) || *byte == expected)
+        .all(|(index, (byte, expected))| (6..12).contains(&index) || *byte == expected))
 }
