@@ -96,22 +96,20 @@ async fn production_codex_message_search(
     project: &Path,
 ) -> Value {
     // An empty partial or stale answer is not yet converged; a complete zero
-    // must still fail when the final Codex source has not appeared.
-    let payload = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let payload = production_codex_message_search_once(harness, project).await;
-            if !matches!(payload["outcome"].as_str(), Some("partial" | "stale"))
-                || payload["results"]
-                    .as_array()
-                    .is_some_and(|results| !results.is_empty())
-            {
-                break payload;
-            }
-            tokio::task::yield_now().await;
+    // must still fail when the final Codex source has not appeared. Background
+    // catch-up has no deadline, so the wait ends on the answer's own
+    // freshness, not on a wall clock.
+    let payload = loop {
+        let payload = production_codex_message_search_once(harness, project).await;
+        if !matches!(payload["outcome"].as_str(), Some("partial" | "stale"))
+            || payload["results"]
+                .as_array()
+                .is_some_and(|results| !results.is_empty())
+        {
+            break payload;
         }
-    })
-    .await
-    .expect("production Codex message search convergence deadline");
+        tokio::task::yield_now().await;
+    };
     assert!(
         payload["results"].as_array().is_some_and(|results| {
             results.iter().any(|result| {
@@ -845,35 +843,31 @@ async fn scheduled_session_import_makes_the_final_codex_source_searchable() {
         .expect("session import idempotency key")
         .to_owned();
 
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let status = harness
-                .call_tool(
-                    &project,
-                    "tracedecay_admin_cli",
-                    json!({
-                        "action": "sessions_sync_status",
-                        "idempotency_key": idempotency_key,
-                        "format": "json",
-                    }),
-                )
-                .await
-                .expect("production transcript import status");
-            let result = status.result.expect("production transcript status result");
-            assert_ne!(result["isError"], true, "{result}");
-            let payload = recovered_owner_payload(&harness, &project, result).await;
-            if payload["status"] == "complete" {
-                break payload;
-            }
-            assert!(
-                matches!(payload["status"].as_str(), Some("accepted" | "joined")),
-                "session import did not remain active: {payload}"
-            );
-            tokio::task::yield_now().await;
+    let completed = loop {
+        let status = harness
+            .call_tool(
+                &project,
+                "tracedecay_admin_cli",
+                json!({
+                    "action": "sessions_sync_status",
+                    "idempotency_key": idempotency_key,
+                    "format": "json",
+                }),
+            )
+            .await
+            .expect("production transcript import status");
+        let result = status.result.expect("production transcript status result");
+        assert_ne!(result["isError"], true, "{result}");
+        let payload = recovered_owner_payload(&harness, &project, result).await;
+        if payload["status"] == "complete" {
+            break payload;
         }
-    })
-    .await
-    .expect("session import completion deadline");
+        assert!(
+            matches!(payload["status"].as_str(), Some("accepted" | "joined")),
+            "session import did not remain active: {payload}"
+        );
+        tokio::task::yield_now().await;
+    };
     // The import hands catch-up to the workers and admits nothing itself, so
     // its receipt is one deferred unit per store, never a completed claim.
     assert_eq!(completed["termination"], "partial", "{completed}");

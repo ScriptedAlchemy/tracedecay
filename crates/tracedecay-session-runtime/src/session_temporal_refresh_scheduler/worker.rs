@@ -197,6 +197,9 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             return;
         }
         loop {
+            // Busy before any wake is consumed: a waiter must never see its
+            // wake taken while the worker still reads idle.
+            state.mark_worker_busy();
             let mut projection_requested = state.take_dirty();
             let mut history_requested = state.take_historical_dirty();
             // A wake that arrives while the admitted window is still
@@ -211,7 +214,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 break;
             }
             state.begin_pass();
-            state.mark_worker_busy();
             state.pass_count.fetch_add(1, Ordering::AcqRel);
             let history_outcome = if history_requested {
                 Some(
@@ -224,7 +226,13 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             } else {
                 None
             };
-            projection_requested |= state.take_dirty();
+            // A wake that lands after this pass started is served by its
+            // projection instead of a pass of its own, so it counts as a
+            // pass: `wake_and_wait_until_idle` joins the pass after its wake.
+            if state.take_dirty() {
+                projection_requested = true;
+                state.pass_count.fetch_add(1, Ordering::AcqRel);
+            }
             if let Some(outcome) = history_outcome {
                 state.record_history_outcome(outcome);
             }

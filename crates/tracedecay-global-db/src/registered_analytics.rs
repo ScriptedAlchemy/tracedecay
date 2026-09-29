@@ -1451,21 +1451,23 @@ async fn prune_observability_retention_class(
     // Settled outbox entries are replay transport state, not permanent product
     // evidence. Remove them before their exact analytics row so foreign-key
     // enforcement never requires a fail-open cascade. Pending claims have no
-    // analytics id and cannot match this deletion.
+    // analytics id and cannot match this deletion. The class and cutoff seek
+    // `idx_observability_event_retention`, so a pass reads the expired rows of
+    // one class, not every observability row older than the cutoff.
     let eligible_ids = format!(
         "SELECT id FROM analytics_events
          WHERE provider = 'tracedecay-observability'
-           AND timestamp < ?1
            AND json_extract(metadata_json, '$.retention_class') = ?2
+           AND timestamp < ?1
            AND {ACTIVE_DIRTY_ROLLUP_SOURCE_EXCLUSION_SQL}
-         ORDER BY id
+         ORDER BY timestamp, id
          LIMIT ?3"
     );
     let expired_outbox = transaction
         .execute(
             &format!(
                 "DELETE FROM observability_emission_outbox
-                 WHERE state = 'settled' AND analytics_event_id IN ({eligible_ids})"
+                 WHERE analytics_event_id IN ({eligible_ids}) AND state = 'settled'"
             ),
             tracedecay_runtime_core::db::engine::params![cutoff_seconds, retention_class, limit],
         )
@@ -1490,15 +1492,15 @@ async fn observability_retention_has_more(
         "SELECT EXISTS(
              SELECT 1 FROM analytics_events
              WHERE provider = 'tracedecay-observability'
-               AND (
-                   (timestamp < ?1 AND json_extract(metadata_json, '$.retention_class')
-                       = 'optional_local_detail30d')
-                   OR
-                   (timestamp < ?2 AND json_extract(metadata_json, '$.retention_class')
-                       = 'local_rollup395d')
-               )
+               AND json_extract(metadata_json, '$.retention_class') = 'optional_local_detail30d'
+               AND timestamp < ?1
                AND {ACTIVE_DIRTY_ROLLUP_SOURCE_EXCLUSION_SQL}
-             LIMIT 1
+         ) OR EXISTS(
+             SELECT 1 FROM analytics_events
+             WHERE provider = 'tracedecay-observability'
+               AND json_extract(metadata_json, '$.retention_class') = 'local_rollup395d'
+               AND timestamp < ?2
+               AND {ACTIVE_DIRTY_ROLLUP_SOURCE_EXCLUSION_SQL}
          )"
     );
     let mut rows = transaction

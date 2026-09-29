@@ -124,6 +124,7 @@ async fn resume_attempts_refuses_a_live_holder_and_reports_the_lost_attempt() {
     let server = harness
         .server(&project_root)
         .expect("restarted production MCP server");
+    let observing_from = now_micros();
     let before = wait_for_lost_attempt_state(&server).await;
     let held_epoch = evidence.held_status["lease"]["epoch"]
         .as_u64()
@@ -171,7 +172,17 @@ async fn resume_attempts_refuses_a_live_holder_and_reports_the_lost_attempt() {
     assert_eq!(fenced["lease"]["lease_id"], before["lease"]["lease_id"]);
     assert_eq!(fenced["lease"]["epoch"], held_epoch + 1, "{report}");
     let observed_at = if before["state"] == "running" {
-        occurred_at
+        // The restarted daemon's startup recovery fences the lost attempt in
+        // the background, so either it or this call records the observation
+        // first, at a time after `before` was read and no later than this call.
+        let observed_at = fenced["recovery"]["observed_at"]
+            .as_i64()
+            .expect("fence observation");
+        assert!(
+            (observing_from..=occurred_at).contains(&observed_at),
+            "the fence was observed outside this restart: {report}"
+        );
+        observed_at
     } else {
         assert_eq!(before["state"], "recovery_required", "{before}");
         before["recovery"]["observed_at"]

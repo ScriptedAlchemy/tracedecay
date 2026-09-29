@@ -679,19 +679,16 @@ mod tests {
             params_roots.push(json!({"uri": uri.as_str(), "name": format!("slow-{index}")}));
         }
         let params = json!({"roots": params_roots});
-        let started = std::time::Instant::now();
         let route =
             resolve_initialize_roots_project_route(Some(&params), Some(registry), None).await;
-        let elapsed = started.elapsed();
         for index in 0..3 {
             tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(
                 &projects.path().join(format!("slow-{index}")),
             );
         }
-        assert!(
-            elapsed < std::time::Duration::from_secs(3),
-            "three {probe:?} probes must not stack past one 2s budget, took {elapsed:?}"
-        );
+        // Each probe fits one 2 s budget, so per-root budgets would resolve all
+        // three unregistered roots and answer NotFound. Only a budget shared
+        // across roots runs out, on the second probe.
         let Some(crate::mcp::project_route::WorkspaceProjectRoute::Failed(failure)) = route else {
             panic!("shared budget must defer before every slow root resolves");
         };

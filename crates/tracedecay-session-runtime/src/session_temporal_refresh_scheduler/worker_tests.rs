@@ -9,13 +9,19 @@ use tracedecay_store::{
     SessionRefreshStore, SessionTemporalProjectionBatchV1,
 };
 
+use super::history::{
+    SessionHistoricalIngestOutcome, SessionHistoricalIngestPass, SessionHistoricalIngestor,
+    SharedSessionHistoricalIngestor,
+};
 use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy,
     zero_refresh_coverage,
 };
 use super::registry::SessionTemporalRefreshPassReport;
 use super::wake::{SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState};
-use super::worker::{apply_refresh_effect, run_session_temporal_refresh_pass};
+use super::worker::{
+    apply_refresh_effect, run_session_temporal_refresh_pass, run_session_temporal_refresh_scheduler,
+};
 
 async fn begin_empty_refreshes(
     store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
@@ -147,4 +153,65 @@ async fn refused_projection_progress_retires_the_refresh_instead_of_retrying() {
             .is_empty(),
         "the retired refresh must not be rediscovered"
     );
+}
+
+/// Holds its history pass open until the test releases it.
+struct GatedHistory {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl SessionHistoricalIngestor for GatedHistory {
+    fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            SessionHistoricalIngestOutcome::Complete
+        })
+    }
+
+    fn cancel(&self) {}
+}
+
+/// A hook ingest joins the refresh worker with a wake. When that wake lands
+/// while a history pass is running, the pass's projection serves it and no
+/// further pass starts, so the join must end with that pass rather than wait
+/// out its deadline.
+#[tokio::test]
+async fn a_wake_served_by_the_running_pass_joins_that_pass() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-wake-served-mid-pass").await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(GatedHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history.clone();
+    state.wake_history();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    history.entered.notified().await;
+
+    let handle = state.handle();
+    let join = handle.wake_and_wait_until_idle(Duration::from_secs(5));
+    tokio::pin!(join);
+    // The first poll records the pass count and delivers the wake.
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    history.release.notify_one();
+
+    assert!(
+        join.await,
+        "the pass that served the wake must end the join"
+    );
+    state.cancel();
+    worker.await.expect("refresh worker exits on cancellation");
 }

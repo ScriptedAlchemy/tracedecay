@@ -41,10 +41,11 @@ pub(super) fn session_ids(repetition: usize) -> BenchResult<Vec<SessionId>> {
         .collect()
 }
 
+/// Each session refresh is its own request, so `request` mints a fresh
+/// context and binding for every `begin_or_join`.
 pub(super) async fn refresh_sessions(
     db: &RegisteredGlobalDb,
-    context: &RequestContext,
-    binding: &SessionRequestBinding,
+    request: impl Fn(&SessionId) -> BenchResult<(RequestContext, SessionRequestBinding)>,
     sessions: Vec<SessionId>,
     observation_count: u64,
 ) -> BenchResult<RefreshedRootRelationFixture> {
@@ -74,7 +75,8 @@ pub(super) async fn refresh_sessions(
                 .map_err(|error| format!("root refresh frontier: {error}"))?,
         )
         .map_err(|error| format!("root refresh target: {error}"))?;
-        let handle = match refresh.begin_or_join(context, binding, target).await {
+        let (context, binding) = request(session_id)?;
+        let handle = match refresh.begin_or_join(&context, &binding, target).await {
             SessionRefreshOutcome::Started(handle) | SessionRefreshOutcome::Joined(handle) => {
                 handle
             }

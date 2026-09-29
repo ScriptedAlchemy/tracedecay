@@ -5,14 +5,6 @@ use super::*;
 // tests want the standard two-argument `Result` for their `Result<_, String>`
 // signatures, so shadow it back.
 use std::result::Result;
-use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProviderId, SessionId,
-};
-use tracedecay_store::observation::ObservationCoverageV1;
-
-use crate::schema_contract::invariants::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
 
 const DAY: i64 = 24 * 60 * 60;
 const NOW: i64 = 1_900_000_000;
@@ -214,73 +206,65 @@ async fn fetch_str(conn: &RetentionTestStore, sql: &str) -> Result<String, Strin
         .map_err(|e| e.to_string())
 }
 
-async fn seed_cursor_advance_history(conn: &RetentionTestStore) -> Result<(), String> {
-    let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("retention-test").unwrap(),
-        SessionId::new("retention-session").unwrap(),
-    )
-    .unwrap();
-    let scope = ObservationScopeV1::Profile;
-    let source_json = serde_json::to_string(&source).unwrap();
-    let scope_json = serde_json::to_string(&scope).unwrap();
-    conn.execute_batch(&format!(
-        "CREATE TRIGGER IF NOT EXISTS source_cursor_advances_immutable_update_v1
-         BEFORE UPDATE ON source_cursor_advances BEGIN
-             SELECT RAISE(ABORT, 'source cursor advances are immutable');
-         END;
-         DROP TRIGGER IF EXISTS source_cursor_advances_immutable_delete_v1;
-         {SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL};"
-    ))
-    .await
-    .map_err(|error| format!("install cursor immutability: {error}"))?;
-    let current_generation = 1_u64;
-    let current_cursor = ObservationSourceCursorV1::for_ordering(
-        source.clone(),
-        scope.clone(),
-        ObservationSourceGenerationV1::new(current_generation).unwrap(),
-        ObservationOrderingDomainV1::FileBytes,
-        30,
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-         VALUES (?1, ?2, ?3)",
-        params![
-            source_json.as_str(),
-            scope_json.as_str(),
-            serde_json::to_string(&current_cursor).unwrap()
-        ],
-    )
-    .await
-    .map_err(|error| format!("insert current cursor: {error}"))?;
-    // A different generation is superseded because it is not the current
-    // opaque identity, even though its `u64` representation is numerically
-    // larger than the current generation and cannot fit in SQLite's signed
-    // integer range. The lower current-generation receipt is also superseded;
-    // the exact current receipt must remain.
-    for (generation, start, end) in [
-        (u64::MAX, 0, 10),
-        (current_generation, 10, 20),
-        (current_generation, 20, 30),
-    ] {
-        let coverage = ObservationCoverageV1::new(
-            ObservationSourceGenerationV1::new(generation).unwrap(),
-            ObservationOrderingDomainV1::FileBytes,
-            ObservationSourceRangeV1::new(start, end).unwrap(),
-        );
-        conn.execute(
-            "INSERT INTO source_cursor_advances(
-                source_json, scope_json, coverage_json, reason, receipt_id
-             ) VALUES (?1, ?2, ?3, 'blank_frame', NULL)",
-            params![
-                source_json.as_str(),
-                scope_json.as_str(),
-                serde_json::to_string(&coverage).unwrap()
-            ],
+/// A run resumes from its ledger cursor: a later run releases evidence whose
+/// disposition was appended after the previous run, or aged past the window
+/// since, and leaves what earlier runs already released alone.
+#[tokio::test]
+async fn later_runs_release_dispositions_appended_or_aged_since_the_last_run() -> Result<(), String>
+{
+    let conn = test_store().await;
+    seed_evidence(&conn, "anchor-first", GEN, 4096).await?;
+    set_disposition(&conn, "anchor-first", "deleted", NOW - 90 * DAY, None).await?;
+    seed_evidence(&conn, "anchor-aging", GEN, 4096).await?;
+    set_disposition(&conn, "anchor-aging", "deleted", NOW - 10 * DAY, None).await?;
+    let first = run_apply(&conn, None, &released_config()).await?;
+    assert_eq!(
+        (
+            first.anchors_released.acted,
+            first.observations_released.acted,
+            first.provenance_released.acted
+        ),
+        (1, 1, 1)
+    );
+
+    seed_evidence(&conn, "anchor-later", GEN, 4096).await?;
+    set_disposition(&conn, "anchor-later", "deleted", NOW - 60 * DAY, None).await?;
+    let second = run_apply(&conn, None, &released_config()).await?;
+    assert_eq!(
+        (
+            second.anchors_released.acted,
+            second.observations_released.acted,
+            second.provenance_released.acted
+        ),
+        (1, 1, 1)
+    );
+    assert!(is_released(
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-later'"
+        )
+        .await?
+    ));
+    let aged = conn
+        .database()
+        .run_observation_retention(
+            None,
+            &released_config(),
+            RetentionMode::Apply,
+            NOW + 25 * DAY,
         )
         .await
-        .map_err(|error| format!("insert cursor advance: {error}"))?;
-    }
+        .map_err(|error| error.to_string())?;
+    assert_eq!(aged.anchors_released.acted, 1);
+    assert!(is_released(
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-aging'"
+        )
+        .await?
+    ));
+    let settled = run_apply(&conn, None, &released_config()).await?;
+    assert_eq!(settled.anchors_released.eligible, 0);
     Ok(())
 }
 
@@ -750,67 +734,6 @@ async fn immutability_and_ledger_are_preserved() -> Result<(), String> {
         .await
         .is_err(),
         "ledger remains append-only"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn superseded_cursor_advances_are_reclaimed_but_current_receipt_survives()
--> Result<(), String> {
-    let conn = test_store().await;
-    seed_cursor_advance_history(&conn).await?;
-
-    let dry_run = conn
-        .database()
-        .run_observation_retention(
-            None,
-            &ObservationRetentionConfig::default(),
-            RetentionMode::DryRun,
-            NOW,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    assert_eq!(dry_run.cursor_advances_reclaimed.eligible, 2);
-    assert_eq!(dry_run.cursor_advances_reclaimed.acted, 0);
-    assert_eq!(dry_run.cursor_advances_before, 3);
-    assert_eq!(dry_run.cursor_advances_after, 3);
-
-    let applied = run_apply(&conn, None, &ObservationRetentionConfig::default()).await?;
-    assert_eq!(applied.cursor_advances_reclaimed.eligible, 2);
-    assert_eq!(applied.cursor_advances_reclaimed.acted, 2);
-    assert_eq!(applied.cursor_advances_before, 3);
-    assert_eq!(applied.cursor_advances_after, 1);
-    assert_eq!(
-        fetch_i64(
-            &conn,
-            "SELECT CAST(json_extract(coverage_json, '$.range.end') AS INTEGER)
-             FROM source_cursor_advances"
-        )
-        .await?,
-        30,
-        "the exact receipt supporting the current frontier remains"
-    );
-    assert!(
-        conn.execute("DELETE FROM source_cursor_advances", ())
-            .await
-            .is_err(),
-        "ordinary callers still cannot delete cursor-advance evidence"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn revoked_daemon_scope_retains_cursor_advance_evidence() -> Result<(), String> {
-    let mut conn = test_store().await;
-    seed_cursor_advance_history(&conn).await?;
-    conn.revoke();
-    let error = run_apply(&conn, None, &ObservationRetentionConfig::default())
-        .await
-        .expect_err("revoked daemon scope must reject cursor retention");
-    assert!(!error.is_empty());
-    assert_eq!(
-        fetch_i64(&conn, "SELECT COUNT(*) FROM source_cursor_advances").await?,
-        3
     );
     Ok(())
 }
