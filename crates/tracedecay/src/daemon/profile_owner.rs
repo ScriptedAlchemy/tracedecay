@@ -48,12 +48,14 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use super::StoreAdministration;
 use super::profile_retained::profile_session_scope;
 use crate::mcp::tools::graph_tool_error_problem;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 /// Serve one profile-owner request from the daemon's pinned profile.
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "daemon.profile_owner.invoke", future = true)]
 pub(super) async fn invoke_profile_owner_operation(
     store_administration: &StoreAdministration,
+    code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     active_project_root: Option<&Path>,
     request_id: String,
     operation: ApplicationSurfaceOperation,
@@ -72,6 +74,7 @@ pub(super) async fn invoke_profile_owner_operation(
         |arguments| {
             compute_profile_owner_operation(
                 store_administration,
+                code_index_schedulers,
                 active_project_root,
                 operation,
                 arguments,
@@ -85,6 +88,7 @@ pub(super) async fn invoke_profile_owner_operation(
 /// profile session scope it reports.
 async fn compute_profile_owner_operation(
     store_administration: &StoreAdministration,
+    code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     active_project_root: Option<&Path>,
     operation: ApplicationSurfaceOperation,
     arguments: Map<String, Value>,
@@ -144,6 +148,7 @@ async fn compute_profile_owner_operation(
                             .then_some(registry.as_ref()),
                         profile_identity.profile_root(),
                         active_project_root,
+                        code_index_schedulers,
                     ),
                 )
                 .await?,

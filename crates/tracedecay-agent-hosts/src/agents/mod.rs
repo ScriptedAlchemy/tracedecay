@@ -788,7 +788,8 @@ pub fn inspect_receipt_backed_host_components(
 // DoctorCounters
 // ---------------------------------------------------------------------------
 
-/// Diagnostic counters for doctor checks.
+/// Diagnostic counters for doctor checks, plus every check line in order so
+/// `tracedecay doctor --json` carries exactly what the terminal showed.
 #[derive(Default)]
 pub struct DoctorCounters {
     pub issues: u32,
@@ -796,33 +797,74 @@ pub struct DoctorCounters {
     /// Steps only the operator can take; nothing failed, but the
     /// installation is not converged until they are done.
     pub pending_actions: u32,
+    pub checks: Vec<DoctorCheckV1>,
+}
+
+/// One reported doctor check line.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DoctorCheckV1 {
+    pub level: DoctorCheckLevelV1,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorCheckLevelV1 {
+    Pass,
+    Issue,
+    Warning,
+    PendingOperatorAction,
+    /// A host that is not installed.
+    Skipped,
+    Info,
 }
 
 impl DoctorCounters {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn pass(&self, msg: &str) {
-        eprintln!("  \x1b[32m✔\x1b[0m {msg}");
+    pub fn pass(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::Pass, msg);
     }
     pub fn fail(&mut self, msg: &str) {
-        eprintln!("  \x1b[31m✘\x1b[0m {msg}");
-        self.issues += 1;
+        self.report(DoctorCheckLevelV1::Issue, msg);
     }
     pub fn warn(&mut self, msg: &str) {
-        eprintln!("  \x1b[33m!\x1b[0m {msg}");
-        self.warnings += 1;
+        self.report(DoctorCheckLevelV1::Warning, msg);
     }
     pub fn pending(&mut self, msg: &str) {
-        eprintln!("  \x1b[33m…\x1b[0m {msg}");
-        self.pending_actions += 1;
+        self.report(DoctorCheckLevelV1::PendingOperatorAction, msg);
     }
     /// A host that is not installed; counted nowhere.
-    pub fn skipped(&self, msg: &str) {
-        eprintln!("  - {msg}");
+    pub fn skipped(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::Skipped, msg);
     }
-    pub fn info(&self, msg: &str) {
-        eprintln!("    {msg}");
+    pub fn info(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::Info, msg);
+    }
+    fn report(&mut self, level: DoctorCheckLevelV1, msg: &str) {
+        let marker = match level {
+            DoctorCheckLevelV1::Pass => "  \x1b[32m✔\x1b[0m ",
+            DoctorCheckLevelV1::Issue => {
+                self.issues += 1;
+                "  \x1b[31m✘\x1b[0m "
+            }
+            DoctorCheckLevelV1::Warning => {
+                self.warnings += 1;
+                "  \x1b[33m!\x1b[0m "
+            }
+            DoctorCheckLevelV1::PendingOperatorAction => {
+                self.pending_actions += 1;
+                "  \x1b[33m…\x1b[0m "
+            }
+            DoctorCheckLevelV1::Skipped => "  - ",
+            DoctorCheckLevelV1::Info => "    ",
+        };
+        eprintln!("{marker}{msg}");
+        self.checks.push(DoctorCheckV1 {
+            level,
+            message: msg.to_owned(),
+        });
     }
 }
 

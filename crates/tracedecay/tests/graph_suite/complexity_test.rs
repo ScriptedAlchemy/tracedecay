@@ -161,7 +161,7 @@ fn find(items: &[i32], target: i32) -> Option<usize> {
 }
 "#,
     );
-    assert!(m.returns >= 1, "expected at least 1 return");
+    assert_eq!(m.returns, 1, "expected the single early return");
 }
 
 // ── Nesting depth ───────────────────────────────────────────────────────────
@@ -237,10 +237,9 @@ fn risky(v: Option<i32>) -> i32 {
 }
 "#,
     );
-    assert!(
-        m.unchecked_calls >= 1,
-        "expected unwrap to be detected, got {}",
-        m.unchecked_calls
+    assert_eq!(
+        m.unchecked_calls, 1,
+        "expected the single unwrap to be detected"
     );
 }
 

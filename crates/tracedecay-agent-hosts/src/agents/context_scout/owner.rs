@@ -365,6 +365,7 @@ impl ProjectContextScoutOwnerV1 {
         let ready = self.store.startup(now, STARTUP_RECOVERY_LIMIT).await;
         let entries = match ready {
             ContextScoutDurableStartupOutcomeV1::Ready { entries, .. } => entries,
+            ContextScoutDurableStartupOutcomeV1::Reset => Vec::new(),
             ContextScoutDurableStartupOutcomeV1::Unavailable => return None,
         };
         let mut matching = entries.into_iter().filter(|entry| {

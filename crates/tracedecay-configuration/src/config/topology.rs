@@ -119,7 +119,12 @@ mod tests {
                 ConfigurationValueV1::WorkTopologyPolicy(Box::new(safe_work_topology_policy_v1())),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "setting work.topology_policy.v1 cannot be placed in UserProfile { profile_id: UserProfileId(\"profile.fixture\") }"
+        );
     }
 
     #[test]
@@ -133,7 +138,12 @@ mod tests {
                 ConfigurationValueV1::WorkTopologyPolicy(Box::new(safe_work_topology_policy_v1())),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "the registry default layer is internal and cannot be supplied"
+        );
     }
 
     #[test]
@@ -149,7 +159,12 @@ mod tests {
                 ConfigurationValueV1::Text("permissive".to_owned()),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: setting value kind does not match work.topology_policy.v1: expected WorkTopologyPolicy, got Text"
+        );
     }
 
     #[test]
@@ -159,12 +174,22 @@ mod tests {
         // No protected-ref rules at all.
         let mut unprotected = safe_work_topology_policy_v1();
         unprotected.protected_refs.clear();
-        assert!(resolve_configuration(&registry, &[project_layer(unprotected)]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[project_layer(unprotected)])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: protected ref rules must not be empty"
+        );
 
         // Unsupported schema version.
         let mut future = safe_work_topology_policy_v1();
         future.schema_version = 2;
-        assert!(resolve_configuration(&registry, &[project_layer(future)]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[project_layer(future)])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: work topology policy schema version is not canonical"
+        );
     }
 
     #[test]

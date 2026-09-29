@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tracedecay_api::is_http_application_operation_exposed;
 use tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID;
 use tracedecay_contracts::{
@@ -11,7 +11,9 @@ use tracedecay_contracts::{
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
 use tracedecay_daemon_protocol::RequestedOutputFormat;
-use tracedecay_daemon_protocol::{ApplicationSurfaceRequest, parse_application_surface_request};
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceRequest, parse_application_surface_request,
+};
 use tracedecay_daemon_service::application_surface::{
     application_surface_catalog_ref, resolve_application_surface_dispatch,
 };
@@ -259,18 +261,26 @@ fn stack_snapshot_decodes_into_the_typed_journey_request() {
     .expect("stack_snapshot dispatch");
 }
 
+fn surface_refusal(operation: ApplicationSurfaceOperation, body: Value) -> String {
+    match parse_application_surface_request(operation, body) {
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { detail }) => detail,
+        Err(other) => panic!("{operation:?} refused with the wrong kind: {other}"),
+        Ok(_) => panic!("{operation:?} must refuse this body"),
+    }
+}
+
 #[test]
 fn stack_snapshot_rejects_caller_supplied_canonical_revision_fields() {
     let mut body = stack_snapshot_body();
     body["selection"]["binding"]["canonical_order"] = json!(["node.source"]);
     body["selection"]["binding"]["digest"] = json!(format!("sha256:{}", "cd".repeat(32)));
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
+        body,
+    );
     assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
-            body,
-        )
-        .is_err(),
-        "canonical order and digest must be derived by the daemon"
+        detail.starts_with("unknown field `canonical_order`"),
+        "canonical order and digest must be derived by the daemon: {detail}"
     );
 }
 
@@ -278,13 +288,13 @@ fn stack_snapshot_rejects_caller_supplied_canonical_revision_fields() {
 fn a_journey_request_cannot_carry_an_unknown_or_path_bearing_field() {
     let mut body = stack_snapshot_body();
     body["repository_path"] = json!("/tmp/alpha");
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
+        body,
+    );
     assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
-            body,
-        )
-        .is_err(),
-        "a path-bearing stack_snapshot body must be rejected, not silently ignored"
+        detail.starts_with("unknown field `repository_path`"),
+        "a path-bearing stack_snapshot body must be rejected, not silently ignored: {detail}"
     );
 }
 
@@ -292,31 +302,33 @@ fn a_journey_request_cannot_carry_an_unknown_or_path_bearing_field() {
 fn a_journey_request_cannot_be_submitted_under_another_operation() {
     // A `stack_snapshot` body under the apply operation must not decode: apply
     // accepts only an exact preview identity plus a one-use approval.
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationApply,
+        stack_snapshot_body(),
+    );
     assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::NativeIntegrationApply,
-            stack_snapshot_body(),
-        )
-        .is_err(),
-        "apply must not accept a snapshot body"
+        detail.starts_with("unknown field `authorized_scope_set_digest`"),
+        "apply must not accept a snapshot body: {detail}"
     );
     // Approval issuance accepts only the exact preview identity/digest pair;
     // a snapshot body or an approval body without the content digest must be
     // rejected rather than partially decoded.
-    assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::NativeIntegrationApprove,
-            stack_snapshot_body(),
-        )
-        .is_err(),
-        "approve must not accept a snapshot body"
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationApprove,
+        stack_snapshot_body(),
     );
     assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::NativeIntegrationApprove,
-            json!({"preview_id": "preview.native-integration.example"}),
-        )
-        .is_err(),
+        detail.starts_with(
+            "unknown field `authorized_scope_set_digest`, expected `preview_id` or `preview_digest`"
+        ),
+        "approve must not accept a snapshot body: {detail}"
+    );
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationApprove,
+        json!({"preview_id": "preview.native-integration.example"}),
+    );
+    assert_eq!(
+        detail, "missing field `preview_digest`",
         "approve must not accept a preview identity without its content digest"
     );
 }

@@ -152,6 +152,23 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+
+        write_identity(
+            &path,
+            br#"{"schema_version":1,"brain_id":"brain.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","profile_id":"profile.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+        );
+        let record = read_existing_profile_identity_record(&path)
+            .unwrap()
+            .expect("published record");
+        assert_eq!(record.schema_version, 1);
+        assert_eq!(
+            record.brain_id.as_str(),
+            "brain.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            record.profile_id.as_str(),
+            "profile.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
     }
 
     #[test]

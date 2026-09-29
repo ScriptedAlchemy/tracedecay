@@ -1316,8 +1316,11 @@ mod tests {
         ] {
             let mut candidate = encoded.clone();
             candidate[field] = invalid;
-            assert!(
-                serde_json::from_value::<RemoteEnrollmentAdmissionEvidenceV1>(candidate).is_err(),
+            assert_eq!(
+                serde_json::from_value::<RemoteEnrollmentAdmissionEvidenceV1>(candidate)
+                    .unwrap_err()
+                    .to_string(),
+                "non-canonical remote enrollment admission identity",
                 "{field} must fail closed"
             );
         }

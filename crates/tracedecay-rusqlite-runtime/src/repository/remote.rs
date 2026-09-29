@@ -301,6 +301,9 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(install.validate().is_err());
+        assert_eq!(
+            install.validate().unwrap_err().to_string(),
+            "repository payload for install remote writer fence failed its owning store contract"
+        );
     }
 }

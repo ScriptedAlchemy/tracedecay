@@ -649,13 +649,12 @@ fn code_index_freshness_projection(
     if authoritative {
         (FreshnessLabelV1::Current, None)
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
-        (
-            FreshnessLabelV1::Restoring,
-            Some(
-                "the sealed lexical artifact is completing bounded authentication before serving"
-                    .to_owned(),
-            ),
-        )
+        let warning = if freshness.restore_progress.is_some() {
+            "the sealed lexical artifact is completing bounded authentication before serving"
+        } else {
+            "the sealed generation is restoring its serving seats before serving"
+        };
+        (FreshnessLabelV1::Restoring, Some(warning.to_owned()))
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Verifying) {
         (
             FreshnessLabelV1::Stale,
@@ -1435,6 +1434,21 @@ mod tests {
             warning
                 .expect("restore names its bounded work")
                 .contains("bounded authentication")
+        );
+
+        let reseating = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            restore_progress: None,
+            ..freshness
+        };
+        assert_eq!(
+            code_index_freshness_projection(&reseating),
+            (
+                FreshnessLabelV1::Restoring,
+                Some(
+                    "the sealed generation is restoring its serving seats before serving"
+                        .to_owned()
+                )
+            )
         );
     }
 

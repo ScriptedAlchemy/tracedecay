@@ -828,8 +828,13 @@ mod doctor_runtime_route_tests {
             })
             .to_string(),
         );
+        let plain_status = AuthenticatedFirstRequest::new(status_request_line());
 
-        assert!(core_status_request_id(request.parsed()).is_none());
+        assert_eq!(core_status_request_id(request.parsed()), None);
+        assert_eq!(
+            core_status_request_id(plain_status.parsed()),
+            Some(serde_json::json!(10))
+        );
     }
 
     #[test]

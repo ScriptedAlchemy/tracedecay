@@ -393,7 +393,28 @@ async fn handle_storage_report(
     let daemon_owns_profile = profile_root == default_profile_root;
     let project_root = project_root.map(PathBuf::from);
     let report = if daemon_owns_profile && tracedecay_daemon_control::daemon_reachable(profile) {
-        brokered_storage_report(profile, project_id.as_deref(), project_root.as_deref()).await?
+        let mut report =
+            brokered_storage_report(profile, project_id.as_deref(), project_root.as_deref())
+                .await?;
+        // The daemon pages stores; the profile total comes from one read-only
+        // census of the whole profile, as the offline report takes it.
+        if project_id.is_none() {
+            let census_root = profile_root.clone();
+            report.full_profile_size = Some(
+                tokio::task::spawn_blocking(move || {
+                    tracedecay_maintenance::retention::storage_report::scan_full_profile_size(
+                        &census_root,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!("profile size census failed to join: {error}"),
+                    }
+                })?,
+            );
+        }
+        report
     } else {
         let offline = match (&project_id, &project_root) {
             (Some(project_id), Some(project_root)) => {
@@ -403,7 +424,7 @@ async fn handle_storage_report(
                     &profile_root,
                     project_id,
                     project_root,
-                    None,
+                    Err(tracedecay_maintenance::retention::storage_report::RETENTION_PROTECTION_UNRESOLVED),
                 )
             }
             (None, None) => {
@@ -463,6 +484,23 @@ async fn handle_storage_report(
             store.canonical_root,
             format_bytes(store.total_bytes),
         );
+        let kinds = &store.kinds;
+        for (family, bytes) in [
+            ("graph database", kinds.graph_database),
+            ("sealed graph", kinds.sealed_graph),
+            ("text artifacts", kinds.text_artifacts),
+            ("generation artifacts", kinds.generation_artifacts),
+            ("sessions", kinds.sessions),
+            ("other", kinds.other),
+        ] {
+            println!("      {family}: {}", format_bytes(bytes));
+        }
+        if store.unavailable_entry_count > 0 {
+            println!(
+                "      not sized: {} unreadable or non-regular entries",
+                store.unavailable_entry_count
+            );
+        }
     }
     for retention in &report.code_generation_retention {
         println!(
@@ -488,6 +526,12 @@ async fn handle_storage_report(
             retention.collectable_generation_count,
             retention.collectable_generation_bytes,
             format_bytes(retention.collectable_generation_bytes)
+        );
+        println!(
+            "    would delete: {} text artifact(s), {} bytes ({})",
+            retention.collectable_text_artifact_count,
+            retention.collectable_text_artifact_bytes,
+            format_bytes(retention.collectable_text_artifact_bytes)
         );
         for generation in &retention.collectable_generations {
             println!(

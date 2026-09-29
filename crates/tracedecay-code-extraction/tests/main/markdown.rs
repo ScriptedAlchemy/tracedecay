@@ -2,6 +2,35 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::MarkdownExtractor;
 use tracedecay_domain::*;
 
+fn extract(source: &str) -> ExtractionResult {
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    result
+}
+
+/// `(source node name, target file id)` for every `Uses` edge, in emission order.
+fn uses_edges(result: &ExtractionResult) -> Vec<(&str, &str)> {
+    result
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Uses)
+        .map(|e| {
+            let source = result
+                .nodes
+                .iter()
+                .find(|n| n.id == e.source)
+                .expect("uses edge source is an extracted node");
+            (source.name.as_str(), e.target.as_str())
+        })
+        .collect()
+}
+
+fn file_id(path: &str) -> String {
+    generate_node_id(path, &NodeKind::File, path, 0)
+}
+
 #[test]
 fn test_markdown_header_hierarchy() {
     let source = "# Top\n\n## Section1\n\n### Deep\n\n## Section2";
@@ -40,39 +69,21 @@ fn test_markdown_header_hierarchy() {
 
 #[test]
 fn test_markdown_skips_external_links() {
-    let source = "Check [Google](https://google.com) for more.";
-    let result = MarkdownExtractor
-        .extract_artifact("README.md", source)
-        .result;
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert!(
-        uses_edges.is_empty(),
-        "should not create Uses edge for external links"
+    let result = extract("Check [Google](https://google.com) and [main](src/main.rs).");
+    let main = file_id("src/main.rs");
+    assert_eq!(
+        uses_edges(&result),
+        [("README.md", main.as_str())],
+        "only the repository code link becomes a Uses edge"
     );
 }
 
 #[test]
 fn test_markdown_skips_non_code_links() {
-    let source = "See [image](docs/image.png) for diagram.";
-    let result = MarkdownExtractor
-        .extract_artifact("README.md", source)
-        .result;
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    // .png is not a code extension, so no Uses edge
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert!(
-        uses_edges.is_empty(),
-        "should not create Uses edge for non-code links"
-    );
+    // .png is not a code extension, so only the .rs link is a Uses edge.
+    let result = extract("See [image](docs/image.png) and [lib](src/lib.rs).");
+    let lib = file_id("src/lib.rs");
+    assert_eq!(uses_edges(&result), [("README.md", lib.as_str())]);
 }
 
 #[test]
@@ -93,32 +104,23 @@ fn test_markdown_handles_empty_file() {
 
 #[test]
 fn test_markdown_handles_no_headers() {
-    let source = "Just some plain text without any headers.";
-    let result = MarkdownExtractor
-        .extract_artifact("README.md", source)
-        .result;
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let modules: Vec<_> = result
+    let result = extract("Just some plain text without any headers.");
+    let nodes: Vec<_> = result
         .nodes
         .iter()
-        .filter(|n| n.kind == NodeKind::Module)
+        .map(|n| (n.kind.clone(), n.name.as_str()))
         .collect();
-    assert!(modules.is_empty(), "should have no Module nodes");
+    assert_eq!(nodes, [(NodeKind::File, "README.md")]);
 }
 
 #[test]
 fn test_markdown_multiple_links_same_line() {
-    let source = "See [main](src/main.rs) and [lib](src/lib.rs).";
-    let result = MarkdownExtractor
-        .extract_artifact("README.md", source)
-        .result;
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert_eq!(uses_edges.len(), 2);
+    let result = extract("See [main](src/main.rs) and [lib](src/lib.rs).");
+    let (main, lib) = (file_id("src/main.rs"), file_id("src/lib.rs"));
+    assert_eq!(
+        uses_edges(&result),
+        [("README.md", main.as_str()), ("README.md", lib.as_str())]
+    );
 }
 
 #[test]
@@ -141,44 +143,26 @@ fn test_markdown_handles_header_with_punctuation() {
 fn test_markdown_link_inside_heading_emits_uses_edge() {
     // `## See [main](src/main.rs)`. The link inside the heading should
     // be captured as a Uses edge parented to that heading.
-    let source = "## See [main](src/main.rs)\n";
-    let result = MarkdownExtractor
-        .extract_artifact("README.md", source)
-        .result;
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
+    let result = extract("## See [main](src/main.rs)\n");
+    let main = file_id("src/main.rs");
     assert_eq!(
-        uses_edges.len(),
-        1,
-        "expected 1 Uses edge for link in heading"
+        uses_edges(&result),
+        [("See [main](src/main.rs)", main.as_str())],
+        "the edge is parented to the heading, not the file"
     );
-
-    // The edge should be parented to the heading, not the file.
-    let heading = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Module)
-        .expect("heading module node");
-    assert_eq!(uses_edges[0].source, heading.id);
 }
 
 #[test]
 fn test_markdown_link_in_heading_does_not_double_count_body_links() {
     // A heading with a link, plus a body paragraph with another link,
-    // produces exactly two Uses edges. One per link.
-    let source = "# [foo](src/foo.rs)\n\nSee also [bar](src/bar.rs).\n";
-    let result = MarkdownExtractor
-        .extract_artifact("README.md", source)
-        .result;
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert_eq!(uses_edges.len(), 2);
+    // produces exactly one Uses edge per link, both under the heading.
+    let result = extract("# [foo](src/foo.rs)\n\nSee also [bar](src/bar.rs).\n");
+    let (foo, bar) = (file_id("src/foo.rs"), file_id("src/bar.rs"));
+    assert_eq!(
+        uses_edges(&result),
+        [
+            ("[foo](src/foo.rs)", foo.as_str()),
+            ("[foo](src/foo.rs)", bar.as_str())
+        ]
+    );
 }

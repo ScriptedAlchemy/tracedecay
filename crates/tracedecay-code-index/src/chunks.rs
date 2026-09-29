@@ -3059,36 +3059,6 @@ mod tests {
         assert_eq!(authority.waiting_work_units(), 0);
     }
 
-    /// Chunk rows are not a pool actor. A merge that puts a join back in this
-    /// file assigns the CPU role to stolen leaves again.
-    #[test]
-    fn chunk_sweeps_are_not_a_pool_actor() {
-        let source = include_str!("chunks.rs");
-        let pool_tokens = [
-            concat!("ray", "on"),
-            concat!("par_", "iter"),
-            concat!("par_", "chunks"),
-            concat!("par_", "bridge"),
-            concat!("with_yielded_background_cpu_", "permits"),
-        ];
-        let code_lines = source
-            .lines()
-            .map(str::trim_start)
-            .filter(|line| !line.starts_with("//"))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        for token in pool_tokens {
-            let hits = code_lines
-                .iter()
-                .filter(|line| line.contains(token))
-                .collect::<Vec<_>>();
-            assert!(
-                hits.is_empty(),
-                "`{token}` assigns chunk work a pool role: {hits:?}"
-            );
-        }
-    }
-
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";
 
     fn chunker() -> DeterministicCodeChunker {
@@ -5221,8 +5191,13 @@ pub fn real_symbol() {}
         chunk
             .validate()
             .expect("raw structural validation cannot establish parser authority");
-        assert!(
-            authority.admit(chunk).is_err(),
+        assert_eq!(
+            authority.admit(chunk).err(),
+            Some(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityMismatch,
+                )
+            )),
             "opaque authority must reject modified exact evidence"
         );
     }

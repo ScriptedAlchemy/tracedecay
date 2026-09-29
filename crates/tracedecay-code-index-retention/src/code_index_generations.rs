@@ -34,6 +34,8 @@ use tracedecay_domain::{
 };
 
 mod file_quarantine;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod fixture;
 mod generation_scan;
 mod generation_transactions;
 mod graph_replay_release;
@@ -54,13 +56,13 @@ pub use locking::{
     try_acquire_code_generation_store_read_lock,
 };
 pub use scope_roots::{
-    RefusedCodeIndexScopeV1, SCOPE_ROOT_RECORD_FILE, ScopeRootAuthorityReceiptV1,
+    CodeIndexScopeV1, RefusedCodeIndexScopeV1, SCOPE_ROOT_RECORD_FILE, ScopeRootAuthorityReceiptV1,
     ScopeRootLivenessProofV1, ScopeRootRetentionPlanV1, ScopeRootRetentionReceiptV1,
     ScopeRootRetentionReportV1, StrandedCodeIndexScopeV1, StrandedScopeRefusalV1,
-    code_index_scope_store_root, code_index_store_root, execute_scope_root_retention,
-    git_worktree_scope_root_inventory, insert_live_root_variants, plan_scope_root_retention,
-    plan_scope_root_retention_with_liveness_proof, record_scope_root, recover_scope_root_retention,
-    resolve_live_code_index_roots, scope_root_liveness_proof,
+    code_index_scope_store_root, code_index_scopes, code_index_store_root,
+    execute_scope_root_retention, git_worktree_scope_root_inventory, insert_live_root_variants,
+    plan_scope_root_retention, plan_scope_root_retention_with_liveness_proof, record_scope_root,
+    recover_scope_root_retention, resolve_live_code_index_roots, scope_root_liveness_proof,
 };
 pub use text_artifacts::{
     attach_verified_text_artifact_under_lock, find_shared_text_artifact,
@@ -89,14 +91,16 @@ use scope_roots::{
     build_scope_receipt, scope_receipt_digest, scope_receipt_path, scope_stage_root,
     scope_transaction_path, validate_scope_transaction,
 };
+use text_artifacts::{
+    TEXT_ARTIFACT_RECEIPT_STORE, execute_text_artifact_retention_under_store_lock,
+    plan_collectable_text_artifacts_cancellable,
+    recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
+    total_text_artifact_bytes,
+};
 #[cfg(test)]
 use text_artifacts::{
-    TEXT_ARTIFACT_RECEIPT_STORE, TEXT_ARTIFACT_TRANSACTION_JOURNAL, build_text_artifact_receipt,
-    stage_collectable_text_artifacts, total_text_artifact_bytes,
-};
-use text_artifacts::{
-    execute_text_artifact_retention_under_store_lock, plan_collectable_text_artifacts_cancellable,
-    recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
+    TEXT_ARTIFACT_TRANSACTION_JOURNAL, build_text_artifact_receipt,
+    stage_collectable_text_artifacts,
 };
 
 use generation_scan::{read_generation_format_revision, read_generation_metadata};
@@ -618,6 +622,17 @@ impl CodeGenerationRetentionPlanV1 {
         total_bytes(&self.collectable_generations)
     }
 
+    /// Unreferenced text artifacts this plan collects.
+    #[must_use]
+    pub fn collectable_text_artifact_count(&self) -> usize {
+        self.collectable_text_artifacts.len()
+    }
+
+    #[must_use]
+    pub fn collectable_text_artifact_bytes(&self) -> u64 {
+        total_text_artifact_bytes(&self.collectable_text_artifacts)
+    }
+
     #[must_use]
     pub fn has_collectable_work(&self) -> bool {
         !self.collectable_generations.is_empty()
@@ -907,12 +922,17 @@ fn unpublished_store_plan(
 }
 
 /// Recover any bounded prior apply, then build the next fully verified
-/// collection unit while preserving the caller's cancellation authority.
+/// collection batch while preserving the caller's cancellation authority.
 ///
-/// Daemon maintenance performs this preparation before it acquires the graph
-/// writer transaction. Full verification checks `is_cancelled` between bounded
-/// read chunks, so shutdown never waits for every byte in a multi-GiB store
-/// while that transaction is held.
+/// The batch is every collectable generation up to
+/// [`MAX_CODE_GENERATION_RETENTION_BATCH_V1`], oldest first. One full digest
+/// verification covers the whole store whatever the batch size, and the
+/// executor journals the batch as one transaction whose recovery restores or
+/// finishes every member, so a backlog drains in batch-count passes instead
+/// of paying a full verification per generation.
+///
+/// Full verification checks `is_cancelled` between bounded read chunks, so
+/// shutdown never waits for every byte in a multi-GiB store.
 #[hotpath::measure(label = "usecases.retention.prepare")]
 pub fn prepare_next_code_generation_retention_cancellable(
     store_root: &Path,
@@ -987,15 +1007,13 @@ pub fn prepare_next_code_generation_retention_cancellable(
     if !census.has_collectable_work() {
         return Ok(census);
     }
-    let mut plan = plan_code_generation_retention_with_verification_cancellable(
+    plan_code_generation_retention_with_verification_cancellable(
         store_root,
         vector_readable_sources,
         GenerationDigestVerificationV1::Full,
         graph_replay_pool_root,
         is_cancelled,
-    )?;
-    plan.collectable_generations.truncate(1);
-    Ok(plan)
+    )
 }
 
 #[hotpath::measure(label = "usecases.retention.plan")]
@@ -1194,12 +1212,10 @@ fn plan_code_generation_retention_with_verification_cancellable(
     // Sweep from the oldest end. `superseded_generations` is newest-first so
     // reports read most-recent-first, but the collection batch is the
     // opposite question: which bytes may go first.
-    // Reading the batch in the newest-first order made every bounded unit -
-    // `MAX_CODE_GENERATION_RETENTION_BATCH_V1` here, one generation after
-    // `plan_next`/`prepare_next` truncate it - name the newest collectable
-    // generation, so the oldest sealed generation was never in a plan and a
-    // store that publishes at least as fast as maintenance collects never
-    // released its floor.
+    // Reading the batch in the newest-first order made every bounded unit
+    // name the newest collectable generation, so the oldest sealed
+    // generation was never in a plan and a store that publishes at least as
+    // fast as maintenance collects never released its floor.
     let collectable_generations = superseded_generations
         .iter()
         .rev()
@@ -1901,6 +1917,17 @@ fn recover_code_generation_retention_cancellable(
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
     recover_pending_text_artifact_transaction_unlocked(store_root)?;
+    // Receipts are recovery evidence: a pending journal reads its own, and a
+    // queued graph-replay release is validated against the generation receipt
+    // it names. With every journal settled above, a receipt the release queue
+    // does not name has no reader left, so one receipt per collection no
+    // longer accumulates for the life of the store.
+    receipt_store::prune_receipts(
+        store_root,
+        &GENERATION_RECEIPT_STORE,
+        &graph_replay_release::queued_release_receipt_digests(store_root)?,
+    )?;
+    receipt_store::prune_receipts(store_root, &TEXT_ARTIFACT_RECEIPT_STORE, &BTreeSet::new())?;
     crate::hotpath_observe::retention_recovery_idle();
     Ok(())
 }
@@ -1934,10 +1961,7 @@ fn run_code_generation_retention_cancellable(
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
-    // Apply must sweep the same census dry-run reports (bounded by the batch
-    // cap), not the single-unit "next" plan: that truncation exists for daemon
-    // maintenance, which calls `prepare_next_…` directly so one graph writer
-    // transaction never holds more than one collection unit.
+    // Apply sweeps the same census dry-run reports, bounded by the batch cap.
     let plan = match mode {
         CodeGenerationRetentionModeV1::Apply => {
             recover_code_generation_retention_cancellable(

@@ -323,6 +323,12 @@ mod tests {
             recovery_required: false,
             observed_at: UtcMicros(10),
         };
-        assert!(status.validate().is_err());
+        let problem = status.validate().unwrap_err();
+        assert_eq!(
+            problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("remote_operational_status_invalid")
+        );
     }
 }

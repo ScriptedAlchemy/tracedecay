@@ -114,15 +114,19 @@ fn configuration_surface_requires_mounted_project_and_exact_layer_routes() {
 
 #[test]
 fn empty_configuration_requests_reject_transport_arguments() {
-    assert!(
+    assert_eq!(
         serde_json::from_value::<ConfigurationListRequestV1>(serde_json::json!({"format": "json"}))
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+        "unknown field `format`, there are no fields"
     );
-    assert!(
+    assert_eq!(
         serde_json::from_value::<ConfigurationObservedStateRequestV1>(
             serde_json::json!({"page_size": 10})
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "unknown field `page_size`, there are no fields"
     );
 }
 
@@ -130,7 +134,12 @@ fn empty_configuration_requests_reject_transport_arguments() {
 fn configuration_schema_refs_reject_unknown_operations() {
     assert!(configuration_surface_request_schema("configuration_get").is_ok());
     assert!(configuration_surface_result_schema("configuration_get").is_ok());
-    assert!(configuration_surface_request_schema("configuration_unknown").is_err());
+    assert_eq!(
+        configuration_surface_request_schema("configuration_unknown")
+            .unwrap_err()
+            .to_string(),
+        "configuration surface operation is inconsistent with the application contract"
+    );
 }
 
 #[test]

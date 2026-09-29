@@ -23,12 +23,10 @@ impl ShutdownStatus {
     }
 }
 
-pub type ShutdownTaskStatus = ShutdownStatus;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShutdownTaskOutcome {
     pub owner: String,
-    pub status: ShutdownTaskStatus,
+    pub status: ShutdownStatus,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -42,7 +40,7 @@ impl ShutdownTaskReceipt {
         Self {
             outcomes: vec![ShutdownTaskOutcome {
                 owner: owner.into(),
-                status: ShutdownTaskStatus::Failed(error.into()),
+                status: ShutdownStatus::Failed(error.into()),
             }],
         }
     }
@@ -52,7 +50,7 @@ impl ShutdownTaskReceipt {
         Self {
             outcomes: vec![ShutdownTaskOutcome {
                 owner: owner.into(),
-                status: ShutdownTaskStatus::TimedOut,
+                status: ShutdownStatus::TimedOut,
             }],
         }
     }
@@ -61,29 +59,29 @@ impl ShutdownTaskReceipt {
     pub fn is_clean(&self) -> bool {
         self.outcomes
             .iter()
-            .all(|outcome| outcome.status == ShutdownTaskStatus::Clean)
+            .all(|outcome| outcome.status == ShutdownStatus::Clean)
     }
 
     #[must_use]
-    pub fn status(&self) -> ShutdownTaskStatus {
+    pub fn status(&self) -> ShutdownStatus {
         let failures = self
             .outcomes
             .iter()
             .filter_map(|outcome| match &outcome.status {
-                ShutdownTaskStatus::Failed(error) => Some(format!("{}: {error}", outcome.owner)),
-                ShutdownTaskStatus::Clean | ShutdownTaskStatus::TimedOut => None,
+                ShutdownStatus::Failed(error) => Some(format!("{}: {error}", outcome.owner)),
+                ShutdownStatus::Clean | ShutdownStatus::TimedOut => None,
             })
             .collect::<Vec<_>>();
         if !failures.is_empty() {
-            ShutdownTaskStatus::Failed(failures.join("; "))
+            ShutdownStatus::Failed(failures.join("; "))
         } else if self
             .outcomes
             .iter()
-            .any(|outcome| outcome.status == ShutdownTaskStatus::TimedOut)
+            .any(|outcome| outcome.status == ShutdownStatus::TimedOut)
         {
-            ShutdownTaskStatus::TimedOut
+            ShutdownStatus::TimedOut
         } else {
-            ShutdownTaskStatus::Clean
+            ShutdownStatus::Clean
         }
     }
 
@@ -93,7 +91,7 @@ impl ShutdownTaskReceipt {
 
     pub fn retain_failures_from(&mut self, failures: &[ShutdownTaskOutcome]) {
         for failure in failures {
-            let ShutdownTaskStatus::Failed(prior_error) = &failure.status else {
+            let ShutdownStatus::Failed(prior_error) = &failure.status else {
                 continue;
             };
             match self
@@ -102,16 +100,15 @@ impl ShutdownTaskReceipt {
                 .position(|outcome| outcome.owner == failure.owner)
             {
                 Some(index) => match self.outcomes[index].status.clone() {
-                    ShutdownTaskStatus::Clean => {
+                    ShutdownStatus::Clean => {
                         self.outcomes[index].status = failure.status.clone();
                     }
-                    ShutdownTaskStatus::Failed(error) if error != *prior_error => {
-                        self.outcomes[index].status = ShutdownTaskStatus::Failed(format!(
-                            "{prior_error}; retry failed: {error}"
-                        ));
+                    ShutdownStatus::Failed(error) if error != *prior_error => {
+                        self.outcomes[index].status =
+                            ShutdownStatus::Failed(format!("{prior_error}; retry failed: {error}"));
                     }
-                    ShutdownTaskStatus::Failed(_) => {}
-                    ShutdownTaskStatus::TimedOut => self.outcomes.insert(index, failure.clone()),
+                    ShutdownStatus::Failed(_) => {}
+                    ShutdownStatus::TimedOut => self.outcomes.insert(index, failure.clone()),
                 },
                 None => self.outcomes.push(failure.clone()),
             }
@@ -122,7 +119,7 @@ impl ShutdownTaskReceipt {
     pub fn failed_count(&self) -> usize {
         self.outcomes
             .iter()
-            .filter(|outcome| matches!(outcome.status, ShutdownTaskStatus::Failed(_)))
+            .filter(|outcome| matches!(outcome.status, ShutdownStatus::Failed(_)))
             .count()
     }
 
@@ -130,7 +127,7 @@ impl ShutdownTaskReceipt {
     pub fn timed_out_count(&self) -> usize {
         self.outcomes
             .iter()
-            .filter(|outcome| outcome.status == ShutdownTaskStatus::TimedOut)
+            .filter(|outcome| outcome.status == ShutdownStatus::TimedOut)
             .count()
     }
 }
@@ -141,7 +138,7 @@ pub async fn join_shutdown_tasks_until<Tasks, Task>(
 ) -> ShutdownTaskReceipt
 where
     Tasks: IntoIterator<Item = (String, Option<tokio::task::AbortHandle>, Task)>,
-    Task: Future<Output = ShutdownTaskStatus> + Send + 'static,
+    Task: Future<Output = ShutdownStatus> + Send + 'static,
 {
     let now = tokio::time::Instant::now();
     let cooperative_deadline =
@@ -187,7 +184,7 @@ where
                         ordinal,
                         ShutdownTaskOutcome {
                             owner,
-                            status: ShutdownTaskStatus::Failed(error.to_string()),
+                            status: ShutdownStatus::Failed(error.to_string()),
                         },
                     ));
                 }
@@ -206,7 +203,7 @@ where
                         ordinal,
                         ShutdownTaskOutcome {
                             owner,
-                            status: ShutdownTaskStatus::TimedOut,
+                            status: ShutdownStatus::TimedOut,
                         },
                     )
                 }));
@@ -237,7 +234,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use super::ShutdownTaskStatus;
+    use super::ShutdownStatus;
 
     struct Dropped(Arc<AtomicBool>);
 
@@ -264,8 +261,8 @@ mod tests {
             .map(|(owner, task)| {
                 (owner, None, async move {
                     match task.await {
-                        Ok(()) => ShutdownTaskStatus::Clean,
-                        Err(error) => ShutdownTaskStatus::Failed(error.to_string()),
+                        Ok(()) => ShutdownStatus::Clean,
+                        Err(error) => ShutdownStatus::Failed(error.to_string()),
                     }
                 })
             }),
@@ -276,11 +273,11 @@ mod tests {
         assert_eq!(receipt.outcomes[1].owner, "cancelled");
         assert!(matches!(
             receipt.outcomes[0].status,
-            ShutdownTaskStatus::Failed(_)
+            ShutdownStatus::Failed(_)
         ));
         assert!(matches!(
             receipt.outcomes[1].status,
-            ShutdownTaskStatus::Failed(_)
+            ShutdownStatus::Failed(_)
         ));
         assert!(!receipt.is_clean());
     }
@@ -290,7 +287,7 @@ mod tests {
         let receipt = super::join_shutdown_tasks_until(
             tokio::time::Instant::now() + Duration::from_secs(1),
             [("drain".to_owned(), None, async {
-                ShutdownTaskStatus::Failed("project request drain timed out".to_owned())
+                ShutdownStatus::Failed("project request drain timed out".to_owned())
             })],
         )
         .await;
@@ -298,7 +295,7 @@ mod tests {
         assert_eq!(receipt.outcomes.len(), 1);
         assert_eq!(
             receipt.outcomes[0].status,
-            ShutdownTaskStatus::Failed("project request drain timed out".to_owned())
+            ShutdownStatus::Failed("project request drain timed out".to_owned())
         );
     }
 
@@ -311,7 +308,7 @@ mod tests {
         let straggler = tokio::spawn(async move {
             let _dropped = Dropped(task_dropped);
             task_started.notify_one();
-            std::future::pending::<ShutdownTaskStatus>().await
+            std::future::pending::<ShutdownStatus>().await
         });
         started.notified().await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -322,7 +319,7 @@ mod tests {
                 async move {
                     match straggler.await {
                         Ok(status) => status,
-                        Err(error) => ShutdownTaskStatus::Failed(error.to_string()),
+                        Err(error) => ShutdownStatus::Failed(error.to_string()),
                     }
                 }
             })],
@@ -336,7 +333,7 @@ mod tests {
             receipt.outcomes,
             [super::ShutdownTaskOutcome {
                 owner: "straggler".to_string(),
-                status: ShutdownTaskStatus::TimedOut,
+                status: ShutdownStatus::TimedOut,
             }]
         );
         assert!(dropped.load(Ordering::Acquire));
@@ -358,8 +355,8 @@ mod tests {
             started + Duration::from_secs(1),
             [("short-budget-owner".to_owned(), Some(abort), async move {
                 match task.await {
-                    Ok(()) => ShutdownTaskStatus::Clean,
-                    Err(error) => ShutdownTaskStatus::Failed(error.to_string()),
+                    Ok(()) => ShutdownStatus::Clean,
+                    Err(error) => ShutdownStatus::Failed(error.to_string()),
                 }
             })],
         )
@@ -370,7 +367,7 @@ mod tests {
             receipt.outcomes,
             [super::ShutdownTaskOutcome {
                 owner: "short-budget-owner".to_owned(),
-                status: ShutdownTaskStatus::TimedOut,
+                status: ShutdownStatus::TimedOut,
             }]
         );
         assert!(dropped.load(Ordering::Acquire));

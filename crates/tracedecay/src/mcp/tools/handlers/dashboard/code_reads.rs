@@ -200,7 +200,8 @@ fn map_unavailable(reason: CodeIndexSearchUnavailableReasonV1) -> DashboardCodeR
             DashboardCodeReadErrorV1::CapacityUnavailable
         }
         CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
-        | CodeIndexSearchUnavailableReasonV1::GenerationUnverified => {
+        | CodeIndexSearchUnavailableReasonV1::GenerationUnverified
+        | CodeIndexSearchUnavailableReasonV1::GraphWarming => {
             DashboardCodeReadErrorV1::GenerationUnavailable
         }
         CodeIndexSearchUnavailableReasonV1::InvalidRequest => {

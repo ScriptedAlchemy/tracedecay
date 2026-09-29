@@ -1890,12 +1890,14 @@ mod reconcile_tests {
         let second = tmp.path().join("second");
         std::fs::create_dir_all(&first).unwrap();
         std::fs::create_dir_all(&second).unwrap();
-        assert!(
+        assert_eq!(
             reconcile_session_rows_detailed(
                 &record(&first.to_string_lossy()),
                 &record(&second.to_string_lossy()),
             )
-            .is_err(),
+            .unwrap_err()
+            .0,
+            "project_key",
             "distinct directories must never merge"
         );
     }

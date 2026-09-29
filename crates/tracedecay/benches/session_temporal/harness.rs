@@ -1226,8 +1226,14 @@ mod tests {
             "test: seed source",
         ]);
 
+        let head = Command::new("git")
+            .current_dir(temp.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(head.status.success());
         let commit = clean_source_commit(temp.path()).unwrap();
-        assert_eq!(commit.len(), 40);
+        assert_eq!(commit, String::from_utf8(head.stdout).unwrap().trim());
 
         fs::write(temp.path().join("source.txt"), "dirty\n").unwrap();
         let error = clean_source_commit(temp.path()).unwrap_err();

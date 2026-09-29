@@ -43,95 +43,63 @@ fn daemon_admission_is_idempotent_per_identity_and_conflicts_on_different_bytes(
             data_root.path(),
             tracedecay_domain::NativeHostIdentityV1::ClaudeCode
         )
-        .join("admissions.v1.bin")
+        .join("admissions.v2.log")
         .is_file()
     );
 }
 
+fn record_hook_v2_admission(
+    data_root: &std::path::Path,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    now: UtcMicros,
+) -> Option<tracedecay_hooks::HookAdmissionLedgerReceiptV1> {
+    let staged = stage_hook_v2_admission(data_root, envelope, None, now)?;
+    staged.commit.wait().ok()?;
+    Some(staged.receipt)
+}
+
+fn pending_work(data_root: &std::path::Path) -> Vec<tracedecay_hooks::HookEventEnvelopeV2> {
+    hook_v2_pending_work_envelopes(
+        data_root,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
+        UtcMicros(1_000),
+    )
+}
+
+fn restart_ledger(data_root: &std::path::Path) {
+    forget_hook_v2_admission_ledger_for_test(
+        data_root,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
+    );
+}
+
 #[test]
-fn completion_persists_before_pending_ack_failure_and_cleanup_retries() {
+fn producer_work_commits_with_its_admission_and_redrives_until_completed() {
     let data_root = tempfile::tempdir().unwrap();
     let now = UtcMicros(1_000);
     let envelope = admission_test_envelope(31, 7);
-    let binding = admission_test_binding(7);
-    let first = record_hook_v2_admission(data_root.path(), &envelope, now).unwrap();
-    assert!(!first.work_completed);
-    let unavailable =
-        retain_hook_v2_pending_work(data_root.path(), &envelope, &envelope, &binding, now)
-            .expect("durable pending work");
-    drop(unavailable);
+    let staged = stage_hook_v2_admission(data_root.path(), &envelope, Some(&envelope), now)
+        .expect("ledger available");
+    staged.commit.wait().unwrap();
     assert_eq!(
-        hook_v2_pending_work_envelopes(
-            data_root.path(),
-            tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-            now,
-        ),
-        std::slice::from_ref(&envelope)
+        staged.receipt.decision,
+        tracedecay_hooks::HookAdmissionDecisionV1::Admitted
     );
-    let pending_sequence = {
-        let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
-            hook_v2_pending_work_root(
-                data_root.path(),
-                tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-            ),
-            tracedecay_hooks::HookSpoolConfigV1::stock(
-                tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-            ),
-            now,
-        )
-        .unwrap();
-        let batch = spool.claim_replay_batches(now, 1).unwrap().remove(0);
-        let sequence = batch.records[0].sequence;
-        spool.release_replay_claim(batch.claim_id).unwrap();
-        sequence
-    };
+    assert!(!staged.receipt.work_completed);
 
-    assert!(
-        !complete_hook_v2_pending_work(data_root.path(), &envelope, pending_sequence + 1, now),
-        "invalid acknowledgement must retain pending work"
-    );
-
+    restart_ledger(data_root.path());
+    assert_eq!(pending_work(data_root.path()), vec![envelope.clone()]);
     let duplicate = record_hook_v2_admission(data_root.path(), &envelope, now).unwrap();
     assert_eq!(
         duplicate.decision,
         tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
     );
-    assert!(
-        duplicate.work_completed,
-        "completed producer work must stay fenced when pending acknowledgement fails"
-    );
-    assert_eq!(
-        hook_v2_pending_work_envelopes(
-            data_root.path(),
-            tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-            now,
-        ),
-        std::slice::from_ref(&envelope)
-    );
+    assert!(!duplicate.work_completed);
 
-    assert!(complete_hook_v2_pending_work(
-        data_root.path(),
-        &envelope,
-        pending_sequence,
-        now,
-    ));
-    assert!(
-        hook_v2_pending_work_envelopes(
-            data_root.path(),
-            tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-            now,
-        )
-        .is_empty()
-    );
-    assert!(
-        record_hook_v2_admission(data_root.path(), &envelope, now)
-            .unwrap()
-            .work_completed
-    );
-    forget_hook_v2_admission_ledger_for_test(
-        data_root.path(),
-        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-    );
+    assert!(complete_hook_v2_pending_work(data_root.path(), &envelope));
+    assert!(pending_work(data_root.path()).is_empty());
+    restart_ledger(data_root.path());
+    assert!(pending_work(data_root.path()).is_empty());
     assert!(
         record_hook_v2_admission(data_root.path(), &envelope, now)
             .unwrap()
@@ -140,56 +108,72 @@ fn completion_persists_before_pending_ack_failure_and_cleanup_retries() {
     );
 }
 
+/// A native re-delivery carries the same event at a later `observed_at`. It
+/// must converge on the first admission's pending work, not be refused as a
+/// second record the drain could never settle.
 #[test]
-fn completed_restart_duplicate_cleans_pending_without_work_redrive() {
+fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
     let data_root = tempfile::tempdir().unwrap();
-    let now = UtcMicros(1_000);
-    let envelope = admission_test_envelope(32, 7);
-    let binding = admission_test_binding(7);
-    record_hook_v2_admission(data_root.path(), &envelope, now).unwrap();
-    let completion =
-        retain_hook_v2_pending_work(data_root.path(), &envelope, &envelope, &binding, now)
-            .expect("durable pending work");
-    {
-        let key = hook_v2_admission_ledger_root(
-            data_root.path(),
-            tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-        );
-        let mut ledgers = hook_v2_admission_ledgers().lock().unwrap();
-        assert!(
-            ledgers
-                .get_mut(&key)
-                .unwrap()
-                .mark_work_completed(&envelope)
-                .unwrap()
-        );
-    }
-    drop(completion);
-    forget_hook_v2_admission_ledger_for_test(
+    let envelope = admission_test_envelope(33, 7);
+    let mut redelivered = envelope.clone();
+    redelivered.observed_at = UtcMicros(envelope.observed_at.0 + 5_000);
+    let first = stage_hook_v2_admission(
         data_root.path(),
-        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-    );
+        &envelope,
+        Some(&envelope),
+        UtcMicros(1_000),
+    )
+    .unwrap();
+    first.commit.wait().unwrap();
 
-    let duplicate = record_hook_v2_admission(data_root.path(), &envelope, now).unwrap();
+    let again = stage_hook_v2_admission(
+        data_root.path(),
+        &redelivered,
+        Some(&redelivered),
+        UtcMicros(2_000),
+    )
+    .expect("a redelivery is not backpressure");
+    again.commit.wait().unwrap();
+
     assert_eq!(
-        duplicate.decision,
+        again.receipt.decision,
         tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
     );
-    assert!(duplicate.work_completed);
-    let cleanup =
-        retain_hook_v2_pending_work(data_root.path(), &envelope, &envelope, &binding, now)
-            .expect("completed duplicate pending cleanup");
-    cleanup();
+    assert_eq!(pending_work(data_root.path()), vec![envelope.clone()]);
+    assert!(complete_hook_v2_pending_work(
+        data_root.path(),
+        &redelivered
+    ));
+    assert!(pending_work(data_root.path()).is_empty());
+}
 
-    assert!(
-        hook_v2_pending_work_envelopes(
-            data_root.path(),
-            tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
+#[test]
+fn legacy_pending_work_spool_is_adopted_by_the_ledger_and_retired() {
+    let data_root = tempfile::tempdir().unwrap();
+    let now = UtcMicros(1_000);
+    let host = tracedecay_domain::NativeHostIdentityV1::ClaudeCode;
+    let provider = admission_test_envelope(34, 7);
+    let legacy_root = data_root.path().join("hook-v2-pending-work").join("claude");
+    {
+        let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
+            &legacy_root,
+            tracedecay_hooks::HookSpoolConfigV1::stock(host),
             now,
         )
-        .is_empty(),
-        "completed duplicate must clear pending transport state without rerunning producer work"
-    );
+        .unwrap();
+        spool
+            .append(provider.clone(), &admission_test_binding(7), now)
+            .unwrap();
+        spool.commit().unwrap();
+    }
+
+    assert_eq!(pending_work(data_root.path()), vec![provider.clone()]);
+    assert!(!legacy_root.exists());
+
+    let canonical = daemon_mint_hook_v2_envelope(&provider);
+    assert!(complete_hook_v2_pending_work(data_root.path(), &canonical));
+    restart_ledger(data_root.path());
+    assert!(pending_work(data_root.path()).is_empty());
 }
 
 #[test]
@@ -307,7 +291,7 @@ fn profile_scoped_native_admission_is_idempotent_in_the_authenticated_profile() 
         profile_root
             .join("hook-v2-profile-admissions")
             .join("claude")
-            .join("admissions.v1.bin")
+            .join("admissions.v2.log")
             .is_file()
     );
 }

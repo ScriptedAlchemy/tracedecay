@@ -248,8 +248,10 @@ fn positional_occurrence_disambiguation_binds_base_identity_and_exact_range() {
         ObservationPositionalOccurrenceV1::new(ObservationSourceRangeV1::new(30, 40).unwrap());
 
     assert_eq!(
-        first.disambiguate(&base).unwrap(),
-        first.disambiguate(&base).unwrap()
+        serde_json::to_value(first.disambiguate(&base).unwrap()).unwrap(),
+        serde_json::json!(
+            "sha256:5373fbe5d37c41b8b4c322477e57a866a77ad5450e82c6dcf4c5cf4d46a2d0d5"
+        )
     );
     assert_ne!(
         first.disambiguate(&base).unwrap(),
@@ -686,9 +688,20 @@ fn scope_participates_in_identity_and_invalid_positions_are_rejected() {
         CanonicalObservationIdV1::derive(&profile).unwrap(),
         CanonicalObservationIdV1::derive(&project).unwrap()
     );
-    assert!(ObservationSourceGenerationV1::new(0).is_err());
-    assert!(ObservationSourceRangeV1::new(5, 5).is_err());
-    assert!(ObservationSourceRangeV1::new(6, 5).is_err());
+    assert_eq!(
+        ObservationSourceGenerationV1::new(0)
+            .unwrap_err()
+            .to_string(),
+        "observation source generation must be non-zero"
+    );
+    assert_eq!(
+        ObservationSourceRangeV1::new(5, 5).unwrap_err().to_string(),
+        "observation source range must be non-empty and increasing"
+    );
+    assert_eq!(
+        ObservationSourceRangeV1::new(6, 5).unwrap_err().to_string(),
+        "observation source range must be non-empty and increasing"
+    );
 }
 
 #[test]
@@ -794,50 +807,58 @@ fn receipts_and_durable_observations_enforce_sanitization_binding() {
     let payload = json!({"message": "safe"});
     let payload_ref = PayloadReferenceV1::for_payload(&payload).unwrap();
 
-    assert!(
+    assert_eq!(
         SanitizationReceiptV1::new(
             receipt_ref(),
             SanitizerDispositionV1::Accepted,
             SensitivityV1::Unclassified,
             Some(payload_ref.clone()),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "unclassified content cannot cross the durable boundary"
     );
-    assert!(
+    assert_eq!(
         SanitizationReceiptV1::new(
             receipt_ref(),
             SanitizerDispositionV1::Accepted,
             SensitivityV1::Secret,
             Some(payload_ref.clone()),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "secret content cannot be accepted without redaction"
     );
 
     for disposition in [
         SanitizerDispositionV1::Rejected,
         SanitizerDispositionV1::Quarantined,
     ] {
-        assert!(
+        assert_eq!(
             SanitizationReceiptV1::new(
                 receipt_ref(),
                 disposition,
                 SensitivityV1::Sensitive,
                 Some(payload_ref.clone()),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "rejected or quarantined content cannot carry a payload reference"
         );
 
         let receipt =
             SanitizationReceiptV1::new(receipt_ref(), disposition, SensitivityV1::Sensitive, None)
                 .unwrap();
-        assert!(
+        assert_eq!(
             DurableObservationV1::new(
                 profile_material(),
                 receipt,
                 RetentionClass::new("transcript.fixture").unwrap(),
                 payload.clone(),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "rejected or quarantined content cannot carry a payload reference"
         );
     }
 
@@ -845,14 +866,16 @@ fn receipts_and_durable_observations_enforce_sanitization_binding() {
         json!({"message": "nope"}),
         json!({"message": "longer value"}),
     ] {
-        assert!(
+        assert_eq!(
             DurableObservationV1::new(
                 profile_material(),
                 accepted_receipt(&payload),
                 RetentionClass::new("transcript.fixture").unwrap(),
                 mismatched,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "sanitization receipt does not bind the durable payload"
         );
     }
 }
@@ -1193,13 +1216,15 @@ fn cline_native_transition_rejects_source_scope_and_native_identity_mismatches()
     );
     assert!(cline_native_source_successor_id(&new).unwrap().is_none());
     assert!(cline_task_native_observation_id(&old).unwrap().is_none());
-    assert!(
+    assert_eq!(
         ClineTranscriptStream::ApiHistory
             .source_identity(
                 ProviderId::new("codex").unwrap(),
                 SessionId::new("task.fixture").unwrap()
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+        "observation source identity is invalid"
     );
 }
 

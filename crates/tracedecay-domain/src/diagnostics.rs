@@ -427,7 +427,13 @@ mod tests {
     fn stale_records_cannot_transition_again() {
         let record = fixture_record();
         let cleared = record.clear(id("generation.clean.2")).unwrap();
-        assert!(cleared.clear(id("generation.clean.3")).is_err());
+        assert_eq!(
+            cleared
+                .clear(id("generation.clean.3"))
+                .unwrap_err()
+                .to_string(),
+            "diagnostic record state transition is not canonical"
+        );
     }
 
     #[test]

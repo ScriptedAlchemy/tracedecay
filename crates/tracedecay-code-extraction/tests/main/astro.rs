@@ -57,12 +57,15 @@ fn test_astro_no_frontmatter_returns_file_node_only() {
         .extract_artifact("static.astro", source)
         .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let non_file: Vec<_> = result
+    assert_eq!(kinds_and_names(&result), [(NodeKind::File, "static.astro")]);
+}
+
+fn kinds_and_names(result: &ExtractionResult) -> Vec<(NodeKind, &str)> {
+    result
         .nodes
         .iter()
-        .filter(|n| n.kind != NodeKind::File)
-        .collect();
-    assert!(non_file.is_empty(), "unexpected nodes: {:?}", non_file);
+        .map(|n| (n.kind.clone(), n.name.as_str()))
+        .collect()
 }
 
 #[test]
@@ -71,15 +74,12 @@ fn test_astro_template_markup_does_not_produce_symbols() {
     let source = "---\nconst greeting = 'hello';\n---\n<p class=\"text-lg\">{greeting}</p>\n<script>window.foo = 1;</script>";
     let result = AstroExtractor.extract_artifact("page.astro", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert!(
-        fns.is_empty(),
-        "unexpected functions from template: {:?}",
-        fns
+    assert_eq!(
+        kinds_and_names(&result),
+        [
+            (NodeKind::File, "page.astro"),
+            (NodeKind::Const, "greeting")
+        ]
     );
 }
 

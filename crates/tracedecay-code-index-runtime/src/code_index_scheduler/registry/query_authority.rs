@@ -83,6 +83,9 @@ impl CodeIndexSchedulerRegistryV1 {
             ));
         }
         worktree.query_authority = Some((scope.scope_digest.clone(), authority));
+        drop(mounted);
+        // Reads waiting on a restart's seat also wait for this authority.
+        Self::record_serving_seat(&self.serving_seats);
         Ok(())
     }
 

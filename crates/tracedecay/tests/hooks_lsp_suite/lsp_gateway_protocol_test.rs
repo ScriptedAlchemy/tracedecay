@@ -154,13 +154,26 @@ fn fixture_projection_identity() -> ContextProjectionIdentity {
 
 #[test]
 fn lsp_context_identity_rejects_unknown_fields() {
-    let mut identity =
+    let exact =
         serde_json::to_value(fixture_projection_identity()).expect("serialize projection identity");
+    let decoded = serde_json::from_value::<ContextProjectionIdentity>(exact.clone())
+        .expect("the exact projection identity must decode");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("reserialize projection identity"),
+        exact
+    );
+
+    let mut identity = exact;
     identity
         .as_object_mut()
         .expect("projection identity object")
         .insert("unexpected".to_owned(), Value::Bool(true));
-    assert!(serde_json::from_value::<ContextProjectionIdentity>(identity).is_err());
+    let error = serde_json::from_value::<ContextProjectionIdentity>(identity)
+        .expect_err("an unknown field must be refused");
+    assert!(
+        error.to_string().contains("unknown field `unexpected`"),
+        "unexpected refusal: {error}"
+    );
 }
 
 impl ContextProjectionPort for PendingContext {

@@ -567,8 +567,14 @@ fn kimi_reports_pending_operator_action_until_its_plugins_install_runs() {
 
     complete_kimi_plugins_install(&cli, &staged);
 
+    // No daemon listens here, so `daemon_unavailable` is the one step left.
     let doctor = stderr(&cli.run(&["doctor"]));
-    assert!(!doctor.contains("pending operator action"), "{doctor}");
+    assert!(!doctor.contains("open Kimi Code and run"), "{doctor}");
+    assert!(
+        doctor.contains("daemon_unavailable: no TraceDecay daemon is listening")
+            && doctor.contains("1 pending operator action(s), "),
+        "{doctor}"
+    );
     let converged = cli.run(&["update-plugin"]);
     assert_eq!(converged.status.code(), Some(0), "{}", stderr(&converged));
 }

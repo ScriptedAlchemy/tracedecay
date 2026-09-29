@@ -754,6 +754,9 @@ mod tests {
             (PathBuf::from("/repo/alpha"), "proj_alpha".to_string()),
         ];
 
-        assert!(select_initialize_project_path(&candidates).is_err());
+        assert!(matches!(
+            select_initialize_project_path(&candidates),
+            Err(InitializeRootResolutionError::AmbiguousIdentity)
+        ));
     }
 }

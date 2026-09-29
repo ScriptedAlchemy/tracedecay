@@ -66,9 +66,8 @@ pub use privacy_remediation::{
     run_at_rest_privacy_remediation, spawn_at_rest_privacy_remediation,
 };
 pub use sanitize::{
-    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
-    ObservationSanitizationOutcomeV1, PrivacySanitizerError, RecordSanitizerV1,
-    SanitizedClaudeRecordV1, SanitizedObservationRecordV1,
+    ClaudeSanitizerPolicyV1, ObservationSanitizationOutcomeV1, PrivacySanitizerError,
+    RecordSanitizerV1, SanitizedObservationRecordV1,
 };
 pub use structural_id::{
     protect_optional_sensitive_structural_id, protect_sensitive_structural_id,

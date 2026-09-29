@@ -7384,6 +7384,36 @@ mod tests {
         }
     }
 
+    /// SQLite's Unix VFS cannot open a full name of 512 bytes or more and
+    /// says only "unable to open database file", which the scheduler kept
+    /// retrying as an unavailable store. The builder names the limit as a
+    /// contract failure, which ends the build.
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_a_staging_path_sqlite_cannot_address() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let mut parent = directory.path().to_path_buf();
+        while parent.as_os_str().len() < 520 {
+            parent.push("d".repeat(64));
+        }
+        std::fs::create_dir_all(&parent).expect("deep staging parent");
+        let path = parent.join("staging.sqlite");
+
+        let error = match CodeLexicalArtifactBuilderV1::create(&path, test_metadata()) {
+            Ok(_) => panic!("SQLite cannot open a staging path this long"),
+            Err(error) => error,
+        };
+
+        let CodeLexicalArtifactErrorV1::Contract(detail) = error else {
+            panic!("expected a contract refusal naming the SQLite limit, got {error:?}");
+        };
+        assert!(
+            detail.starts_with(&format!("SQLite database path '{}", path.display()))
+                && detail.ends_with("SQLite's default VFS opens names shorter than 512 bytes"),
+            "{detail}"
+        );
+    }
+
     #[test]
     fn resume_refuses_staging_without_incremental_field_statistics() {
         let directory = tempfile::tempdir().expect("artifact tempdir");

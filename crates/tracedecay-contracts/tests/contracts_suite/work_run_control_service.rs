@@ -643,6 +643,10 @@ fn one_actors_pause_does_not_fence_another_actors_run() {
     service
         .pause(&mine, pause_command(None, 4_000))
         .expect("pause mine");
+    let fenced = service
+        .admit_reservation(&mine, &task(), &run())
+        .expect_err("my paused run fences new reservations");
+    assert_eq!(fenced.kind(), ApplicationProblemKind::Conflict);
     // The peer authority is a separate aggregate, not a shared switch.
     service
         .admit_reservation(&peer, &task(), &run())
