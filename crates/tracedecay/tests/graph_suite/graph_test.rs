@@ -110,14 +110,17 @@ fn test_depth_empty() {
 #[test]
 fn test_depth_with_cycle_breaks() {
     let result = dependency_depth(&make_adj(&[("a", "b"), ("b", "a"), ("b", "c")]), 10);
-    assert!(result.max_depth >= 1);
+    assert_eq!(
+        result.max_depth, 1,
+        "the a<->b cycle collapses to one level above c"
+    );
 }
 
 #[test]
 fn test_modularity_independent_clusters() {
     let adjacency = make_adj(&[("a", "b"), ("c", "d")]);
     let (score, components) = modularity_score(&adjacency);
-    assert!(components >= 2);
+    assert_eq!(components, 2);
     assert!(score > 0.0);
 }
 

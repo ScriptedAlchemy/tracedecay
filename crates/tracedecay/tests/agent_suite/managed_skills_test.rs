@@ -50,25 +50,44 @@ fn rejects_unsafe_skill_ids_and_support_paths() {
     ] {
         let mut draft = draft();
         draft.id = id.to_string();
-        assert!(draft.materialize().is_err(), "accepted unsafe id: {id}");
-    }
-
-    for path in [
-        "",
-        "/tmp/escape.md",
-        "../escape.md",
-        "a/../../b.md",
-        "a\\b.md",
-        "SKILL.md",
-        "skill.json",
-        "notes/freeform.md",
-        "references",
-    ] {
+        let error = draft.materialize().expect_err("accepted unsafe id");
         assert!(
-            ManagedSupportFile::new(path, b"body".to_vec()).is_err(),
-            "accepted unsafe support path: {path}",
+            error
+                .to_string()
+                .contains(&format!("unsafe managed skill id '{id}'")),
+            "unexpected refusal for {id:?}: {error}"
         );
     }
+    assert!(draft().materialize().is_ok());
+
+    for (path, refusal) in [
+        ("", "unsafe support path ''"),
+        ("/tmp/escape.md", "unsafe support path '/tmp/escape.md'"),
+        ("../escape.md", "unsafe support path '../escape.md'"),
+        ("a/../../b.md", "unsafe support path 'a/../../b.md'"),
+        ("a\\b.md", "unsafe support path 'a\\b.md'"),
+        ("SKILL.md", "support path 'SKILL.md' must be under one of"),
+        (
+            "skill.json",
+            "support path 'skill.json' must be under one of",
+        ),
+        (
+            "notes/freeform.md",
+            "support path 'notes/freeform.md' must be under one of",
+        ),
+        (
+            "references",
+            "support path 'references' must name a file under",
+        ),
+    ] {
+        let error = ManagedSupportFile::new(path, b"body".to_vec())
+            .expect_err("accepted unsafe support path");
+        assert!(
+            error.to_string().contains(refusal),
+            "unexpected refusal for {path:?}: {error}"
+        );
+    }
+    assert!(ManagedSupportFile::new("references/checklist.md", b"body".to_vec()).is_ok());
 }
 
 #[test]
@@ -78,16 +97,38 @@ fn rejects_duplicate_conflicting_and_oversized_support_files() {
         ManagedSupportFile::new("references/checklist.md", b"one".to_vec()).unwrap(),
         ManagedSupportFile::new("references/checklist.md", b"two".to_vec()).unwrap(),
     ];
-    assert!(duplicate.materialize().is_err());
+    let error = duplicate.materialize().expect_err("duplicate support path");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate managed skill support path 'references/checklist.md'"),
+        "unexpected refusal: {error}"
+    );
 
     let mut conflict = draft();
     conflict.support_files = vec![
         ManagedSupportFile::new("references/checklist.md", b"one".to_vec()).unwrap(),
         ManagedSupportFile::new("references/checklist.md/detail.md", b"two".to_vec()).unwrap(),
     ];
-    assert!(conflict.materialize().is_err());
+    let error = conflict
+        .materialize()
+        .expect_err("conflicting support path");
+    assert!(
+        error.to_string().contains(
+            "support path 'references/checklist.md/detail.md' conflicts with file path 'references/checklist.md'"
+        ),
+        "unexpected refusal: {error}"
+    );
 
-    assert!(ManagedSupportFile::new("references/huge.md", vec![b'x'; 64 * 1024 + 1]).is_err());
+    let error = ManagedSupportFile::new("references/huge.md", vec![b'x'; 64 * 1024 + 1])
+        .expect_err("oversized support file");
+    assert!(
+        error
+            .to_string()
+            .contains("support file 'references/huge.md' exceeds 65536 bytes"),
+        "unexpected refusal: {error}"
+    );
+    assert!(ManagedSupportFile::new("references/at-limit.md", vec![b'x'; 64 * 1024]).is_ok());
 }
 
 #[test]

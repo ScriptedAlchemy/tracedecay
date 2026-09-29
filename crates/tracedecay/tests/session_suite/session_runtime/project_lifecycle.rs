@@ -751,10 +751,13 @@ fn other_unadmitted_startup_import_outcomes_still_fail_the_project_mount() {
         SessionSyncOutcomeV1::DeadlineExceeded,
         SessionSyncOutcomeV1::WrongScope,
     ] {
-        let refused = DaemonSessionSyncService::classify_startup_import_outcome(outcome.clone());
+        let refused = DaemonSessionSyncService::classify_startup_import_outcome(outcome.clone())
+            .expect_err("an unadmitted startup import must still fail the project mount");
         assert!(
-            refused.is_err(),
-            "startup import outcome {outcome:?} must still fail the project mount"
+            refused.to_string().contains(&format!(
+                "session sync startup import was not admitted: {outcome:?}"
+            )),
+            "startup import outcome {outcome:?} refused with: {refused}"
         );
     }
 }

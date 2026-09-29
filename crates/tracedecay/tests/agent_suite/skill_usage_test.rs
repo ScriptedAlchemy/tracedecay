@@ -105,8 +105,8 @@ async fn analytics_ingest_skips_failed_tracedecay_skill_view_rows() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
 
-    let events = vec![AnalyticsEventRecord {
-        id: 10,
+    let skill_view = |id: i64, skill_id: &str, outcome: Option<&str>| AnalyticsEventRecord {
+        id,
         provider: "codex".to_string(),
         project_id: "project".to_string(),
         session_id: Some("session".to_string()),
@@ -118,17 +118,22 @@ async fn analytics_ingest_skips_failed_tracedecay_skill_view_rows() {
         skill_name: None,
         hint_category: None,
         hint_id: None,
-        outcome: Some("error".to_string()),
-        metadata_json: Some(
-            r#"{"request_id":"req-failed","function":{"name":"tracedecay_skill_view","arguments":{"id":"repo-hygiene"}}}"#
-                .to_string(),
-        ),
-    }];
+        outcome: outcome.map(str::to_string),
+        metadata_json: Some(format!(
+            r#"{{"request_id":"req-{id}","function":{{"name":"tracedecay_skill_view","arguments":{{"id":"{skill_id}"}}}}}}"#
+        )),
+    };
+    let events = vec![
+        skill_view(10, "repo-hygiene", Some("error")),
+        skill_view(11, "release-notes", None),
+    ];
 
     let touched = ingest_analytics_events(&profile_root, &events)
         .await
         .unwrap();
-    assert!(touched.is_empty());
+    assert_eq!(touched.len(), 1);
+    assert_eq!(touched[0].skill_id, "release-notes");
+    assert_eq!(touched[0].view_count, 1);
     assert!(
         tracedecay_automation_runtime::automation::skill_usage::load_skill_usage_record(
             &profile_root,
