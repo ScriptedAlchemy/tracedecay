@@ -3910,7 +3910,9 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
             .index_verified_ignored_dependency(&project_root, request, Arc::new(ActiveControl))
             .await
     });
-    tokio::time::timeout(Duration::from_millis(100), async {
+    // The publication gate stays held until after this wait, so a request
+    // that waited on it first could never take the permit.
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         while global_admission.available_permits() != 0 {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
