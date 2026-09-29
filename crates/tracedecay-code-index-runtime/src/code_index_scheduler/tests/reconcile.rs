@@ -9030,9 +9030,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         .to_string();
     let projection = DiagnosticsStoreLspFeedbackProjection::new(
         Arc::new(
-            tracedecay_application::feedback::diagnostics::DatabaseDiagnosticStore::new(
-                database.clone(),
-            ),
+            tracedecay_application::diagnostics_store::DiagnosticsStore::new(database.clone()),
         ),
         Arc::new(FixedDocument(source.to_owned())),
     );

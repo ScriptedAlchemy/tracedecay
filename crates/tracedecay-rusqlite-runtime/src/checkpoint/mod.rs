@@ -11,8 +11,6 @@ mod driver;
 mod types;
 
 pub(crate) use controller::WriterCheckpointController;
-#[cfg(test)]
-pub(crate) use driver::CheckpointDriver;
 pub(crate) use driver::{RusqliteCheckpointDriver, RusqliteCheckpointError};
 pub use types::{
     CheckpointBlocker, CheckpointBlockers, CheckpointFrameReport, CheckpointInterruption,

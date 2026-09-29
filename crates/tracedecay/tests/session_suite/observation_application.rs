@@ -19,7 +19,7 @@ use tracedecay_sessions::observation::{
     GetObservationRequest, ObservationApplication, ObservationApplicationError,
     ObservationCancellation, ReplayObservationsRequest,
 };
-use tracedecay_store::observation::{NonDurableFrameReason, ObservationCursorAdvance};
+use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
     ObservationStore, ProjectionPersistOutcome,
@@ -794,7 +794,7 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             ObservationOrderingDomainV1::SqliteRowId,
             cursor_after_commit.clone(),
             ObservationSourceRangeV1::new(1, 2).unwrap(),
-            NonDurableFrameReason::MalformedFrame,
+            ObservationCoverageReason::MalformedFrame,
         )
         .unwrap();
         application
