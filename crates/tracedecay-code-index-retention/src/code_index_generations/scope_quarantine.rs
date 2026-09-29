@@ -253,7 +253,11 @@ impl ScopeQuarantineAuthority {
                 None => None,
             };
             match (source, staged) {
-                (Some((_, actual)), None) if actual == expected => {}
+                // Nothing of this scope was quarantined, so there is nothing to
+                // restore. A writer that touched the source after `prepare`
+                // changed its identity and made `stage` refuse; the source is
+                // left as it is, and refusing here would pin the journal.
+                (Some(_), None) => {}
                 (None, Some((staged, actual))) => {
                     if actual != expected
                         || directory_identity(&staged).map_err(storage)? != expected
@@ -296,9 +300,6 @@ impl ScopeQuarantineAuthority {
                         "scope reconciliation rollback found duplicate '{}'",
                         scope.scope_hash
                     )));
-                }
-                (Some(_), None) => {
-                    return Err(identity_changed(&scope.scope_hash, "during rollback"));
                 }
             }
         }
@@ -826,6 +827,53 @@ mod tests {
         assert_eq!(
             std::fs::read(displaced.join("payload")).expect("fenced scope survives"),
             b"owned"
+        );
+    }
+
+    /// A still-mounted worker that writes into a removed worktree's scope
+    /// after `prepare` changes the scope's identity, so the quarantine rename
+    /// is refused. Rollback then has nothing to restore and must finish, or
+    /// its journal refuses every later maintenance tick.
+    #[cfg(unix)]
+    #[test]
+    fn rollback_finishes_when_a_touched_source_was_never_quarantined() {
+        let (store, scope) = fixture();
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        let source = store.path().join(SCOPE_HASH);
+        std::fs::write(source.join("late-write"), b"worker").expect("write into the scope");
+        // Pin the new mtime so the change never hides inside one clock tick.
+        std::fs::File::open(&source)
+            .expect("open the scope directory")
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400))
+            .expect("move the scope mtime");
+
+        let refused = authority.stage(std::slice::from_ref(&scope));
+        assert!(
+            matches!(&refused, Err(CodeGenerationRetentionErrorV1::UnsafeState(message))
+                if message.ends_with("changed filesystem identity before quarantine")),
+            "{refused:?}"
+        );
+        authority
+            .rollback(std::slice::from_ref(&scope))
+            .expect("rollback has nothing of this scope to restore");
+
+        let mut kept = std::fs::read_dir(&source)
+            .expect("source survives")
+            .map(|entry| entry.expect("source entry").file_name())
+            .collect::<Vec<_>>();
+        kept.sort();
+        assert_eq!(kept, ["late-write", "payload"]);
+        assert!(
+            !store
+                .path()
+                .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
+                .join(RECEIPT_DIGEST)
+                .exists()
         );
     }
 

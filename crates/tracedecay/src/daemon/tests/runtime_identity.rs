@@ -769,7 +769,8 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
     let observations = engine.store_administration.store_telemetry_sampling();
     let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
     let lease = crate::daemon::maintenance::project_store_maintenance_lease(primary_graph.as_ref());
-    tokio::time::timeout(std::time::Duration::from_mins(1), async {
+    let mut ticks = Vec::new();
+    let converged = tokio::time::timeout(std::time::Duration::from_mins(1), async {
         let mut continuation = None;
         loop {
             let outcome = tracedecay_maintenance::generation::run_project_generation_maintenance(
@@ -781,6 +782,7 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
                 continuation,
             )
             .await;
+            ticks.push((outcome.label(), linked_scope.exists()));
             if outcome.is_complete() && !linked_scope.exists() {
                 return;
             }
@@ -791,8 +793,14 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
-    .await
-    .expect("generation maintenance converges after the worktree is removed");
+    .await;
+    assert!(
+        converged.is_ok(),
+        "generation maintenance did not converge after the worktree was removed; \
+         (outcome, linked scope present) per tick, last 20: {:?} of {} ticks",
+        &ticks[ticks.len().saturating_sub(20)..],
+        ticks.len()
+    );
 
     assert!(
         !linked_scope.exists(),
