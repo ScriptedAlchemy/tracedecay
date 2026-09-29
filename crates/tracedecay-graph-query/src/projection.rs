@@ -23,6 +23,10 @@ pub enum CodeGraphReadError {
     MissingRegistry,
     #[error("the exact project code graph is unavailable: {detail}")]
     Unavailable { detail: String },
+    /// The serving generation's graph is refused for that generation's
+    /// lifetime; a retry answers the same until another generation seals.
+    #[error("the exact project code graph is refused for this generation: {detail}")]
+    Refused { detail: String },
     #[error("the exact project code graph requires reset: {detail}")]
     ResetRequired { detail: String },
     #[error("the requested code-graph generation is stale: {detail}")]
@@ -295,6 +299,7 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
             reason_code: match &error {
                 CodeGraphReadError::MissingRegistry => "code-graph-registry-missing",
                 CodeGraphReadError::Unavailable { .. } => "code-graph-unavailable",
+                CodeGraphReadError::Refused { .. } => "code-graph-refused",
                 CodeGraphReadError::Stale { .. } => "code-graph-stale",
                 CodeGraphReadError::Cancelled => "code-graph-cancelled",
                 CodeGraphReadError::TimedOut => "code-graph-timed-out",
@@ -332,6 +337,7 @@ pub fn code_graph_read_error_from_runtime(error: &TraceDecayError) -> Option<Cod
     let detail = detail.to_owned();
     Some(match reason_code {
         "code-graph-registry-missing" => CodeGraphReadError::MissingRegistry,
+        "code-graph-refused" => CodeGraphReadError::Refused { detail },
         "code-graph-stale" => CodeGraphReadError::Stale { detail },
         "code-graph-cancelled" => CodeGraphReadError::Cancelled,
         "code-graph-timed-out" => CodeGraphReadError::TimedOut,

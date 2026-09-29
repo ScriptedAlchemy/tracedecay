@@ -1510,6 +1510,9 @@ pub enum CodeIndexWorkerPhaseV1 {
     AwaitingAdmission,
     /// Holding a permit and waiting for the worktree's build/publication gate.
     AwaitingPublicationGate,
+    /// Building a sealed generation's code graph: corpus-sized work a read
+    /// that waits on the graph cannot shorten.
+    PublishingGraph,
 }
 
 impl CodeIndexWorkerPhaseV1 {
@@ -1535,7 +1538,11 @@ impl CodeIndexOwnerActivityV1 {
     /// No owner pass holds the worktree and the worker is back at a wait, so
     /// the last pass and its tail have finished.
     pub fn pass_finished(&self) -> bool {
-        !self.passes().running() && self.worker_phase() != CodeIndexWorkerPhaseV1::Working
+        !self.passes().running()
+            && !matches!(
+                self.worker_phase(),
+                CodeIndexWorkerPhaseV1::Working | CodeIndexWorkerPhaseV1::PublishingGraph
+            )
     }
 
     pub fn passes(&self) -> super::CodeIndexOwnerPassesV1 {

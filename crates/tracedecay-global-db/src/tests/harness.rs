@@ -10,7 +10,6 @@ use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
-use tracedecay_rusqlite_runtime::repository::RepositoryWriterRuntimeSnapshot;
 
 pub(super) static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
@@ -1170,17 +1169,6 @@ pub async fn publish_test_session_relation_projection(
             message: format!("{error:?}"),
         },
     )
-}
-
-/// The mounted writer's rusqlite telemetry for `database`: the SQLite work its
-/// write transactions executed and how they ended.
-pub fn writer_telemetry(database: &RegisteredGlobalDb) -> RepositoryWriterRuntimeSnapshot {
-    database
-        .runtime_client()
-        .writer_telemetry_snapshot()
-        .expect("registered database must expose rusqlite writer telemetry")
-        .writer
-        .expect("mounted writer must carry rusqlite writer telemetry")
 }
 
 /// Mounts the daemon-owned relation graph a registered session shard needs to

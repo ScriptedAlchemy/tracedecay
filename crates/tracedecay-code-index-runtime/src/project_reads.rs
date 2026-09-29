@@ -12,6 +12,7 @@ use std::time::Duration;
 use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
 use tracedecay_contracts::{Deadline, ResolvedScope, now_micros};
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
+use tracedecay_query::retrieval::RetrievalPortError;
 
 use crate::code_index_scheduler::{
     CodeIndexAutomaticAdmissionV1, CodeIndexSchedulerRegistryV1, LatestCodeTextGenerationV1,
@@ -152,12 +153,9 @@ impl ProjectCodeGraphServingAuthorityV1 {
         latest: LatestCompleteCodeIndexV1,
         freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
     ) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
-        let store =
-            latest
-                .interactive_graph_store()
-                .map_err(|error| CodeGraphReadError::Unavailable {
-                    detail: error.to_string(),
-                })?;
+        let store = latest
+            .interactive_graph_store()
+            .map_err(|error| graph_store_read_error(latest.generation_graph_refusal(), &error))?;
         Ok(ProjectCodeGraphServingProjectionV1 {
             generation_id: latest.generation().manifest().generation_id.clone(),
             statistics: latest.generation().generation_statistics().ok(),
@@ -170,18 +168,31 @@ impl ProjectCodeGraphServingAuthorityV1 {
         latest: LatestCodeTextGenerationV1,
         freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
     ) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
-        let store =
-            latest
-                .interactive_graph_store()
-                .map_err(|error| CodeGraphReadError::Unavailable {
-                    detail: error.to_string(),
-                })?;
+        let store = latest
+            .interactive_graph_store()
+            .map_err(|error| graph_store_read_error(latest.generation_graph_refusal(), &error))?;
         Ok(ProjectCodeGraphServingProjectionV1 {
             generation_id: latest.metadata().manifest().generation_id.clone(),
             statistics: Some(latest.metadata().generation_statistics().clone()),
             store,
             freshness,
         })
+    }
+}
+
+/// A generation whose graph is refused for its lifetime answers that typed
+/// refusal; any other store miss is the retryable not-yet-serving state.
+fn graph_store_read_error(
+    refusal: Option<&'static str>,
+    error: &RetrievalPortError,
+) -> CodeGraphReadError {
+    match refusal {
+        Some(reason) => CodeGraphReadError::Refused {
+            detail: reason.to_owned(),
+        },
+        None => CodeGraphReadError::Unavailable {
+            detail: error.to_string(),
+        },
     }
 }
 
