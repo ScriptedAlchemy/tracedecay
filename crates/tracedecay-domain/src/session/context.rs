@@ -247,11 +247,8 @@ impl<'de> Deserialize<'de> for CompactContextBundleV1 {
             records: Vec<CompactContextRecordV1>,
             omissions: Vec<CompactContextOmissionV1>,
             continuation_anchors: Vec<RetrievalAnchorId>,
-            #[serde(default)]
             coverage: TemporalCoverageCountsV1,
-            #[serde(default)]
             conflicts: Vec<CompactContextConflictV1>,
-            #[serde(default)]
             lineage: Vec<CompactContextLineageEdgeV1>,
             encoded_bytes: u64,
         }

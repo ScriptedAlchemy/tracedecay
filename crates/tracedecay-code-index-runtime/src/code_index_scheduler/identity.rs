@@ -503,26 +503,4 @@ mod tests {
             "an in-place loose-ref rewrite must be detected by the refs signature"
         );
     }
-
-    /// Cost of one tier-1 staleness sample, the number this module's contract
-    /// calls fixed and cheap.
-    ///
-    /// Ignored because it reports a duration rather than asserting one; run it
-    /// with `--ignored --nocapture` to re-derive the figure in the module doc.
-    #[test]
-    #[ignore = "timing measurement, not a pass/fail contract"]
-    fn measure_git_metadata_fingerprint_capture() {
-        const ITERATIONS: u32 = 2000;
-
-        let repo = init_repo(&[("src/lib.rs", "pub fn a() {}\n")]);
-        for _ in 0..100 {
-            std::hint::black_box(GitMetadataFingerprintV1::capture(repo.path()));
-        }
-        let started = std::time::Instant::now();
-        for _ in 0..ITERATIONS {
-            std::hint::black_box(GitMetadataFingerprintV1::capture(repo.path()));
-        }
-        let per_capture = started.elapsed() / ITERATIONS;
-        println!("capture: {:.1}us", per_capture.as_secs_f64() * 1e6);
-    }
 }

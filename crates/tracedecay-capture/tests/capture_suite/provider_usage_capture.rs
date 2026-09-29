@@ -333,4 +333,38 @@ fn claude_api_error_placeholder_records_no_provider_usage() {
             envelope.facts()
         );
     }
+
+    let billed = json!({
+        "type": "assistant",
+        "uuid": "billed-uuid",
+        "timestamp": "2026-08-01T00:00:00.000Z",
+        "message": {
+            "id": "msg_billed",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [{"type": "text", "text": "Answered."}],
+            "usage": {"input_tokens": 5, "output_tokens": 7}
+        }
+    });
+    let record_id = claude::stable_record_id(&billed, "claude-error-session", 0).unwrap();
+    let envelope = claude::normalize(
+        &billed,
+        "claude-error-session",
+        record_id,
+        ObservationSourceRangeV1::new(0, 128).unwrap(),
+    )
+    .unwrap();
+    let models = provider_usage_facts(&envelope)
+        .into_iter()
+        .map(|fact| match fact {
+            CanonicalObservationFactV1::ProviderUsage { model, .. } => model.clone(),
+            other => panic!("expected ProviderUsage, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        models,
+        vec![ProviderUsageModelV1::Known {
+            model: "claude-opus-5".to_owned(),
+        }]
+    );
 }

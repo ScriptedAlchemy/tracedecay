@@ -429,7 +429,10 @@ mod tests {
     fn concealed_proximity_requires_matching_coverage() {
         let mut contribution = concealed_private_contribution();
         contribution.inclusion = ProximityInclusionV1::Denied;
-        assert!(contribution.validate().is_err());
+        assert_eq!(
+            contribution.validate().unwrap_err().to_string(),
+            "proximity inclusion coverage is not canonical"
+        );
         contribution.coverage = ProximityCoverageV1::Denied;
         assert!(contribution.validate().is_ok());
     }

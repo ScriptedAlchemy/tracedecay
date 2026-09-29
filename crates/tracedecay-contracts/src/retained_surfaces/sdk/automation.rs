@@ -365,7 +365,12 @@ mod tests {
             "include_recent_sessions": true,
             "recent_sessions_limit": 3
         });
-        assert!(serde_json::from_value::<AutomationRunRequestV1>(cross_authority).is_err());
+        assert!(
+            serde_json::from_value::<AutomationRunRequestV1>(cross_authority)
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown field `skill_writer`")
+        );
 
         let combined = json!({
             "run_id": "run.memory.combined",
@@ -374,7 +379,12 @@ mod tests {
                 "options": {"session_reflector": reflector_request()["task"]["options"]}
             }
         });
-        assert!(serde_json::from_value::<AutomationRunRequestV1>(combined).is_err());
+        assert_eq!(
+            serde_json::from_value::<AutomationRunRequestV1>(combined)
+                .unwrap_err()
+                .to_string(),
+            "missing field `skill_writer`"
+        );
     }
 
     #[test]

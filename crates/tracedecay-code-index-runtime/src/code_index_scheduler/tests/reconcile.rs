@@ -2582,6 +2582,87 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
     registry.shutdown().await;
 }
 
+/// A restarted owner has no verified proof for a watcher frontier to move
+/// from. The frontier wakes the verifying pass but must not mint an observed
+/// change: that overflow turned the restart's verification into a rescan and
+/// status reported it as a rebuild.
+#[tokio::test]
+async fn restart_watcher_frontier_before_verification_does_not_mint_a_change() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::super::scoped_code_index_store_root(store.path(), fixture.path());
+    let seeded = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation")).generation_id
+    };
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount the retained generation");
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical_root)
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(identity) =
+        tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded(
+            fixture.path(),
+        )
+    else {
+        panic!("the fixture checkout resolves a repository identity");
+    };
+    assert_eq!(
+        registry.request_for_root(&identity).await,
+        super::super::GitStateChangeRequestV1::Accepted
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_hint_count(),
+        Some(0),
+        "a frontier before the first verification must not fabricate overflow evidence"
+    );
+
+    drop(admission);
+    let receipt = wait_for_event_to_ready(&registry).await;
+    assert_eq!(
+        (receipt.is_noop(), receipt.overflow_reconciled),
+        (true, false),
+        "the restart must verify the unchanged tree, not rescan it: {receipt:?}"
+    );
+    assert_eq!(
+        registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("dashboard freshness")
+            .latest_generation_id
+            .as_deref(),
+        Some(seeded.as_str())
+    );
+    registry.shutdown().await;
+}
+
 /// The live outage this covers: a background reconcile owns the scheduler
 /// mutex for its whole pass, sealing a production-scale corpus holds it for
 /// minutes per generation, while the seated serving generation stays fully
@@ -8949,9 +9030,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         .to_string();
     let projection = DiagnosticsStoreLspFeedbackProjection::new(
         Arc::new(
-            tracedecay_application::feedback::diagnostics::DatabaseDiagnosticStore::new(
-                database.clone(),
-            ),
+            tracedecay_application::diagnostics_store::DiagnosticsStore::new(database.clone()),
         ),
         Arc::new(FixedDocument(source.to_owned())),
     );

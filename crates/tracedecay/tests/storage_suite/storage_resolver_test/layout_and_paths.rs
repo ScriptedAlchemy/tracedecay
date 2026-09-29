@@ -1,6 +1,7 @@
 //! Store layout resolution, config path, and path-safety guard tests.
 
 use super::*;
+use tracedecay_domain::errors::TraceDecayError;
 
 #[test]
 fn resolve_layout_defaults_to_profile_shard_without_marker_or_local_db() {
@@ -70,16 +71,43 @@ fn project_path_rejects_parent_absolute_nul_non_normal_and_symlink_escapes() {
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("secret.txt"), "secret").unwrap();
 
-    assert!(ProjectPath::resolve(&root, Path::new("../secret.txt")).is_err());
-    assert!(ProjectPath::resolve(&root, &outside.join("secret.txt")).is_err());
-    assert!(ProjectPath::resolve(&root, Path::new("src/../lib.rs")).is_err());
-    assert!(ProjectPath::resolve(&root, Path::new("src/./lib.rs")).is_err());
-    assert!(ProjectPath::resolve(&root, Path::new("src/bad\0name.rs")).is_err());
+    let refusal = |path: &Path| match ProjectPath::resolve(&root, path) {
+        Err(TraceDecayError::Config { message }) => message,
+        Err(other) => panic!("unexpected refusal kind for {}: {other:?}", path.display()),
+        Ok(_) => panic!("{} must be refused", path.display()),
+    };
+    let escapes = |path: &Path| {
+        format!(
+            "path '{}' escapes project root '{}'",
+            path.display(),
+            root.display()
+        )
+    };
+
+    assert_eq!(
+        refusal(Path::new("../secret.txt")),
+        "path '../secret.txt' is not normalized"
+    );
+    let absolute_outside = outside.join("secret.txt");
+    assert_eq!(refusal(&absolute_outside), escapes(&absolute_outside));
+    assert_eq!(
+        refusal(Path::new("src/../lib.rs")),
+        "path 'src/../lib.rs' is not normalized"
+    );
+    assert_eq!(
+        refusal(Path::new("src/./lib.rs")),
+        "path 'src/./lib.rs' is not normalized"
+    );
+    assert_eq!(
+        refusal(Path::new("src/bad\0name.rs")),
+        "path 'src/bad\0name.rs' contains a NUL byte"
+    );
 
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
-        assert!(ProjectPath::resolve(&root, Path::new("escape/secret.txt")).is_err());
+        let through_symlink = Path::new("escape/secret.txt");
+        assert_eq!(refusal(through_symlink), escapes(through_symlink));
     }
 }
 

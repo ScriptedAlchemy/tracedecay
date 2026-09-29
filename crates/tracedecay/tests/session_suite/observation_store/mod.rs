@@ -24,7 +24,8 @@ use tracedecay_domain::{
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCoverageV1,
+    ObservationCursorAdvance,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStatus,
@@ -575,7 +576,7 @@ fn provider_malformed_advance(
         ObservationOrderingDomainV1::SqliteRowId,
         expected_cursor,
         ObservationSourceRangeV1::new(start, end).unwrap(),
-        NonDurableFrameReason::MalformedFrame,
+        ObservationCoverageReason::MalformedFrame,
     )
     .unwrap()
 }
@@ -584,13 +585,15 @@ fn cursor_advance(
     expected_cursor: Option<ObservationSourceCursorV1>,
     start: u64,
     end: u64,
-    reason: NonDurableFrameReason,
+    reason: ObservationCoverageReason,
 ) -> ObservationCursorAdvance {
     let generation = ObservationSourceGenerationV1::new(GENERATION).unwrap();
     let covered = ObservationSourceRangeV1::new(start, end).unwrap();
     let disposition = match reason {
-        NonDurableFrameReason::SanitizerRejected => Some(SanitizerDispositionV1::Rejected),
-        NonDurableFrameReason::SanitizerQuarantined => Some(SanitizerDispositionV1::Quarantined),
+        ObservationCoverageReason::SanitizerRejected => Some(SanitizerDispositionV1::Rejected),
+        ObservationCoverageReason::SanitizerQuarantined => {
+            Some(SanitizerDispositionV1::Quarantined)
+        }
         _ => None,
     };
     let Some(disposition) = disposition else {
@@ -1428,13 +1431,13 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
         .unwrap()
         .to_path_buf();
     let before = user_table_counts(&database_path);
-    let advance = cursor_advance(None, 0, 10, NonDurableFrameReason::BlankFrame);
+    let advance = cursor_advance(None, 0, 10, ObservationCoverageReason::BlankFrame);
 
     assert_eq!(
         advance.covered(),
         ObservationSourceRangeV1::new(0, 10).unwrap()
     );
-    assert_eq!(advance.reason(), NonDurableFrameReason::BlankFrame);
+    assert_eq!(advance.reason(), ObservationCoverageReason::BlankFrame);
     assert_eq!(
         store.advance_source_cursor(advance.clone()).await.unwrap(),
         CursorAdvanceOutcome::Committed
@@ -1503,7 +1506,7 @@ async fn cursor_already_owned_keeps_the_first_reason_for_a_later_owner() {
             None,
             0,
             10,
-            NonDurableFrameReason::BlankFrame,
+            ObservationCoverageReason::BlankFrame,
         ))
         .await
         .unwrap();
@@ -1514,7 +1517,7 @@ async fn cursor_already_owned_keeps_the_first_reason_for_a_later_owner() {
                 None,
                 0,
                 10,
-                NonDurableFrameReason::OutOfScope,
+                ObservationCoverageReason::OutOfScope,
             ))
             .await
             .unwrap(),
@@ -1553,7 +1556,7 @@ async fn cursor_already_past_a_narrower_range_keeps_the_owned_frontier() {
             None,
             0,
             10,
-            NonDurableFrameReason::BlankFrame,
+            ObservationCoverageReason::BlankFrame,
         ))
         .await
         .unwrap();
@@ -1564,7 +1567,7 @@ async fn cursor_already_past_a_narrower_range_keeps_the_owned_frontier() {
                 Some(cursor(5)),
                 5,
                 10,
-                NonDurableFrameReason::BlankFrame,
+                ObservationCoverageReason::BlankFrame,
             ))
             .await
             .unwrap(),
@@ -1592,7 +1595,7 @@ async fn contiguous_observation_commit_is_atomic() {
             None,
             0,
             10,
-            NonDurableFrameReason::OutOfScope,
+            ObservationCoverageReason::OutOfScope,
         ))
         .await
         .unwrap();
@@ -1653,7 +1656,7 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
             None,
             0,
             10,
-            NonDurableFrameReason::SanitizerRejected,
+            ObservationCoverageReason::SanitizerRejected,
         ))
         .await
         .unwrap();
@@ -1662,7 +1665,7 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
         Some(cursor(0)),
         0,
         20,
-        NonDurableFrameReason::SanitizerRejected,
+        ObservationCoverageReason::SanitizerRejected,
     );
     assert!(matches!(
         store.advance_source_cursor(stale).await,
@@ -1676,7 +1679,7 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
             ObservationSourceGenerationV1::new(GENERATION).unwrap(),
             Some(cursor(10)),
             ObservationSourceRangeV1::new(11, 20).unwrap(),
-            NonDurableFrameReason::BlankFrame,
+            ObservationCoverageReason::BlankFrame,
         ),
         Err(ObservationStoreError::CursorCoverageMismatch)
     ));
@@ -1699,7 +1702,7 @@ async fn sanitizer_cursor_progress_persists_typed_nonpayload_receipt_atomically(
             .database_path(HostAdmissionScope::Profile)
             .unwrap()
             .to_path_buf();
-        let advance = cursor_advance(None, 0, 10, NonDurableFrameReason::SanitizerRejected);
+        let advance = cursor_advance(None, 0, 10, ObservationCoverageReason::SanitizerRejected);
         assert_eq!(
             store.advance_source_cursor(advance.clone()).await.unwrap(),
             CursorAdvanceOutcome::Committed
@@ -1750,7 +1753,7 @@ async fn cursor_only_progress_allows_file_replacement_from_zero_with_exact_cas()
             None,
             0,
             42,
-            NonDurableFrameReason::BlankFrame,
+            ObservationCoverageReason::BlankFrame,
         ))
         .await
         .unwrap();
@@ -1762,7 +1765,7 @@ async fn cursor_only_progress_allows_file_replacement_from_zero_with_exact_cas()
         replacement_generation,
         Some(cursor(42)),
         ObservationSourceRangeV1::new(0, 10).unwrap(),
-        NonDurableFrameReason::OutOfScope,
+        ObservationCoverageReason::OutOfScope,
     )
     .unwrap();
     let replacement_cursor = ObservationSourceCursorV1::for_ordering(
@@ -1797,7 +1800,7 @@ fn cursor_only_progress_rejects_file_replacement_after_zero() {
             ObservationSourceGenerationV1::new(GENERATION + 1).unwrap(),
             Some(cursor(42)),
             ObservationSourceRangeV1::new(1, 10).unwrap(),
-            NonDurableFrameReason::OutOfScope,
+            ObservationCoverageReason::OutOfScope,
         ),
         Err(ObservationStoreError::CursorCoverageMismatch)
     ));
@@ -1816,7 +1819,7 @@ async fn cursor_only_progress_survives_restart() {
                 None,
                 0,
                 10,
-                NonDurableFrameReason::SanitizerQuarantined,
+                ObservationCoverageReason::SanitizerQuarantined,
             ))
             .await
             .unwrap();
@@ -1835,7 +1838,7 @@ async fn cursor_only_progress_survives_restart() {
             Some(cursor(10)),
             10,
             20,
-            NonDurableFrameReason::SanitizerQuarantined,
+            ObservationCoverageReason::SanitizerQuarantined,
         ))
         .await
         .unwrap();

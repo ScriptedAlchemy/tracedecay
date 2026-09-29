@@ -2086,15 +2086,17 @@ mod tests {
             safe_bounded_preview: None,
             diagnostic_projection: None,
         };
-        assert!(
+        assert_eq!(
             FeedbackCycleAdvisoryV1 {
                 providers: Vec::new(),
                 findings: vec![projectionless_finding.clone()],
             }
             .validate()
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "feedback advisory coverage is inconsistent with the application contract"
         );
-        assert!(
+        assert_eq!(
             FeedbackCycleAdvisoryV1 {
                 providers: vec![FeedbackAdvisoryProviderStateV1 {
                     producer:
@@ -2104,7 +2106,9 @@ mod tests {
                 findings: vec![projectionless_finding.clone()],
             }
             .validate()
-            .is_err(),
+            .unwrap_err()
+            .to_string(),
+            "feedback advisory finding is inconsistent with the application contract",
             "a projection-less finding cannot claim an unrepresented provider state"
         );
         let mut ci_finding = projectionless_finding.clone();

@@ -982,8 +982,12 @@ mod tests {
         write(root, "src/dir_form/leaf.rs", "");
         write(root, "src/file_form.rs", "mod leaf;\n");
         write(root, "src/file_form/leaf.rs", "");
+        write(root, "src/file_form/undeclared.rs", "");
 
-        assert!(unmounted_paths(&audit_rust(root)).is_empty());
+        assert_eq!(
+            unmounted_paths(&audit_rust(root)),
+            vec!["src/file_form/undeclared.rs"]
+        );
     }
 
     /// `#[path]` relocates a module's file, including out of its own directory.
@@ -1129,8 +1133,12 @@ mod tests {
         );
         write(root, "src/gated.rs", "");
         write(root, "src/featured.rs", "");
+        write(root, "src/undeclared.rs", "");
 
-        assert!(unmounted_paths(&audit_rust(root)).is_empty());
+        assert_eq!(
+            unmounted_paths(&audit_rust(root)),
+            vec!["src/undeclared.rs"]
+        );
     }
 
     /// `#[cfg_attr(…, path = "…")]` names a file the module may be on some
@@ -1276,8 +1284,12 @@ mod tests {
         );
         write(root, "tests/suite/main.rs", "mod helper;\n");
         write(root, "tests/suite/helper.rs", "");
+        write(root, "tests/suite/undeclared.rs", "");
 
-        assert!(unmounted_paths(&audit_rust(root)).is_empty());
+        assert_eq!(
+            unmounted_paths(&audit_rust(root)),
+            vec!["tests/suite/undeclared.rs"]
+        );
     }
 
     /// Workspace members are audited under their own manifests, and a file the
@@ -1433,8 +1445,12 @@ mod tests {
         write(root, "src/cli.rs", "");
         write(root, "src/bin/extra/main.rs", "mod helper;\nfn main() {}\n");
         write(root, "src/bin/extra/helper.rs", "");
+        write(root, "src/bin/extra/undeclared.rs", "");
 
-        assert!(unmounted_paths(&audit_rust(root)).is_empty());
+        assert_eq!(
+            unmounted_paths(&audit_rust(root)),
+            vec!["src/bin/extra/undeclared.rs"]
+        );
     }
 
     /// A project with no cargo manifest and no Rust files is answered as
@@ -1480,12 +1496,11 @@ mod tests {
         write(root, "external/linked/leaf.rs", "");
         std::os::unix::fs::symlink(root.join("external/linked"), root.join("src/linked"))
             .expect("symlink");
+        write(root, "src/undeclared.rs", "");
 
-        let audit = audit_rust(root);
-        assert!(
-            unmounted_paths(&audit).is_empty(),
-            "symlinked tree reported: {:?}",
-            unmounted_paths(&audit)
+        assert_eq!(
+            unmounted_paths(&audit_rust(root)),
+            vec!["src/undeclared.rs"]
         );
     }
 

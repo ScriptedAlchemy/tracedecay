@@ -330,7 +330,12 @@ fn frozen_coverage_rejects_a_shard_observed_twice() {
             serde_json::to_value(&required_project).unwrap(),
         ],
     });
-    assert!(serde_json::from_value::<FrozenWatermarkCoverageV1>(duplicate_observed).is_err());
+    assert_eq!(
+        serde_json::from_value::<FrozenWatermarkCoverageV1>(duplicate_observed)
+            .unwrap_err()
+            .to_string(),
+        "duplicate observed watermark does not match its canonical shard identity"
+    );
 }
 
 #[test]
@@ -824,8 +829,11 @@ fn graph_read_contracts_preserve_backend_order_and_legacy_query_inputs() {
         .expect("legacy graph search accepts whitespace and control characters");
     }
 
-    assert!(GraphSearchScoreV1::new(f64::NAN).is_err());
-    assert!(
+    assert_eq!(
+        GraphSearchScoreV1::new(f64::NAN).unwrap_err().to_string(),
+        "graph search score is not canonical"
+    );
+    assert_eq!(
         RuntimeReadRequestV1::new(
             binding,
             ConsistencyModeV1::LatestAvailable,
@@ -837,7 +845,9 @@ fn graph_read_contracts_preserve_backend_order_and_legacy_query_inputs() {
             64,
             control(),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "graph search limit value 1001 exceeds the maximum of 1000"
     );
     round_trip(&UnavailableReasonV1::UnsupportedOperation);
 }
@@ -946,11 +956,21 @@ fn lifecycle_permits_and_batch_contracts_are_fenced() {
 fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatches() {
     let mut invalid_control = serde_json::to_value(control()).unwrap();
     invalid_control["cancellation"]["generation"] = json!(0);
-    assert!(serde_json::from_value::<RuntimeRequestControlV1>(invalid_control).is_err());
+    assert_eq!(
+        serde_json::from_value::<RuntimeRequestControlV1>(invalid_control)
+            .unwrap_err()
+            .to_string(),
+        "runtime cancellation generation must be non-zero"
+    );
 
     let mut wall_clock_deadline = serde_json::to_value(control()).unwrap();
     wall_clock_deadline["deadline"]["expires_at"] = json!(100);
-    assert!(serde_json::from_value::<RuntimeRequestControlV1>(wall_clock_deadline).is_err());
+    assert_eq!(
+        serde_json::from_value::<RuntimeRequestControlV1>(wall_clock_deadline)
+            .unwrap_err()
+            .to_string(),
+        "unknown field `expires_at`, expected `deadline_id`"
+    );
 
     let identity = effect_identity();
     let receipt = TransactionalInboxReceiptV1 {
@@ -964,7 +984,12 @@ fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatc
     };
     let mut wrong_receipt = serde_json::to_value(&receipt).unwrap();
     wrong_receipt["target_commit_watermark"]["authority_epoch"] = json!(8);
-    assert!(serde_json::from_value::<TransactionalInboxReceiptV1>(wrong_receipt).is_err());
+    assert_eq!(
+        serde_json::from_value::<TransactionalInboxReceiptV1>(wrong_receipt)
+            .unwrap_err()
+            .to_string(),
+        "authority epoch mismatch for target effect sink"
+    );
 
     let frozen_request = read_request(
         binding(project_shard("project.one")),
@@ -976,7 +1001,12 @@ fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatc
     );
     let mut wrong_frozen_request = serde_json::to_value(&frozen_request).unwrap();
     wrong_frozen_request["binding"]["authority_epoch"] = json!(8);
-    assert!(serde_json::from_value::<RuntimeReadRequestV1>(wrong_frozen_request).is_err());
+    assert_eq!(
+        serde_json::from_value::<RuntimeReadRequestV1>(wrong_frozen_request)
+            .unwrap_err()
+            .to_string(),
+        "frozen watermark runtime binding does not bind to the request or effect identity"
+    );
 
     let health_lease = ReaderHealthLeaseV1 {
         lease_id: ReaderHealthLeaseIdV1::new("reader.health.serde").unwrap(),
@@ -988,7 +1018,12 @@ fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatc
     };
     let mut wrong_health_lease = serde_json::to_value(&health_lease).unwrap();
     wrong_health_lease["lane"] = json!("general");
-    assert!(serde_json::from_value::<ReaderHealthLeaseV1>(wrong_health_lease).is_err());
+    assert_eq!(
+        serde_json::from_value::<ReaderHealthLeaseV1>(wrong_health_lease)
+            .unwrap_err()
+            .to_string(),
+        "reader health leases require the reserved health lane"
+    );
 
     let invalid_snapshot_lease = json!({
         "lease_id": "snapshot.lease",
@@ -997,5 +1032,10 @@ fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatc
         "acquired_at": 2,
         "expires_at": 2,
     });
-    assert!(serde_json::from_value::<SnapshotLeaseV1>(invalid_snapshot_lease).is_err());
+    assert_eq!(
+        serde_json::from_value::<SnapshotLeaseV1>(invalid_snapshot_lease)
+            .unwrap_err()
+            .to_string(),
+        "snapshot lease is not a valid lease interval"
+    );
 }

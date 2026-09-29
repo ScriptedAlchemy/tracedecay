@@ -1473,17 +1473,32 @@ mod tests {
         // genuinely new symbol emits no candidate at all.
         let prior = index(
             generation(1),
-            vec![record("sym.p1", 'a', "crate::alpha", "function", 'f', '0')],
+            vec![
+                record("sym.p1", 'a', "crate::alpha", "function", 'f', '0'),
+                record("sym.p2", 'd', "crate::old_name", "function", 'f', '3'),
+            ],
         );
         let current = index(
             generation(2),
             vec![
                 record("sym.c1", 'b', "crate::alpha", "function", '9', '1'),
                 record("sym.c2", 'c', "crate::brand_new", "function", 'f', '2'),
+                // Same file and body under a new name: the one symbol with evidence.
+                record("sym.c3", 'e', "crate::new_name", "function", 'f', '3'),
             ],
         );
         let candidates = resolver().resolve(&prior, &current).expect("resolution");
-        assert!(candidates.is_empty());
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (
+                    candidate.prior_occurrence.as_str(),
+                    candidate.current_occurrence.as_str(),
+                    candidate.kind,
+                ))
+                .collect::<Vec<_>>(),
+            [("sym.p2", "sym.c3", LineageKindV1::Renamed)]
+        );
     }
 
     #[test]

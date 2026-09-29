@@ -7,6 +7,10 @@ license = "MIT"
 description = "Liveness-based retention for immutable code-index generations"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+# Sealed-generation store fixtures for retention tests in dependent crates.
+test-helpers = []
+
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"

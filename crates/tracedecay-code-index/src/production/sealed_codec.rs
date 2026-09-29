@@ -1322,8 +1322,24 @@ mod tests {
 
     #[test]
     fn chunk_text_slices_refuse_ranges_that_disagree_with_their_text() {
-        assert!(ChunkTextSlicesV1::new(&[[0, 4]], "abc").is_err());
-        assert!(ChunkTextSlicesV1::new(&[[0, 4], [2, 6]], "abcdefgh").is_err());
-        assert!(ChunkTextSlicesV1::new(&[[4, 4]], "").is_err());
+        let refusal = |ranges: &[[u64; 2]], text: &str| match ChunkTextSlicesV1::new(ranges, text) {
+            Err(CodeIndexProductionErrorV1::Contract(message)) => message,
+            other => panic!("expected a contract refusal, got {:?}", other.map(|_| ())),
+        };
+        assert_eq!(
+            refusal(&[[0, 4]], "abc"),
+            "sealed file segment text does not match its ranges"
+        );
+        assert_eq!(
+            refusal(&[[0, 4], [2, 6]], "abcdefgh"),
+            "sealed file segment text ranges are not ascending and disjoint"
+        );
+        assert_eq!(
+            refusal(&[[4, 4]], ""),
+            "sealed file segment text ranges are not ascending and disjoint"
+        );
+        let accepted = ChunkTextSlicesV1::new(&[[0, 4], [6, 10]], "abcdefgh")
+            .expect("ascending disjoint ranges covering the text");
+        assert_eq!(accepted.slice(span(6, 9)).expect("slice"), "efg");
     }
 }

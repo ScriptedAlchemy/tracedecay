@@ -137,9 +137,18 @@ mod tests {
 
     #[test]
     fn free_page_ratio_new_rejects_out_of_range() {
-        assert!(FreePageRatioV1::new(-0.1).is_err());
-        assert!(FreePageRatioV1::new(1.5).is_err());
-        assert!(FreePageRatioV1::new(f64::NAN).is_err());
+        assert_eq!(
+            FreePageRatioV1::new(-0.1).unwrap_err().to_string(),
+            "storage free page ratio has an invalid range"
+        );
+        assert_eq!(
+            FreePageRatioV1::new(1.5).unwrap_err().to_string(),
+            "storage free page ratio has an invalid range"
+        );
+        assert_eq!(
+            FreePageRatioV1::new(f64::NAN).unwrap_err().to_string(),
+            "storage free page ratio has an invalid range"
+        );
         assert!(FreePageRatioV1::new(0.5).is_ok());
     }
 }

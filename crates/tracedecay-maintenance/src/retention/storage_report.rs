@@ -33,9 +33,14 @@ use tracedecay_runtime_core::sqlite_read_snapshot::{
 };
 
 use tracedecay_code_index_retention::code_index_generations::{
+    CODE_TEXT_ARTIFACT_STAGING_DIRECTORY_V1, CODE_TEXT_ARTIFACTS_DIRECTORY_V1,
     CodeGenerationRetentionGenerationV1, GenerationDigestVerificationV1,
     plan_code_generation_retention_with_verification, scoped_code_index_store_root,
 };
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME;
+
+use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 
 const GLOBAL_DB_FILENAME: &str = "global.db";
 const PROJECT_CURSOR_PREFIX: &str = "projects:";
@@ -43,20 +48,108 @@ const DIRECTORY_CURSOR_PREFIX: &str = "directories:";
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
 const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
+const CODE_INDEX_DIRECTORY: &str = "code-index-v1";
+const SEALED_GRAPH_DIRECTORY: &str = "tracedecay.sealed";
+const GRAPH_REPLAY_POOL_DIRECTORY: &str = "tracedecay.graph-replay";
+/// Why a report without the daemon's scheduler authority cannot plan a
+/// retention dry run.
+pub const RETENTION_PROTECTION_UNRESOLVED: &str =
+    "generation_retention_graph_inventory_unavailable";
+
+/// The protection set a retention dry run plans against, or why it could not
+/// be resolved.
+type RetentionProtection = Result<BTreeSet<CodeGenerationId>, &'static str>;
 
 /// One registered profile-sharded store's size/free-page snapshot.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct StoreSizeReportEntry {
     pub project_id: String,
     pub canonical_root: String,
-    /// On-disk bytes of the graph database family (main file plus `-wal` and
-    /// `-shm`), from filesystem metadata.
+    /// Every regular file under the store's `projects/<id>/` directory, from
+    /// filesystem metadata: the sum of `kinds`.
     pub total_bytes: u64,
-    /// Reclaimable free-page bytes, or `None` when the store could not be
-    /// sampled without waiting on a live writer.
+    /// `total_bytes` by the store family each file belongs to.
+    pub kinds: StoreKindBytesV1,
+    /// Entries under the store that could not be read or are neither regular
+    /// files nor directories. Non-zero makes `total_bytes` a floor.
+    pub unavailable_entry_count: usize,
+    /// Reclaimable free-page bytes of the graph database, or `None` when it
+    /// could not be sampled without waiting on a live writer.
     pub free_bytes: Option<u64>,
     /// Free pages as a fraction of total pages, or `None` when unsampled.
     pub free_page_ratio: Option<f64>,
+}
+
+/// On-disk bytes of one project store, by family.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct StoreKindBytesV1 {
+    /// `tracedecay.db` with its `-wal` and `-shm`.
+    pub graph_database: u64,
+    /// `tracedecay.sealed/`: sealed code-graph generations.
+    pub sealed_graph: u64,
+    /// Completed text artifacts and each scope's text-artifact staging.
+    pub text_artifacts: u64,
+    /// The rest of `code-index-v1/` (generation manifests and segments,
+    /// publication pointers, retention evidence) and the
+    /// `tracedecay.graph-replay/` pool of retired generations.
+    pub generation_artifacts: u64,
+    /// `sessions.db` with its sidecars and spools.
+    pub sessions: u64,
+    /// Everything else: hook spools, dashboard state, locks, manifests.
+    pub other: u64,
+}
+
+impl StoreKindBytesV1 {
+    fn add(&mut self, relative: &Path, bytes: u64) {
+        let mut components = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy());
+        let first = components.next().unwrap_or_default();
+        let db_filename = tracedecay_runtime_core::config::DB_FILENAME;
+        let family = if first == db_filename
+            || first
+                .strip_prefix(db_filename)
+                .is_some_and(|suffix| suffix.starts_with('-'))
+        {
+            &mut self.graph_database
+        } else if first == SEALED_GRAPH_DIRECTORY {
+            &mut self.sealed_graph
+        } else if first == GRAPH_REPLAY_POOL_DIRECTORY {
+            &mut self.generation_artifacts
+        } else if first == CODE_INDEX_DIRECTORY {
+            let second = components.next().unwrap_or_default();
+            let third = components.next().unwrap_or_default();
+            if second == CODE_TEXT_ARTIFACTS_DIRECTORY_V1
+                || third == CODE_TEXT_ARTIFACT_STAGING_DIRECTORY_V1
+            {
+                &mut self.text_artifacts
+            } else {
+                &mut self.generation_artifacts
+            }
+        } else if first.starts_with(SESSIONS_DB_FILENAME)
+            || first
+                .strip_prefix('.')
+                .is_some_and(|name| name.starts_with(SESSIONS_DB_FILENAME))
+        {
+            &mut self.sessions
+        } else {
+            &mut self.other
+        };
+        *family = family.saturating_add(bytes);
+    }
+
+    fn total(self) -> u64 {
+        [
+            self.graph_database,
+            self.sealed_graph,
+            self.text_artifacts,
+            self.generation_artifacts,
+            self.sessions,
+            self.other,
+        ]
+        .into_iter()
+        .fold(0u64, u64::saturating_add)
+    }
 }
 
 /// The full report: per-store sizes plus an unregistered-directory backlog
@@ -170,31 +263,24 @@ impl StorageReport {
             };
         }
 
-        let mut excluded_families = Vec::new();
+        // Store rows size every file under `projects/<id>/`, but profile-level
+        // files beside `global.db` (the profile session store, spools, daemon
+        // state) are only sized by the full census, so this total is a floor.
+        let mut excluded_families =
+            vec!["profile-level files outside global.db and projects/".to_owned()];
         if self.coverage.state == StorageReportCoverageState::Partial {
             excluded_families.push("registered stores beyond this page".to_owned());
         }
-        // Sealed generation files live outside the graph database family, and
-        // only their superseded portion is sized here; the active generation is
-        // not. Naming the gap keeps the total from posing as the profile size.
-        if !self.code_generation_retention.is_empty() {
-            excluded_families.push("code-index generation files".to_owned());
+        let unreadable_store_entries = self.stores.iter().fold(0usize, |total, store| {
+            total.saturating_add(store.unavailable_entry_count)
+        });
+        if unreadable_store_entries > 0 {
+            excluded_families.push(format!(
+                "{unreadable_store_entries} unreadable entries under registered stores"
+            ));
         }
-        if self
-            .code_generation_retention_availability
-            .iter()
-            .any(|entry| entry.state == StorageReportAvailabilityState::Unavailable)
-        {
-            excluded_families.push("code-index scopes that could not be read".to_owned());
-        }
-
-        let state = if excluded_families.is_empty() {
-            ProfileTotalCoverageStateV1::Complete
-        } else {
-            ProfileTotalCoverageStateV1::Partial
-        };
         ProfileTotalSizeV1 {
-            state,
+            state: ProfileTotalCoverageStateV1::Partial,
             accounted_bytes,
             registered_store_bytes,
             global_db_bytes: self.global_db_bytes,
@@ -220,6 +306,11 @@ pub struct CodeGenerationRetentionDryRunEntry {
     pub collectable_generation_count: usize,
     pub collectable_generation_bytes: u64,
     pub collectable_generations: Vec<CodeGenerationRetentionGenerationV1>,
+    /// Completed text artifacts no retained generation names, collectable by
+    /// the same pass. An artifact becomes collectable once the generations
+    /// naming it leave the durable index.
+    pub collectable_text_artifact_count: usize,
+    pub collectable_text_artifact_bytes: u64,
     /// Whether every listed generation was proven to match the content digest in
     /// its name. False when the digest scan exceeded its budget and the entry
     /// was produced from metadata alone: the counts and byte totals are exact,
@@ -396,7 +487,7 @@ fn sample_registered_storage(
             profile_root,
             &project_id,
             &canonical_root,
-            None,
+            Err(RETENTION_PROTECTION_UNRESOLVED),
             &mut stores,
             &mut code_generation_retention,
             &mut code_generation_retention_availability,
@@ -422,6 +513,7 @@ fn sample_registered_storage(
 pub async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
     global_db: &tracedecay_global_db::RegisteredGlobalDb,
+    code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     cursor: Option<&str>,
     limit: usize,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
@@ -447,6 +539,17 @@ pub async fn build_storage_report_page_from_registered_global_db(
         } else {
             DIRECTORY_CURSOR_PREFIX.to_owned()
         };
+        let mut protections = Vec::with_capacity(projects.len());
+        for project in &projects {
+            protections.push(
+                resolve_retention_protection(
+                    code_index_schedulers,
+                    global_db,
+                    Path::new(&project.canonical_root),
+                )
+                .await,
+            );
+        }
         let profile_root = profile_root.to_path_buf();
         return tokio::task::spawn_blocking(move || {
             let mut report = StorageReport {
@@ -455,16 +558,12 @@ pub async fn build_storage_report_page_from_registered_global_db(
                 coverage: StorageReportCoverage::partial(next_cursor),
                 ..StorageReport::default()
             };
-            for project in projects {
-                // This paged surface has no mounted scheduler or native
-                // binding authority, so the retention protection set is
-                // unresolved and the dry run reports itself unavailable
-                // rather than planning against an unproven protection set.
+            for (project, protection) in projects.into_iter().zip(protections) {
                 append_project_report(
                     &profile_root,
                     &project.project_id,
                     &project.canonical_root,
-                    None,
+                    protection,
                     &mut report.stores,
                     &mut report.code_generation_retention,
                     &mut report.code_generation_retention_availability,
@@ -586,43 +685,58 @@ fn list_project_directories_page(
 /// Builds one project-scoped report on the daemon's blocking pool so bounded
 /// read-only `SQLite` samples cannot stall the async authority loop.
 ///
-/// This admin-CLI wrapper is inventory-less: it has no mounted code-index
-/// scheduler, so it cannot resolve the serving generation or the live
-/// native-preview bindings the daemon retention pass protects. The retention
-/// dry run therefore reports `generation_retention_graph_inventory_unavailable`
-/// rather than planning against an unproven protection set. Callers that
-/// already hold a resolved set must use [`build_project_storage_report`]
-/// directly.
+/// The retention dry run plans against the same protection set daemon
+/// retention resolves: the scheduler's serving generations and the live
+/// native-preview bindings. Without the scheduler authority it reports
+/// `generation_retention_graph_inventory_unavailable` rather than planning
+/// against an unproven protection set.
 pub async fn build_project_storage_report_from_daemon(
     profile_root: &Path,
     project_id: &str,
     canonical_root: &Path,
+    global_db: &tracedecay_global_db::RegisteredGlobalDb,
+    code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
+    let protection =
+        resolve_retention_protection(code_index_schedulers, global_db, canonical_root).await;
     let profile_root = profile_root.to_path_buf();
     let project_id = project_id.to_owned();
     let canonical_root = canonical_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        build_project_storage_report(&profile_root, &project_id, &canonical_root, None)
+        build_project_storage_report(&profile_root, &project_id, &canonical_root, protection)
     })
     .await
     .map_err(|error| report_error("join daemon-backed project storage report", error))?
+}
+
+async fn resolve_retention_protection(
+    code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    global_db: &tracedecay_global_db::RegisteredGlobalDb,
+    canonical_root: &Path,
+) -> RetentionProtection {
+    let Some(schedulers) = code_index_schedulers else {
+        return Err(RETENTION_PROTECTION_UNRESOLVED);
+    };
+    code_generation_protection(schedulers, global_db, canonical_root)
+        .await
+        .map(|protection| protection.sources)
+        .map_err(CodeGenerationProtectionUnavailableV1::reason)
 }
 
 /// Build the same read-only report for one explicitly identified shard without
 /// opening `global.db`. This is the daemon-independent path for maintenance
 /// when the global registry's exclusive-maintenance authority is unavailable.
 /// The protection set (the serving generation plus live native-preview
-/// bindings) is only resolvable from mounted daemon authorities; a caller that
-/// holds it passes it here. Inventory-less surfaces, including
-/// [`build_project_storage_report_from_daemon`], pass `None` and the
-/// retention dry run reports itself unavailable rather than planning against
-/// an unproven protection set.
+/// bindings) is only resolvable from daemon authorities; a caller that holds
+/// it passes it here. Inventory-less surfaces pass the reason it is missing,
+/// and the retention dry run reports itself unavailable with that reason
+/// rather than planning against an unproven protection set.
 #[hotpath::measure(label = "maintenance.storage_report.project")]
 pub fn build_project_storage_report(
     profile_root: &Path,
     project_id: &str,
     canonical_root: &Path,
-    vector_readable_sources: Option<BTreeSet<CodeGenerationId>>,
+    vector_readable_sources: Result<BTreeSet<CodeGenerationId>, &'static str>,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -659,20 +773,32 @@ fn append_project_report(
     profile_root: &Path,
     project_id: &str,
     canonical_root: &str,
-    vector_readable_sources: Option<BTreeSet<CodeGenerationId>>,
+    vector_readable_sources: RetentionProtection,
     stores: &mut Vec<StoreSizeReportEntry>,
     code_generation_retention: &mut Vec<CodeGenerationRetentionDryRunEntry>,
     code_generation_retention_availability: &mut Vec<CodeGenerationRetentionAvailabilityEntry>,
 ) -> tracedecay_domain::errors::Result<()> {
     let data_root = profile_root.join("projects").join(project_id);
-    let graph_db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
-    if let Some(entry) = sample_store_size(&graph_db_path) {
+    if data_root.is_dir() {
+        let mut kinds = StoreKindBytesV1::default();
+        let unavailable_entry_count = walk_regular_files(&data_root, &mut |path, bytes| {
+            if let Ok(relative) = path.strip_prefix(&data_root) {
+                kinds.add(relative, bytes);
+            }
+        });
+        let (free_bytes, free_page_ratio) =
+            sample_free_pages(&data_root.join(tracedecay_runtime_core::config::DB_FILENAME))
+                .map_or((None, None), |(free_bytes, ratio)| {
+                    (Some(free_bytes), Some(ratio))
+                });
         stores.push(StoreSizeReportEntry {
             project_id: project_id.to_owned(),
             canonical_root: canonical_root.to_owned(),
-            total_bytes: entry.total_bytes,
-            free_bytes: entry.free_bytes,
-            free_page_ratio: entry.free_page_ratio,
+            total_bytes: kinds.total(),
+            kinds,
+            unavailable_entry_count,
+            free_bytes,
+            free_page_ratio,
         });
     }
     let code_index_store_root =
@@ -709,17 +835,19 @@ fn append_project_report(
         GenerationDigestVerificationV1::Full
     };
     // The serving generation and live native-preview bindings are only
-    // provable from mounted daemon authorities. Without them the dry run is
-    // reported unavailable rather than planned against an empty protection
-    // set.
-    let Some(readable_sources) = vector_readable_sources else {
-        code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-            project_id: project_id.to_owned(),
-            store_root: code_index_store_root.display().to_string(),
-            state: StorageReportAvailabilityState::Unavailable,
-            reason: Some("generation_retention_graph_inventory_unavailable".to_owned()),
-        });
-        return Ok(());
+    // provable from daemon authorities. Without them the dry run is reported
+    // unavailable rather than planned against an empty protection set.
+    let readable_sources = match vector_readable_sources {
+        Ok(sources) => sources,
+        Err(reason) => {
+            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
+                project_id: project_id.to_owned(),
+                store_root: code_index_store_root.display().to_string(),
+                state: StorageReportAvailabilityState::Unavailable,
+                reason: Some(reason.to_owned()),
+            });
+            return Ok(());
+        }
     };
     let plan = match plan_code_generation_retention_with_verification(
         &code_index_store_root,
@@ -754,6 +882,8 @@ fn append_project_report(
         superseded_generation_bytes: plan.superseded_generation_bytes(),
         collectable_generation_count: plan.collectable_generations.len(),
         collectable_generation_bytes: plan.collectable_generation_bytes(),
+        collectable_text_artifact_count: plan.collectable_text_artifact_count(),
+        collectable_text_artifact_bytes: plan.collectable_text_artifact_bytes(),
         collectable_generations: plan.collectable_generations,
         digest_verified: verification == GenerationDigestVerificationV1::Full,
     });
@@ -801,34 +931,6 @@ fn generation_digest_scan_exceeds_budget(
         }
     }
     Ok(false)
-}
-
-/// A store's sampled size. `total_bytes` is always available (filesystem
-/// metadata); the free-page fields are only present when the database could
-/// be read without waiting on a live writer.
-struct StoreSizeSample {
-    total_bytes: u64,
-    free_bytes: Option<u64>,
-    free_page_ratio: Option<f64>,
-}
-
-/// `None` only when the store has no graph database file at all.
-fn sample_store_size(graph_db_path: &Path) -> Option<StoreSizeSample> {
-    if !graph_db_path.is_file() {
-        return None;
-    }
-    // Filesystem metadata over the whole family: what the owner actually sees
-    // consumed on disk, including a WAL that has not been checkpointed.
-    let total_bytes = database_family_bytes(graph_db_path);
-    let (free_bytes, free_page_ratio) = match sample_free_pages(graph_db_path) {
-        Some((free_bytes, ratio)) => (Some(free_bytes), Some(ratio)),
-        None => (None, None),
-    };
-    Some(StoreSizeSample {
-        total_bytes,
-        free_bytes,
-        free_page_ratio,
-    })
 }
 
 fn database_family_bytes(database_path: &Path) -> u64 {
@@ -926,54 +1028,58 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
     (count, bytes)
 }
 
+/// Visit every regular file under `root` with its byte length, without
+/// following symlinks, and return how many entries could not be read or were
+/// neither regular files nor directories. Those make any total built from the
+/// visits a lower bound instead of a successful zero-size family.
+fn walk_regular_files(root: &Path, visit: &mut dyn FnMut(&Path, u64)) -> usize {
+    let mut unavailable_entry_count = 0usize;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                continue;
+            };
+            let Ok(file_type) = entry.file_type() else {
+                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                continue;
+            };
+            // A socket (the running daemon's endpoint) holds no bytes.
+            #[cfg(unix)]
+            if std::os::unix::fs::FileTypeExt::is_socket(&file_type) {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                match entry.metadata() {
+                    Ok(metadata) => visit(&entry.path(), metadata.len()),
+                    Err(_) => {
+                        unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                    }
+                }
+            } else {
+                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+            }
+        }
+    }
+    unavailable_entry_count
+}
+
 /// Count every regular file under a profile root without following symlinks.
 /// Failures remain visible as a partial lower bound instead of a successful
 /// zero-size family.
 #[hotpath::measure(label = "maintenance.storage_report.scan_profile_size")]
-pub(crate) fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
-    fn walk(path: &Path, total_bytes: &mut u64, unavailable_entry_count: &mut usize) {
-        let entries = match std::fs::read_dir(path) {
-            Ok(entries) => entries,
-            Err(_) => {
-                *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                return;
-            }
-        };
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => {
-                    *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                    continue;
-                }
-            };
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => {
-                    *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                    continue;
-                }
-            };
-            if file_type.is_dir() {
-                walk(&entry.path(), total_bytes, unavailable_entry_count);
-            } else if file_type.is_file() {
-                match entry.metadata() {
-                    Ok(metadata) => {
-                        *total_bytes = total_bytes.saturating_add(metadata.len());
-                    }
-                    Err(_) => {
-                        *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                    }
-                }
-            } else {
-                *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-            }
-        }
-    }
-
+pub fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
     let mut total_bytes = 0u64;
-    let mut unavailable_entry_count = 0usize;
-    walk(profile_root, &mut total_bytes, &mut unavailable_entry_count);
+    let unavailable_entry_count = walk_regular_files(profile_root, &mut |_, bytes| {
+        total_bytes = total_bytes.saturating_add(bytes);
+    });
     FullProfileSizeV1 {
         state: if unavailable_entry_count == 0 {
             ProfileTotalCoverageStateV1::Complete
@@ -1009,6 +1115,8 @@ mod tests {
             project_id: project_id.to_owned(),
             canonical_root: format!("/work/{project_id}"),
             total_bytes,
+            kinds: StoreKindBytesV1::default(),
+            unavailable_entry_count: 0,
             free_bytes: None,
             free_page_ratio: None,
         }
@@ -1039,27 +1147,24 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_code_index_scope_is_named_rather_than_silently_dropped() {
+    fn unreadable_store_entries_are_named_rather_than_silently_dropped() {
+        let mut unreadable = store("alpha", 400);
+        unreadable.unavailable_entry_count = 2;
         let report = StorageReport {
-            stores: vec![store("alpha", 400)],
-            code_generation_retention_availability: vec![
-                CodeGenerationRetentionAvailabilityEntry {
-                    project_id: "alpha".to_owned(),
-                    store_root: "/profile/projects/alpha/code-index-v1/ab".to_owned(),
-                    state: StorageReportAvailabilityState::Unavailable,
-                    reason: Some("generation_digest_scan_budget_exceeded".to_owned()),
-                },
-            ],
+            stores: vec![unreadable],
+            global_db_bytes: 100,
             ..StorageReport::default()
         };
 
         let total = report.profile_total_size();
         assert_eq!(total.state, ProfileTotalCoverageStateV1::Partial);
-        assert!(
-            total
-                .excluded_families
-                .iter()
-                .any(|family| family.contains("could not be read"))
+        assert_eq!(total.accounted_bytes, 500);
+        assert_eq!(
+            total.excluded_families,
+            vec![
+                "profile-level files outside global.db and projects/".to_owned(),
+                "2 unreadable entries under registered stores".to_owned(),
+            ]
         );
     }
 
@@ -1232,6 +1337,7 @@ mod tests {
         let first = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
+            None,
             Some(DIRECTORY_CURSOR_PREFIX),
             1,
         )
@@ -1245,6 +1351,7 @@ mod tests {
         let second = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
+            None,
             Some(&cursor),
             1,
         )
@@ -1253,6 +1360,7 @@ mod tests {
         let repeated = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
+            None,
             Some(&cursor),
             1,
         )
@@ -1270,6 +1378,7 @@ mod tests {
             build_storage_report_page_from_registered_global_db(
                 profile_root,
                 &db,
+                None,
                 Some(&invalid),
                 1
             )
@@ -1279,6 +1388,7 @@ mod tests {
         let third = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
+            None,
             second.coverage.next_cursor.as_deref(),
             1,
         )
@@ -1291,6 +1401,7 @@ mod tests {
         let exhausted = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
+            None,
             third.coverage.next_cursor.as_deref(),
             1,
         )
@@ -1629,6 +1740,206 @@ mod tests {
         );
     }
 
+    /// Each store row sizes every family under its project directory, and the
+    /// families add up to the same bytes a plain walk of the directory finds.
+    #[test]
+    fn store_row_sizes_every_store_family_under_the_project_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let data_root = profile_root.join("projects").join("proj_a");
+        let scope = data_root.join("code-index-v1").join("a".repeat(64));
+        for (relative, bytes) in [
+            ("tracedecay.db", 4_096),
+            ("tracedecay.db-wal", 100),
+            ("tracedecay.sealed/digest/generation.grafeo", 3_000),
+            (
+                "code-index-v1/code-text-artifacts-v1/text-artifact.bin",
+                2_000,
+            ),
+            (
+                "code-index-v1/code-generation-segments-v1/segment.json",
+                300,
+            ),
+            ("tracedecay.graph-replay/generation.json", 40),
+            ("sessions.db", 900),
+            ("sessions.db-wal", 10),
+            (".sessions.db.host-admission/claim", 5),
+            ("hook-delivery-spool/claude/record", 7),
+        ] {
+            let path = data_root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; bytes]).unwrap();
+        }
+        for (relative, bytes) in [
+            ("code-text-artifact-staging-v1/.text-artifact.staging", 50),
+            ("code-generations-v1/generation.json", 700),
+        ] {
+            let path = scope.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; bytes]).unwrap();
+        }
+
+        // The row sizes the store as supplied, before the free-page probe
+        // opens its database.
+        let walked_bytes = profile_tree_bytes(&data_root);
+        let report = build_project_storage_report(
+            &profile_root,
+            "proj_a",
+            Path::new("/repos/a"),
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+        )
+        .unwrap();
+
+        assert_eq!(report.stores.len(), 1);
+        let store = &report.stores[0];
+        assert_eq!(
+            store.kinds,
+            StoreKindBytesV1 {
+                graph_database: 4_196,
+                sealed_graph: 3_000,
+                text_artifacts: 2_050,
+                generation_artifacts: 1_040,
+                sessions: 915,
+                other: 7,
+            }
+        );
+        assert_eq!(store.total_bytes, 11_208);
+        assert_eq!(store.total_bytes, walked_bytes);
+        assert_eq!(store.unavailable_entry_count, 0);
+    }
+
+    /// The daemon page the CLI walks lists the collectable backlog against the
+    /// protection set the scheduler registry resolves; without that authority
+    /// the same store reports the backlog unavailable.
+    #[tokio::test]
+    async fn daemon_report_page_lists_the_collectable_generation_backlog() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let checkout = tmp.path().join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let checkout = checkout.canonicalize().unwrap();
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+            &profile_root,
+        )
+        .await
+        .unwrap();
+        let db = runtime.profile_database_arc();
+        let project = db
+            .upsert_code_project("proj_backlog", &checkout, None, None, None)
+            .await
+            .unwrap();
+        let store_root =
+            tracedecay_code_index_retention::code_index_generations::code_index_store_root(
+                &profile_root.join("projects").join(&project.project_id),
+                &checkout,
+            );
+        let generations =
+            tracedecay_code_index_retention::code_index_generations::fixture::write_generation_store_fixture(
+                &store_root,
+                4,
+            );
+        let orphan_text = b"text artifact no retained generation names";
+        let orphan_root =
+            tracedecay_code_index_retention::code_index_generations::code_text_artifacts_root(
+                &store_root,
+            );
+        std::fs::create_dir_all(&orphan_root).unwrap();
+        std::fs::write(
+            orphan_root.join(format!(
+                "text-artifact-{}.bin",
+                tracedecay_domain::canonical_text::encode_lowercase_hex(
+                    &<sha2::Sha256 as sha2::Digest>::digest(orphan_text)
+                )
+            )),
+            orphan_text,
+        )
+        .unwrap();
+        let schedulers = crate::store_maintenance::registered_tests::unmounted_scheduler_registry();
+
+        let page = build_storage_report_page_from_registered_global_db(
+            &profile_root,
+            &db,
+            Some(&schedulers),
+            None,
+            8,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page.code_generation_retention.len(), 1);
+        let backlog = &page.code_generation_retention[0];
+        assert_eq!(backlog.project_id, "proj_backlog");
+        assert_eq!(
+            backlog.active_generation_id.as_deref(),
+            Some(generations[3].id.as_str())
+        );
+        assert_eq!(backlog.superseded_generation_count, 3);
+        assert_eq!(backlog.collectable_generation_count, 3);
+        assert_eq!(
+            backlog
+                .collectable_generations
+                .iter()
+                .map(|generation| generation.generation_file.clone())
+                .collect::<Vec<_>>(),
+            generations[..3]
+                .iter()
+                .map(|generation| generation.file.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            backlog.collectable_generation_bytes,
+            generations[..3]
+                .iter()
+                .map(|generation| generation.size_bytes)
+                .sum::<u64>()
+        );
+        assert_eq!(backlog.collectable_text_artifact_count, 1);
+        assert_eq!(backlog.collectable_text_artifact_bytes, 42);
+        assert_eq!(
+            page.code_generation_retention_availability[0].state,
+            StorageReportAvailabilityState::Available
+        );
+
+        let without_authority =
+            build_storage_report_page_from_registered_global_db(&profile_root, &db, None, None, 8)
+                .await
+                .unwrap();
+        assert!(without_authority.code_generation_retention.is_empty());
+        assert_eq!(
+            without_authority.code_generation_retention_availability[0]
+                .reason
+                .as_deref(),
+            Some(RETENTION_PROTECTION_UNRESOLVED)
+        );
+    }
+
+    /// The daemon's socket lives in the profile it serves; it holds no bytes
+    /// and must not turn a readable census into a partial one.
+    #[cfg(unix)]
+    #[test]
+    fn full_profile_census_is_complete_beside_a_live_daemon_socket() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(profile_root.join("projects/proj_a")).unwrap();
+        std::fs::write(profile_root.join("global.db"), vec![0u8; 300]).unwrap();
+        std::fs::write(
+            profile_root.join("projects/proj_a/tracedecay.db"),
+            vec![0u8; 700],
+        )
+        .unwrap();
+        let _socket =
+            std::os::unix::net::UnixListener::bind(profile_root.join("daemon.sock")).unwrap();
+
+        assert_eq!(
+            scan_full_profile_size(&profile_root),
+            FullProfileSizeV1 {
+                state: ProfileTotalCoverageStateV1::Complete,
+                total_bytes: 1_000,
+                unavailable_entry_count: 0,
+            }
+        );
+    }
+
     #[test]
     fn targeted_project_report_bypasses_global_registry() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1636,9 +1947,13 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         seed_graph_db(&profile_root, "proj_a");
 
-        let report =
-            build_project_storage_report(&profile_root, "proj_a", Path::new("/repos/a"), None)
-                .unwrap();
+        let report = build_project_storage_report(
+            &profile_root,
+            "proj_a",
+            Path::new("/repos/a"),
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+        )
+        .unwrap();
 
         assert_eq!(report.stores.len(), 1);
         assert_eq!(report.stores[0].project_id, "proj_a");
@@ -1660,8 +1975,13 @@ mod tests {
         std::fs::create_dir_all(store_root.join(CODE_GENERATIONS_DIRECTORY)).unwrap();
         std::fs::write(store_root.join("active-code-generation-v1.json"), b"{}").unwrap();
 
-        let report =
-            build_project_storage_report(&profile_root, "proj_a", canonical_root, None).unwrap();
+        let report = build_project_storage_report(
+            &profile_root,
+            "proj_a",
+            canonical_root,
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+        )
+        .unwrap();
 
         assert!(report.code_generation_retention.is_empty());
         let availability = report
@@ -1712,7 +2032,7 @@ mod tests {
             &profile_root,
             "proj_a",
             canonical_root,
-            Some(BTreeSet::new()),
+            Ok(BTreeSet::new()),
         )
         .unwrap();
         let payload = serde_json::to_value(report).unwrap();

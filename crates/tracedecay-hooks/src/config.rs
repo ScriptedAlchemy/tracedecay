@@ -86,38 +86,17 @@ pub enum HookConfigurationPublicationError {
     Unavailable,
 }
 
-/// Daemon-only atomic publication seam.
-pub trait HookConfigurationPublicationStoreV1 {
-    fn publish(
-        &self,
-        snapshot: HookConfigurationSnapshotV1,
-    ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError>;
-}
-
-/// Hook-process read-only configuration seam.
-pub trait HookConfigurationReadStoreV1 {
-    fn load(
-        &self,
-        host: NativeHostIdentityV1,
-    ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError>;
-}
-
 /// Daemon-side publisher. Structure and monotonic revision are checked before
 /// the atomic file store sees a record.
-pub struct HookConfigurationPublisherV1<S> {
-    store: S,
+pub struct HookConfigurationPublisherV1 {
+    store: HookConfigurationFileWriterV1,
 }
 
-impl<S> HookConfigurationPublisherV1<S> {
-    pub fn new(store: S) -> Self {
+impl HookConfigurationPublisherV1 {
+    pub fn new(store: HookConfigurationFileWriterV1) -> Self {
         Self { store }
     }
-}
 
-impl<S> HookConfigurationPublisherV1<S>
-where
-    S: HookConfigurationPublicationStoreV1,
-{
     pub fn publish(
         &self,
         snapshot: HookConfigurationSnapshotV1,
@@ -129,20 +108,14 @@ where
 
 /// Subscriber adapter for a separate hook process. It revalidates schema,
 /// revision, exact host/scope binding, and expiry on every bounded read.
-pub struct HookConfigurationSubscriberV1<S> {
-    store: S,
+pub struct HookConfigurationSubscriberV1 {
+    store: HookConfigurationFileReaderV1,
 }
 
-impl<S> HookConfigurationSubscriberV1<S> {
-    pub fn new(store: S) -> Self {
+impl HookConfigurationSubscriberV1 {
+    pub fn new(store: HookConfigurationFileReaderV1) -> Self {
         Self { store }
     }
-}
-
-impl<S> HookConfigurationSubscriberV1<S>
-where
-    S: HookConfigurationReadStoreV1,
-{
     /// Every native capture re-reads the published binding through this
     /// bounded read, so its cost and outcome mix are what separate "hook is
     /// unbound/stale" from a spool refusal when hooks fall silent.
@@ -207,10 +180,8 @@ impl HookConfigurationFileWriterV1 {
     pub fn reader(&self) -> HookConfigurationFileReaderV1 {
         HookConfigurationFileReaderV1::new(self.path.clone())
     }
-}
 
-impl HookConfigurationPublicationStoreV1 for HookConfigurationFileWriterV1 {
-    fn publish(
+    pub fn publish(
         &self,
         snapshot: HookConfigurationSnapshotV1,
     ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError> {
@@ -261,10 +232,8 @@ impl HookConfigurationFileReaderV1 {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
-}
 
-impl HookConfigurationReadStoreV1 for HookConfigurationFileReaderV1 {
-    fn load(
+    pub fn load(
         &self,
         _host: NativeHostIdentityV1,
     ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError> {
@@ -297,50 +266,10 @@ fn read_snapshot(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
     use crate::{HookCapabilityV1, HookEventFamily, HookEventSupportV1};
-
-    #[derive(Clone, Default)]
-    struct Store(Arc<Mutex<Option<HookConfigurationSnapshotV1>>>);
-
-    impl HookConfigurationPublicationStoreV1 for Store {
-        fn publish(
-            &self,
-            snapshot: HookConfigurationSnapshotV1,
-        ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError>
-        {
-            let mut current = self.0.lock().unwrap();
-            match current.as_ref() {
-                Some(existing) if existing.revision > snapshot.revision => {
-                    Ok(HookConfigurationPublicationOutcomeV1::StaleRejected)
-                }
-                Some(existing) if existing == &snapshot => {
-                    Ok(HookConfigurationPublicationOutcomeV1::Duplicate)
-                }
-                Some(existing) if existing.revision == snapshot.revision => {
-                    Ok(HookConfigurationPublicationOutcomeV1::StaleRejected)
-                }
-                _ => {
-                    *current = Some(snapshot);
-                    Ok(HookConfigurationPublicationOutcomeV1::Published)
-                }
-            }
-        }
-    }
-
-    impl HookConfigurationReadStoreV1 for Store {
-        fn load(
-            &self,
-            _host: NativeHostIdentityV1,
-        ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError>
-        {
-            Ok(self.0.lock().unwrap().clone())
-        }
-    }
 
     struct TestDir {
         path: PathBuf,
@@ -388,8 +317,10 @@ mod tests {
 
     #[test]
     fn publication_replay_rejects_stale_revision_and_preserves_exact_scope() {
-        let store = Store::default();
-        let publisher = HookConfigurationPublisherV1::new(store.clone());
+        let directory = TestDir::new();
+        let path = directory.path.join("hook-config.json");
+        let publisher =
+            HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&path));
         let published = snapshot(2, 100);
         assert_eq!(
             publisher.publish(published.clone()).unwrap(),
@@ -407,7 +338,8 @@ mod tests {
             publisher.publish(snapshot(2, 101)).unwrap(),
             HookConfigurationPublicationOutcomeV1::StaleRejected
         );
-        let restarted_subscriber = HookConfigurationSubscriberV1::new(store);
+        let restarted_subscriber =
+            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(&path));
         assert_eq!(
             restarted_subscriber.load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Bound(published)
@@ -416,30 +348,45 @@ mod tests {
 
     #[test]
     fn schema_revision_expiry_and_scope_validation_fail_closed() {
-        let store = Store::default();
-        let publisher = HookConfigurationPublisherV1::new(store.clone());
+        let directory = TestDir::new();
+        let path = directory.path.join("hook-config.json");
+        let publisher =
+            HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&path));
         let mut invalid_schema = snapshot(1, 100);
         invalid_schema.schema_version += 1;
         assert_eq!(
             publisher.publish(invalid_schema),
             Err(HookConfigurationPublicationError::InvalidSnapshot)
         );
-        assert!(store.0.lock().unwrap().is_none());
+        assert!(!path.exists());
 
         assert_eq!(
             publisher.publish(snapshot(0, 100)),
             Err(HookConfigurationPublicationError::InvalidSnapshot)
         );
-        let subscriber = HookConfigurationSubscriberV1::new(store.clone());
-        *store.0.lock().unwrap() = Some(snapshot(1, 2));
+        assert!(!path.exists());
+
+        assert_eq!(
+            publisher.publish(snapshot(1, 2)).unwrap(),
+            HookConfigurationPublicationOutcomeV1::Published
+        );
+        let subscriber =
+            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(&path));
         assert_eq!(
             subscriber.load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Stale
         );
 
-        *store.0.lock().unwrap() = Some(snapshot(1, 100));
+        let live = directory.path.join("live.json");
+        let live_publisher =
+            HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&live));
         assert_eq!(
-            subscriber.load_current(NativeHostIdentityV1::Codex, UtcMicros(2)),
+            live_publisher.publish(snapshot(1, 100)).unwrap(),
+            HookConfigurationPublicationOutcomeV1::Published
+        );
+        assert_eq!(
+            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(&live))
+                .load_current(NativeHostIdentityV1::Codex, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Corrupted
         );
     }

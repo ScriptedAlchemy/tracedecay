@@ -597,7 +597,9 @@ fn agent_install_health_check_is_selective() {
         agent: Some("cursor".to_string()),
         local: false,
     }));
-    assert!(should_skip_agent_install_check(&Commands::Doctor));
+    assert!(should_skip_agent_install_check(&Commands::Doctor {
+        json: false
+    }));
 
     let cli = Cli::try_parse_from(["tracedecay", "init", "."])
         .unwrap_or_else(|error| panic!("init entrypoint must parse: {error}"));

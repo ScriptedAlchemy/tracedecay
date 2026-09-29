@@ -340,7 +340,20 @@ fn application_owner_issues_authorities_for_sanitized_capture() {
         )
         .unwrap();
 
-    assert!(admission.snapshot_completion().is_some());
+    let completion = serde_json::to_value(
+        admission
+            .snapshot_completion()
+            .expect("whole-root completion"),
+    )
+    .expect("serialize completion");
+    assert_eq!(
+        completion["snapshot"],
+        format!("sha256:{}", "d".repeat(64)).as_str()
+    );
+    assert_eq!(
+        completion["present_objects"],
+        serde_json::json!([format!("sha256:{}", "f".repeat(64))])
+    );
 }
 
 #[test]

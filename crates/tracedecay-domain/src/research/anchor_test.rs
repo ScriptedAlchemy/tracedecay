@@ -209,7 +209,10 @@ fn repository_capture_requires_a_project_owner() {
     let mut parts = record_parts(target, ObservationScopeV1::Profile);
     parts.source_generation = AnchorSourceGeneration::RepositoryCapture(capture_id);
 
-    assert!(RetrievalAnchorRecord::new(parts).is_err());
+    assert_eq!(
+        RetrievalAnchorRecord::new(parts).unwrap_err().to_string(),
+        "repository anchor owner references an unknown identity"
+    );
 }
 
 #[test]
@@ -241,7 +244,12 @@ fn standalone_target_deserialization_enforces_git_identity() {
         }
     });
 
-    assert!(serde_json::from_value::<RetrievalAnchorTarget>(wire).is_err());
+    assert_eq!(
+        serde_json::from_value::<RetrievalAnchorTarget>(wire)
+            .unwrap_err()
+            .to_string(),
+        "retrieval anchor commit is not canonical"
+    );
 }
 
 #[test]
@@ -344,7 +352,12 @@ fn deserialization_rejects_a_tampered_anchor_identity() {
     let mut wire = serde_json::to_value(record).unwrap();
     wire["anchor_id"] = json!("retrieval.v2.tampered");
 
-    assert!(serde_json::from_value::<RetrievalAnchorRecord>(wire).is_err());
+    assert_eq!(
+        serde_json::from_value::<RetrievalAnchorRecord>(wire)
+            .unwrap_err()
+            .to_string(),
+        "manifest digest does not match its canonical domain-separated payload"
+    );
 }
 
 #[test]

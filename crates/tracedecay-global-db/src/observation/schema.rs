@@ -7,6 +7,14 @@ use super::super::global_db_operation_error;
 /// it. It is recorded at creation, never by rewriting an existing table.
 const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
 
+/// Marker proving `observations` was created by a binary that derives every
+/// provider's id on `tracedecay.observation.v1`. Recorded at creation. An
+/// existing store that already holds rows and lacks the marker keeps those
+/// rows unread: admission returns a typed reset instead of decoding them.
+const OBSERVATION_UNIFIED_IDENTITY_MIGRATION: &str = "observations-unified-identity-v1";
+
+const OBSERVATION_UNIFIED_IDENTITY_RESET_REASON: &str = "observation rows predate the unified observation identity and cannot be read; reset the profile so ingestion can rebuild them from host transcripts";
+
 /// Marker proving every `observation_repository_provenance` row references
 /// its repository capture through `observation_repository_captures` instead of
 /// embedding it. One checkout state is shared by every observation taken under
@@ -65,6 +73,19 @@ async fn migration_recorded(
             "SELECT 1 FROM global_schema_migrations WHERE migration = ?1",
             params![migration],
         )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    rows.next()
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+}
+
+async fn observation_rows_exist(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<bool> {
+    let mut rows = conn
+        .query("SELECT 1 FROM observations LIMIT 1", ())
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     rows.next()
@@ -206,9 +227,27 @@ pub async fn ensure_observation_schema(
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     if !table_preexisted {
+        for migration in [
+            OBSERVATION_SCHEMA_MIGRATION,
+            OBSERVATION_UNIFIED_IDENTITY_MIGRATION,
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
+                params![migration],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        }
+    } else if !migration_recorded(conn, OBSERVATION_UNIFIED_IDENTITY_MIGRATION).await? {
+        if observation_rows_exist(conn).await? {
+            return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+                "observations",
+                OBSERVATION_UNIFIED_IDENTITY_RESET_REASON,
+            ));
+        }
         conn.execute(
             "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-            params![OBSERVATION_SCHEMA_MIGRATION],
+            params![OBSERVATION_UNIFIED_IDENTITY_MIGRATION],
         )
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
@@ -230,6 +269,243 @@ pub async fn ensure_observation_schema(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_domain::errors::TraceDecayError;
+    use tracedecay_domain::{
+        ComponentVersion, DurableObservationV1, ObservationIdentityMaterialV1,
+        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+        ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+        PayloadReferenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
+    };
+    use tracedecay_runtime_core::db::engine::TestConnection;
+
+    const PRE_UNIFIED_OBSERVATION_ID: &str =
+        "sha256:efd99c7fd87f4ad156b40f16d982d18511ebfb708afc140f9f67e63e0c73f5ba";
+    const PRE_UNIFIED_RECEIPT_ID: &str =
+        "privacy.claude.v1.0000000000000000000000000000000000000000000000000000000000000000";
+    const PRE_UNIFIED_OBSERVATION_JSON: &str = concat!(
+        r#"{"observation_id":""#,
+        "sha256:efd99c7fd87f4ad156b40f16d982d18511ebfb708afc140f9f67e63e0c73f5ba",
+        r#"","idempotency_key":""#,
+        "sha256:efd99c7fd87f4ad156b40f16d982d18511ebfb708afc140f9f67e63e0c73f5ba",
+        r#"","identity":{"source":{"provider":"claude","session_id":"session.fixture"}},"#,
+        r#""receipt":{"receipt_id":""#,
+        "privacy.claude.v1.0000000000000000000000000000000000000000000000000000000000000000",
+        r#""},"retention_class":"transcript.fixture","payload":{"message":"safe"}}"#
+    );
+    const FRESH_UNIFIED_OBSERVATION_ID: &str =
+        "sha256:3fe143a02ab7fbca28e297944f24e997badda9ca9b1e40c7d2a6e4f965cebad5";
+
+    async fn reopen(
+        path: &std::path::Path,
+    ) -> tracedecay_domain::errors::Result<(
+        crate::RegisteredGlobalDbLeaseV1,
+        crate::RegisteredGlobalDbOwnerV1,
+    )> {
+        crate::tests::harness::open_registered_test_database_fixture(
+            path,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+    }
+
+    fn fresh_unified_observation() -> DurableObservationV1 {
+        let payload = serde_json::json!({"message": "safe"});
+        let material = ObservationIdentityMaterialV1::new(
+            ObservationSourceIdentityV1::new(SessionId::new("session.fixture").unwrap()).unwrap(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(7).unwrap(),
+            ObservationSourceRangeV1::new(12, 34).unwrap(),
+        )
+        .unwrap();
+        DurableObservationV1::new(
+            material,
+            SanitizationReceiptV1::new(
+                SanitizationReceiptRefV1::new(
+                    SanitizationReceiptId::new("receipt.fixture").unwrap(),
+                    ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
+                )
+                .unwrap(),
+                SanitizerDispositionV1::Accepted,
+                SensitivityV1::NonSensitive,
+                Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+            )
+            .unwrap(),
+            RetentionClass::new("transcript.fixture").unwrap(),
+            payload,
+        )
+        .unwrap()
+    }
+
+    fn fresh_unified_cursor(observation: &DurableObservationV1) -> ObservationSourceCursorV1 {
+        ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            ObservationOrderingDomainV1::FileBytes,
+            observation.identity().position().end(),
+        )
+        .unwrap()
+    }
+
+    /// A store written before the unified identity, holding a Claude row whose
+    /// id was derived on `tracedecay.claude.observation.v1` and whose JSON
+    /// still carries `idempotency_key`, is refused. The row is left unchanged.
+    #[tokio::test]
+    async fn pre_unified_identity_rows_require_a_typed_reset() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("sessions.db");
+        drop(reopen(&path).await.unwrap());
+        let conn = TestConnection::open(&path);
+        conn.execute(
+            "DELETE FROM global_schema_migrations WHERE migration = ?1",
+            params!["observations-unified-identity-v1"],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sanitization_receipts
+             (receipt_id, sanitizer_version, payload_digest, receipt_json)
+             VALUES (?1, 'privacy.claude-record.v1', ?2, '{}')",
+            params![PRE_UNIFIED_RECEIPT_ID, PRE_UNIFIED_OBSERVATION_ID],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO observations
+             (observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json)
+             VALUES (?1, ?1, ?2, ?3, '{}')",
+            params![
+                PRE_UNIFIED_OBSERVATION_ID,
+                PRE_UNIFIED_RECEIPT_ID,
+                PRE_UNIFIED_OBSERVATION_JSON
+            ],
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let Err(error) = reopen(&path).await else {
+            panic!("a store holding pre-unified Claude observations must be refused, not decoded");
+        };
+        let TraceDecayError::ResetRequired { authority, reason } = error else {
+            panic!("old observation rows must be a typed reset, got {error}");
+        };
+        assert_eq!(authority, "observations");
+        assert_eq!(
+            reason,
+            "observation rows predate the unified observation identity and cannot be read; reset the profile so ingestion can rebuild them from host transcripts"
+        );
+
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT observation_json FROM observations WHERE observation_id = ?1",
+                params![PRE_UNIFIED_OBSERVATION_ID],
+            )
+            .await
+            .unwrap();
+        let stored: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(stored, PRE_UNIFIED_OBSERVATION_JSON);
+    }
+
+    /// An empty store created before the marker has nothing to refuse. Admission
+    /// records the marker and a later unified-identity row stays readable.
+    #[tokio::test]
+    async fn empty_pre_marker_observation_store_adopts_the_unified_identity() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("sessions.db");
+        drop(reopen(&path).await.unwrap());
+        let conn = TestConnection::open(&path);
+        conn.execute(
+            "DELETE FROM global_schema_migrations WHERE migration = ?1",
+            params![OBSERVATION_UNIFIED_IDENTITY_MIGRATION],
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        drop(reopen(&path).await.unwrap());
+
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM global_schema_migrations WHERE migration = ?1",
+                params![OBSERVATION_UNIFIED_IDENTITY_MIGRATION],
+            )
+            .await
+            .unwrap();
+        let recorded: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(recorded, 1);
+    }
+
+    /// A store this binary created keeps a unified-identity row and reads it
+    /// back as that same id.
+    #[tokio::test]
+    async fn fresh_observation_store_accepts_unified_identity_rows() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("sessions.db");
+        drop(reopen(&path).await.unwrap());
+        let observation = fresh_unified_observation();
+        assert_eq!(
+            observation.observation_id().as_str(),
+            FRESH_UNIFIED_OBSERVATION_ID
+        );
+        let observation_json = serde_json::to_string(&observation).unwrap();
+        assert!(
+            !observation_json.contains("idempotency_key"),
+            "{observation_json}"
+        );
+        let cursor_json = serde_json::to_string(&fresh_unified_cursor(&observation)).unwrap();
+        let receipt = observation.receipt();
+        let conn = TestConnection::open(&path);
+        conn.execute(
+            "INSERT INTO sanitization_receipts
+             (receipt_id, sanitizer_version, payload_digest, receipt_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                receipt.receipt().receipt_id().as_str(),
+                receipt.receipt().sanitizer_version().as_str(),
+                observation.payload_reference().digest().as_str(),
+                serde_json::to_string(receipt).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO observations
+             (observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                observation.observation_id().as_str(),
+                observation.payload_reference().digest().as_str(),
+                receipt.receipt().receipt_id().as_str(),
+                observation_json.as_str(),
+                cursor_json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        drop(reopen(&path).await.unwrap());
+
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT observation_json FROM observations WHERE observation_id = ?1",
+                params![FRESH_UNIFIED_OBSERVATION_ID],
+            )
+            .await
+            .unwrap();
+        let stored: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        let decoded: DurableObservationV1 = serde_json::from_str(&stored).unwrap();
+        assert_eq!(
+            decoded.observation_id().as_str(),
+            FRESH_UNIFIED_OBSERVATION_ID
+        );
+        assert!(!stored.contains("idempotency_key"));
+    }
 
     /// A provenance row written before the shared-capture migration embeds the
     /// same capture twice; re-admission must split it into a shared row plus a

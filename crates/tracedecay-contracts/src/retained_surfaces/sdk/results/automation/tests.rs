@@ -88,7 +88,13 @@ fn terminal_rejects_removed_open_fields() {
     ] {
         let mut legacy = zero_terminal("completed");
         legacy[field] = value;
-        assert!(serde_json::from_value::<AutomationRunResultV1>(legacy).is_err());
+        let error = serde_json::from_value::<AutomationRunResultV1>(legacy)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(&format!("unknown field `{field}`, expected one of")),
+            "{error}"
+        );
     }
 }
 
@@ -547,7 +553,12 @@ fn partial_problem_rejects_duplicate_automatic_effect_identity() {
     let result = serde_json::from_value::<AutomationRunResultV1>(automatic_fact_terminal())
         .expect("automatic terminal");
     let receipt = result.committed_receipts[0].clone();
-    assert!(automatic_partial_problem_result(vec![receipt.clone(), receipt]).is_err());
+    assert_eq!(
+        automatic_partial_problem_result(vec![receipt.clone(), receipt])
+            .unwrap_err()
+            .to_string(),
+        "automation problem terminal is inconsistent with the application contract"
+    );
 }
 
 #[test]
@@ -627,8 +638,18 @@ fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
         AutomationRunProblemV1::new(&request, memory_scope(), envelope, Vec::new(), &request_id)
     };
 
-    assert!(terminal(ApplicationProblem::cancelled_before_admission()).is_err());
-    assert!(terminal(ApplicationProblem::timed_out_before_admission()).is_err());
+    assert_eq!(
+        terminal(ApplicationProblem::cancelled_before_admission())
+            .unwrap_err()
+            .to_string(),
+        "automation problem terminal is inconsistent with the application contract"
+    );
+    assert_eq!(
+        terminal(ApplicationProblem::timed_out_before_admission())
+            .unwrap_err()
+            .to_string(),
+        "automation problem terminal is inconsistent with the application contract"
+    );
     assert!(
         terminal(
             ApplicationProblem::cancelled(CancellationStage::BeforeEffect)
@@ -671,7 +692,7 @@ fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
         )
         .is_ok()
     );
-    assert!(
+    assert_eq!(
         ApplicationProblem::admitted_unavailable(
             ApplicationUnavailableClassV1::Authority,
             SafeDiagnostic::new(
@@ -680,7 +701,9 @@ fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
             )
             .expect("diagnostic"),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "admitted unavailable classification is inconsistent with the application contract"
     );
 }
 
@@ -706,7 +729,7 @@ fn non_partial_problem_rejects_committed_memory_receipts() {
         problem,
     )
     .expect("problem envelope");
-    assert!(
+    assert_eq!(
         AutomationRunProblemV1::new(
             &automation_request("run.memory.fact", AutomationTaskV1::SessionReflector),
             scope,
@@ -714,7 +737,9 @@ fn non_partial_problem_rejects_committed_memory_receipts() {
             result.committed_receipts,
             &request_id,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "automation problem terminal is inconsistent with the application contract"
     );
 }
 

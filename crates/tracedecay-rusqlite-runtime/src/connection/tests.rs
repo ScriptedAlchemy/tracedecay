@@ -201,7 +201,7 @@ fn maintenance_mode_makes_schema_exceptions_explicit() {
     connection
         .execute_batch("CREATE TABLE maintained(value); DROP TABLE maintained;")
         .expect("maintenance schema operation");
-    assert!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap() > 0);
+    assert_eq!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 4);
     connection
         .execute_batch("ATTACH DATABASE ':memory:' AS maintenance_aux; DETACH maintenance_aux;")
         .expect("maintenance attachment");

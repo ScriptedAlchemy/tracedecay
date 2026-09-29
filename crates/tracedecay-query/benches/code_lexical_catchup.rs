@@ -410,7 +410,9 @@ fn run(fixture: &Fixture, mode: IngestionMode) -> RunResult {
     let started = Instant::now();
     let (progress, sqlite_ingestion_commits) = match mode {
         IngestionMode::OnePage => {
-            let mut progress = builder.progress().expect("read initial artifact progress");
+            let mut progress = builder
+                .progress(&control)
+                .expect("read initial artifact progress");
             for page in &fixture.pages {
                 progress = builder
                     .append_page(page, &control)
@@ -422,7 +424,9 @@ fn run(fixture: &Fixture, mode: IngestionMode) -> RunResult {
             )
         }
         IngestionMode::BoundedBatch => {
-            let mut progress = builder.progress().expect("read initial artifact progress");
+            let mut progress = builder
+                .progress(&control)
+                .expect("read initial artifact progress");
             let mut commits = 0_u64;
             for pages in fixture.pages.chunks(BATCH_PAGE_LIMIT) {
                 progress = builder

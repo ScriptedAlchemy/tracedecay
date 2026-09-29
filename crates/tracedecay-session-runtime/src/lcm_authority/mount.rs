@@ -270,11 +270,22 @@ pub fn mount_registered_lcm_authority(
 
 #[cfg(test)]
 mod deadline_tests {
-    use super::lcm_operation_and_grant_expiries;
+    use super::{LCM_GRANT_SETTLEMENT_MARGIN, lcm_operation_and_grant_expiries};
+    use crate::lcm_effects::LCM_EFFECT_CEILING;
     use tracedecay_domain::UtcMicros;
 
     #[test]
     fn lcm_deadline_derivation_fails_closed_on_clock_overflow() {
         assert!(lcm_operation_and_grant_expiries(UtcMicros(i64::MAX)).is_none());
+
+        let ceiling = i64::try_from(LCM_EFFECT_CEILING.as_micros()).unwrap();
+        let margin = i64::try_from(LCM_GRANT_SETTLEMENT_MARGIN.as_micros()).unwrap();
+        assert_eq!(
+            lcm_operation_and_grant_expiries(UtcMicros(1_000)),
+            Some((
+                UtcMicros(1_000 + ceiling),
+                UtcMicros(1_000 + ceiling + margin)
+            ))
+        );
     }
 }

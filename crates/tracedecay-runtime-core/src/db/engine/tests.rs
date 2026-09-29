@@ -99,10 +99,25 @@ async fn runtime_rows_preserve_column_metadata_without_materialized_rows() {
 fn row_decode_rejects_wrong_types_and_invalid_indexes() {
     let row = Row::from_values(vec![Value::Integer(-1)]);
 
-    assert!(row.get::<String>(0).is_err());
-    assert!(row.get::<u64>(0).is_err());
-    assert!(row.get::<i64>(-1).is_err());
-    assert!(row.get::<i64>(1).is_err());
+    assert_eq!(row.get::<i64>(0), Ok(-1));
+    assert_eq!(
+        row.get::<String>(0),
+        Err(Error::TypeMismatch {
+            column: 0,
+            expected: "text",
+            actual: "integer",
+        })
+    );
+    assert_eq!(
+        row.get::<u64>(0),
+        Err(Error::IntegerOutOfRange {
+            column: 0,
+            target: "u64",
+            value: -1,
+        })
+    );
+    assert_eq!(row.get::<i64>(-1), Err(Error::InvalidColumn(-1)));
+    assert_eq!(row.get::<i64>(1), Err(Error::InvalidColumn(1)));
 }
 
 struct NoWrites;

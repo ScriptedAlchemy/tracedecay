@@ -569,7 +569,7 @@ mod tests {
         GraphPublicationSequenceV1, ProjectId, StoreShardIdV1, UserProfileId,
     };
 
-    use super::{GraphProjectionIdentityV1, validate_replay_cursor};
+    use super::{GraphDbError, GraphProjectionIdentityV1, validate_replay_cursor};
 
     fn projection(project: &str) -> GraphProjectionIdentityV1 {
         GraphProjectionIdentityV1 {
@@ -592,7 +592,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(validate_replay_cursor(&expected, None, &continuation, "cleanup").is_err());
+        assert_eq!(
+            validate_replay_cursor(&expected, None, &continuation, "cleanup"),
+            Err(GraphDbError::Corrupt {
+                message: "cleanup cursor escaped its projection".to_owned(),
+            })
+        );
     }
 
     #[test]
@@ -605,8 +610,20 @@ mod tests {
         .unwrap();
         let continuation = previous.clone();
 
-        assert!(
-            validate_replay_cursor(&expected, Some(&previous), &continuation, "cleanup").is_err()
+        assert_eq!(
+            validate_replay_cursor(&expected, Some(&previous), &continuation, "cleanup"),
+            Err(GraphDbError::Corrupt {
+                message: "cleanup cursor did not advance".to_owned(),
+            })
+        );
+        let advanced = GraphPublicationReplayCursorV1::new(
+            expected.clone(),
+            GraphPublicationSequenceV1::new(3).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_replay_cursor(&expected, Some(&previous), &advanced, "cleanup"),
+            Ok(())
         );
     }
 }

@@ -62,7 +62,8 @@ pub async fn compute_graph_tool(
 ) -> Result<GraphToolCompletionV1> {
     match operation {
         ApplicationSurfaceOperation::Context => {
-            compute_context(ctx, open(read("context")?), args, scope_prefix).await
+            let operation = read("context")?;
+            compute_context(ctx, || open(operation.clone()), args, scope_prefix).await
         }
         ApplicationSurfaceOperation::Impact => {
             compute_impact(&open(read("impact")?).await?, args).await

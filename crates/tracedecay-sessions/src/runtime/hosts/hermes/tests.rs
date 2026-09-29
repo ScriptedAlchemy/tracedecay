@@ -370,7 +370,7 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
         record.native_record_id,
     )
     .unwrap();
-    let outcome = tracedecay_privacy::ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = tracedecay_privacy::RecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(
             parsed,
@@ -1781,7 +1781,7 @@ fn hermes_timestamp_survives_the_json_boundary_into_one_identity() {
         record.native_record_id,
     )
     .unwrap();
-    let outcome = tracedecay_privacy::ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = tracedecay_privacy::RecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(
             parsed,

@@ -142,6 +142,12 @@ async fn release_one_idle_project_server_before_open(
                 .session_temporal_refresh_schedulers()
                 .retire_project(&retired_owner)
                 .await;
+            #[cfg(unix)]
+            super::scheduler::retire_owner_automation_schedulers(
+                &retirement_administration,
+                &retired_owner,
+            )
+            .await;
             super::project_server_lifecycle::retire_project_servers(retired_servers, None).await;
             for data_root in hook_data_roots {
                 super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;

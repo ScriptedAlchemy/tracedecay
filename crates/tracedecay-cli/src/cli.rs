@@ -561,7 +561,12 @@ pub enum Commands {
     EnableUploadCounter,
     /// Check tracedecay installation, configuration, and agent integration
     #[command(long_about = DOCTOR_LONG_ABOUT, after_help = DOCTOR_AFTER_HELP)]
-    Doctor,
+    Doctor {
+        /// Also print one JSON document on stdout: every check line plus the
+        /// daemon's canonical findings in the `/api/doctor/findings` shape
+        #[arg(long)]
+        json: bool,
+    },
     /// Token cost summary from Claude Code sessions
     #[command(long_about = COST_LONG_ABOUT, after_help = COST_AFTER_HELP)]
     Cost {

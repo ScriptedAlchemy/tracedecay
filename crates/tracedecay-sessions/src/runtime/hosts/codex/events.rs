@@ -1673,6 +1673,38 @@ mod tests {
                 .is_none(),
             "an output with no buffered exec call falls through"
         );
+
+        let exec_call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call_exec",
+                "input": "await tools.exec_command({cmd:\"git status\"});\n"
+            }
+        });
+        assert_eq!(
+            state
+                .event_from_line(&exec_call, &meta(), None, path, 5)
+                .map(|rows| rows.len()),
+            Some(0),
+            "an exec_command harness is buffered for its output"
+        );
+        let exec_output = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec",
+                "output": "Script completed\nOutput:\nclean\n"
+            }
+        });
+        let rows = state
+            .event_from_line(&exec_output, &meta(), None, path, 6)
+            .expect("buffered exec output joins");
+        assert_eq!(
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            vec!["git status"]
+        );
     }
 
     #[test]
@@ -1944,6 +1976,29 @@ mod tests {
                     15
                 )
                 .is_none()
+        );
+
+        let exec = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "e",
+                "input": "await tools.exec_command({cmd:\"ls\"});\n"
+            }
+        });
+        assert_eq!(
+            state
+                .event_from_line(
+                    &exec,
+                    &meta(),
+                    None,
+                    std::path::Path::new("/tmp/r.jsonl"),
+                    16
+                )
+                .map(|rows| rows.len()),
+            Some(0),
+            "a structured exec call is consumed rather than falling through"
         );
     }
 

@@ -374,16 +374,17 @@ pub(super) fn text_projection_unfinished_withholds_seat(exact_and_lexical_ready:
 
 #[cfg(any(test, feature = "test-helpers"))]
 struct ColdMountFinalCommitGateV1 {
-    project_root: PathBuf,
     entered: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
+/// Armed gates keyed by project root, so tests pausing distinct worktrees in
+/// one process do not contend for a single slot.
 #[cfg(any(test, feature = "test-helpers"))]
-fn cold_mount_final_commit_gate() -> &'static Mutex<Option<ColdMountFinalCommitGateV1>> {
-    static GATE: std::sync::OnceLock<Mutex<Option<ColdMountFinalCommitGateV1>>> =
+fn cold_mount_final_commit_gate() -> &'static Mutex<BTreeMap<PathBuf, ColdMountFinalCommitGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, ColdMountFinalCommitGateV1>>> =
         std::sync::OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(None))
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -455,7 +456,9 @@ mod resident_memory;
 #[cfg(test)]
 mod test_gates;
 pub mod watch_ingress;
-pub use owner_signals::{CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1};
+pub use owner_signals::{
+    CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1, CodeIndexRetainedSeatWaitV1,
+};
 
 /// At most two distinct worktrees may reconcile concurrently. Each reconcile
 /// already saturates the shared indexing pool during extraction; the second
@@ -1914,32 +1917,26 @@ impl CodeIndexSchedulerRegistryV1 {
     ) {
         let (entered, entered_observed) = tokio::sync::oneshot::channel();
         let (released, release) = tokio::sync::oneshot::channel();
-        let mut gate = cold_mount_final_commit_gate()
+        let previous = cold_mount_final_commit_gate()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root,
+                ColdMountFinalCommitGateV1 { entered, release },
+            );
         assert!(
-            gate.is_none(),
-            "only one cold mount final-commit gate may be armed at a time"
+            previous.is_none(),
+            "only one cold mount final-commit gate may be armed per project root"
         );
-        *gate = Some(ColdMountFinalCommitGateV1 {
-            project_root,
-            entered,
-            release,
-        });
         (entered_observed, released)
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
     async fn wait_for_cold_mount_final_commit_gate(project_root: &Path) {
-        let gate = {
-            let mut armed = cold_mount_final_commit_gate()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let matches_root = armed
-                .as_ref()
-                .is_some_and(|gate| gate.project_root == project_root);
-            if matches_root { armed.take() } else { None }
-        };
+        let gate = cold_mount_final_commit_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;

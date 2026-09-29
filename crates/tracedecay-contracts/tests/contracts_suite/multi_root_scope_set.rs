@@ -101,11 +101,21 @@ fn scope_set_digest_and_deserialization_reject_identity_drift() {
     let mut wire = serde_json::to_value(&set).unwrap();
     wire["roots"][1]["worktree_id"] = serde_json::json!("worktree.alias");
 
-    assert!(serde_json::from_value::<AuthorizedScopeSet>(wire).is_err());
+    assert!(
+        serde_json::from_value::<AuthorizedScopeSet>(wire)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `worktree_id`")
+    );
 
     let mut actor_drift = serde_json::to_value(&set).unwrap();
     actor_drift["actor_id"] = serde_json::json!("actor.other");
-    assert!(serde_json::from_value::<AuthorizedScopeSet>(actor_drift).is_err());
+    assert_eq!(
+        serde_json::from_value::<AuthorizedScopeSet>(actor_drift)
+            .unwrap_err()
+            .to_string(),
+        "authorized scope-set digest does not match its exact roots"
+    );
 }
 
 #[test]

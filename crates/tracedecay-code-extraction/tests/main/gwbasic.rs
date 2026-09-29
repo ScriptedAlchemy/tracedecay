@@ -55,26 +55,21 @@ fn test_gwbasic_docstrings() {
 fn test_gwbasic_subroutine_complexity() {
     let result = extract_fixture();
 
-    let connect_fn = result
+    // VALIDATE_CONFIGURATION has two `IF`s, CONNECT_TO_SERVER one `WHILE`.
+    let complexity: Vec<_> = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "CONNECT_TO_SERVER")
-        .expect("CONNECT_TO_SERVER function not found");
-    assert!(
-        connect_fn.loops >= 1,
-        "CONNECT_TO_SERVER should have >= 1 loop, got {}",
-        connect_fn.loops
-    );
-
-    let validate_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "VALIDATE_CONFIGURATION")
-        .expect("VALIDATE_CONFIGURATION function not found");
-    assert!(
-        validate_fn.branches >= 1,
-        "VALIDATE_CONFIGURATION should have >= 1 branch, got {}",
-        validate_fn.branches
+        .filter(|n| n.kind == NodeKind::Function)
+        .map(|n| (n.name.as_str(), n.branches, n.loops))
+        .collect();
+    assert_eq!(
+        complexity,
+        [
+            ("FNLOG", 0, 0),
+            ("VALIDATE_CONFIGURATION", 2, 0),
+            ("CONNECT_TO_SERVER", 0, 1),
+            ("DISCONNECT", 0, 0),
+        ]
     );
 }
 

@@ -3893,7 +3893,7 @@ export type ObservabilityHorizonV1 = {
 };
 
 export type ObservationSourceIdentityV1 = {
-  provider?: ProviderId | undefined;
+  provider: ProviderId;
   session_id: SessionId;
   source_key?: SessionId | null | undefined;
 };
