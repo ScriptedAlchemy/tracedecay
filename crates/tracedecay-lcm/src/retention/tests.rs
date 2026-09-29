@@ -614,16 +614,17 @@ async fn later_passes_act_on_rows_that_aged_or_became_durable_since() -> Result<
     let summarized_later = insert_message(conn, 2, 90, "old, summarized later").await?;
     let young = insert_message(conn, 3, 1, "durable and young").await?;
     make_projection_durable(conn, young).await?;
+    let config = LcmRetentionConfig {
+        offload_after_days: None,
+        ..drop_config(30)
+    };
     let pass = |now: i64| {
         run_session_retention_authorized(
             conn,
             &store.storage_root,
             "all",
             None,
-            &LcmRetentionConfig {
-                offload_after_days: None,
-                ..drop_config(30)
-            },
+            &config,
             RetentionMode::Apply,
             now,
             &|_| Ok(()),

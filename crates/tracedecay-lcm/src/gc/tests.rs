@@ -1124,6 +1124,202 @@ async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_wi
     Ok(())
 }
 
+fn grace_config() -> LcmGcConfig {
+    LcmGcConfig {
+        grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
+        ..Default::default()
+    }
+    .normalized()
+}
+
+async fn mark_state(store: &TestStore, payload_ref: &str) -> Result<Option<String>, String> {
+    Ok(gc_mark(&store.conn, payload_ref)
+        .await
+        .map_err(|err| err.to_string())?
+        .map(|(state, _)| state))
+}
+
+/// A change to a payload's owner row records the payload as a GC candidate.
+/// Once due, a candidate its owner still references only loses its mark, and
+/// one its owner dropped is reaped; a payload whose owner never changed is
+/// never visited.
+#[tokio::test]
+async fn owner_row_changes_record_candidates_that_gc_verifies() -> Result<(), String> {
+    let store = test_store().await?;
+    let kept = seed_payload(&store, "message-kept", "kept body").await?;
+    let dropped = seed_payload(&store, "message-dropped", "dropped body").await?;
+    let untouched = seed_payload(&store, "message-untouched", "untouched body").await?;
+    store
+        .conn
+        .execute(
+            "UPDATE lcm_raw_messages SET metadata_json = '{}' WHERE message_id = 'message-kept'",
+            (),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    drop_raw_reference(&store, &dropped).await?;
+    let changed_at = tracedecay_runtime_core::tracedecay::current_timestamp();
+    assert_eq!(
+        (
+            mark_state(&store, &kept).await?,
+            mark_state(&store, &dropped).await?,
+            mark_state(&store, &untouched).await?
+        ),
+        (
+            Some("unreferenced".to_string()),
+            Some("unreferenced".to_string()),
+            None
+        )
+    );
+
+    let report = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &grace_config(),
+        true,
+        changed_at + LcmGcConfig::MIN_GRACE_SECONDS as i64,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    assert_eq!(report.unreferenced.refs, vec![dropped.clone()]);
+    assert_eq!(mark_state(&store, &kept).await?, None);
+    assert!(
+        payload::load_payload_metadata(&store.conn, &kept)
+            .await
+            .is_ok()
+    );
+    assert!(
+        payload::load_payload_metadata(&store.conn, &untouched)
+            .await
+            .is_ok()
+    );
+    assert!(
+        payload::load_payload_metadata(&store.conn, &dropped)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+/// A store whose candidate triggers predate this schema lost references no
+/// trigger recorded. Installing the triggers records every existing payload as
+/// a candidate, so GC still reaps a payload whose owner was dropped before.
+#[tokio::test]
+async fn installing_candidate_triggers_records_existing_payloads() -> Result<(), String> {
+    let store = test_store().await?;
+    let orphaned = seed_payload(&store, "message-orphaned", "orphaned body").await?;
+    let live = seed_payload(&store, "message-live", "live body").await?;
+    store
+        .conn
+        .execute_batch(
+            "DROP TRIGGER lcm_raw_messages_gc_candidate_delete;
+             DROP TRIGGER lcm_raw_messages_gc_candidate_update;",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    drop_raw_reference(&store, &orphaned).await?;
+    assert_eq!(mark_state(&store, &orphaned).await?, None);
+
+    schema::ensure_lcm_schema(&store.conn)
+        .await
+        .map_err(|err| err.to_string())?;
+    let installed_at = tracedecay_runtime_core::tracedecay::current_timestamp();
+    assert_eq!(
+        (
+            mark_state(&store, &orphaned).await?,
+            mark_state(&store, &live).await?
+        ),
+        (
+            Some("unreferenced".to_string()),
+            Some("unreferenced".to_string())
+        )
+    );
+    let report = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &grace_config(),
+        true,
+        installed_at + LcmGcConfig::MIN_GRACE_SECONDS as i64,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    assert_eq!(report.unreferenced.refs, vec![orphaned]);
+    assert_eq!(mark_state(&store, &live).await?, None);
+    Ok(())
+}
+
+/// A live placeholder that arrives in a new row naming a payload with neither
+/// metadata nor a file is tombstoned by the next applied pass, which then
+/// moves past that row.
+#[tokio::test]
+async fn new_rows_with_dangling_placeholders_are_tombstoned_once() -> Result<(), String> {
+    let store = test_store().await?;
+    insert_session(&store.conn, &store.storage_root, "session-a").await?;
+    let quoted = format!("see [externalized tool output: bytes=4 ref={PRIMARY_REF}; out]");
+    insert_raw_message(
+        &store.conn,
+        RawMessage {
+            session_id: "session-a",
+            message_id: "message-quoting",
+            storage_kind: "inline",
+            payload_ref: None,
+            content: Some(&quoted),
+            placeholder_text: None,
+            metadata_json: None,
+        },
+    )
+    .await?;
+
+    let first = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &grace_config(),
+        true,
+        1_000,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let second = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &grace_config(),
+        true,
+        1_000,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    assert_eq!(first.dangling.refs, vec![PRIMARY_REF.to_string()]);
+    assert_eq!(second.dangling.count, 0);
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT content FROM lcm_raw_messages WHERE message_id = 'message-quoting'",
+            (),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let content: String = rows
+        .next()
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "quoting row vanished".to_string())?
+        .get(0)
+        .map_err(|err| err.to_string())?;
+    assert!(text_has_tombstoned_payload_ref(&content, PRIMARY_REF));
+    Ok(())
+}
+
 #[tokio::test]
 async fn missing_metadata_clears_mark_when_file_reappears() -> Result<(), String> {
     let store = test_store().await?;
