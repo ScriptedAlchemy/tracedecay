@@ -1,8 +1,67 @@
-//! Kernel coarse-clock witness for filesystem change times.
+//! Filesystem change-time witnesses.
 //!
 //! Linux stamps inode mtime and ctime from `CLOCK_REALTIME_COARSE`. Two
 //! writes inside that quantum can share one timestamp, so a change time that
 //! is still inside the current quantum is not proof the bytes are stable.
+
+use std::fs::Metadata;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+/// The stat field that witnesses an in-place rewrite of a file's bytes.
+///
+/// A stat observation is a negative cache: a moved field proves the file
+/// changed, but an unmoved one proves its bytes unchanged only when some field
+/// must advance on every write. Where none must, callers settle currency
+/// against the bytes' content digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RewriteWitness {
+    /// Unix ctime: every write advances it and no API sets it back.
+    ChangeTime,
+    /// No stat field. NTFS `ChangeTime` stays put when a writer restores
+    /// `LastWriteTime` through its handle, so on Windows an unchanged stat
+    /// only fails to disprove a same-length rewrite.
+    Absent,
+}
+
+impl RewriteWitness {
+    /// This platform's witness.
+    pub const NATIVE: Self = if cfg!(unix) {
+        Self::ChangeTime
+    } else {
+        Self::Absent
+    };
+
+    /// Whether an unchanged stat under this witness can prove unchanged bytes.
+    #[must_use]
+    pub const fn proves_unchanged_bytes(self) -> bool {
+        matches!(self, Self::ChangeTime)
+    }
+
+    /// The witnessing change time of `metadata` in nanoseconds since the
+    /// epoch, `None` when this witness has no such field here.
+    #[must_use]
+    pub fn change_time_nanos(self, metadata: &Metadata) -> Option<i128> {
+        match self {
+            Self::ChangeTime => native_change_time_nanos(metadata),
+            Self::Absent => None,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn native_change_time_nanos(metadata: &Metadata) -> Option<i128> {
+    Some(
+        i128::from(metadata.ctime())
+            .saturating_mul(1_000_000_000)
+            .saturating_add(i128::from(metadata.ctime_nsec())),
+    )
+}
+
+#[cfg(not(unix))]
+fn native_change_time_nanos(_metadata: &Metadata) -> Option<i128> {
+    None
+}
 
 /// Whether `changed_at_nanos` is strictly older than the kernel clock that
 /// stamps inode change times.

@@ -522,6 +522,39 @@ fn update_plugin_exits_nonzero_when_an_attempted_host_fails() {
     assert!(stderr.contains("cline: failed:"), "{stderr}");
 }
 
+/// A reachable host CLI that refuses the registration: the install fails
+/// with the host CLI's own words, not a TraceDecay filesystem failure
+/// pointing at a source line. An absent host is skipped instead; this is a
+/// host TraceDecay can reach.
+#[cfg(unix)]
+#[test]
+fn install_reports_a_host_cli_refusal_in_the_host_clis_words() {
+    let cli = IsolatedCli::new();
+    install_host_cli(
+        &cli,
+        "droid",
+        r#"case "$1 $2" in
+  "mcp add") echo 'error: the MCP registry is locked by another droid' >&2; exit 1 ;;
+esac
+exit 0"#,
+    );
+
+    let output = cli.run(&["install", "--agent", "droid"]);
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let droid_line = stderr
+        .lines()
+        .find(|line| line.starts_with("  droid: "))
+        .unwrap_or_else(|| panic!("no droid summary line: {stderr}"));
+    assert!(
+        droid_line.starts_with("  droid: failed: ")
+            && droid_line.ends_with("error: the MCP registry is locked by another droid"),
+        "{droid_line}"
+    );
+    assert!(!stderr.contains("filesystem operation failed"), "{stderr}");
+}
+
 #[cfg(unix)]
 #[test]
 fn kimi_reports_pending_operator_action_until_its_plugins_install_runs() {

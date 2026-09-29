@@ -8266,7 +8266,7 @@ async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
 /// be observed. The old helper (`wait_for_live_complete_generation` before
 /// #1206) asserted `"live generation"` once `Instant` passed that bound;
 /// the registry seating signal has no such wall-clock cut-off.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serving_seat_signal_observes_a_seat_that_misses_the_poll_deadline() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
@@ -9431,7 +9431,7 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
 
 /// A mount whose restored generation is proved current by its freshness witness
 /// activates that generation without rebuilding it.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn witness_verified_mount_activates_without_rebuild() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");

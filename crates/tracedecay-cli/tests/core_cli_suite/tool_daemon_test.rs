@@ -2545,13 +2545,16 @@ fn project_routed_tool_names_a_held_managed_daemon() {
         "pub fn answer() -> u32 { 42 }\n",
     )
     .unwrap();
+    // The test command names the profile socket through TRACEDECAY_DAEMON_SOCKET.
     let socket = home_path.join(".tracedecay/daemon.sock");
     let socket = socket.display();
     let not_installed = format!(
-        "TraceDecay daemon socket '{socket}' is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
     );
+    let unit_dir = home_path.join(".config/systemd/user");
     let held = format!(
-        "TraceDecay daemon socket '{socket}' is not available. TraceDecay daemon unit is installed but socket '{socket}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running."
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+        unit_dir.join("tracedecay.service").display()
     );
     let project_arg = project_path.to_string_lossy().to_string();
     let search_probe = [
@@ -2629,13 +2632,14 @@ fn authority_routed_clients_name_a_held_managed_daemon() {
     std::fs::write(&workflow_request, "{}").unwrap();
     let record = home_path.join(".tracedecay/daemon-authority.json");
     let record = record.display();
-    let socket = home_path.join(".tracedecay/daemon.sock");
-    let socket = socket.display();
     let not_installed = format!(
         "TraceDecay daemon is not available: no authority record at '{record}'. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
     );
     let held = format!(
-        "TraceDecay daemon is not available: no authority record at '{record}'. TraceDecay daemon unit is installed but socket '{socket}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running."
+        "TraceDecay daemon is not available: no authority record at '{record}'. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+        home_path
+            .join(".config/systemd/user/tracedecay.service")
+            .display()
     );
     let project_arg = project_path.to_string_lossy().to_string();
     let work_request_arg = work_request.to_string_lossy().to_string();
@@ -2664,6 +2668,52 @@ fn authority_routed_clients_name_a_held_managed_daemon() {
         &not_installed,
         &held,
     );
+}
+
+/// A missing `TRACEDECAY_DAEMON_SOCKET` is reported as that socket being
+/// unavailable, and the installed managed service is reported as observed
+/// beside it rather than denied.
+#[cfg(target_os = "linux")]
+#[test]
+fn tool_cli_reports_a_missing_override_socket_apart_from_the_installed_service() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let unit = home_path.join(".config/systemd/user/tracedecay.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(
+        &unit,
+        "[Service]\nExecStart=/usr/local/bin/tracedecay daemon run\n",
+    )
+    .unwrap();
+    let missing_socket = socket_dir.path().join("missing.sock");
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+        .args(["tool", "status", "--json"])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(
+            tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+        )),
+        "{output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected = format!(
+        "TraceDecay daemon socket '{}' named by TRACEDECAY_DAEMON_SOCKET is not available. \
+         The managed TraceDecay daemon service is installed at '{}' and serves '{}', not this \
+         socket.",
+        missing_socket.display(),
+        unit.display(),
+        home_path.join(".tracedecay/daemon.sock").display(),
+    );
+    assert!(stderr.contains(&expected), "{stderr}");
 }
 
 #[test]
