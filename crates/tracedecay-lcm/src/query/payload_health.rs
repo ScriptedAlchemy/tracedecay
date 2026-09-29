@@ -108,7 +108,7 @@ pub async fn payload_health_detail(
         maintenance::payload_metadata_refs_for_scope(conn, provider, session_id).await?;
     let metadata_bytes = payload_byte_counts_for_scope(conn, provider, session_id).await?;
     let payload_locations = payload_ref_locations_for_scope(conn, provider, session_id).await?;
-    let referenced_refs = gc::referenced_payload_refs(conn, provider, session_id).await?;
+    let referenced_refs = gc::owner_referenced_metadata(conn, &metadata_refs).await?;
     let placeholder_status = placeholder_payload_status(
         conn,
         storage_root,

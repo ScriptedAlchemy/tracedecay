@@ -9,10 +9,6 @@ const PLACEHOLDER_TEXT_COLUMNS: [&str; 4] =
 
 pub(crate) enum PlaceholderScanScope<'a> {
     Unscoped,
-    ExactProvider {
-        provider: &'a str,
-        session_id: Option<&'a str>,
-    },
     ProviderOrAll {
         provider: &'a str,
         session_id: Option<&'a str>,
@@ -105,20 +101,6 @@ fn session_sql_value(session_id: Option<&str>) -> SqlValue {
 fn placeholder_scan_scope_sql(scope: &PlaceholderScanScope<'_>) -> (String, Vec<SqlValue>) {
     match scope {
         PlaceholderScanScope::Unscoped => ("1 = 1".to_string(), Vec::new()),
-        PlaceholderScanScope::ExactProvider {
-            provider,
-            session_id,
-        } => {
-            let session = session_sql_value(*session_id);
-            (
-                "provider = ? AND (? IS NULL OR session_id = ?)".to_string(),
-                vec![
-                    SqlValue::Text((*provider).to_string()),
-                    session.clone(),
-                    session,
-                ],
-            )
-        }
         PlaceholderScanScope::ProviderOrAll {
             provider,
             session_id,
@@ -151,8 +133,20 @@ pub(crate) async fn scan_placeholder_text_rows(
     scope: PlaceholderScanScope<'_>,
     like_patterns: &[String],
 ) -> Result<Vec<PlaceholderTextRow>, LcmError> {
+    scan_placeholder_text_rows_between(conn, scope, like_patterns, 0, i64::MAX).await
+}
+
+/// [`scan_placeholder_text_rows`] over the rows with `after < store_id <=
+/// through`.
+pub(crate) async fn scan_placeholder_text_rows_between(
+    conn: &(impl QueryExecutor + ?Sized),
+    scope: PlaceholderScanScope<'_>,
+    like_patterns: &[String],
+    after: i64,
+    through: i64,
+) -> Result<Vec<PlaceholderTextRow>, LcmError> {
     let mut rows_out = Vec::new();
-    drive_placeholder_text_scan(conn, scope, like_patterns, |row| {
+    drive_placeholder_text_scan(conn, scope, like_patterns, (after, through), |row| {
         rows_out.push(row);
         PlaceholderScanFlow::Continue
     })
@@ -174,7 +168,7 @@ pub(crate) async fn any_placeholder_text_row(
     mut confirm: impl FnMut(&PlaceholderTextRow) -> bool,
 ) -> Result<bool, LcmError> {
     let mut confirmed = false;
-    drive_placeholder_text_scan(conn, scope, like_patterns, |row| {
+    drive_placeholder_text_scan(conn, scope, like_patterns, (0, i64::MAX), |row| {
         if confirm(&row) {
             confirmed = true;
             PlaceholderScanFlow::Stop
@@ -190,6 +184,7 @@ async fn drive_placeholder_text_scan(
     conn: &(impl QueryExecutor + ?Sized),
     scope: PlaceholderScanScope<'_>,
     like_patterns: &[String],
+    (after, through): (i64, i64),
     mut visit: impl FnMut(PlaceholderTextRow) -> PlaceholderScanFlow,
 ) -> Result<(), LcmError> {
     if like_patterns.is_empty() {
@@ -198,7 +193,7 @@ async fn drive_placeholder_text_scan(
     let (scope_sql, scope_values) = placeholder_scan_scope_sql(&scope);
     let like_sql = placeholder_text_like_sql(like_patterns.len());
     let like_values = bind_placeholder_like_patterns(like_patterns);
-    let mut after_store_id = 0_i64;
+    let mut after_store_id = after;
     loop {
         let sql = format!(
             "WITH page AS (
@@ -206,7 +201,7 @@ async fn drive_placeholder_text_scan(
                         placeholder_text
                  FROM lcm_raw_messages
                  WHERE {scope_sql}
-                   AND store_id > ?
+                   AND store_id > ? AND store_id <= ?
                    AND ({like_sql})
                  ORDER BY store_id
                  LIMIT ?
@@ -231,6 +226,7 @@ async fn drive_placeholder_text_scan(
         );
         let mut values = scope_values.clone();
         values.push(SqlValue::Integer(after_store_id));
+        values.push(SqlValue::Integer(through));
         values.extend(like_values.iter().cloned());
         values.push(SqlValue::Integer(LCM_SCAN_PAGE_ROWS));
         values.push(SqlValue::Integer(LCM_SCAN_PAGE_MAX_BYTES));

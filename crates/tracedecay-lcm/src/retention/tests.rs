@@ -602,7 +602,58 @@ async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<()
     Ok(())
 }
 
-// (e) reclaimed space is measurable via row and page/free-list metrics.
+/// A pass resumes from the previous one's cursors, yet still drops a durable
+/// row that aged past the window since, and an old row a summary first
+/// covered since.
+#[tokio::test]
+async fn later_passes_act_on_rows_that_aged_or_became_durable_since() -> Result<(), String> {
+    let store = test_store().await?;
+    let conn = &store.conn;
+    let ages_later = insert_message(conn, 1, 20, "durable, ages past the window later").await?;
+    make_projection_durable(conn, ages_later).await?;
+    let summarized_later = insert_message(conn, 2, 90, "old, summarized later").await?;
+    let young = insert_message(conn, 3, 1, "durable and young").await?;
+    make_projection_durable(conn, young).await?;
+    let pass = |now: i64| {
+        run_session_retention_authorized(
+            conn,
+            &store.storage_root,
+            "all",
+            None,
+            &LcmRetentionConfig {
+                offload_after_days: None,
+                ..drop_config(30)
+            },
+            RetentionMode::Apply,
+            now,
+            &|_| Ok(()),
+        )
+    };
+
+    let first = pass(NOW).await.map_err(|error| error.to_string())?;
+    assert_eq!(first.dropped.acted, 0);
+
+    make_projection_durable(conn, summarized_later).await?;
+    let second = pass(NOW + 15 * DAY)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(second.dropped.acted, 2);
+    let mut rows = conn
+        .query(
+            "SELECT store_id FROM lcm_raw_messages ORDER BY store_id",
+            (),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut remaining = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|error| error.to_string())? {
+        remaining.push(row.get::<i64>(0).map_err(|error| error.to_string())?);
+    }
+    assert_eq!(remaining, [young]);
+    Ok(())
+}
+
+// (e) reclaimed space is measurable via page/free-list metrics.
 #[tokio::test]
 async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
     let store = test_store().await?;
@@ -613,8 +664,8 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
     }
     let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
 
-    assert_eq!(report.raw_rows_before, 8);
-    assert_eq!(report.raw_rows_after, 0, "row-count delta is measurable");
+    assert_eq!(report.dropped.acted, 8);
+    assert_eq!(count(conn, "lcm_raw_messages").await?, 0);
     assert!(report.page_count_before > 0, "page_count observed");
     assert!(
         report.freelist_after >= report.freelist_before,

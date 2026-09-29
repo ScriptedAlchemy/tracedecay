@@ -608,3 +608,70 @@ async fn retention_write_transactions_do_not_scale_with_the_session_store() {
          its write transactions: base={base_steps} grown={grown_steps}"
     );
 }
+
+/// Runs one maintenance retention tick and returns the bytes the process read.
+async fn retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
+    let before = process_read_bytes();
+    let report = run_registered_store_retention(
+        database,
+        &LcmRetentionConfig::default(),
+        &ObservationRetentionConfig::default(),
+        RETENTION_NOW,
+    )
+    .await;
+    assert!(report.succeeded(), "retention must succeed");
+    process_read_bytes() - before
+}
+
+/// Every retention tick after the store settles follows the messages streamed
+/// since the previous tick. Payload GC, observation release, session
+/// retention, and observability pruning each select from their own cursors or
+/// candidate indexes, so an 8x larger store costs the same tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_tick_reads_do_not_scale_with_the_session_store() {
+    const STREAMED: u64 = 8;
+    let _measured = MEASURED.lock().await;
+    let fixture = DrainFixture::open().await;
+    let facade = fixture.facade();
+    let database = fixture
+        .runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let (project, scope) = (fixture.project.as_path(), fixture.scope());
+    let probe_timestamp = SEED_TIMESTAMP + 10_000_000;
+
+    let mut streamed = seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
+    retention_tick_read_bytes(database).await;
+    for offset in 0..STREAMED {
+        probe_one_message(
+            &facade,
+            project,
+            &scope,
+            &mut streamed,
+            probe_timestamp + i64::try_from(offset).unwrap(),
+        )
+        .await;
+    }
+    let base_read = retention_tick_read_bytes(database).await;
+
+    seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
+    retention_tick_read_bytes(database).await;
+    for offset in STREAMED..2 * STREAMED {
+        probe_one_message(
+            &facade,
+            project,
+            &scope,
+            &mut streamed,
+            probe_timestamp + i64::try_from(offset).unwrap(),
+        )
+        .await;
+    }
+    let grown_read = retention_tick_read_bytes(database).await;
+
+    eprintln!("retention tick read bytes: base={base_read} grown={grown_read}");
+    assert!(
+        grown_read * 10 <= base_read * 12,
+        "one retention tick on an 8x larger session store must stay within 1.2x of the \
+         base store's reads: base={base_read} grown={grown_read}"
+    );
+}

@@ -220,7 +220,10 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             next_retry_at_micros INTEGER NOT NULL DEFAULT 0 CHECK(next_retry_at_micros >= 0),
             last_error TEXT,
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
-        );";
+        );
+        CREATE INDEX IF NOT EXISTS idx_retrieval_anchor_dispositions_release_due
+            ON retrieval_anchor_dispositions(effective_at, sequence)
+            WHERE state IN ('superseded', 'deleted');";
 
 /// Installs the observation authority. Returns the refused authority, with
 /// the unified-identity marker and every observation-row rewrite skipped, when

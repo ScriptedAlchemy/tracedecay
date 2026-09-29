@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -47,74 +46,6 @@ pub enum CommittedPayloadRemoval {
     Missing,
     Removed(u64),
     ReplacementPreserved,
-}
-
-/// Memoizes [`gc::referenced_payload_refs`] for a caller that deletes many
-/// payloads inside one transaction.
-///
-/// Reuse is exact rather than approximate. Whether a payload `X` sits in the
-/// live reference closure is only ever changed by `X`'s own deletion:
-///
-/// * `tombstone_residual_placeholders` rewrites a bracket placeholder only when
-///   [`gc::tombstone_placeholder_in_text`] finds that placeholder's `ref=` equal
-///   to the ref being deleted, and `extract_payload_refs_from_text` yields at
-///   most one ref per bracket, so tombstoning `Y` cannot drop a reference to
-///   any `X != Y`.
-/// * The `payload_ref` column is only nulled on rows whose column already equals
-///   the ref being deleted.
-///
-/// Nothing else in the delete path writes `lcm_raw_messages`, the sole table the
-/// closure scan reads. One scan per provider therefore answers every iteration
-/// exactly as a fresh per-payload scan would have.
-#[derive(Debug, Default)]
-pub struct ReferencedClosureCache {
-    by_provider: BTreeMap<String, BTreeSet<String>>,
-    /// Every provider's references, read before the transaction by a caller
-    /// that deletes only payloads whose GC mark survived into it.
-    all_providers: Option<BTreeSet<String>>,
-}
-
-impl ReferencedClosureCache {
-    /// Answers every provider from `referenced`, the complete closure payload
-    /// GC read before its write transaction. That is exact for a payload whose
-    /// unreferenced GC mark is still present in the transaction: every writer
-    /// that adds a reference clears the referenced payload's mark in the same
-    /// transaction (`payload::upsert_payload_metadata`).
-    pub(crate) fn from_closure(referenced: &BTreeSet<String>) -> Self {
-        Self {
-            by_provider: BTreeMap::new(),
-            all_providers: Some(referenced.clone()),
-        }
-    }
-
-    #[hotpath::skip]
-    async fn is_referenced(
-        &mut self,
-        conn: &(impl Executor + ?Sized),
-        provider: &str,
-        payload_ref: &str,
-    ) -> Result<bool, LcmError> {
-        if let Some(referenced) = &self.all_providers {
-            return Ok(referenced.contains(payload_ref));
-        }
-        if !self.by_provider.contains_key(provider) {
-            let refs = gc::referenced_payload_refs(conn, provider, None).await?;
-            self.by_provider.insert(provider.to_string(), refs);
-        }
-        Ok(self
-            .by_provider
-            .get(provider)
-            .is_some_and(|refs| refs.contains(payload_ref)))
-    }
-
-    /// Applies the shrink a completed placeholder rewrite performed on the
-    /// database, so a repeated ref in the same batch reads the post-rewrite
-    /// truth instead of the pre-rewrite snapshot.
-    fn forget(&mut self, payload_ref: &str) {
-        for refs in self.by_provider.values_mut().chain(&mut self.all_providers) {
-            refs.remove(payload_ref);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -187,26 +118,19 @@ pub(super) async fn delete_external_payload_in_transaction(
     payload_ref: &str,
     opts: &DeleteOpts,
 ) -> Result<PreparedPayloadDelete, LcmError> {
-    let mut referenced = ReferencedClosureCache::default();
-    let prepared = prepare_external_payload_delete_in_transaction_with_cache(
-        conn,
-        storage_root,
-        payload_ref,
-        opts,
-        &mut referenced,
-    )
-    .await?;
+    let prepared =
+        prepare_external_payload_delete_in_transaction(conn, storage_root, payload_ref, opts)
+            .await?;
     let deleted_refs = [payload_ref.to_string()];
     gc::delete_gc_marks(conn, &deleted_refs).await?;
     Ok(prepared)
 }
 
-pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
+pub(super) async fn prepare_external_payload_delete_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
     opts: &DeleteOpts,
-    referenced: &mut ReferencedClosureCache,
 ) -> Result<PreparedPayloadDelete, LcmError> {
     validate_payload_ref(payload_ref)?;
     // The DB-side cleanup below must still run for a store whose payload
@@ -270,10 +194,18 @@ pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
     let tombstone_missing_payload =
         opts.rewrite_placeholders && !opts.remove_file && !opts.verify_hash;
     if let Some(metadata) = metadata.as_ref()
-        && referenced
-            .is_referenced(conn, &metadata.provider, payload_ref)
-            .await?
         && !tombstone_missing_payload
+        && !gc::owner_referenced_payloads(
+            conn,
+            &[gc::PayloadOwner {
+                payload_ref: payload_ref.to_string(),
+                provider: metadata.provider.clone(),
+                session_id: metadata.session_id.clone(),
+                message_id: metadata.message_id.clone(),
+            }],
+        )
+        .await?
+        .is_empty()
     {
         return Err(LcmError::StillReferenced);
     }
@@ -284,9 +216,6 @@ pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
     .await?;
     if opts.rewrite_placeholders {
         placeholders_rewritten = tombstone_residual_placeholders(conn, payload_ref).await?;
-        // The rewrite above is unscoped and exhaustive, so this ref is now
-        // absent from the live closure of every provider.
-        referenced.forget(payload_ref);
     }
 
     let file_removed = opts.remove_file && file_existed;
