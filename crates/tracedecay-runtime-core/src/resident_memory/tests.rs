@@ -1227,6 +1227,7 @@ fn cgroup_committed_bytes_refuse_growth_that_unreclaimable_bytes_would_admit() {
 /// A daemon the kernel swaps under its cgroup ceiling has small resident
 /// counters and large live heap. Both the process sample and the cgroup's
 /// committed figure count those pages, so admission is refused.
+#[cfg(target_os = "linux")]
 #[test]
 fn admission_counts_swapped_anonymous_pages() {
     let limit_bytes = 100 * 1024 * 1024;

@@ -47,9 +47,17 @@ pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executa
 /// no registered owner anymore. `semantic.runtime.v1` shipped through
 /// v0.1.0-beta.37 and left with the dense retrieval runtime;
 /// `sync.orphan_db_gc_days.v1` shipped through v0.1.0-beta.50 and left with
-/// the orphan branch-database sweep.
-pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] =
-    &["semantic.runtime.v1", "sync.orphan_db_gc_days.v1"];
+/// the orphan branch-database sweep. The upload, watcher-debounce, and
+/// extraction-timeout user settings were stored in each project's snapshot
+/// through v1.0.0-beta.61 and now live only in the profile store
+/// ([`PROFILE_SETTING_KEYS_V1`]).
+pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &[
+    "semantic.runtime.v1",
+    "sync.orphan_db_gc_days.v1",
+    USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+];
 
 /// Canonical user-profile settings.
 pub const USER_UPLOAD_ENABLED_SETTING_KEY: &str = "user.upload_enabled.v1";
@@ -57,6 +65,21 @@ pub const USER_CODE_INDEX_WORKERS_SETTING_KEY: &str = "user.code_index_workers.v
 pub const USER_WATCHER_DEBOUNCE_MS_SETTING_KEY: &str = "user.watcher_debounce_ms.v1";
 pub const USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY: &str = "user.extraction_timeout_secs.v1";
 pub const USER_WORK_EXPERTISE_CONSENT_SETTING_KEY: &str = "user.work_expertise_consent.v1";
+
+/// User-profile settings persisted in the profile's own `ProfileSessions`
+/// store. They resolve from the profile alone, with or without a project.
+/// `user.work_expertise_consent.v1` stays in each project snapshot because a
+/// Work read pins it together with the project's consent in one revision.
+pub const PROFILE_SETTING_KEYS_V1: &[&str] = &[
+    USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+];
+
+pub fn is_profile_setting_key(key: &SettingKey) -> bool {
+    PROFILE_SETTING_KEYS_V1.contains(&key.as_str())
+}
 
 /// Canonical project-scoped runtime settings.
 pub const INDEX_EXCLUDE_SETTING_KEY: &str = "index.exclude.v1";

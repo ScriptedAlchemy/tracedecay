@@ -21,6 +21,7 @@ use crate::configuration::resolver::resolve_configuration;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationMutationOperationV1, SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY,
 };
 
 #[tokio::test]
@@ -34,11 +35,14 @@ async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
         .registered_database(HostAdmissionScope::Profile)
         .unwrap();
     let profile_id = db.binding().shard_id.profile_id.clone();
-    let store =
-        super::super::ProfileCodeIndexWorkerConfigurationStore::new_registered(db, &profile_id)
-            .unwrap();
+    let store = super::super::ProfileConfigurationStore::new_registered(db, &profile_id).unwrap();
 
-    let initialized = store.read_or_initialize(UtcMicros(1)).await.unwrap();
+    let initialized = store
+        .read_or_initialize(UtcMicros(1))
+        .await
+        .unwrap()
+        .code_index_workers()
+        .unwrap();
     assert_eq!(
         initialized.selection,
         CodeIndexWorkerSelectionV1::Automatic {}
@@ -69,7 +73,12 @@ async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
         committed.current.selection,
         CodeIndexWorkerSelectionV1::Exact { workers: 8 }
     );
-    let restarted = store.read_or_initialize(UtcMicros(2)).await.unwrap();
+    let restarted = store
+        .read_or_initialize(UtcMicros(2))
+        .await
+        .unwrap()
+        .code_index_workers()
+        .unwrap();
     assert_eq!(restarted, committed.current);
     assert!(matches!(
         store
@@ -90,10 +99,88 @@ async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
             .is_err()
     );
     assert!(
-        ConfigurationRegistry::profile_code_index_workers()
+        ConfigurationRegistry::profile()
             .unwrap()
             .definition(&worker_key)
             .is_ok()
+    );
+}
+
+/// A profile store written when it held only the worker selection converges
+/// onto the profile registry on first read: the operator's selection survives
+/// and the user settings resolve to their defaults.
+#[tokio::test]
+async fn worker_only_profile_store_converges_onto_the_profile_registry() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile_root = directory.path().join("profile");
+    let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let profile_id = db.binding().shard_id.profile_id.clone();
+    let worker_key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).unwrap();
+    let worker_only = ConfigurationRegistry::from_definitions([ConfigurationRegistry::profile()
+        .unwrap()
+        .definition(&worker_key)
+        .unwrap()
+        .clone()])
+    .unwrap();
+    let initial_revision = id("configuration.profile-code-index-workers.initial.v1");
+    GlobalDbConfigurationControlStore::new_registered(db)
+        .initialize_canonical_with_registry(
+            &initial_revision,
+            &resolve_configuration(&worker_only, &[]).unwrap(),
+            UtcMicros(1),
+            &worker_only,
+        )
+        .await
+        .unwrap();
+    let layer = ConfigurationLayerIdV1::UserProfile {
+        profile_id: profile_id.clone(),
+    };
+    let authority = control_authority_with_key_for_layer(
+        ConfigurationMutationOperationV1::DirectMutation,
+        &initial_revision,
+        Some(
+            ConfigurationIdempotencyKey::new("configuration.idempotency.old-worker".to_owned())
+                .unwrap(),
+        ),
+        layer.clone(),
+    );
+    let transaction = db.begin_write_transaction().await.unwrap();
+    let old = super::super::mutation::commit_direct_in_transaction_with_registry(
+        &transaction,
+        &authority,
+        &DirectConfigurationMutation::Set {
+            layer,
+            key: worker_key,
+            value: Box::new(ConfigurationValueV1::CodeIndexWorkerSelection(
+                CodeIndexWorkerSelectionV1::Exact { workers: 8 },
+            )),
+        },
+        &initial_revision,
+        &worker_only,
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+
+    let converged = super::super::ProfileConfigurationStore::new_registered(db, &profile_id)
+        .unwrap()
+        .read_or_initialize(UtcMicros(3))
+        .await
+        .unwrap();
+
+    assert_ne!(converged.revision_id, old.current.revision_id);
+    assert_eq!(
+        converged.code_index_workers().unwrap().selection,
+        CodeIndexWorkerSelectionV1::Exact { workers: 8 }
+    );
+    assert_eq!(
+        converged.value(USER_UPLOAD_ENABLED_SETTING_KEY).unwrap(),
+        &ConfigurationValueV1::Boolean(false)
     );
 }
 
@@ -104,7 +191,7 @@ async fn project_revision_store_rejects_profile_worker_snapshot() {
         .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let store = GlobalDbConfigurationControlStore::new_registered(db);
-    let profile_registry = ConfigurationRegistry::profile_code_index_workers().unwrap();
+    let profile_registry = ConfigurationRegistry::profile().unwrap();
     let profile_snapshot = resolve_configuration(&profile_registry, &[])
         .unwrap()
         .snapshot;

@@ -14,7 +14,7 @@ use tracedecay_global_db::configuration::contracts::types::{
     ConfigurationError, ConfigurationMutationAuthority, DirectConfigurationMutation,
 };
 use tracedecay_global_db::configuration::{
-    ProfileCodeIndexWorkerCommitV1, ProfileCodeIndexWorkerConfigurationStore,
+    ProfileCodeIndexWorkerCommitV1, ProfileConfigurationStore,
 };
 
 /// Open the exact registered profile-sessions store and build the worker mutation.
@@ -23,8 +23,8 @@ pub fn profile_code_index_worker_mutation(
     profile_id: &UserProfileId,
     selection: CodeIndexWorkerSelectionV1,
 ) -> Result<DirectConfigurationMutation, ConfigurationError> {
-    ProfileCodeIndexWorkerConfigurationStore::new_registered(database, profile_id)
-        .and_then(|store| store.mutation(selection))
+    ProfileConfigurationStore::new_registered(database, profile_id)
+        .and_then(|store| store.code_index_worker_mutation(selection))
 }
 
 /// Open the exact registered profile-sessions store and commit the worker selection.
@@ -36,7 +36,7 @@ pub async fn commit_profile_code_index_worker_selection(
     selection: CodeIndexWorkerSelectionV1,
     expected_revision: &ConfigurationRevisionId,
 ) -> Result<ProfileCodeIndexWorkerCommitV1, ConfigurationError> {
-    let store = ProfileCodeIndexWorkerConfigurationStore::new_registered(database, profile_id)?;
+    let store = ProfileConfigurationStore::new_registered(database, profile_id)?;
     store
         .commit_selection(authority, selection, expected_revision)
         .await
