@@ -40,7 +40,7 @@ enum CodeGraphBaseInputsLineV1 {
         generation: CodeGenerationId,
         projector_revision: String,
     },
-    File(CodeGraphBaseFileV1),
+    File(Box<CodeGraphBaseFileV1>),
     Resolution {
         cross_file_edges: Vec<CanonicalRelationEdgeV1>,
         unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
@@ -104,7 +104,7 @@ impl CodeGraphBaseInputsWriterV1 {
         &mut self,
         file: CodeGraphBaseFileV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
-        self.line(&CodeGraphBaseInputsLineV1::File(file))
+        self.line(&CodeGraphBaseInputsLineV1::File(Box::new(file)))
     }
 
     pub(super) fn finish(
@@ -158,7 +158,7 @@ pub(super) fn read_code_graph_base_inputs(
         match next()? {
             Some(CodeGraphBaseInputsLineV1::File(file)) => {
                 if files
-                    .insert(file.file_occurrence_id.clone(), file)
+                    .insert(file.file_occurrence_id.clone(), *file)
                     .is_some()
                 {
                     return Err(inputs_io("file", "a snapshot file appears twice"));

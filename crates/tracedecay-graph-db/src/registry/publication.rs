@@ -133,16 +133,19 @@ impl GraphDbRegistry {
 
         let locator = locator_from_key(&head.key)?;
         let database_path = canonical_graph_database_file(registration.canonical_path())?;
-        let (database, identity, direct_store) =
-            crate::sealed_store::open_direct_sealed_generation(
-                &database_path,
-                locator.projection,
-                locator.generation,
-                &head.recovered_digest,
-                Arc::clone(&registration.authority_lease),
-                &|| check_all(&registration, context, "generation.recover.direct_sealed"),
-            )?
-            .ok_or_else(|| GraphDbError::unavailable("sealed generation store is absent"))?;
+        let crate::sealed_store::DirectSealedGenerationV1 {
+            lease: database,
+            identity,
+            layered,
+        } = crate::sealed_store::open_direct_sealed_generation(
+            &database_path,
+            locator.projection,
+            locator.generation,
+            &head.recovered_digest,
+            Arc::clone(&registration.authority_lease),
+            &|| check_all(&registration, context, "generation.recover.direct_sealed"),
+        )?
+        .ok_or_else(|| GraphDbError::unavailable("sealed generation store is absent"))?;
         if identity.dependency_closure_digest(&|| {
             check_all(&registration, context, "generation.recover.direct_sealed")
         })? != head.dependency_generation_closure_digest
@@ -156,9 +159,7 @@ impl GraphDbRegistry {
         let lease = generation_lease(&identity, head, BTreeMap::new());
         self.track_direct_sealed_reader(&lease)?;
         Ok(VerifiedGraphSnapshot::new_direct_sealed(
-            database,
-            lease,
-            direct_store,
+            database, lease, layered,
         ))
     }
 

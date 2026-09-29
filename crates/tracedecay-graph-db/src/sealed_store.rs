@@ -84,6 +84,14 @@ use crate::{
     SpilledGraphGeneration,
 };
 
+/// A sealed generation opened without the shared staging database.
+pub(crate) struct DirectSealedGenerationV1 {
+    pub(crate) lease: crate::GraphDbLeaseV1,
+    pub(crate) identity: GraphGenerationManifestIdentity,
+    /// A layered generation's store, whose delta `lease` holds.
+    pub(crate) layered: Option<Arc<SealedGenerationStore>>,
+}
+
 /// Opens and verifies one dependency-free sealed generation without opening
 /// the shared mutable staging database.
 #[hotpath::measure(label = "graph_db.sealed_store.open_direct")]
@@ -94,14 +102,7 @@ pub(crate) fn open_direct_sealed_generation(
     expected: &GraphRecoveredGenerationDigestV1,
     authority_lease: Arc<dyn tracedecay_store::RetainedGraphStoreLeaseV1>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<
-    Option<(
-        crate::GraphDbLeaseV1,
-        GraphGenerationManifestIdentity,
-        Option<Arc<SealedGenerationStore>>,
-    )>,
-    GraphDbError,
-> {
+) -> Result<Option<DirectSealedGenerationV1>, GraphDbError> {
     if sealed_store_disabled() {
         return Ok(None);
     }
@@ -171,7 +172,11 @@ pub(crate) fn open_direct_sealed_generation(
             .ok_or_else(|| GraphDbError::unavailable("layered sealed generation is absent"))?;
         let lease =
             crate::owner::issue_derived_read_lease(Arc::clone(&store.database), authority_lease)?;
-        return Ok(Some((lease, identity, Some(store))));
+        return Ok(Some(DirectSealedGenerationV1 {
+            lease,
+            identity,
+            layered: Some(store),
+        }));
     }
     // Same marker-aware proof as registry adoption: a boot that reopens the
     // exact bytes an earlier open already proved resolves by marker, and a
@@ -186,7 +191,11 @@ pub(crate) fn open_direct_sealed_generation(
     }
     database.mark_sealed_read_only();
     let lease = crate::owner::issue_derived_read_lease(database, authority_lease)?;
-    Ok(Some((lease, identity, None)))
+    Ok(Some(DirectSealedGenerationV1 {
+        lease,
+        identity,
+        layered: None,
+    }))
 }
 
 /// Rows loaded from the shared staging database per read-guard hold while a
