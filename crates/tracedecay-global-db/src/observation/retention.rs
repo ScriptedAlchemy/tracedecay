@@ -426,6 +426,8 @@ struct PayloadRelease {
     /// eligibility (`?1` is the marker, `?2` the disposition cutoff).
     update: String,
     label: &'static str,
+    window_days: Option<u32>,
+    cutoff: i64,
 }
 
 /// Reads one pass's candidates on the reader. Selection scans the evidence
@@ -454,11 +456,13 @@ async fn run_release_pass(
     database: &Database,
     selection: (&str, Params),
     release: PayloadRelease,
-    cutoff: i64,
     mode: RetentionMode,
-    report: &mut ObservationRetentionPhaseReport,
     errors: &mut Vec<String>,
-) -> Result<()> {
+) -> Result<ObservationRetentionPhaseReport> {
+    let mut report = ObservationRetentionPhaseReport {
+        window_days: release.window_days,
+        ..ObservationRetentionPhaseReport::default()
+    };
     let targets = select_release_targets(database, selection.0, selection.1).await?;
     report.eligible = targets.len() as u64;
     report.oldest_eligible_at = targets.iter().map(|target| target.effective_at).min();
@@ -467,12 +471,12 @@ async fn run_release_pass(
             .iter()
             .map(|target| reclaimed_bytes(target.original_len, release.marker))
             .sum();
-        return Ok(());
+        return Ok(report);
     }
-    if targets.is_empty() {
-        return Ok(());
+    if !targets.is_empty() {
+        release_payload_batch(database, &release, &targets, &mut report, errors).await?;
     }
-    release_payload_batch(database, &release, cutoff, &targets, report, errors).await
+    Ok(report)
 }
 
 /// Rewrites a selected batch's payload column to its released marker in one
@@ -484,7 +488,6 @@ async fn run_release_pass(
 async fn release_payload_batch(
     database: &Database,
     release: &PayloadRelease,
-    cutoff: i64,
     targets: &[ReleaseTarget],
     report: &mut ObservationRetentionPhaseReport,
     errors: &mut Vec<String>,
@@ -502,7 +505,7 @@ async fn release_payload_batch(
         let sql = release.update.replace("{ids}", &ids);
         let mut values = Vec::with_capacity(chunk.len() + 2);
         values.push(Value::Text(release.marker.to_owned()));
-        values.push(Value::Integer(cutoff));
+        values.push(Value::Integer(release.cutoff));
         values.extend(chunk.iter().map(|target| Value::Text(target.id.clone())));
         let mut rows = match txn.query(&sql, values).await {
             Ok(rows) => rows,
@@ -542,12 +545,9 @@ async fn run_anchor_pass(
     now: i64,
     errors: &mut Vec<String>,
 ) -> Result<ObservationRetentionPhaseReport> {
-    let mut report = ObservationRetentionPhaseReport {
-        window_days: config.anchor_release_after_days,
-        ..ObservationRetentionPhaseReport::default()
-    };
-    let Some(window) = config.anchor_release_after_days else {
-        return Ok(report);
+    let window_days = config.anchor_release_after_days;
+    let Some(window) = window_days else {
+        return Ok(ObservationRetentionPhaseReport::default());
     };
     let cutoff = cutoff_secs(window, now);
     let sql = format!(
@@ -579,6 +579,8 @@ async fn run_anchor_pass(
              RETURNING anchor_id"
         ),
         label: "anchor",
+        window_days,
+        cutoff,
     };
     run_release_pass(
         database,
@@ -587,13 +589,10 @@ async fn run_anchor_pass(
             params![opt_text(generation), cutoff, config.batch_limit()],
         ),
         release,
-        cutoff,
         mode,
-        &mut report,
         errors,
     )
-    .await?;
-    Ok(report)
+    .await
 }
 
 /// True when no anchor bound to `{observation}` still keeps its payload live:
@@ -632,12 +631,9 @@ async fn run_observation_pass(
     now: i64,
     errors: &mut Vec<String>,
 ) -> Result<ObservationRetentionPhaseReport> {
-    let mut report = ObservationRetentionPhaseReport {
-        window_days: config.observation_release_after_days,
-        ..ObservationRetentionPhaseReport::default()
-    };
-    let Some(window) = config.observation_release_after_days else {
-        return Ok(report);
+    let window_days = config.observation_release_after_days;
+    let Some(window) = window_days else {
+        return Ok(ObservationRetentionPhaseReport::default());
     };
     let cutoff = cutoff_secs(window, now);
     // An observation is released once per observation only when every anchor
@@ -693,6 +689,8 @@ async fn run_observation_pass(
             live = no_live_binding("o.observation_id"),
         ),
         label: "observation",
+        window_days,
+        cutoff,
     };
     run_release_pass(
         database,
@@ -701,13 +699,10 @@ async fn run_observation_pass(
             params![opt_text(generation), cutoff, config.batch_limit()],
         ),
         release,
-        cutoff,
         mode,
-        &mut report,
         errors,
     )
-    .await?;
-    Ok(report)
+    .await
 }
 
 async fn run_provenance_pass(
@@ -718,12 +713,9 @@ async fn run_provenance_pass(
     now: i64,
     errors: &mut Vec<String>,
 ) -> Result<ObservationRetentionPhaseReport> {
-    let mut report = ObservationRetentionPhaseReport {
-        window_days: config.provenance_release_after_days,
-        ..ObservationRetentionPhaseReport::default()
-    };
-    let Some(window) = config.provenance_release_after_days else {
-        return Ok(report);
+    let window_days = config.provenance_release_after_days;
+    let Some(window) = window_days else {
+        return Ok(ObservationRetentionPhaseReport::default());
     };
     let cutoff = cutoff_secs(window, now);
     // Only rows that carry a provenance anchor are released; the anchor linkage
@@ -769,6 +761,8 @@ async fn run_provenance_pass(
              RETURNING observation_id"
         ),
         label: "provenance",
+        window_days,
+        cutoff,
     };
     run_release_pass(
         database,
@@ -777,13 +771,10 @@ async fn run_provenance_pass(
             params![opt_text(generation), cutoff, config.batch_limit()],
         ),
         release,
-        cutoff,
         mode,
-        &mut report,
         errors,
     )
-    .await?;
-    Ok(report)
+    .await
 }
 
 struct CursorAdvanceTarget {

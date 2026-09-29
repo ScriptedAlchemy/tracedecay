@@ -1074,10 +1074,20 @@ pub async fn rewrite_dangling_placeholders<E: Executor + ?Sized>(
             }
         }
     }
-    if apply {
+    if apply && !dangling.is_empty() {
         // The metadata set came from the snapshot; a payload written since
         // then owns its placeholders again.
-        remove_refs_with_metadata(conn, &mut dangling).await?;
+        let probe = pending_delete::probe_metadata_rows(
+            conn,
+            &dangling.iter().cloned().collect::<Vec<_>>(),
+        )
+        .await;
+        for (payload_ref, detail) in &probe.failures {
+            report.add_error(payload_ref, "metadata_check_failed", detail.clone());
+        }
+        dangling.retain(|payload_ref| {
+            !probe.existing.contains(payload_ref) && !probe.failures.contains_key(payload_ref)
+        });
     }
     for payload_ref in &dangling {
         report.dangling.add(payload_ref, 0);
@@ -1085,33 +1095,6 @@ pub async fn rewrite_dangling_placeholders<E: Executor + ?Sized>(
     if apply && !dangling.is_empty() {
         report.totals.placeholders_rewritten +=
             tombstone_dangling_refs_in_transaction(conn, &dangling, provider, session_id).await?;
-    }
-    Ok(())
-}
-
-async fn remove_refs_with_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
-    refs: &mut BTreeSet<String>,
-) -> Result<(), LcmError> {
-    let candidates = refs.iter().cloned().collect::<Vec<_>>();
-    for chunk in candidates.chunks(util::SQLITE_IN_BATCH_SIZE) {
-        let sql = format!(
-            "SELECT payload_ref FROM lcm_external_payloads WHERE payload_ref IN ({})",
-            util::sql_in_placeholders(chunk.len())
-        );
-        let mut rows = conn
-            .query(
-                &sql,
-                chunk
-                    .iter()
-                    .cloned()
-                    .map(SqlValue::Text)
-                    .collect::<Vec<_>>(),
-            )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            refs.remove(&row.get::<String>(0)?);
-        }
     }
     Ok(())
 }
