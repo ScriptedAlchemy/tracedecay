@@ -2545,14 +2545,15 @@ fn project_routed_tool_names_a_held_managed_daemon() {
         "pub fn answer() -> u32 { 42 }\n",
     )
     .unwrap();
+    // The test command names the profile socket through TRACEDECAY_DAEMON_SOCKET.
     let socket = home_path.join(".tracedecay/daemon.sock");
     let socket = socket.display();
     let not_installed = format!(
-        "TraceDecay daemon socket '{socket}' is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
     );
     let unit_dir = home_path.join(".config/systemd/user");
     let held = format!(
-        "TraceDecay daemon socket '{socket}' is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
         unit_dir.join("tracedecay.service").display()
     );
     let project_arg = project_path.to_string_lossy().to_string();
