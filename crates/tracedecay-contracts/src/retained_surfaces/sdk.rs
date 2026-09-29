@@ -704,9 +704,19 @@ impl SessionRefreshRequestV1 {
 
 #[cfg(test)]
 mod session_refresh_request_tests {
+    use serde::de::DeserializeOwned;
     use serde_json::json;
 
     use super::{SessionRefreshActionRequestV1, SessionRefreshRequestV1, SessionRefreshScopeV1};
+
+    fn rejection<T: DeserializeOwned>(field: &str, value: serde_json::Value) -> String {
+        let mut body = route_body();
+        body[field] = value;
+        serde_json::from_value::<T>(body)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string()
+    }
 
     fn route_body() -> serde_json::Value {
         json!({
@@ -724,11 +734,7 @@ mod session_refresh_request_tests {
 
     #[test]
     fn route_selected_refresh_request_rejects_an_action_tag() {
-        let mut body = route_body();
-        body["action"] = json!("status");
-        let error = serde_json::from_value::<SessionRefreshActionRequestV1>(body)
-            .unwrap_err()
-            .to_string();
+        let error = rejection::<SessionRefreshActionRequestV1>("action", json!("status"));
         assert!(
             error.starts_with("unknown field `action`, expected one of"),
             "{error}"
@@ -765,21 +771,16 @@ mod session_refresh_request_tests {
                 "unknown variant `user`, expected `project` or `profile`",
             ),
         ] {
-            let mut body = route_body();
-            body["scope"] = scope.clone();
             assert_eq!(
-                serde_json::from_value::<SessionRefreshActionRequestV1>(body)
-                    .unwrap_err()
-                    .to_string(),
+                rejection::<SessionRefreshActionRequestV1>("scope", scope.clone()),
                 expected,
                 "scope {scope} must be refused"
             );
         }
-        let mut body = route_body();
-        body["profile"] = json!({ "id": "profile.default" });
-        let error = serde_json::from_value::<SessionRefreshActionRequestV1>(body)
-            .unwrap_err()
-            .to_string();
+        let error = rejection::<SessionRefreshActionRequestV1>(
+            "profile",
+            json!({ "id": "profile.default" }),
+        );
         assert!(
             error.starts_with("unknown field `profile`, expected one of"),
             "{error}"
@@ -789,11 +790,7 @@ mod session_refresh_request_tests {
     #[test]
     fn current_refresh_request_rejects_legacy_action_aliases() {
         for action in ["start", "join", "resume"] {
-            let mut body = route_body();
-            body["action"] = json!(action);
-            let error = serde_json::from_value::<SessionRefreshRequestV1>(body)
-                .unwrap_err()
-                .to_string();
+            let error = rejection::<SessionRefreshRequestV1>("action", json!(action));
             assert!(
                 error.starts_with(&format!("unknown variant `{action}`, expected one of")),
                 "{error}"

@@ -774,11 +774,7 @@ mod invocation_tests {
         })
         .expect("serialize feedback finding result");
         nested["finding"]["unexpected"] = serde_json::Value::Bool(true);
-        assert_unexpected_field_error(
-            serde_json::from_value::<FeedbackGetResultV1>(nested)
-                .map(|_| ())
-                .unwrap_err(),
-        );
+        assert_unexpected_field_rejected::<FeedbackGetResultV1>(nested);
     }
 
     fn assert_unknown_field_rejected<T>(value: &T)
@@ -790,15 +786,14 @@ mod invocation_tests {
             .as_object_mut()
             .expect("feedback SDK result object")
             .insert("unexpected".to_owned(), serde_json::Value::Bool(true));
-        assert_unexpected_field_error(
-            serde_json::from_value::<T>(encoded)
-                .map(|_| ())
-                .unwrap_err(),
-        );
+        assert_unexpected_field_rejected::<T>(encoded);
     }
 
-    fn assert_unexpected_field_error(error: serde_json::Error) {
-        let error = error.to_string();
+    fn assert_unexpected_field_rejected<T: DeserializeOwned>(encoded: serde_json::Value) {
+        let error = serde_json::from_value::<T>(encoded)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
         assert!(error.starts_with("unknown field `unexpected`"), "{error}");
     }
 
