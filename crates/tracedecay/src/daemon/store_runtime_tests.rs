@@ -2002,24 +2002,45 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
         Ok(_) => panic!("read-only project graph facade unexpectedly admitted a write"),
         Err(error) => error,
     };
-    assert!(
-        write_error.to_string().contains("read-only"),
-        "unexpected read-only denial: {write_error}"
-    );
+    match write_error {
+        TraceDecayError::Database { operation, message } => {
+            assert_eq!(operation, "write through read-only project graph facade");
+            assert_eq!(
+                message,
+                format!(
+                    "cannot upgrade the daemon's shared read-only connection at '{}' to writable; acquire writable ownership before opening read handles",
+                    main_path.display()
+                )
+            );
+        }
+        other => panic!("read-only write denial must be a database error: {other}"),
+    }
 
     let unpublished_error = match registry
-        .project_graph_registered(project_id, unpublished_path, DatabaseAccessMode::ReadOnly)
+        .project_graph_registered(
+            project_id,
+            unpublished_path.clone(),
+            DatabaseAccessMode::ReadOnly,
+        )
         .await
     {
         Ok(_) => panic!("unpublished project store inherited synthetic write authority"),
         Err(error) => error,
     };
-    assert!(
-        unpublished_error
-            .to_string()
-            .contains("differs from retained canonical locator"),
-        "unexpected unpublished project store denial: {unpublished_error}"
-    );
+    match unpublished_error {
+        TraceDecayError::Database { operation, message } => {
+            assert_eq!(operation, "reuse project graph runtime");
+            assert_eq!(
+                message,
+                format!(
+                    "project graph locator {} differs from retained canonical locator {}",
+                    unpublished_path.display(),
+                    main.canonical_database_path().display()
+                )
+            );
+        }
+        other => panic!("unpublished project store denial must be a database error: {other}"),
+    }
     drop(unpublished_authority);
 }
 
@@ -2067,10 +2088,16 @@ async fn read_only_worktree_mount_never_recreates_a_deleted_database() {
         )
         .await;
 
-    assert!(
-        result.is_err(),
-        "read-only mount must fail for a deleted DB"
-    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("read-only mount of a deleted DB must refuse"),
+    };
+    match error {
+        TraceDecayError::Database { operation, .. } => {
+            assert_eq!(operation, "mount project graph store read-only");
+        }
+        other => panic!("read-only mount of a deleted DB must refuse as a database error: {other}"),
+    }
     assert!(
         !database_path.exists(),
         "read-only mount recreated the deleted worktree DB"

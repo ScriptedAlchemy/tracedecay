@@ -10,8 +10,9 @@ use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
+use tracedecay_rusqlite_runtime::repository::RepositoryWriterRuntimeSnapshot;
 
-static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+pub(super) static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 static HOST_ADMISSION_TEST_RESIDENT_MEMORY: OnceLock<
     Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
@@ -492,10 +493,12 @@ impl RegisteredGlobalDbHarness {
             .await
             .expect("publish daemon test runtime")
             .into_parts();
-        let (database, convergence) =
-            RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database_owner)
-                .await
-                .expect("daemon admission");
+        let (database, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database_owner,
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        )
+        .await
+        .expect("daemon admission");
         let registered = database.issue_lease().expect("issue daemon test lease");
         (
             Self {
@@ -504,7 +507,7 @@ impl RegisteredGlobalDbHarness {
                 _directory,
                 _scope,
             },
-            convergence,
+            convergence.expect("an admissible store returns its convergence plan"),
         )
     }
 }
@@ -1167,6 +1170,17 @@ pub async fn publish_test_session_relation_projection(
             message: format!("{error:?}"),
         },
     )
+}
+
+/// The mounted writer's rusqlite telemetry for `database`: the SQLite work its
+/// write transactions executed and how they ended.
+pub fn writer_telemetry(database: &RegisteredGlobalDb) -> RepositoryWriterRuntimeSnapshot {
+    database
+        .runtime_client()
+        .writer_telemetry_snapshot()
+        .expect("registered database must expose rusqlite writer telemetry")
+        .writer
+        .expect("mounted writer must carry rusqlite writer telemetry")
 }
 
 /// Mounts the daemon-owned relation graph a registered session shard needs to

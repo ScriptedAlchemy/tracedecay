@@ -24,9 +24,7 @@ const AUDIT_NAME: &str = "observation-authority";
 const AUDIT_VERSION: i64 = 2;
 pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
 const DETAILED_AUDIT_CONCURRENCY: usize = 32;
-const DETAILED_TAIL_CONCURRENCY: usize = 1;
-// Amortize the page query across several bounded validation chunks while
-// checkpointing often enough to stay below one ordinary statement deadline.
+// Amortize the page query across several bounded validation chunks.
 const DETAILED_AUDIT_CHUNKS_PER_PAGE: usize = 3;
 const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize =
     DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE;
@@ -1464,72 +1462,6 @@ async fn collect_projection_suffix_ids(
     }
 }
 
-async fn projection_rowid_through_sequence(
-    conn: &impl QueryExecutor,
-    table: &str,
-    through_observation_sequence: i64,
-) -> tracedecay_domain::errors::Result<i64> {
-    let query = format!(
-        "SELECT COALESCE(MAX(projection.rowid), 0)
-         FROM {table} AS projection
-         JOIN observations AS observation
-           ON observation.observation_id = projection.observation_id
-         WHERE projection.projector_version = ?1
-           AND observation.sequence <= ?2"
-    );
-    let mut rows = conn
-        .query(
-            &query,
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                through_observation_sequence
-            ],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    rows.next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .ok_or_else(|| authority_violation("projection progress query returned no row"))?
-        .get(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))
-}
-
-async fn projection_audit_checkpoint_through_sequence(
-    conn: &impl QueryExecutor,
-    checkpoint: AuditCheckpoint,
-    observation_sequence: i64,
-) -> tracedecay_domain::errors::Result<AuditCheckpoint> {
-    if checkpoint.bounded_passes_since_exhaustive == INCOMPLETE_EXHAUSTIVE_PASS {
-        return Ok(AuditCheckpoint {
-            projection_checkpoint: observation_sequence,
-            ..checkpoint
-        });
-    }
-    Ok(AuditCheckpoint {
-        provenance_rowid: projection_rowid_through_sequence(
-            conn,
-            "observation_projection_provenance",
-            observation_sequence,
-        )
-        .await?,
-        disposition_rowid: projection_rowid_through_sequence(
-            conn,
-            "observation_projection_dispositions",
-            observation_sequence,
-        )
-        .await?,
-        alias_rowid: projection_rowid_through_sequence(
-            conn,
-            "observation_projection_aliases",
-            observation_sequence,
-        )
-        .await?,
-        projection_checkpoint: observation_sequence,
-        ..checkpoint
-    })
-}
-
 fn historical_projection_delta_required(checkpoint: AuditCheckpoint) -> bool {
     checkpoint.bounded_passes_since_exhaustive != INCOMPLETE_EXHAUSTIVE_PASS
 }
@@ -1739,18 +1671,8 @@ async fn validate_projection_authority_suffix_pages(
             }
         }
         drop(rows);
-        let validation_concurrency = if detailed_limit_reached {
-            DETAILED_AUDIT_CONCURRENCY
-        } else {
-            // The final partial page can contain unusually expensive composite
-            // outputs. Checkpoint smaller chunks so interruption never restarts
-            // the whole tail.
-            DETAILED_TAIL_CONCURRENCY
-        };
         // Derivation and the page's stored authority are read once for the
-        // whole page; validation still advances the checkpoint in
-        // `validation_concurrency` chunks, so batching the reads never widens
-        // the stride an interruption has to replay.
+        // whole page.
         let page_observations = detailed_observations
             .iter()
             .map(|(_, observation)| observation)
@@ -1759,8 +1681,8 @@ async fn validate_projection_authority_suffix_pages(
         let resolved =
             resolve_output_authority(conn, &page_observations, &page_effects, released).await?;
         for (chunk, chunk_effects) in detailed_observations
-            .chunks(validation_concurrency)
-            .zip(page_effects.chunks(validation_concurrency))
+            .chunks(DETAILED_AUDIT_CONCURRENCY)
+            .zip(page_effects.chunks(DETAILED_AUDIT_CONCURRENCY))
         {
             try_join_all(
                 chunk
@@ -1771,18 +1693,17 @@ async fn validate_projection_authority_suffix_pages(
                     }),
             )
             .await?;
-            let validated_through = chunk.last().map_or(scan_cursor, |(sequence, _)| *sequence);
-            checkpoint =
-                projection_audit_checkpoint_through_sequence(conn, checkpoint, validated_through)
-                    .await?;
         }
         pages_audited += 1;
         if page_rows < AUDIT_PAGE_ROWS && !detailed_limit_reached {
             break;
         }
         if page_limit.is_some_and(|limit| pages_audited >= limit) {
-            checkpoint =
-                projection_audit_checkpoint_through_sequence(conn, checkpoint, scan_cursor).await?;
+            // The projection rowid checkpoints stay where this pass started:
+            // rows appended since then for observations at or below
+            // `projection_checkpoint` are the historical delta the next pass
+            // still has to validate.
+            checkpoint.projection_checkpoint = scan_cursor;
             return Ok((
                 checkpoint,
                 provenance_audited,
@@ -1946,7 +1867,7 @@ mod tests {
     };
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjection,
-        ObservationProjectionStore, ObservationStore, ObservationWrite,
+        ObservationProjectionStore, ObservationStore, ObservationWrite, ProjectionSkipReason,
         SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
         build_observation_retrieval_anchor,
     };
@@ -1954,9 +1875,11 @@ mod tests {
     use super::{
         AuditCheckpoint, BTreeSet, HashMap, ProjectionOutputOwnership, ReleasedRenderingLedger,
         ResolvedOutputAuthority, ensure_audit_checkpoint_schema,
-        projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
+        validate_projection_authority_suffix,
     };
-    use crate::tests::harness::{RegisteredGlobalDbTestFixture, open_registered_test_fixture};
+    use crate::tests::harness::{
+        RegisteredGlobalDbTestFixture, open_registered_test_fixture, writer_telemetry,
+    };
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{
         Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
@@ -2101,38 +2024,6 @@ mod tests {
                 .any(|detail| detail.contains("idx_observations_valid_session_sequence")),
             "lifecycle admission must seek by session instead of scanning observations: {plan:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn incomplete_exhaustive_checkpoint_does_not_rescan_projection_tables() {
-        let directory = TempDir::new().unwrap();
-        let connection = open_registered_test_fixture(
-            &directory.path().join("sessions.db"),
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .unwrap();
-        let counting = CountingQuery {
-            inner: &connection,
-            queries: AtomicUsize::new(0),
-        };
-        let checkpoint = AuditCheckpoint {
-            provenance_rowid: 11,
-            disposition_rowid: 22,
-            alias_rowid: 33,
-            bounded_passes_since_exhaustive: -1,
-            ..AuditCheckpoint::default()
-        };
-
-        let checkpoint = projection_audit_checkpoint_through_sequence(&counting, checkpoint, 44)
-            .await
-            .unwrap();
-
-        assert_eq!(checkpoint.provenance_rowid, 11);
-        assert_eq!(checkpoint.disposition_rowid, 22);
-        assert_eq!(checkpoint.alias_rowid, 33);
-        assert_eq!(checkpoint.projection_checkpoint, 44);
-        assert_eq!(counting.queries.load(Ordering::Relaxed), 0);
     }
 
     fn skipped_observation(index: usize) -> DurableObservationV1 {
@@ -2568,9 +2459,11 @@ mod tests {
 
     /// One session's projected messages, committed and drained through the real
     /// observation store so the audit sees production-shaped authority.
+    /// Commits and projects messages `indexes` of one session, continuing its
+    /// source cursor from the message before the first index.
     async fn seed_projected_messages(
         runtime: &crate::tests::harness::HostAdmissionTestRuntimeV1,
-        count: usize,
+        indexes: std::ops::Range<usize>,
     ) -> Vec<DurableObservationV1> {
         use tracedecay_domain::{
             CanonicalMessageRoleV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
@@ -2590,9 +2483,18 @@ mod tests {
         let source =
             ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
                 .unwrap();
-        let mut expected_cursor: Option<ObservationSourceCursorV1> = None;
-        let mut observations = Vec::with_capacity(count);
-        for index in 0..count {
+        let mut expected_cursor = (indexes.start > 0).then(|| {
+            ObservationSourceCursorV1::for_ordering(
+                source.clone(),
+                ObservationScopeV1::Profile,
+                ObservationSourceGenerationV1::new(1).unwrap(),
+                ObservationOrderingDomainV1::FileBytes,
+                u64::try_from(indexes.start).unwrap() * 100,
+            )
+            .unwrap()
+        });
+        let mut observations = Vec::with_capacity(indexes.len());
+        for index in indexes {
             let record_id = format!("record.audit-batch-{index}");
             let record = ObservationId::new(record_id.clone()).unwrap();
             let start = u64::try_from(index).unwrap() * 100;
@@ -2938,7 +2840,7 @@ mod tests {
         let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
             .unwrap();
-        let observations = seed_projected_messages(&runtime, OBSERVATIONS).await;
+        let observations = seed_projected_messages(&runtime, 0..OBSERVATIONS).await;
 
         let database = runtime
             .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
@@ -3091,6 +2993,98 @@ mod tests {
             verification.issued("FROM observation_projection_aliases"),
             0,
             "an unaliased retained message must not re-query its alias"
+        );
+    }
+
+    /// Runs the resumed (non-exhaustive) authority audit and returns the
+    /// SQLite VM steps it executed; the audit runs inside the writer's stepped
+    /// transactions.
+    async fn resumed_audit_vm_steps(database: &crate::RegisteredGlobalDb) -> u64 {
+        let vm_steps = || writer_telemetry(database).sqlite_vm.vm_steps;
+        let before = vm_steps();
+        super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+            .await
+            .expect("well-formed projections must pass the resumed audit");
+        vm_steps() - before
+    }
+
+    /// A resumed audit validates the observations committed since its
+    /// checkpoint. Its work must follow those observations: re-reading the
+    /// store for each one makes a streamed window cost O(new × store).
+    #[tokio::test]
+    async fn resumed_authority_audit_work_follows_new_observations_not_the_store() {
+        const BASE: usize = 48;
+        const GROWN: usize = 8 * BASE;
+        const STREAMED: usize = 16;
+
+        let directory = TempDir::new().unwrap();
+        let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        let database = runtime
+            .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+            .expect("registered profile database");
+
+        seed_projected_messages(&runtime, 0..BASE).await;
+        resumed_audit_vm_steps(database).await;
+        seed_projected_messages(&runtime, BASE..BASE + STREAMED).await;
+        let base_steps = resumed_audit_vm_steps(database).await;
+
+        seed_projected_messages(&runtime, BASE + STREAMED..GROWN + STREAMED).await;
+        resumed_audit_vm_steps(database).await;
+        seed_projected_messages(&runtime, GROWN + STREAMED..GROWN + 2 * STREAMED).await;
+        let grown_steps = resumed_audit_vm_steps(database).await;
+
+        eprintln!("resumed authority audit VM steps: base={base_steps} grown={grown_steps}");
+        assert!(
+            grown_steps * 10 <= base_steps * 12,
+            "auditing {STREAMED} new observations on an 8x larger store must stay within \
+             1.2x of the base store's audit work: base={base_steps} grown={grown_steps}"
+        );
+    }
+
+    /// A projection row appended for an observation the previous pass already
+    /// audited sits behind the observation checkpoint but past the projection
+    /// rowid checkpoints. The resumed audit must still reach it when the same
+    /// pass also validates newly committed observations.
+    #[tokio::test]
+    async fn resumed_authority_audit_detects_a_projection_row_planted_behind_its_checkpoint() {
+        let directory = TempDir::new().unwrap();
+        let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        let database = runtime
+            .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let audited = seed_projected_messages(&runtime, 0..8).await;
+        resumed_audit_vm_steps(database).await;
+
+        let transaction = database.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "INSERT INTO observation_projection_dispositions (
+                    projector_version, observation_id, receipt_id, reason
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    audited[0].observation_id().as_str(),
+                    audited[0].receipt().receipt().receipt_id().as_str(),
+                    ProjectionSkipReason::OutputCollision.as_str()
+                ],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        seed_projected_messages(&runtime, 8..12).await;
+
+        let error =
+            super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+                .await
+                .expect_err("a planted disposition on a projected message must fail the audit");
+        assert_eq!(
+            error.to_string(),
+            "database error: projection authority must contain exactly one skip outcome \
+             without an alias (operation: ensure global database authority invariants)"
         );
     }
 

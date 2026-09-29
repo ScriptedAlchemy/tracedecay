@@ -381,7 +381,9 @@ fn prepared_error_outcome(
                 CursorBindingMismatchV1::ParameterChanged { parameter },
             );
         }
-        PreparedQueryErrorV1::Foreign | PreparedQueryErrorV1::Stale => {
+        PreparedQueryErrorV1::Foreign
+        | PreparedQueryErrorV1::Stale
+        | PreparedQueryErrorV1::GenerationNotHeld => {
             code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
         }
         PreparedQueryErrorV1::Unavailable => {

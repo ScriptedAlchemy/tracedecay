@@ -21,28 +21,86 @@ fn read_analytics_rows(path: &Path) -> Vec<Value> {
         .collect()
 }
 
-#[test]
-fn unbound_hook_analytics_do_not_create_a_missing_profile() {
-    let home = tempfile::tempdir().unwrap();
-    let profile_root = home.path().join(".tracedecay");
-    let profile = ProfileRoot::new(&profile_root);
-    assert!(!profile_root.exists());
-
-    let event = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
-    let parsed = serde_json::from_str(event).unwrap();
+fn record_stop(profile: &ProfileRoot, event: &str, parsed: &Value) {
     drop(record_hook_invoked_parsed(
         &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
         None,
         HostIntegrationIdV1::Claude,
         "Stop",
         event,
-        &parsed,
+        parsed,
     ));
+}
 
+#[test]
+fn unbound_hook_analytics_do_not_create_a_missing_profile() {
+    let home = tempfile::tempdir().unwrap();
+    let profile_root = home.path().join(".tracedecay");
+    let event = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
+    let parsed = serde_json::from_str(event).unwrap();
+    record_stop(&ProfileRoot::new(&profile_root), event, &parsed);
     assert!(
         !profile_root.exists(),
         "unbound hook analytics created a missing profile"
     );
+
+    let present = tempfile::tempdir().unwrap();
+    let present_root = present.path().join(".tracedecay");
+    std::fs::create_dir(&present_root).unwrap();
+    record_stop(&ProfileRoot::new(&present_root), event, &parsed);
+    let rows = read_analytics_rows(&present_root.join("hook_analytics.jsonl"));
+    assert_eq!(
+        rows.len(),
+        2,
+        "an existing profile records invoke and completion"
+    );
+    let invoked = rows
+        .iter()
+        .find(|row| row["event"] == "hook_invoked")
+        .expect("hook_invoked row");
+    let mut invoked_fields = invoked
+        .as_object()
+        .cloned()
+        .expect("hook_invoked row is an object");
+    let recorded_at = invoked_fields
+        .remove("ts_unix_ms")
+        .and_then(|value| value.as_u64())
+        .expect("hook_invoked carries a unix millisecond timestamp");
+    assert!(recorded_at >= 1_700_000_000_000);
+    assert_eq!(
+        Value::Object(invoked_fields),
+        serde_json::json!({
+            "event": "hook_invoked",
+            "schema_version": 1,
+            "coverage": "host_measured",
+            "agent": "claude",
+            "hook_name": "Stop",
+            "session_id": "s1",
+            "prompt_category": null,
+            "payload_bytes": event.len() as u64,
+        })
+    );
+    let completed = rows
+        .iter()
+        .find(|row| row["event"] == "hook_completed")
+        .expect("hook_completed row");
+    assert!(
+        completed["ts_unix_ms"]
+            .as_u64()
+            .expect("completed timestamp")
+            >= recorded_at
+    );
+    assert_eq!(completed["agent"], "claude");
+    assert_eq!(completed["hook_name"], "Stop");
+    assert_eq!(completed["session_id"], "s1");
+    assert_eq!(completed["payload_bytes"], event.len() as u64);
+    assert_eq!(completed["disposition"]["status"], "unknown");
+    assert_eq!(completed["disposition"]["retryable"], false);
+    assert_eq!(
+        completed["disposition"]["reason_code"],
+        "disposition_absent"
+    );
+    assert_eq!(completed["disposition"]["class"], "unknown");
 }
 
 #[test]

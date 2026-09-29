@@ -42,9 +42,12 @@ async fn projectless_user_session_setup_failure_is_a_typed_unavailable_terminal(
         panic!("profile setup failure must be a typed tool result: {response:?}")
     });
     assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["problem"]["kind"], "unavailable", "{result}");
     assert_eq!(
-        result["problem"]["code"], "registered_authority_unavailable",
+        result["structuredContent"]["problem"]["kind"], "unavailable",
+        "{result}"
+    );
+    assert_eq!(
+        result["structuredContent"]["problem"]["code"], "registered_authority_unavailable",
         "{result}"
     );
 }
@@ -107,12 +110,18 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         panic!("blocked canonical apply must be the owner's typed refusal: {response:?}")
     });
     assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["problem"]["kind"], "unavailable", "{result}");
     assert_eq!(
-        result["problem"]["code"], "canonical_admission_failed",
+        result["structuredContent"]["problem"]["kind"], "unavailable",
         "{result}"
     );
-    assert_eq!(result["problem"]["retryable"], true, "{result}");
+    assert_eq!(
+        result["structuredContent"]["problem"]["code"], "canonical_admission_failed",
+        "{result}"
+    );
+    assert_eq!(
+        result["structuredContent"]["problem"]["retryable"], true,
+        "{result}"
+    );
     assert_eq!(broker.pending_count().await, 1);
     assert!(!profile_root.join("host_receipts.json").exists());
     first_admin.shutdown_host_admission_replay().await;

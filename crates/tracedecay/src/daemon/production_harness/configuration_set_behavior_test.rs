@@ -135,7 +135,7 @@ fn assert_completed_effect(
         answer.payload
     );
     assert_ne!(answer.result["isError"], true);
-    assert!(answer.result.get("problem").is_none());
+    assert!(answer.result.get("structuredContent").is_none());
     let effect = &answer.payload["outcome"]["value"];
     assert_eq!(answer.payload["outcome"]["outcome"], "effect");
     assert_eq!(effect["effect_class"], "configuration_write");
@@ -164,19 +164,40 @@ fn assert_completed_effect(
 fn assert_conflict(answer: &McpAnswer) {
     assert!(answer.refused, "conflict must be an MCP isError");
     assert_eq!(answer.result["isError"], true);
-    assert_eq!(answer.result["problem"]["kind"], "conflict");
-    assert_eq!(answer.result["problem"]["code"], "configuration.conflict");
     assert_eq!(
-        answer.result["problem"]["message"],
+        answer.result["structuredContent"]["problem"]["kind"],
+        "conflict"
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["code"],
+        "configuration.conflict"
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["message"],
         "The configuration request conflicts with current state"
     );
-    assert_eq!(answer.result["problem"]["retry"], "after_revalidate");
-    assert_eq!(answer.result["problem"]["retryable"], true);
-    assert_eq!(answer.result["problem"]["retry_scope"], "fresh_request");
-    assert_eq!(answer.result["problem"]["terminality"], "pre_admission");
-    assert_eq!(answer.result["problem"]["committed_receipt"], Value::Null);
     assert_eq!(
-        answer.result["problem"]["legal_actions"],
+        answer.result["structuredContent"]["problem"]["retry"],
+        "after_revalidate"
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["retryable"],
+        true
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["retry_scope"],
+        "fresh_request"
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["terminality"],
+        "pre_admission"
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["committed_receipt"],
+        Value::Null
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["legal_actions"],
         json!(["refresh"])
     );
     assert_eq!(answer.payload["problem"]["kind"], "conflict");
@@ -199,25 +220,43 @@ fn assert_invalid_request(answer: &McpAnswer, message: &str) {
     );
     assert_eq!(answer.result["isError"], true);
     assert_eq!(
-        answer.result["problem"]["kind"], "invalid_request",
+        answer.result["structuredContent"]["problem"]["kind"], "invalid_request",
         "problem record: {}",
-        answer.result["problem"]
+        answer.result["structuredContent"]["problem"]
     );
     assert_eq!(
-        answer.result["problem"]["code"],
+        answer.result["structuredContent"]["problem"]["code"],
         "configuration.invalid_request"
     );
     assert_eq!(
-        answer.result["problem"]["message"], message,
+        answer.result["structuredContent"]["problem"]["message"], message,
         "problem record: {}",
-        answer.result["problem"]
+        answer.result["structuredContent"]["problem"]
     );
-    assert_eq!(answer.result["problem"]["retry"], "never");
-    assert_eq!(answer.result["problem"]["retryable"], false);
-    assert_eq!(answer.result["problem"]["retry_scope"], Value::Null);
-    assert_eq!(answer.result["problem"]["terminality"], "pre_admission");
-    assert_eq!(answer.result["problem"]["committed_receipt"], Value::Null);
-    assert_eq!(answer.result["problem"]["legal_actions"], json!([]));
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["retry"],
+        "never"
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["retryable"],
+        false
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["retry_scope"],
+        Value::Null
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["terminality"],
+        "pre_admission"
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["committed_receipt"],
+        Value::Null
+    );
+    assert_eq!(
+        answer.result["structuredContent"]["problem"]["legal_actions"],
+        json!([])
+    );
     assert_eq!(answer.payload["problem"]["kind"], "invalid_request");
     assert_eq!(
         answer.payload["problem"]["code"],
@@ -388,22 +427,31 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     );
     assert_eq!(wrong_layer.result["isError"], true);
     assert_eq!(
-        wrong_layer.result["problem"]["kind"],
+        wrong_layer.result["structuredContent"]["problem"]["kind"],
         "not_found_or_not_authorized"
     );
     assert_eq!(
-        wrong_layer.result["problem"]["code"],
+        wrong_layer.result["structuredContent"]["problem"]["code"],
         "not_found_or_not_authorized"
     );
     assert_eq!(
-        wrong_layer.result["problem"]["message"],
+        wrong_layer.result["structuredContent"]["problem"]["message"],
         "The requested resource was not found or is not authorized"
     );
-    assert_eq!(wrong_layer.result["problem"]["retry"], "never");
-    assert_eq!(wrong_layer.result["problem"]["retryable"], false);
-    assert_eq!(wrong_layer.result["problem"]["legal_actions"], json!([]));
     assert_eq!(
-        wrong_layer.result["problem"]["committed_receipt"],
+        wrong_layer.result["structuredContent"]["problem"]["retry"],
+        "never"
+    );
+    assert_eq!(
+        wrong_layer.result["structuredContent"]["problem"]["retryable"],
+        false
+    );
+    assert_eq!(
+        wrong_layer.result["structuredContent"]["problem"]["legal_actions"],
+        json!([])
+    );
+    assert_eq!(
+        wrong_layer.result["structuredContent"]["problem"]["committed_receipt"],
         Value::Null
     );
     assert_eq!(

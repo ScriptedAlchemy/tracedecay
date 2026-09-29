@@ -31,6 +31,8 @@ pub mod session_registry;
 pub mod standalone_session;
 pub mod store_locator_resolver;
 pub mod store_shutdown;
+#[cfg(test)]
+mod thread_allocation;
 pub mod writer_gate;
 
 pub use remote_credentials::{

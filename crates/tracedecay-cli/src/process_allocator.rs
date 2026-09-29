@@ -10,14 +10,19 @@
 ))]
 mod mimalloc_v3 {
     use tracedecay_code_index::parallelism::run_on_every_installed_worker;
-    use tracedecay_runtime_core::resident_memory::install_process_allocator_release_v1;
+    use tracedecay_runtime_core::resident_memory::{
+        ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
+    };
 
     unsafe extern "C" {
         fn mi_collect(force: bool);
     }
 
     pub(super) fn install() {
-        if let Err(message) = install_process_allocator_release_v1(release) {
+        if let Err(message) = install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
+            release,
+            collect_calling_thread: collect,
+        }) {
             tracing::warn!(event = "process_allocator_release_install_failed", %message);
         }
     }

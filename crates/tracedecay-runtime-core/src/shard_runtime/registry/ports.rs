@@ -19,6 +19,7 @@ use super::{
     PublishedShardRuntime, StoreRuntimeAccessMode, StoreRuntimeKey, StoreRuntimeOpenMode,
     StoreRuntimeRegistryFailure,
 };
+use crate::cancellation::CancellationToken;
 use crate::shard_runtime::shard::{ShardRuntime, ShardRuntimeError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -416,12 +417,23 @@ async fn install_final_schema_before_publication(
         StoreShardScopeV1::Profile
         | StoreShardScopeV1::ProfileSessions
         | StoreShardScopeV1::ProjectSessions { .. } => {
-            crate::ports::registered_schema::install_from_authorized_connection(connection)
-                .await
-                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "create initialized global/session schema",
-                    message: error.to_string(),
-                })?;
+            crate::ports::registered_schema::install_from_authorized_connection(
+                connection,
+                request.open_cancellation.clone(),
+            )
+            .await
+            .map_err(|error| {
+                if error.is_store_open_cancelled() {
+                    StoreRuntimeRegistryFailure::OpenCancelled {
+                        key: Box::new(StoreRuntimeKey::from_binding(&request.binding)),
+                    }
+                } else {
+                    StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "create initialized global/session schema",
+                        message: error.to_string(),
+                    }
+                }
+            })?;
         }
         StoreShardScopeV1::RemoteNode { .. } => {
             connection
@@ -598,6 +610,7 @@ pub struct ShardRuntimeBuildRequest {
     mode: StoreRuntimeOpenMode,
     access: StoreRuntimeAccessMode,
     database_authority: Option<crate::db::DatabaseAuthority>,
+    open_cancellation: CancellationToken,
 }
 
 impl ShardRuntimeBuildRequest {
@@ -607,6 +620,7 @@ impl ShardRuntimeBuildRequest {
         mode: StoreRuntimeOpenMode,
         access: StoreRuntimeAccessMode,
         database_authority: Option<crate::db::DatabaseAuthority>,
+        open_cancellation: CancellationToken,
     ) -> Self {
         Self {
             binding,
@@ -614,6 +628,7 @@ impl ShardRuntimeBuildRequest {
             mode,
             access,
             database_authority,
+            open_cancellation,
         }
     }
 

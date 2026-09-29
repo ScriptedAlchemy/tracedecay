@@ -130,8 +130,8 @@ fn project_path_flags_resolve_a_relative_path_from_inside_the_project() {
     let stdout = String::from_utf8_lossy(&import.stdout);
     assert!(
         import.status.success()
-            && stdout.starts_with("session import completed (")
-            && stdout.ends_with(")\n"),
+            && stdout.starts_with("session import scheduled (")
+            && stdout.ends_with("); historical catch-up has remaining work 2\n"),
         "sessions import --project-path . must import into the CLI's project\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&import.stderr)
     );

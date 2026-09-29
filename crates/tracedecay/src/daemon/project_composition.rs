@@ -1700,6 +1700,49 @@ impl ProjectOpenInputs<'_> {
         }
     }
 
+    /// Code reads (primitives and callable code) on a route whose full
+    /// upgrade a reset-required session store refused. A refusal to mount
+    /// them leaves those reads answering the store's reset refusal.
+    async fn register_reset_required_code_reads(
+        &self,
+        core: &ComposedCoreServer,
+        resolved: &Arc<crate::mcp::McpServer>,
+    ) {
+        let registered = match tracedecay_domain::ProjectId::new(core.project_id.clone()) {
+            Ok(project_id) => match core
+                .graph_runtime
+                .mounted_project_session_store(&project_id)
+                .await
+            {
+                Some(session_store) => {
+                    Box::pin(
+                        project_open_owners::register_reset_required_route_code_read_owners(
+                            self.invocation,
+                            self.canonical_project_path,
+                            &core.project_id,
+                            resolved,
+                            session_store,
+                        ),
+                    )
+                    .await
+                }
+                None => Err(TraceDecayError::Config {
+                    message: "the project session store is not mounted".to_owned(),
+                }),
+            },
+            Err(error) => Err(TraceDecayError::Config {
+                message: format!("invalid project identity: {error}"),
+            }),
+        };
+        if let Err(error) = registered {
+            self.log_phase(
+                "reset_required_code_reads_unavailable",
+                Some(("error", error.to_string())),
+                self.started,
+            );
+        }
+    }
+
     /// A failed upgrade either degrades the route to the still-published core
     /// (logging the failure and retiring the full server if it had gone live)
     /// or, when the core cannot be reclaimed, retires every server this
@@ -1735,11 +1778,21 @@ impl ProjectOpenInputs<'_> {
             mutation.mark_failed();
         }
         if core_retained {
+            let reset_refusal =
+                tracedecay_mcp::reset_required_context(&error).and_then(|(authority, _)| {
+                    tracedecay_contracts::ApplicationProblemDetailV1::from_reset_required(
+                        &error,
+                        tracedecay_mcp::reset_required_command(&authority, None),
+                    )
+                });
             if let Some(attempt) = &activation.publication_attempt {
-                self.invocation
-                    .service
-                    .project_runtimes
-                    .mark_publication_failed(attempt);
+                let project_runtimes = &self.invocation.service.project_runtimes;
+                match &reset_refusal {
+                    Some(refusal) => {
+                        project_runtimes.mark_publication_reset_required(attempt, refusal.clone())
+                    }
+                    None => project_runtimes.mark_publication_failed(attempt),
+                };
             }
             if let Some(failed_full_server) = failed_full_server {
                 failed_full_server.revoke_project_server_responses();
@@ -1754,8 +1807,9 @@ impl ProjectOpenInputs<'_> {
             // A session store in its typed reset-required state keeps the
             // full upgrade refused until the operator resets it, so the
             // retained core serves the code index meanwhile.
-            if tracedecay_mcp::reset_required_context(&error).is_some() {
+            if reset_refusal.is_some() {
                 let code_index_status = self.activate_code_index(core);
+                Box::pin(self.register_reset_required_code_reads(core, resolved)).await;
                 self.log_phase(
                     "full_upgrade_reset_required",
                     Some(("code_index", code_index_status.to_owned())),

@@ -5,6 +5,8 @@
 
 use serde_json::{Value, json};
 
+use crate::support::application_invalid_request_error;
+
 use super::memory_facts_test::{
     FactStoreMcpFixture, active_project_id, close_test_graph, invoke_production_tool,
     invoke_production_tool_response, setup_project,
@@ -346,19 +348,14 @@ async fn memory_status_reports_the_seeded_project_and_keeps_user_memory_separate
         json!({"memory_scope": "galaxy"}),
     )
     .await;
-    // Decode failures are a config error, so the MCP boundary currently
-    // reports them as an untyped execution failure. The message still names
-    // the rejected argument and the admitted scopes.
+    // A decode failure is the caller's typed invalid request, naming the
+    // rejected argument and the admitted scopes.
     assert_eq!(
         invalid["error"],
-        json!({
-            "code": -32603,
-            "message": "tool execution failed: config error: invalid retained application request for tracedecay_memory_status: memory_scope: unknown variant `galaxy`, expected `project` or `user`",
-            "data": {
-                "tool": "tracedecay_memory_status",
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool memory_status ...` (`tracedecay tool memory_status --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-            }
-        }),
+        application_invalid_request_error(
+            "tracedecay_memory_status",
+            "memory_scope: unknown variant `galaxy`, expected `project` or `user`"
+        ),
         "invalid scope response: {invalid}"
     );
     assert_eq!(invalid.get("result"), None);

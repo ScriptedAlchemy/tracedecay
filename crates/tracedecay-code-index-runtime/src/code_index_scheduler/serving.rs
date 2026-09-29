@@ -82,7 +82,11 @@ use crate::{
             PreparedCodeLexicalArtifactPageV1, code_lexical_artifact_build_memory_budget_for,
             code_lexical_artifact_content_key,
         },
-        ports::{RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError},
+        ports::{
+            RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, TEXT_ARTIFACT_BASE_BATCH_BYTES_V1,
+            TEXT_ARTIFACT_BASE_BATCH_PAGES_V1, TEXT_ARTIFACT_PAGE_BYTES_V1,
+            TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+        },
     },
 };
 
@@ -90,12 +94,6 @@ use super::{
     CodeIndexSchedulerErrorV1, DaemonCodeIndexPublicationStoreV1, ProfiledStdMutex, queries,
 };
 
-/// Page bounds for streaming one sealed generation into the durable lexical
-/// text artifact. One page is one bounded unit of background build progress.
-pub(super) const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = RETRIEVAL_CANDIDATE_BATCH_SIZE;
-const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
-const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
-const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
 const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_BYTES_V1: usize = 4 * 1024;
 const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_FILES_V1: usize = 64;
@@ -2201,6 +2199,10 @@ impl LatestCompleteCodeIndexV1 {
     pub(super) fn graph_publication_budget_spent(&self) -> bool {
         self.text.graph_publication_budget_spent()
     }
+
+    pub fn generation_graph_refusal(&self) -> Option<&'static str> {
+        self.text.generation_graph_refusal()
+    }
 }
 
 impl LatestCodeTextGenerationV1 {
@@ -2287,6 +2289,24 @@ impl LatestCodeTextGenerationV1 {
             CodeGraphActivationStateV1::Refused(reason)
                 if reason == super::graph_activation::GRAPH_PUBLICATION_DEADLINE_REASON
         )
+    }
+
+    /// The refusal that holds this generation's graph for its lifetime: a
+    /// spent publication budget or a configuration refusal. A resident-memory
+    /// refusal is retried once memory is given back, so it is not one.
+    pub fn generation_graph_refusal(&self) -> Option<&'static str> {
+        match *self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Refused(reason)
+                if reason != super::graph_activation::RESIDENT_MEMORY_GRAPH_REFUSAL_REASON =>
+            {
+                Some(reason)
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn refuse_graph_activation(&self, reason: &'static str) {

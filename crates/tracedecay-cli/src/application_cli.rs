@@ -111,7 +111,9 @@ pub(crate) fn render(
     if json {
         return Ok(crate::cli::output::json::json_line(outcome)?);
     }
-    let outcome = outcome.as_ref().map_err(problem_error)?;
+    let outcome = outcome
+        .as_ref()
+        .map_err(|problem| refusal(kind, operation, problem))?;
     Ok(format!(
         "{} {}\nProject: {}\n{}\n",
         kind.0,
@@ -121,16 +123,29 @@ pub(crate) fn render(
     ))
 }
 
-/// The process status of an outcome whose JSON line was already written: a
-/// typed problem still fails the command, as it does for `tracedecay tool`.
-pub(crate) fn outcome_status(outcome: &ApplicationResult<Value>) -> Result<()> {
-    outcome.as_ref().map(|_| ()).map_err(problem_error)
+/// Fails the process with the refusal an already-rendered `--json` outcome
+/// carries, so a typed problem never exits successfully.
+pub(crate) fn refused(
+    kind: ApplicationKind,
+    operation: &str,
+    outcome: &ApplicationResult<Value>,
+) -> Result<()> {
+    outcome
+        .as_ref()
+        .map(drop)
+        .map_err(|problem| refusal(kind, operation, problem))
 }
 
-fn problem_error(problem: &ApplicationProblemEnvelope) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("{}: {}", problem.problem.code, problem.problem.message),
-    }
+fn refusal(
+    kind: ApplicationKind,
+    operation: &str,
+    envelope: &ApplicationProblemEnvelope,
+) -> TraceDecayError {
+    TraceDecayError::tool_refused(
+        format!("{} {operation}", kind.1),
+        Some(envelope.problem.code.clone()),
+        Some(envelope.problem.message.clone()),
+    )
 }
 
 pub(crate) fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
@@ -169,6 +184,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_problem_outcome_fails_as_a_named_refusal_in_both_modes() {
+        let outcome: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.workflow.get_run.result").unwrap(), 1)
+                .unwrap(),
+            RequestId::new("request.cli.workflow.1").unwrap(),
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        )
+        .unwrap());
+        let expected = "workflow get-run refused the request (not_found_or_not_authorized): \
+                        The requested resource was not found or is not authorized";
+        let root = std::path::Path::new("/repo");
+
+        let human = super::render(super::WORKFLOW, "get-run", root, &outcome, false).unwrap_err();
+        assert_eq!(human.to_string(), expected);
+
+        let json = super::render(super::WORKFLOW, "get-run", root, &outcome, true).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(json.trim_end()).unwrap()["problem"]["kind"],
+            "not_found_or_not_authorized"
+        );
+        let refused = super::refused(super::WORKFLOW, "get-run", &outcome).unwrap_err();
+        assert_eq!(refused.to_string(), expected);
+    }
+
+    #[test]
     fn a_json_rendered_cursor_refusal_still_fails_the_command() {
         let outcome: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
             ResultContractRef::new(
@@ -194,10 +234,12 @@ pub(crate) mod tests {
         let problem: Value = serde_json::from_str(rendered.trim_end()).unwrap();
         assert_eq!(problem["problem"]["code"], "cursor.parameter_changed");
         assert_eq!(
-            super::outcome_status(&outcome).unwrap_err().to_string(),
-            "config error: cursor.parameter_changed: The cursor was issued for a request \
-             with a different `page_size`. Repeat the request with the parameters that returned \
-             the cursor, or restart without it."
+            super::refused(super::WORK, "list-attempts", &outcome)
+                .unwrap_err()
+                .to_string(),
+            "work list-attempts refused the request (cursor.parameter_changed): The cursor was \
+             issued for a request with a different `page_size`. Repeat the request with the \
+             parameters that returned the cursor, or restart without it."
         );
     }
 }

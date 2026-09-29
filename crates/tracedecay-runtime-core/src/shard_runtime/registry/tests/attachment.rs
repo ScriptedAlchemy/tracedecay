@@ -451,3 +451,57 @@ async fn failed_blocking_drain_restores_fault_and_wakes_reserved_open_joiners() 
         StoreRuntimeLookup::Evicting { .. }
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_close_drains_every_idle_runtime_concurrently() {
+    let publisher = Arc::new(AttachmentPublisher::default());
+    let registry = StoreRuntimeRegistry::with_config(
+        Arc::new(TestResolver::default()),
+        publisher.clone(),
+        StoreRuntimeRegistryConfig::new(2).unwrap(),
+    )
+    .unwrap();
+    let pin = profile_pin(&registry).await;
+    let first = open_published(&registry, code_request("worktree.shutdown-first", &pin)).await;
+    let second = open_published(&registry, code_request("worktree.shutdown-second", &pin)).await;
+    let bindings = [first.binding().clone(), second.binding().clone()];
+    let controls = [publisher.control(1), publisher.control(2)];
+    drop((first, second));
+    for control in &controls {
+        control.drain_gate.block();
+    }
+
+    let closing = registry.clone();
+    let close = tokio::spawn(async move { closing.close_idle_for_shutdown().await });
+    // A close that ran one runtime at a time would hold the second runtime's
+    // drain behind the first, which stays blocked until both have entered.
+    let entered = || {
+        controls
+            .iter()
+            .filter(|control| control.drain_gate.entered.load(Ordering::SeqCst))
+            .count()
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while entered() < controls.len() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let concurrent_drains = entered();
+    for control in &controls {
+        control.drain_gate.release();
+    }
+
+    assert_eq!(close.await.unwrap().unwrap(), 2);
+    assert_eq!(
+        concurrent_drains, 2,
+        "every idle runtime drains while the others are still draining"
+    );
+    for (binding, control) in bindings.iter().zip(&controls) {
+        assert_eq!(control.close_calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            registry.lookup(binding),
+            StoreRuntimeLookup::Missing { .. }
+        ));
+    }
+}

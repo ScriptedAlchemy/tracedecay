@@ -2926,10 +2926,25 @@ mod wire_input_fail_closed_tests {
 
     #[test]
     fn with_resolved_scope_none_is_accepted_for_all_payloads() {
-        let request = git_status_read(ApplicationSurfaceOperation::GitStatus);
-        request
-            .with_resolved_scope(None)
-            .expect("CurrentProject (None) applies to every payload");
+        let git_read = git_status_read(ApplicationSurfaceOperation::GitStatus);
+        let observatory = DaemonInvocationRequest::observatory_read(
+            "request.observatory.none",
+            ObservatoryReadRequestV1::default(),
+            UtcMicros(1),
+            deadline(),
+            cancellation(),
+        );
+        for (label, request) in [("git_read", git_read), ("observatory", observatory)] {
+            let before = serde_json::to_value(&request).expect(label);
+            let accepted = request.with_resolved_scope(None).unwrap_or_else(|problem| {
+                panic!("{label}: CurrentProject must be accepted, got {problem:?}")
+            });
+            assert_eq!(
+                serde_json::to_value(&accepted).expect(label),
+                before,
+                "{label}: None must leave the invocation frame unchanged"
+            );
+        }
     }
 }
 

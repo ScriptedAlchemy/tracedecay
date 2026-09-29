@@ -523,8 +523,10 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     while let Ok(command) = commands.recv() {
         match command {
             SnapshotCommand::Pin { reply } => {
+                // Any read starts the snapshot; counting the schema would
+                // read every schema page on each pinned snapshot.
                 let result = transaction
-                    .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+                    .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", [], |row| {
                         row.get::<_, i64>(0)
                     })
                     .map(|_| ())

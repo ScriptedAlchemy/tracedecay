@@ -44,9 +44,11 @@ fn unavailable_authority(operation: ApplicationSurfaceOperation) -> TraceDecayEr
         ApplicationSurfaceOperation::SourceEditReconcile => "source edit reconciliation authority",
         _ => "source edit authority",
     };
-    TraceDecayError::Config {
-        message: format!("daemon-owned {authority} is unavailable"),
-    }
+    TraceDecayError::project_route(
+        "application_surface_unavailable",
+        false,
+        format!("daemon-owned {authority} is unavailable"),
+    )
 }
 
 fn adapter_error(error: ApplicationSurfaceAdapterError) -> TraceDecayError {
@@ -59,9 +61,7 @@ fn adapter_error(error: ApplicationSurfaceAdapterError) -> TraceDecayError {
             message: detail,
         })
         .into_trace_decay_error(),
-        error => TraceDecayError::Config {
-            message: error.to_string(),
-        },
+        error => error.into_trace_decay_error(),
     }
 }
 
@@ -90,8 +90,9 @@ pub async fn run_source_edit(
     args: &Value,
     invocation: SourceEditInvocationContext<'_>,
 ) -> Result<SourceEditOutcome> {
-    let request = parse_source_edit_arguments(operation, args)
-        .map_err(|message| TraceDecayError::Config { message })?;
+    let request = parse_source_edit_arguments(operation, args).map_err(|message| {
+        TraceDecayError::project_route("application_surface_invalid_request", false, message)
+    })?;
     let SourceEditInvocationContext {
         executor,
         target,
@@ -492,7 +493,7 @@ mod tests {
         .await
         .expect("a refused source edit renders as a tool result");
         assert_eq!(result.semantic_error(), Some(true), "{}", result.value);
-        result.value["problem"].clone()
+        result.value["structuredContent"]["problem"].clone()
     }
 
     fn problem_summary(problem: &Value) -> Value {

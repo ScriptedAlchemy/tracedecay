@@ -1225,8 +1225,14 @@ fn sealed_import_generation_rejects_semantic_tampering_after_segment_readdress()
         rows[0]["imported_name"] = Value::String("Forged".to_owned());
     });
     assert!(
-        error.to_string().contains("import_authority_mismatch"),
-        "semantic tamper reached the wrong authority rejection: {error}"
+        matches!(
+            &error,
+            CodeIndexProductionErrorV1::Chunk(
+                tracedecay_code_index::chunks::ChunkingFailureV1::NonCanonicalIdentity(cause)
+            ) if cause.reason_code()
+                == tracedecay_code_index::noncanonical::NonCanonicalReasonCodeV1::ImportAuthorityMismatch
+        ),
+        "semantic tamper reached the wrong authority rejection: {error:?}"
     );
 }
 

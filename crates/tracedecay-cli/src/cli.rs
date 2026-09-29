@@ -645,8 +645,11 @@ pub enum Commands {
     #[command(long_about = WIPE_LONG_ABOUT, after_help = WIPE_AFTER_HELP)]
     Wipe {
         /// Wipe ALL profile database state while preserving identity and config
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "stale")]
         all: bool,
+        /// Delete only the stores the running daemon reports as requiring reset
+        #[arg(long)]
+        stale: bool,
     },
     /// List tracedecay projects (current folder, parents, and children)
     #[command(long_about = LIST_LONG_ABOUT, after_help = LIST_AFTER_HELP)]

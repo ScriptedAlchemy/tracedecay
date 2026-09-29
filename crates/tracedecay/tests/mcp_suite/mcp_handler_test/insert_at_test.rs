@@ -488,8 +488,12 @@ async fn insert_at_refuses_unusable_anchors_missing_files_and_escaped_paths() {
     .await;
     assert_rpc_error(
         &bare_apply,
-        -32603,
-        "tool execution failed: config error: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
+        -32602,
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
+    );
+    assert_eq!(
+        bare_apply["error"]["data"]["kind"], "invalid_request",
+        "{bare_apply}"
     );
     assert_eq!(project.read("src/refuse.rs"), REFUSAL_ORIGINAL);
 
@@ -505,7 +509,7 @@ async fn insert_at_refuses_unusable_anchors_missing_files_and_escaped_paths() {
     assert_rpc_error(
         &missing_anchor,
         -32602,
-        "missing required parameter: anchor",
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: missing required parameter: anchor",
     );
 
     let escaped_result = project

@@ -277,14 +277,22 @@ fn assert_hook_completed_analytics(provider: &str, state: &str, project: &Path, 
         );
     }
 
-    let project_path = project.to_string_lossy();
+    // The payload's session is attribution, not content: the row names it so
+    // analytics can join a hook to its session, and no other field repeats it.
     let session_id = format!("{provider}-host-fixture");
+    assert_eq!(row["session_id"], session_id.as_str(), "{label}");
+    let mut unattributed = row.clone();
+    unattributed
+        .as_object_mut()
+        .expect("hook row is an object")
+        .remove("session_id");
+    let project_path = project.to_string_lossy();
     for private in [
         project_path.as_ref(),
         session_id.as_str(),
         "Inspect the fixture.",
     ] {
-        assert_json_strings_omit(row, private, &label);
+        assert_json_strings_omit(&unattributed, private, &label);
     }
 }
 

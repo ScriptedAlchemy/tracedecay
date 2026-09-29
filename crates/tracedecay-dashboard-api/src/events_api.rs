@@ -1088,6 +1088,9 @@ pub(crate) async fn dashboard_state_fixture(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     use super::*;
 
     async fn registered_database_for_test(
@@ -1497,9 +1500,28 @@ mod tests {
 
         // First poll primes the baselines and emits nothing.
         let primed = state.poll_sources(&dash, &scope).await;
-        assert!(primed.is_empty(), "baseline poll must not emit events");
-        // The storage baseline is a real summed size read.
-        assert!(state.last_store_total_bytes.unwrap_or(0) > 0);
-        assert!(state.last_registry_digest.is_some());
+        assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
+        let graph_pages = super::pragma_u64(&dash.graph_conn, "page_size")
+            .await
+            .expect("graph page size")
+            * super::pragma_u64(&dash.graph_conn, "page_count")
+                .await
+                .expect("graph page count");
+        let memory_pages = super::pragma_u64(&dash.mem_db.read_connection(), "page_size")
+            .await
+            .expect("memory page size")
+            * super::pragma_u64(&dash.mem_db.read_connection(), "page_count")
+                .await
+                .expect("memory page count");
+        assert_eq!(
+            state.last_store_total_bytes,
+            Some(graph_pages + memory_pages)
+        );
+        let mut hasher = DefaultHasher::new();
+        0_u64.hash(&mut hasher);
+        assert_eq!(
+            state.last_registry_digest.as_deref(),
+            Some(format!("{:016x}", hasher.finish())).as_deref()
+        );
     }
 }

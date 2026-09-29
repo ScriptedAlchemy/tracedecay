@@ -371,8 +371,9 @@ pub(super) async fn concrete_dispatch_group_accepts(
     let owned = |result: Result<ToolResult>| {
         !matches!(
             &result,
-            Err(TraceDecayError::Config { message })
-                if message == &format!("unknown tool: {tool_name}")
+            Err(error) if error.project_route_context().is_some_and(|(reason_code, _, detail)| {
+                reason_code == "unknown_tool" && detail == format!("unknown tool: {tool_name}")
+            })
         )
     };
     match group {

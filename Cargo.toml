@@ -64,7 +64,7 @@ resolver = "3"
 # inheritance table is the sanctioned single source of truth.
 [workspace.package]
 edition = "2024"
-version = "1.0.0-beta.61"
+version = "1.0.0-beta.63"
 
 [workspace.dependencies]
 # Opt-in profiler, pinned once for the whole workspace. Non-optional on purpose:
@@ -244,12 +244,16 @@ tokensave-large-treesitters = { git = "https://github.com/ScriptedAlchemy/tokens
 # how sealed generation stores are built. Since ScriptedAlchemy/grafeo#5 the
 # builder spools pushed values to a file and the container write encodes
 # them one column at a time, so the build never holds every row's values
-# or the finished columnar store. Its workspace resolves sibling crates by
-# path, so every grafeo crate must come from the same revision. A mixed
+# or the finished columnar store. Since ScriptedAlchemy/grafeo#6 every
+# compact structure reports the heap it owns from its own capacity, and
+# `memory_usage` includes the compact base with a mapped section reported
+# apart, which is what the graph engine's resident owner charges. Its
+# workspace resolves sibling crates by path, so every grafeo crate must
+# come from the same revision. A mixed
 # registry/git graph would build type-incompatible instances of the patched
 # crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "2027d1093c19d9d631618b9b4d1e575120c12fb2" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "2027d1093c19d9d631618b9b4d1e575120c12fb2" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "2027d1093c19d9d631618b9b4d1e575120c12fb2" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "2027d1093c19d9d631618b9b4d1e575120c12fb2" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "2027d1093c19d9d631618b9b4d1e575120c12fb2" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }

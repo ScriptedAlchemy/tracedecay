@@ -1114,25 +1114,42 @@ fn psi_some_avg10_reads_the_memory_stall_share() {
 
 thread_local! {
     static INSTALLED_RELEASES: Cell<usize> = const { Cell::new(0) };
+    static INSTALLED_THREAD_COLLECTS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn count_installed_release() {
     INSTALLED_RELEASES.with(|count| count.set(count.get() + 1));
 }
 
+fn count_installed_thread_collect() {
+    INSTALLED_THREAD_COLLECTS.with(|count| count.set(count.get() + 1));
+}
+
+const COUNTING_RELEASE: super::ProcessAllocatorReleaseV1 = super::ProcessAllocatorReleaseV1 {
+    release: count_installed_release,
+    collect_calling_thread: count_installed_thread_collect,
+};
+
 /// The allocator the composition root installed is released: glibc's
-/// `malloc_trim` alone returns nothing from mimalloc's pages. Installation
-/// happens once; a second is refused.
+/// `malloc_trim` alone returns nothing from mimalloc's pages. The process
+/// release and the calling-thread collection each run their own installed
+/// call. Installation happens once; a second is refused.
 #[test]
 fn allocator_release_runs_the_installed_allocator_release() {
-    super::install_process_allocator_release_v1(count_installed_release)
-        .expect("first installation");
-    let before = INSTALLED_RELEASES.with(Cell::get);
+    super::install_process_allocator_release_v1(COUNTING_RELEASE).expect("first installation");
+    let (releases, collects) = (
+        INSTALLED_RELEASES.with(Cell::get),
+        INSTALLED_THREAD_COLLECTS.with(Cell::get),
+    );
     let trim = super::release_process_allocator_memory_v1();
-    assert_eq!(INSTALLED_RELEASES.with(Cell::get), before + 1);
+    assert_eq!(INSTALLED_RELEASES.with(Cell::get), releases + 1);
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects);
     assert!(trim.trimmed);
+    super::collect_calling_thread_allocator_v1();
+    assert_eq!(INSTALLED_RELEASES.with(Cell::get), releases + 1);
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 1);
     assert_eq!(
-        super::install_process_allocator_release_v1(count_installed_release),
+        super::install_process_allocator_release_v1(COUNTING_RELEASE),
         Err("the process allocator release is already installed".to_owned())
     );
 }

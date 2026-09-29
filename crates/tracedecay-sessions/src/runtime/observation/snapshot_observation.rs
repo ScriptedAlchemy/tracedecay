@@ -665,8 +665,12 @@ mod tests {
                 .any(|fact| matches!(fact, CanonicalObservationFactV1::Reasoning { .. }))
         );
         let encoded = serde_json::to_string(&canonical).expect("serialize");
+        assert_eq!(
+            encoded,
+            r#"{"version":1,"provider":"kiro","native_record_kind":"message","stable_record_id":"message-1","relations":{"session_id":"session-1","message_id":"message-1"},"facts":[{"kind":"message","role":"assistant","content":"hello"}],"evidence":{"ordering_domain":"snapshot_order","range":{"start":0,"end":1}}}"#
+        );
         assert!(!encoded.contains("must-never-leak"));
-        assert!(!encoded.contains("\"kind\":\"reasoning\""));
+        assert!(encoded.contains("hello"));
     }
 
     #[test]
@@ -799,6 +803,10 @@ mod tests {
         );
         let left_json = serde_json::to_string(&left).expect("serialize left");
         let right_json = serde_json::to_string(&right).expect("serialize right");
+        assert_eq!(
+            left_json,
+            r#"{"version":1,"provider":"kiro","native_record_kind":"message","stable_record_id":"message-1","relations":{"session_id":"session-1","message_id":"message-1"},"facts":[{"kind":"message","role":"assistant","content":"hello"}],"evidence":{"ordering_domain":"snapshot_order","range":{"start":0,"end":1}}}"#
+        );
         assert!(!left_json.contains("/tmp/"));
         assert!(!right_json.contains("/other/"));
         assert_eq!(left_json, right_json);

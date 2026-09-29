@@ -904,7 +904,10 @@ fn publication_replay_returns_original_commit() {
         .unwrap()
         .unwrap();
     assert_eq!(receipt.commit, first);
-    assert_eq!(receipt.digest.as_str().len(), 64);
+    assert_eq!(
+        receipt.digest.as_str(),
+        "30c21d149c315104e69ae124767e8b0cd79aa3694575f4bc5d3eba84a4712b9a"
+    );
     assert_eq!(
         receipt.input_digest.as_str(),
         format!("sha256:{}", "a".repeat(64))

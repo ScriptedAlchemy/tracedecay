@@ -1189,23 +1189,60 @@ pub(crate) fn expect_tool_error<T>(result: tracedecay_domain::errors::Result<T>)
     }
 }
 
+/// The JSON-RPC `error` every tool transport answers for arguments the tool's
+/// reviewed application schema refuses before dispatch.
+#[cfg(feature = "test-transport")]
+pub(crate) fn application_invalid_request_error(tool: &str, detail: &str) -> Value {
+    application_surface_refusal_error(
+        tool,
+        &format!("application surface request does not match its reviewed schema: {detail}"),
+    )
+}
+
+/// Asserts a JSON-RPC response is `tool`'s reviewed-schema refusal.
+#[cfg(feature = "test-transport")]
+pub(crate) fn assert_application_invalid_request(response: &Value, tool: &str, detail: &str) {
+    assert_eq!(
+        response["error"],
+        application_invalid_request_error(tool, detail),
+        "{response}"
+    );
+}
+
+/// The JSON-RPC `error` for any `application_surface_invalid_request`
+/// refusal, with its whole `detail`.
+#[cfg(feature = "test-transport")]
+pub(crate) fn application_surface_refusal_error(tool: &str, detail: &str) -> Value {
+    json!({
+        "code": -32602,
+        "message": format!(
+            "tool project route failed: reason_code=application_surface_invalid_request \
+             retryable=false: {detail}"
+        ),
+        "data": {
+            "tool": tool,
+            "code": "application_surface_invalid_request",
+            "reason_code": "application_surface_invalid_request",
+            "kind": "invalid_request",
+            "retryable": false,
+            "detail": detail,
+        },
+    })
+}
+
 /// The owner's typed problem record from a refused `tools/call` result.
 ///
 /// Owner-served tools answer every refusal, including arguments their typed
 /// request parser rejects, as an `isError` tool result carrying the whole
 /// problem record (an MCP 2025-11-25 tool-execution error), not as a JSON-RPC
-/// error. In-process dispatch keeps the record at `problem`; the rmcp
-/// transport moves it under `structuredContent`.
+/// error. Every route carries the record at `structuredContent.problem`.
 pub(crate) fn refusal_problem(result: &Value) -> &Value {
     assert_eq!(
         result["isError"],
         Value::Bool(true),
         "expected an isError refusal: {result}"
     );
-    let problem = match &result["structuredContent"]["problem"] {
-        Value::Null => &result["problem"],
-        transported => transported,
-    };
+    let problem = &result["structuredContent"]["problem"];
     assert!(
         problem.is_object(),
         "refusal carries no problem record: {result}"
@@ -1220,7 +1257,7 @@ pub(crate) fn tool_result_problem(result: &ToolResult) -> &Value {
     if result.semantic_error() != Some(true) {
         return refusal_problem(&result.value);
     }
-    let problem = &result.value["problem"];
+    let problem = &result.value["structuredContent"]["problem"];
     assert!(
         problem.is_object(),
         "refusal carries no problem record: {}",

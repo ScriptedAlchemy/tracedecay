@@ -299,12 +299,12 @@ fn fixture_backed_composer_assistant_bubble_reaches_canonical_envelope() {
         assert!(relations.get(absent.as_str().unwrap()).is_none());
     }
     let rendered = actual.to_string();
-    for required in expected["encoded_must_contain"].as_array().unwrap() {
-        assert!(rendered.contains(required.as_str().unwrap()));
-    }
-    for rejected in expected["encoded_must_not_contain"].as_array().unwrap() {
-        assert!(!rendered.contains(rejected.as_str().unwrap()));
-    }
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_sequence":1,"ordering_domain":"snapshot_order","range":{"end":2,"start":1}},"facts":[{"content":"Done refactoring the widget module.","kind":"message","role":"assistant"},{"arguments":null,"invocation_id":"call-1","kind":"tool_invocation","name":"edit_file"},{"content":null,"invocation_id":"call-1","kind":"tool_result","success":true},{"content":"Considering the widget invariants carefully.","kind":"reasoning","visibility":"visible"},{"counter_semantics":"delta","counters":{"input_tokens":1200,"output_tokens":340,"state":"known"},"kind":"provider_usage","model":{"reason":"absent","state":"unknown"},"native_field":"tokenCount","native_kind":"bubble","native_scope":"message"},{"evidence_kind":"pull_request","kind":"git","reference":"https://example.invalid/pr/7"},{"evidence_kind":"pull_request","kind":"workflow","reference":"https://example.invalid/pr/7"}],"native_record_kind":"bubble","provider":"cursor","relations":{"message_id":"cursor.composer.sha256:f58e56808b4eb7782841b192954e9c4a96d02af5700f5f87d68376d0a4b6b650","session_id":"comp-1","thread_id":"comp-1"},"stable_record_id":"cursor.composer.sha256:f58e56808b4eb7782841b192954e9c4a96d02af5700f5f87d68376d0a4b6b650","version":1}"#
+    );
+    assert!(!rendered.contains("widget.rs"));
+    assert!(rendered.contains("Done refactoring the widget module."));
 }
 
 /// Checked-in `composerData` envelope `todos[{id,content,status}]` map to
@@ -394,12 +394,12 @@ fn fixture_backed_composer_envelope_todos_reach_workflow_lifecycle() {
         assert!(relations.get(absent.as_str().unwrap()).is_none());
     }
     let rendered = actual.to_string();
-    for required in expected["encoded_must_contain"].as_array().unwrap() {
-        assert!(rendered.contains(required.as_str().unwrap()));
-    }
-    for rejected in expected["encoded_must_not_contain"].as_array().unwrap() {
-        assert!(!rendered.contains(rejected.as_str().unwrap()));
-    }
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_sequence":0,"native_timestamp":1700000000,"ordering_domain":"snapshot_order","range":{"end":1,"start":0}},"facts":[{"kind":"workflow_lifecycle","provider_reference":"comp-1","semantic_kind":"todo_list"},{"content":"First todo","item_id":"t1","item_order":0,"kind":"workflow_lifecycle","list_reference":"comp-1","provider_reference":"t1","semantic_kind":"todo_item","status":"completed"},{"content":"Second todo","item_id":"t2","item_order":1,"kind":"workflow_lifecycle","list_reference":"comp-1","provider_reference":"t2","semantic_kind":"todo_item","status":"pending"}],"native_record_kind":"envelope","provider":"cursor","relations":{"session_id":"comp-1","thread_id":"comp-1"},"stable_record_id":"cursor.composer.envelope.sha256:6eac909995cde9a0c8210a98d075f246144c7c58f829f666c2bff3cd0c0ff6eb","version":1}"#
+    );
+    assert!(!rendered.contains("\"revision\""));
+    assert!(rendered.contains("First todo"));
 }
 
 #[test]
@@ -518,10 +518,12 @@ fn fixture_backed_composer_bubble_colocates_message_and_todo_lifecycle() {
     );
     assert_eq!(items[1].4.as_deref(), Some("comp-1"));
     let rendered = actual.to_string();
-    for required in expected["encoded_must_contain"].as_array().unwrap() {
-        assert!(rendered.contains(required.as_str().unwrap()));
-    }
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_sequence":1,"ordering_domain":"snapshot_order","range":{"end":2,"start":1}},"facts":[{"content":"Working the checklist.","kind":"message","role":"assistant"},{"kind":"workflow_lifecycle","provider_reference":"comp-1","semantic_kind":"todo_list"},{"content":"First todo","item_id":"t1","item_order":0,"kind":"workflow_lifecycle","list_reference":"comp-1","provider_reference":"t1","semantic_kind":"todo_item","status":"completed"},{"content":"Second todo","item_id":"t2","item_order":1,"kind":"workflow_lifecycle","list_reference":"comp-1","provider_reference":"t2","semantic_kind":"todo_item","status":"pending"}],"native_record_kind":"bubble","provider":"cursor","relations":{"message_id":"cursor.composer.sha256:b9e26e522f0ee2f234cf4afe967177a413fcc6e01afcffa3ec007fb282d5b72c","session_id":"comp-1","thread_id":"comp-1"},"stable_record_id":"cursor.composer.sha256:b9e26e522f0ee2f234cf4afe967177a413fcc6e01afcffa3ec007fb282d5b72c","version":1}"#
+    );
     assert!(!rendered.contains("\"revision\""));
+    assert!(rendered.contains("Working the checklist."));
 }
 
 #[test]

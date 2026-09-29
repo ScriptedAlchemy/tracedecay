@@ -439,11 +439,14 @@ async fn symbol_graph_identity_refusal_names_the_runtime_failure() {
         .snapshot(&context, "search", now_observed())
         .await
         .expect_err("runtime refusal must remain typed");
-    assert!(
-        failure
-            .message
-            .contains("lsp-code-index-generation-unavailable"),
-        "the public problem must name the underlying runtime refusal: {failure:?}"
+    assert_eq!(
+        failure,
+        tracedecay_contracts::retrieval::PrimitiveFailure::new(
+            tracedecay_contracts::retrieval::PrimitiveFailureKind::Unavailable,
+            "application.symbol-graph.identity",
+            "could not read the current symbol-graph identity: lsp-code-index-generation-unavailable",
+        )
+        .expect("static failure")
     );
 }
 

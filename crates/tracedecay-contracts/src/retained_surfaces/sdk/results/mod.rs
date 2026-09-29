@@ -236,12 +236,14 @@ mod tests {
             matches!(reason, RetainedSurfaceResultV1::FactStoreReason(_)),
             "{reason:?}"
         );
-        assert!(
+        assert_eq!(
             RetainedSurfaceResultV1::from_operation_value(
                 RetainedSurfaceOperation::FactStoreSearch,
                 page
             )
-            .is_err(),
+            .unwrap_err()
+            .to_string(),
+            "missing field `retrieval_telemetry`",
             "a body decodes only as the named operation's result"
         );
     }
@@ -280,13 +282,15 @@ mod tests {
             }),
             &request,
         );
+        let error = RetainedSurfaceResultV1::from_operation_value(
+            RetainedSurfaceOperation::FactStoreCurate,
+            terminal,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
-            RetainedSurfaceResultV1::from_operation_value(
-                RetainedSurfaceOperation::FactStoreCurate,
-                terminal
-            )
-            .is_err(),
-            "the run terminal is read from the run ledger, not returned by fact_store_curate"
+            error.starts_with("unknown field `committed_receipts`, expected one of"),
+            "the run terminal is read from the run ledger, not returned by fact_store_curate: {error}"
         );
     }
 }

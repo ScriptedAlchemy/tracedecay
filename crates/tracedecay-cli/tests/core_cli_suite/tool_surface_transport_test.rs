@@ -70,6 +70,7 @@ fn init_indexed_git_project(home: &Path, project: &Path) {
 
 struct SurfaceOutcome {
     success: bool,
+    code: Option<i32>,
     stdout: String,
     stderr: String,
 }
@@ -121,6 +122,44 @@ fn tool_dry_run_reads_piped_args_in_either_order() {
         );
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
     }
+}
+
+/// A flag the tool's schema cannot bind is the caller's invalid request, not a
+/// configuration error: `--json` prints the typed problem, stderr names its
+/// reason code, and the process exits 1 before any daemon is contacted.
+#[test]
+fn tool_argument_errors_are_typed_invalid_requests() {
+    let home = TempDir::new().expect("isolated home");
+    let project = TempDir::new().expect("working directory");
+    let detail = "--limit: expected integer, got `abc`";
+    let outcome = run_tool_from(
+        home.path(),
+        project.path(),
+        "fact_store_list",
+        &["--limit", "abc", "--json"],
+    );
+    assert_eq!(
+        outcome.payload(),
+        serde_json::json!({
+            "problem": {
+                "tool": "tracedecay_fact_store_list",
+                "code": "tool_arguments_invalid",
+                "reason_code": "tool_arguments_invalid",
+                "kind": "invalid_request",
+                "retryable": false,
+                "detail": detail,
+            }
+        }),
+        "stderr:\n{}",
+        outcome.stderr
+    );
+    assert_eq!(
+        (outcome.code, outcome.stderr.as_str()),
+        (
+            Some(1),
+            format!("Error: project route error (tool_arguments_invalid): {detail}\n").as_str()
+        )
+    );
 }
 
 /// The diagnostics read answers to its MCP spelling, with or without the
@@ -205,6 +244,7 @@ fn run_tool_from(
     let output = child.wait_with_output().expect("collect tool output");
     SurfaceOutcome {
         success: output.status.success(),
+        code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
@@ -246,6 +286,7 @@ fn run_git_read_from(
     let output = child.wait_with_output().expect("collect git output");
     SurfaceOutcome {
         success: output.status.success(),
+        code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
@@ -283,6 +324,29 @@ fn assert_surface_resolves_project(
     payload
 }
 
+/// Holds until the cold daemon serves a published generation's code graph.
+/// Graph-backed surfaces answer the retryable `application.code-graph.unavailable`
+/// before that, which is the truthful state of a daemon still activating.
+fn await_graph_ready(home: &Path, project: &Path) {
+    let outcome = run_surface_tool_from(
+        home,
+        project,
+        "status",
+        r#"{"format":"json","wait_for":{"state":"graph_ready","timeout_ms":50000}}"#,
+    );
+    assert!(
+        outcome.success,
+        "status wait failed\nstdout:\n{}\nstderr:\n{}",
+        outcome.stdout, outcome.stderr
+    );
+    assert_eq!(
+        outcome.payload()["wait"],
+        serde_json::json!({ "outcome": "reached" }),
+        "the daemon never served a published code graph: {}",
+        outcome.stdout
+    );
+}
+
 fn surface_fixture() -> (TempDir, TempDir, PathBuf, PathBuf) {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -303,6 +367,7 @@ fn application_surface_primitive_tools_resolve_the_working_directory_project() {
         "storage_status",
         r#"{"format":"json"}"#,
     );
+    await_graph_ready(&home_path, &project_path);
     assert_surface_resolves_project(
         &home_path,
         &project_path,
@@ -804,5 +869,97 @@ fn work_and_workflow_tools_answer_through_their_typed_owner() {
     assert_eq!(
         concealed["value"]["problem"]["kind"],
         "not_found_or_not_authorized"
+    );
+}
+
+/// A refusal raised before dispatch answers `--json` with the same typed
+/// problem record MCP puts in the JSON-RPC error `data`, so a shell caller
+/// branches on `code` instead of parsing prose, and the refused edit writes
+/// nothing.
+#[test]
+fn tool_json_reports_argument_refusals_as_typed_problems() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let source_before = std::fs::read_to_string(project_path.join("src/lib.rs")).unwrap();
+
+    for (tool, args, detail) in [
+        (
+            "configuration_get",
+            r#"{"key":"sweep"}"#,
+            "application surface request does not match its reviewed schema: configuration surface request is inconsistent with the application contract",
+        ),
+        (
+            "str_replace",
+            r#"{"path":"src/lib.rs","old_str":"42","new_str":"43"}"#,
+            "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
+        ),
+        (
+            "fact_store_get",
+            r#"{"fact_id":7}"#,
+            "application surface request does not match its reviewed schema: fact_id: invalid type: integer `7`, expected a string",
+        ),
+        (
+            "lcm_doctor",
+            r#"{"storage_scope":"hermes_profile"}"#,
+            "application surface request does not match its reviewed schema: storage_scope must be one of project, user",
+        ),
+    ] {
+        let outcome = run_surface_tool_json_from(&home_path, &project_path, tool, args);
+        assert!(
+            !outcome.success,
+            "`tracedecay tool {tool}` must fail\nstdout:\n{}\nstderr:\n{}",
+            outcome.stdout, outcome.stderr
+        );
+        assert_eq!(
+            outcome.payload(),
+            serde_json::json!({
+                "problem": {
+                    "tool": format!("tracedecay_{tool}"),
+                    "code": "application_surface_invalid_request",
+                    "reason_code": "application_surface_invalid_request",
+                    "kind": "invalid_request",
+                    "retryable": false,
+                    "detail": detail,
+                }
+            }),
+            "stderr:\n{}",
+            outcome.stderr
+        );
+        assert_eq!(
+            (outcome.code, outcome.stderr.lines().last()),
+            (
+                Some(1),
+                Some(
+                    format!(
+                        "Error: project route error (application_surface_invalid_request): {detail}"
+                    )
+                    .as_str()
+                )
+            ),
+            "stderr:\n{}",
+            outcome.stderr
+        );
+    }
+
+    let unknown = run_tool_from(&home_path, &project_path, "not_a_real_tool", &["--json"]);
+    assert!(
+        !unknown.success,
+        "an unknown tool must fail: {}",
+        unknown.stderr
+    );
+    let problem = &unknown.payload()["problem"];
+    assert_eq!(
+        (&problem["code"], &problem["kind"], &problem["retryable"]),
+        (
+            &serde_json::json!("unknown_tool"),
+            &serde_json::json!("invalid_request"),
+            &serde_json::json!(false)
+        ),
+        "{problem}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
+        source_before
     );
 }

@@ -15,6 +15,7 @@ use tracedecay_runtime_core::resident_memory::{
 
 use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
 
+use super::publication_store::{ActiveGenerationDecodeChargeV1, ActiveGenerationWorkV1};
 use super::tests::OwnerSignals;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
@@ -114,16 +115,13 @@ fn captured_source_bytes_are_charged_until_the_snapshot_drops() {
     assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
-/// Capture became proportional to the change set: a reconcile over an
-/// unchanged checkout reuses the active generation's rows instead of
-/// re-reading them, so it retains no source Arcs and holds no charge for
-/// bytes it is not keeping resident. This pins the invariant that survived
-/// that change, the charge always equals what the scheduler still retains,
-/// on the build path and on the no-build path alike, rather than the
-/// pre-proportional behaviour where every reconcile re-captured, and so
-/// re-charged, the whole snapshot.
+/// Captured source lives for the build that reads it. Once the generation is
+/// sealed nothing reads those bytes (the sealed artifacts serve every later
+/// read), so neither a publishing reconcile nor a no-build reconcile over the
+/// unchanged checkout leaves source resident or charged: holding them had
+/// kept about 16 KB of anonymous heap per indexed file after every build.
 #[test]
-fn reconcile_charges_exactly_the_snapshot_sources_it_retains() {
+fn reconcile_leaves_no_captured_source_charged_after_the_build() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
@@ -137,15 +135,33 @@ fn reconcile_charges_exactly_the_snapshot_sources_it_retains() {
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     ));
     scheduler.bind_resident_memory(Arc::clone(&authority));
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture source snapshot");
+    assert_eq!(
+        authority.snapshot().used_bytes,
+        u64::try_from("pub fn retained_generation() -> u32 { 1 }\n".len()).expect("fits"),
+        "captured source is charged while a build holds it"
+    );
+    drop(captured);
 
-    scheduler.reconcile_now().expect("publish generation");
-    let retained_bytes = scheduler
-        .retained_snapshot_bytes
-        .iter()
-        .map(|bytes| bytes.len() as u64)
-        .sum::<u64>();
-    assert!(retained_bytes > 0);
-    assert_eq!(authority.snapshot().used_bytes, retained_bytes);
+    assert!(matches!(
+        scheduler.reconcile_now().expect("publish generation"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    assert_eq!(authority.snapshot().used_bytes, 0);
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("published generation")
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs::retained_generation"]
+    );
 
     assert!(matches!(
         scheduler
@@ -153,22 +169,7 @@ fn reconcile_charges_exactly_the_snapshot_sources_it_retains() {
             .expect("reconcile unchanged source"),
         CodeIndexReconcileOutcomeV1::Noop(_)
     ));
-    let retained_after_no_build = scheduler
-        .retained_snapshot_bytes
-        .iter()
-        .map(|bytes| bytes.len() as u64)
-        .sum::<u64>();
-    assert!(
-        retained_after_no_build <= retained_bytes,
-        "a reuse-only capture never retains more source than the snapshot it reused"
-    );
-    assert_eq!(
-        authority.snapshot().used_bytes,
-        retained_after_no_build,
-        "the no-build path charges exactly the Arc sources it still retains, so a \
-         reuse-only pass neither strands the previous charge nor holds one for bytes \
-         it released"
-    );
+    assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
 #[test]
@@ -430,6 +431,33 @@ async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
     registry.shutdown().await;
 }
 
+fn assert_observed_worker_memory_refusal(
+    failure: &CodeIndexSchedulerErrorV1,
+    observed_bytes: u64,
+    configured_limit: u64,
+) {
+    let CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(admission) = failure else {
+        panic!("expected a worker resident-memory admission failure, got {failure:?}");
+    };
+    assert!(
+        admission.is_observed_over_budget(),
+        "the refusal must name measured pressure, not a full reservation ledger"
+    );
+    let rendered = failure.to_string();
+    assert!(
+        rendered.contains(&observed_bytes.to_string()),
+        "the refusal names observed bytes: {rendered}"
+    );
+    assert!(
+        rendered.contains(&configured_limit.to_string()),
+        "the refusal names configured bytes: {rendered}"
+    );
+    assert!(
+        failure.is_transient_capacity_failure(),
+        "an over-budget refusal is retryable as pressure falls"
+    );
+}
+
 /// Measured RSS, not the reservation ledger, decides worker admission once a
 /// sample says the process is over budget, and the refusal names the observed
 /// and configured bytes so it is never a silent stall.
@@ -455,7 +483,23 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
     );
     let limit = NonZeroU64::new(worker_reservation_bytes(&runtime).saturating_mul(4))
         .expect("positive test limit");
-    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let measured = Arc::new(Mutex::new(None));
+    let sampled = Arc::clone(&measured);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            sampled
+                .lock()
+                .expect("measurement")
+                .map(|unreclaimable_bytes| ProcessResidentSampleV1 {
+                    resident_bytes: unreclaimable_bytes,
+                    unreclaimable_bytes,
+                    swapped_bytes: 0,
+                    cgroup_committed_bytes: None,
+                })
+        }),
+    ));
+    let measure = |bytes: u64| *measured.lock().expect("measurement") = Some(bytes);
     scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
         limit,
         Arc::clone(&pressure),
@@ -468,30 +512,12 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
             .expect("an unobserved process admits on the reservation ceiling alone"),
     );
 
-    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
+    let over_high = pressure.high_watermark_bytes() + 1;
+    measure(over_high);
     let failure = scheduler
         .reserve_worker_memory()
         .expect_err("measured RSS over the high watermark refuses new worker admission");
-    let super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(admission) = &failure else {
-        panic!("expected a worker resident-memory admission failure, got {failure:?}");
-    };
-    assert!(
-        admission.is_observed_over_budget(),
-        "the refusal must name measured pressure, not a full reservation ledger"
-    );
-    let rendered = failure.to_string();
-    assert!(
-        rendered.contains(&(pressure.high_watermark_bytes() + 1).to_string()),
-        "the refusal names observed bytes: {rendered}"
-    );
-    assert!(
-        rendered.contains(&limit.get().to_string()),
-        "the refusal names configured bytes: {rendered}"
-    );
-    assert!(
-        failure.is_transient_capacity_failure(),
-        "an over-budget refusal is retryable as pressure falls"
-    );
+    assert_observed_worker_memory_refusal(&failure, over_high, limit.get());
 
     // Hysteresis: between the watermarks the refusal stands rather than flapping.
     let between = u64::midpoint(
@@ -499,14 +525,14 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
         pressure.high_watermark_bytes(),
     );
     for _ in 0..3 {
-        pressure.publish_observed_resident_bytes(between);
-        assert!(
-            scheduler.reserve_worker_memory().is_err(),
-            "admission must not flap between the watermarks"
-        );
+        measure(between);
+        let failure = scheduler
+            .reserve_worker_memory()
+            .expect_err("admission must not flap between the watermarks");
+        assert_observed_worker_memory_refusal(&failure, between, limit.get());
     }
 
-    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    measure(pressure.low_watermark_bytes());
     drop(
         scheduler
             .reserve_worker_memory()
@@ -603,6 +629,101 @@ fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
     );
 }
 
+/// A refresh decodes its active parent generation and builds under one worker
+/// slab. Here another holder leaves the parent's measured decode plus 64 MiB
+/// below the admission watermark: room for the parent, not for the parent
+/// beside a 128 MiB worker. The refresh still publishes, with its slab
+/// planned against what the resident parent leaves.
+#[test]
+fn a_refresh_decodes_its_parent_before_planning_its_worker_slab() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-refresh-parent-decode").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    bind_automatic_worker_runtime(
+        &scheduler,
+        8,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
+    let limit = NonZeroU64::new(4 * GIB).expect("limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 0,
+                unreclaimable_bytes: 0,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let high_watermark = pressure.high_watermark_bytes();
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+    assert!(matches!(
+        scheduler.reconcile_now().expect("cold index publishes"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    scheduler
+        .publication
+        .release_decoded_active_after_seal()
+        .expect("release the sealed decode");
+    let ActiveGenerationDecodeChargeV1::Measured {
+        bytes: decode_bytes,
+        ..
+    } = scheduler
+        .publication
+        .active_generation_charge(ActiveGenerationWorkV1::Decode)
+        .expect("decode charge")
+    else {
+        panic!("the cold index measured the generation it published");
+    };
+    let holder_bytes = high_watermark - authority.snapshot().used_bytes - decode_bytes - 64 * MIB;
+    let _holder = authority
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-text-build").expect("component"),
+            NonZeroU64::new(holder_bytes).expect("holder bytes"),
+        )
+        .expect("the holder fits the ledger");
+
+    fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn retained_generation() -> u32 { 1 }\npub fn refreshed_generation() -> u32 { 2 }\n",
+    )
+    .expect("write source");
+    git(project.path(), &["commit", "-q", "-am", "refresh"]);
+    let refreshed = scheduler
+        .reconcile_now()
+        .expect("the refresh decodes its parent and builds");
+    assert!(matches!(
+        refreshed,
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    let latest = scheduler.latest_complete().expect("refreshed generation");
+    let mut symbols = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.as_str())
+        .collect::<Vec<_>>();
+    symbols.sort_unstable();
+    assert_eq!(
+        symbols,
+        [
+            "src/lib.rs::refreshed_generation",
+            "src/lib.rs::retained_generation"
+        ]
+    );
+}
+
 /// The seal hands the decoded generation back so the text build has the
 /// memory; decoding it again must fit the process budget. Here another holder
 /// keeps all but a sliver below the admission watermark, so the decode waits
@@ -675,11 +796,7 @@ fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
     );
     assert_eq!(
         authority.snapshot().used_bytes,
-        scheduler
-            .retained_snapshot_bytes
-            .iter()
-            .map(|bytes| bytes.len() as u64)
-            .sum::<u64>(),
+        0,
         "the decode's charge is released once it completes"
     );
 }

@@ -279,7 +279,7 @@ fn code_graph_tools_do_not_first_touch_project_store() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let result: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|error| panic!("status --json prints its refusal: {error}\n{stdout}"));
-    let problem = &result["problem"];
+    let problem = &result["structuredContent"]["problem"];
     assert_eq!(
         (&problem["kind"], &problem["code"], &problem["message"]),
         (

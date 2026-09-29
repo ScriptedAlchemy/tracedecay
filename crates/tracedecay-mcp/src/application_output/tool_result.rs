@@ -13,6 +13,7 @@ use super::markdown;
 use super::view::CanonicalHumanView;
 use crate::ToolResult;
 use crate::handlers::support::text_tool_result;
+use crate::tool_errors::problem_structured_content;
 use crate::tools::render::finalize_with_format;
 use crate::tools::response_trailers::ResponseTrailer;
 
@@ -62,8 +63,8 @@ pub fn problem_error(problem: ApplicationProblemEnvelope) -> TraceDecayError {
 }
 
 /// Renders one settled application call. A problem is a semantic failure
-/// whose whole record rides beside the text as `problem`, which MCP carries
-/// as structured content and `--json` prints with the result.
+/// whose whole record rides beside the text as MCP
+/// `structuredContent.problem`, which `--json` prints with the result.
 pub fn render_application_result(
     response_handle_root: Option<&Path>,
     operation: &str,
@@ -108,8 +109,8 @@ pub fn render_application_result(
         Err(problem) => {
             if let Some(object) = rendered.value.as_object_mut() {
                 object.insert(
-                    "problem".to_string(),
-                    serde_json::to_value(problem.problem.as_ref())?,
+                    "structuredContent".to_string(),
+                    problem_structured_content(&problem.problem)?,
                 );
             }
         }

@@ -117,7 +117,6 @@ enum CodeGraphPublicationConflictStageV1 {
     ActiveReplayPublish,
     RetiredReplay,
     PendingCompletionLimit,
-    PendingPredecessorPublish,
     VerifiedHeadRefreshLimit,
     ReplayAppend,
     FinalPublish,
@@ -130,7 +129,6 @@ impl CodeGraphPublicationConflictStageV1 {
             Self::ActiveReplayPublish => "active_replay_publish",
             Self::RetiredReplay => "retired_replay",
             Self::PendingCompletionLimit => "pending_completion_limit",
-            Self::PendingPredecessorPublish => "pending_predecessor_publish",
             Self::VerifiedHeadRefreshLimit => "verified_head_refresh_limit",
             Self::ReplayAppend => "replay_append",
             Self::FinalPublish => "final_publish",
@@ -1611,8 +1609,8 @@ impl RetainedCodeGraphRuntimeV1 {
         Ok(snapshot)
     }
 
-    /// Discard one interrupted publication whose completion just refused with
-    /// a deterministic verdict: the journaled pending replay row and
+    /// Discard one interrupted publication that can never complete or is
+    /// superseded by the caller's: the journaled pending replay row and
     /// the partial store contents its dead publisher left behind. Every
     /// refusal from the compare-and-swap-shaped discard means the journal
     /// moved since the diagnosis, the caller re-reads and proceeds, so a
@@ -1624,7 +1622,7 @@ impl RetainedCodeGraphRuntimeV1 {
         context: &GraphPublicationOperationContextV1<'_>,
         registration: GraphDbRegistration,
         pending: &GraphPublicationReplayRecordV1,
-        cause: &GraphDbError,
+        cause: &dyn std::fmt::Display,
     ) -> std::result::Result<(), GraphDbError> {
         let outcome = self.graph_registry.discard_interrupted_publication(
             registration,
@@ -1639,9 +1637,9 @@ impl RetainedCodeGraphRuntimeV1 {
                     generation = %discarded.publication.key.generation,
                     sequence = discarded.sequence.get(),
                     error = %cause,
-                    "discarded an interrupted graph publication whose completion \
-                     refused deterministically; the journal position is open for \
-                     a fresh publication"
+                    "discarded an interrupted graph publication that cannot or \
+                     need not complete; the journal position is open for a fresh \
+                     publication"
                 );
             }
             GraphPendingReplayDiscardOutcomeV1::Missing
@@ -1957,7 +1955,7 @@ impl RetainedCodeGraphRuntimeV1 {
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         let publish = |storage: &mut dyn GraphPublicationStoreV1,
                        key: &GraphPublicationKeyV1,
-                       manifest: Option<GraphGenerationRows>|
+                       manifest: GraphGenerationRows|
          -> std::result::Result<_, GraphDbError> {
             let deadline_at = Instant::now() + prepared.projection_deadline;
             let cancellation_identity = RuntimeCancellationIdentityV1 {
@@ -2019,15 +2017,12 @@ impl RetainedCodeGraphRuntimeV1 {
             };
             // The project-shard build permit is already held by
             // `publish_verified_snapshot` from projection through this
-            // publish, including predecessor completions. Claiming it again
-            // here would deadlock the non-reentrant mutex.
+            // publish. Claiming it again here would deadlock the
+            // non-reentrant mutex.
             let _flight = self.publication_locks.flight.claim(key, &interruption)?;
-            // The already-built projection manifest rides along so first
+            // The already-built projection manifest rides along so
             // publication does not re-read and re-project the sealed artifact
-            // through the replay manifest provider; a pending predecessor
-            // journaled by an interrupted publisher carries no in-hand
-            // manifest, so publication reconstructs it from the journaled
-            // canonical replay source.
+            // through the replay manifest provider.
             //
             // Prepare, native staging, the sealed-store build, and the
             // durable digest proof, runs with no gate held; only the
@@ -2037,7 +2032,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 storage,
                 &context,
                 key,
-                manifest,
+                Some(manifest),
             )?;
             let proven = match preparation {
                 GraphPublicationPreparationV1::Settled(commit) => return Ok(*commit),
@@ -2101,7 +2096,7 @@ impl RetainedCodeGraphRuntimeV1 {
                             "verified head matched the partitioned manifest but its derived \
                              Grafeo state was invalid; replaying the canonical generation"
                         );
-                        return publish(&mut storage, &prepared.publication_key, Some(rows()?))
+                        return publish(&mut storage, &prepared.publication_key, rows()?)
                             .map(|publication| publication.snapshot);
                     }
                     Err(error) => return Err(error),
@@ -2127,7 +2122,7 @@ impl RetainedCodeGraphRuntimeV1 {
                             "verified Grafeo staging state was invalid; replaying the \
                              canonical partitioned generation"
                         );
-                        return publish(&mut storage, &prepared.publication_key, Some(rows()?))
+                        return publish(&mut storage, &prepared.publication_key, rows()?)
                             .map(|publication| publication.snapshot);
                     }
                     Err(error) => return Err(error),
@@ -2148,7 +2143,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 drop(replay_pool_lock);
                 match observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::ActiveReplayPublish,
-                    publish(&mut storage, &prepared.publication_key, Some(rows()?)),
+                    publish(&mut storage, &prepared.publication_key, rows()?),
                 ) {
                     Ok(publication) => {
                         *staging_release = Some(prepared.relational_projection.clone());
@@ -2225,12 +2220,10 @@ impl RetainedCodeGraphRuntimeV1 {
         // here wedged the projection permanently, every reconcile sealed a
         // newer generation, appended a newer sequence, and conflicted on the
         // orphan forever while sealed artifacts piled up on disk. So this
-        // publisher completes pending predecessors first (their sealed
-        // sources are retained by collection precisely because they are
-        // pending), then appends its own replay against the advanced head.
-        // Bounded: every pass either appends or advances the verified head by
-        // exactly one completed predecessor, and a repeated blocker surfaces
-        // as that predecessor's own typed error.
+        // publisher discards each pending predecessor it supersedes, then
+        // appends its own replay against the current head. Bounded: every
+        // pass either appends or removes exactly one pending predecessor, and
+        // a repeated blocker surfaces as the discard's own typed error.
         let mut completed_predecessors = 0usize;
         loop {
             // Every durable journal mutation owns one isolated commit permit.
@@ -2286,34 +2279,21 @@ impl RetainedCodeGraphRuntimeV1 {
                         );
                     }
                     completed_predecessors += 1;
-                    match observe_code_graph_publication(
-                        CodeGraphPublicationConflictStageV1::PendingPredecessorPublish,
-                        publish(&mut storage, &pending.publication.key, None),
-                    ) {
-                        Ok(_) => {}
-                        // The orphan predecessor refused deterministically:
-                        // its interrupted publisher left conflicting store
-                        // state (issue #765), its historical seal predates
-                        // authenticated source commitments, or its rows are
-                        // refused by the current reader's contract. None can
-                        // ever complete. The compare-and-swap discard reopens
-                        // only that pending journal position for this fresh
-                        // append.
-                        Err(
-                            cause @ (GraphDbError::Conflict { .. }
-                            | GraphDbError::SourceCommitmentsUnavailable { .. }
-                            | GraphDbError::SealedRevisionIncompatible { .. }),
-                        ) => {
-                            self.discard_interrupted_publication_row(
-                                &mut storage,
-                                &journal_context,
-                                registration(),
-                                &pending,
-                                &cause,
-                            )?;
-                        }
-                        Err(error) => return Err(error),
-                    }
+                    // The pending predecessor is an older full generation of
+                    // this projection whose publisher was interrupted or
+                    // refused; this publication supersedes it, so landing it
+                    // first would be a whole-generation build retired moments
+                    // later. It is also unreadable here: its seal may sit in
+                    // the replay pool this publisher holds. The
+                    // compare-and-swap discard reopens only that journal
+                    // position for this append.
+                    self.discard_interrupted_publication_row(
+                        &mut storage,
+                        &journal_context,
+                        registration(),
+                        &pending,
+                        &"superseded by the next generation's publication",
+                    )?;
                     let prior = storage
                         .verified_head(&prepared.relational_projection, context)
                         .map_err(GraphDbError::from)?;
@@ -2348,7 +2328,7 @@ impl RetainedCodeGraphRuntimeV1 {
         drop(replay_pool_lock);
         let publication = observe_code_graph_publication(
             CodeGraphPublicationConflictStageV1::FinalPublish,
-            publish(&mut storage, &replay.key, Some(rows()?)),
+            publish(&mut storage, &replay.key, rows()?),
         )?;
         *staging_release = Some(prepared.relational_projection.clone());
         Ok(publication.snapshot)

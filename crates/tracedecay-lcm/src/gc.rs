@@ -472,6 +472,7 @@ pub async fn run_payload_gc_with_apply(
         return run_payload_gc(conn, storage_root, provider, session_id, cfg, now).await;
     }
 
+    let snapshot = read_payload_gc_snapshot(conn, provider, session_id).await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -483,6 +484,7 @@ pub async fn run_payload_gc_with_apply(
         cfg,
         true,
         now,
+        &snapshot,
     )
     .await?;
     transaction.commit().await?;
@@ -517,7 +519,47 @@ pub async fn finalize_gc_report(
     Ok(())
 }
 
+/// Payload metadata and references payload GC reads before its write
+/// transaction.
+///
+/// The reference closure reads the text of every raw row, so it runs on the
+/// reader in keyset pages rather than inside the transaction's lease. That is
+/// safe because every writer that adds a reference clears the referenced
+/// payload's GC mark in the same transaction, and GC deletes only payloads
+/// whose unreferenced mark is still present when its transaction reads it.
+pub struct PayloadGcSnapshot {
+    all_metadata_refs: BTreeSet<String>,
+    scoped_metadata_refs: BTreeSet<String>,
+    /// References inside the GC scope; they select what each phase visits.
+    referenced: BTreeSet<String>,
+    /// References from every provider and session; a delete checks these.
+    referenced_anywhere: BTreeSet<String>,
+    metadata_bytes: BTreeMap<String, u64>,
+}
+
+#[hotpath::measure(label = "sessions.lcm.gc.snapshot", future = true)]
+pub async fn read_payload_gc_snapshot(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<PayloadGcSnapshot, LcmError> {
+    let referenced = referenced_payload_refs(conn, provider, session_id).await?;
+    let referenced_anywhere = if provider == "all" && session_id.is_none() {
+        referenced.clone()
+    } else {
+        referenced_payload_refs(conn, "all", None).await?
+    };
+    Ok(PayloadGcSnapshot {
+        all_metadata_refs: maintenance::all_payload_metadata_refs(conn).await?,
+        scoped_metadata_refs: payload_metadata_refs_for_scope(conn, provider, session_id).await?,
+        referenced,
+        referenced_anywhere,
+        metadata_bytes: payload_metadata_bytes(conn).await?,
+    })
+}
+
 #[hotpath::measure(label = "sessions.lcm.gc.apply", future = true)]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_payload_gc_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
@@ -526,6 +568,7 @@ pub async fn run_payload_gc_in_transaction(
     cfg: &LcmGcConfig,
     apply: bool,
     now: i64,
+    snapshot: &PayloadGcSnapshot,
 ) -> Result<LcmGcReport, LcmError> {
     let started = Instant::now();
     let cfg = cfg.clone().normalized();
@@ -540,11 +583,13 @@ pub async fn run_payload_gc_in_transaction(
     // while the DB-side phases below still run (missing payloads, stale
     // marks, dangling placeholders).
     let dir = payload::existing_payload_dir_opt(storage_root)?;
-    let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
-
-    let scoped_metadata_refs = payload_metadata_refs_for_scope(conn, provider, session_id).await?;
-    let referenced = referenced_payload_refs(conn, provider, session_id).await?;
-    let metadata_bytes = payload_metadata_bytes(conn).await?;
+    let PayloadGcSnapshot {
+        all_metadata_refs,
+        scoped_metadata_refs,
+        referenced,
+        referenced_anywhere,
+        metadata_bytes,
+    } = snapshot;
 
     let mut remaining = cfg.max_batch_size.max(1);
     // Orphan files have no metadata row, so they cannot be attributed to a
@@ -555,7 +600,7 @@ pub async fn run_payload_gc_in_transaction(
             stage_orphan_files(
                 conn,
                 dir,
-                &all_metadata_refs,
+                all_metadata_refs,
                 now,
                 &cfg,
                 &mut remaining,
@@ -565,7 +610,7 @@ pub async fn run_payload_gc_in_transaction(
         } else {
             preview_orphan_files(
                 dir,
-                &all_metadata_refs,
+                all_metadata_refs,
                 now,
                 &cfg,
                 &mut remaining,
@@ -576,9 +621,10 @@ pub async fn run_payload_gc_in_transaction(
     reap_unreferenced_metadata(ReapUnreferencedMetadataRequest {
         conn,
         storage_root,
-        metadata_refs: &scoped_metadata_refs,
-        referenced: &referenced,
-        metadata_bytes: &metadata_bytes,
+        metadata_refs: scoped_metadata_refs,
+        referenced,
+        referenced_anywhere,
+        metadata_bytes,
         now,
         cfg: &cfg,
         apply,
@@ -589,8 +635,9 @@ pub async fn run_payload_gc_in_transaction(
     reap_missing_metadata(ReapMissingMetadataRequest {
         conn,
         storage_root,
-        metadata_refs: &all_metadata_refs,
-        referenced: &referenced,
+        metadata_refs: all_metadata_refs,
+        referenced,
+        referenced_anywhere,
         now,
         cfg: &cfg,
         apply,
@@ -604,8 +651,8 @@ pub async fn run_payload_gc_in_transaction(
     rewrite_dangling_placeholders(RewriteDanglingPlaceholdersRequest {
         conn,
         dir: dir.as_deref(),
-        metadata_refs: &all_metadata_refs,
-        referenced: &referenced,
+        metadata_refs: all_metadata_refs,
+        referenced,
         provider,
         session_id,
         apply,
@@ -758,6 +805,7 @@ struct ReapUnreferencedMetadataRequest<'a, E: Executor + ?Sized> {
     storage_root: &'a Path,
     metadata_refs: &'a BTreeSet<String>,
     referenced: &'a BTreeSet<String>,
+    referenced_anywhere: &'a BTreeSet<String>,
     metadata_bytes: &'a BTreeMap<String, u64>,
     now: i64,
     cfg: &'a LcmGcConfig,
@@ -774,6 +822,7 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
         storage_root,
         metadata_refs,
         referenced,
+        referenced_anywhere,
         metadata_bytes,
         now,
         cfg,
@@ -795,9 +844,9 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
     let marks = gc_marks(conn, &candidates).await?;
     let mut marks_to_upsert = Vec::new();
     let mut marks_to_delete = Vec::new();
-    // One reference-closure scan for the whole batch instead of one per
-    // candidate: only a payload's own deletion can change its own membership.
-    let mut referenced_closure = payload::ReferencedClosureCache::default();
+    // The marks above were read in this transaction, so a candidate whose
+    // mark survived gained no reference since the snapshot closure was read.
+    let mut referenced_closure = payload::ReferencedClosureCache::from_closure(referenced_anywhere);
 
     for payload_ref in &candidates {
         let mark = marks.get(payload_ref);
@@ -882,6 +931,7 @@ struct ReapMissingMetadataRequest<'a, E: Executor + ?Sized> {
     storage_root: &'a Path,
     metadata_refs: &'a BTreeSet<String>,
     referenced: &'a BTreeSet<String>,
+    referenced_anywhere: &'a BTreeSet<String>,
     now: i64,
     cfg: &'a LcmGcConfig,
     apply: bool,
@@ -897,6 +947,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
         storage_root,
         metadata_refs,
         referenced,
+        referenced_anywhere,
         now,
         cfg,
         apply,
@@ -934,8 +985,9 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     let marks = gc_marks(conn, &missing_refs).await?;
     let mut marks_to_upsert = Vec::new();
     let mut marks_to_delete = Vec::new();
-    // As in `reap_unreferenced_metadata`: one scan per provider for the batch.
-    let mut referenced_closure = payload::ReferencedClosureCache::default();
+    // As in `reap_unreferenced_metadata`: the snapshot closure answers every
+    // candidate whose missing mark survived into this transaction.
+    let mut referenced_closure = payload::ReferencedClosureCache::from_closure(referenced_anywhere);
     for payload_ref in &missing_refs {
         let first_seen_at = match marks.get(payload_ref) {
             Some((state, first_seen_at)) if state == "missing" => *first_seen_at,
@@ -1021,6 +1073,21 @@ pub async fn rewrite_dangling_placeholders<E: Executor + ?Sized>(
                 report.add_error(payload_ref, "dangling_payload_stat_failed", err.to_string());
             }
         }
+    }
+    if apply && !dangling.is_empty() {
+        // The metadata set came from the snapshot; a payload written since
+        // then owns its placeholders again.
+        let probe = pending_delete::probe_metadata_rows(
+            conn,
+            &dangling.iter().cloned().collect::<Vec<_>>(),
+        )
+        .await;
+        for (payload_ref, detail) in &probe.failures {
+            report.add_error(payload_ref, "metadata_check_failed", detail.clone());
+        }
+        dangling.retain(|payload_ref| {
+            !probe.existing.contains(payload_ref) && !probe.failures.contains_key(payload_ref)
+        });
     }
     for payload_ref in &dangling {
         report.dangling.add(payload_ref, 0);

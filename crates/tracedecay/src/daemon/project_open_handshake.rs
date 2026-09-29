@@ -90,7 +90,7 @@ pub(super) async fn open_project_for_handshake(
         )?;
     }
     let configuration_database = Box::pin(
-        store_administration.registered_project_session_database(project_path, &store_layout),
+        store_administration.registered_project_configuration_database(project_path, &store_layout),
     )
     .await?;
     #[cfg(any(test, feature = "test-helpers"))]
@@ -238,7 +238,7 @@ pub(super) async fn write_project_open_error(
 /// when the refusal is the reset-required terminal, matching the canonical
 /// problem envelope CLI and HTTP callers receive for the same operation.
 /// Non-application tools and every other open failure keep the raw shape.
-fn tool_call_open_refusal_response(
+pub(super) fn tool_call_open_refusal_response(
     request: &JsonRpcRequest,
     connection_scope: &str,
     error: &TraceDecayError,
@@ -259,13 +259,14 @@ fn tool_call_open_refusal_response(
         tool_name, request_id, detail,
     )?;
     let text = serde_json::to_string(&envelope).ok()?;
-    let problem = serde_json::to_value(envelope.problem.as_ref()).ok()?;
+    let structured_content =
+        tracedecay_mcp::tool_errors::problem_structured_content(&envelope.problem).ok()?;
     Some(JsonRpcResponse::success(
         id,
         json!({
             "content": [{ "type": "text", "text": text }],
             "isError": true,
-            "problem": problem,
+            "structuredContent": structured_content,
         }),
     ))
 }
@@ -367,9 +368,13 @@ mod tests {
         assert!(response.error.is_none(), "the refusal is a tool result");
         let result = response.result.expect("tool result payload");
         assert_eq!(result["isError"], serde_json::json!(true));
-        assert_eq!(result["problem"]["kind"], "reset_required");
+        assert_eq!(result.get("problem"), None);
         assert_eq!(
-            result["problem"]["legal_actions"],
+            result["structuredContent"]["problem"]["kind"],
+            "reset_required"
+        );
+        assert_eq!(
+            result["structuredContent"]["problem"]["legal_actions"],
             serde_json::json!(["reset"])
         );
         let text = result["content"][0]["text"]

@@ -42,6 +42,7 @@ impl DaemonEngine {
     )]
     pub(in crate::daemon) async fn shutdown_owner_phases(&self) -> Vec<Vec<ShutdownOwner>> {
         let project_open = project_open_tasks(&self.project_open_gates).await;
+        let store_open_cancel = self.store_administration.clone();
 
         let manual_branch_cancel = self.store_administration.clone();
         let manual_branch_join = self.store_administration.clone();
@@ -88,7 +89,9 @@ impl DaemonEngine {
             // An admitted open registers its owners with the invocation
             // registry, so it must settle before that registry drains: it
             // either registers in time to be released or stops at a
-            // cancellation boundary before registering anything.
+            // cancellation boundary before registering anything. The store
+            // mount it may be inside stops at its next safe point too, so the
+            // open never outlasts the cooperative window by finishing a mount.
             vec![ShutdownOwner::with_deadline_status(
                 "project_open",
                 {
@@ -96,6 +99,7 @@ impl DaemonEngine {
                     move || project_open_cancel.cancel_all()
                 },
                 move |_| async move {
+                    store_open_cancel.cancel_store_opens_for_shutdown().await;
                     if project_open.shutdown().await {
                         ShutdownStatus::Clean
                     } else {

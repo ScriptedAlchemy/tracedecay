@@ -7,7 +7,8 @@
 use serde_json::{Value, json};
 
 use crate::support::{
-    extract_real_server_text, handle_real_server_tool_call_raw, production_composition_fixture,
+    application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
+    production_composition_fixture,
 };
 
 const SEEDED_CONTENT: &str = "Amari Memory starts feedback proofs at the default half trust";
@@ -127,28 +128,18 @@ fn conflict_problem() -> Value {
     })
 }
 
-fn schema_refusal_message(response: &Value) -> String {
+fn schema_refusal_message(response: &Value) -> Value {
     assert!(
         response.get("result").is_none(),
         "schema refusals are JSON-RPC errors, not tool results: {response}"
     );
     assert_eq!(response["jsonrpc"], "2.0", "{response}");
     assert_eq!(response["id"], json!(1), "{response}");
-    assert_eq!(response["error"]["code"], json!(-32603), "{response}");
-    assert_eq!(
-        response["error"]["data"]["tool"], "tracedecay_fact_feedback",
-        "{response}"
-    );
-    response["error"]["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("schema refusal omitted its message: {response}"))
-        .to_owned()
+    response["error"].clone()
 }
 
-fn schema_refusal(detail: &str) -> String {
-    format!(
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_feedback: {detail}"
-    )
+fn schema_refusal(detail: &str) -> Value {
+    application_invalid_request_error("tracedecay_fact_feedback", detail)
 }
 
 fn assert_stored_identity(fact: &Value, fact_id: &Value, project_id: &Value, trust: u64) {

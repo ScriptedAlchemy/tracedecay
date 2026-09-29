@@ -1513,6 +1513,9 @@ pub enum CodeIndexWorkerPhaseV1 {
     AwaitingAdmission,
     /// Holding a permit and waiting for the worktree's build/publication gate.
     AwaitingPublicationGate,
+    /// Building a sealed generation's code graph: corpus-sized work a read
+    /// that waits on the graph cannot shorten.
+    PublishingGraph,
 }
 
 impl CodeIndexWorkerPhaseV1 {
@@ -1538,7 +1541,11 @@ impl CodeIndexOwnerActivityV1 {
     /// No owner pass holds the worktree and the worker is back at a wait, so
     /// the last pass and its tail have finished.
     pub fn pass_finished(&self) -> bool {
-        !self.passes().running() && self.worker_phase() != CodeIndexWorkerPhaseV1::Working
+        !self.passes().running()
+            && !matches!(
+                self.worker_phase(),
+                CodeIndexWorkerPhaseV1::Working | CodeIndexWorkerPhaseV1::PublishingGraph
+            )
     }
 
     pub fn passes(&self) -> super::CodeIndexOwnerPassesV1 {
@@ -3932,22 +3939,20 @@ fn feedback_document_logical_path(
     project_root: &Path,
     document_uri: &str,
 ) -> Result<String, LspRuntimeFailure> {
-    let url = url::Url::parse(document_uri)
-        .map_err(|_| LspRuntimeFailure::new("feedback-document-uri-invalid"))?;
+    let invalid = || LspRuntimeFailure::invalid_request("feedback-document-uri-invalid");
+    let url = url::Url::parse(document_uri).map_err(|_| invalid())?;
     if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
-        return Err(LspRuntimeFailure::new("feedback-document-uri-invalid"));
+        return Err(invalid());
     }
-    let path = url
-        .to_file_path()
-        .map_err(|()| LspRuntimeFailure::new("feedback-document-uri-invalid"))?;
+    let path = url.to_file_path().map_err(|()| invalid())?;
     let relative = canonical_relative_document_path(project_root, &path)
-        .ok_or_else(|| LspRuntimeFailure::new("feedback-document-outside-root"))?;
+        .ok_or_else(|| LspRuntimeFailure::invalid_request("feedback-document-outside-root"))?;
     if relative.as_os_str().is_empty()
         || relative
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
     {
-        return Err(LspRuntimeFailure::new("feedback-document-uri-invalid"));
+        return Err(invalid());
     }
     relative
         .to_str()

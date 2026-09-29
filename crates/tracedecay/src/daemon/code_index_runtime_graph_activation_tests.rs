@@ -4,17 +4,19 @@
 //! `DaemonSessionRuntimeRegistryV1`, so they compile in the composition root.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_code_index_runtime::code_index_scheduler::{
-    CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
-    scoped_code_index_store_root,
+    CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1, CodeIndexDemandAdmissionV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+    SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantId,
@@ -26,6 +28,10 @@ use tracedecay_contracts::{
 use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_graph_query::{
     CodeGraphReadFreshnessV1, CodeGraphReadRequest, request_graph_cancellation,
+};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ProcessResidentSampleV1, RESIDENT_OWNER_IDLE_WINDOW_V1,
+    ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnersReportV1, ResidentOwnersV1,
 };
 use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
@@ -824,6 +830,13 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     drop(seeded_graph);
     drop(retained);
     drop(latest);
+    // The daemon's terminal order: the publication's staging sweep holds the
+    // project graph store until it is joined, and a restart opened beside it
+    // cannot take the store's write lock.
+    graph_runtime
+        .shutdown_terminal_tasks()
+        .await
+        .expect("join graph terminal tasks before restart");
     graph_runtime
         .shutdown_memory_graph_reconciliation_tasks()
         .await
@@ -1646,6 +1659,352 @@ async fn first_index_serves_graph_reads_without_decoding_the_generation() {
         .shutdown_memory_graph_reconciliation_tasks()
         .await
         .expect("join graph reconciliation tasks");
+}
+
+/// A worktree mounted the way the daemon mounts it, on the persistent graph
+/// runtime, and fresh with its graph serving.
+struct PersistentGraphMountV1 {
+    registry: CodeIndexSchedulerRegistryV1,
+    graph_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
+    scope: ResolvedScope,
+    generation_id: CodeGenerationId,
+    _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
+    _profile: TempDir,
+}
+
+impl PersistentGraphMountV1 {
+    async fn mount(
+        registry: CodeIndexSchedulerRegistryV1,
+        fixture: &GitFixture,
+        store: &TempDir,
+        election: &str,
+    ) -> Self {
+        let profile = TempDir::new().expect("profile root");
+        let profile_root = profile.path().join("profile");
+        let project_id = test_project_id();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            fixture.path(),
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let database_scope =
+            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 97, election)
+                .expect("daemon database scope");
+        let graph_runtime = Arc::new(
+            DaemonSessionRuntimeRegistryV1::open(identity)
+                .await
+                .expect("graph runtime registry"),
+        );
+        let project_database = graph_runtime
+            .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+            .await
+            .expect("writable project database");
+        tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+            &project_database,
+            "bind persistent graph runtime",
+        )
+        .await
+        .expect("bound project graph runtime");
+        registry
+            .mount_worktree_with_graph_runtime(
+                project_id.clone(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                graph_runtime.code_graph_seat_port(),
+                project_database,
+                CodeGraphActivationPolicyV1::Enabled,
+            )
+            .await
+            .expect("mount worktree");
+        let reached = registry
+            .wait_for_readiness(
+                fixture.path(),
+                tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("readiness read");
+        assert!(
+            matches!(
+                reached,
+                tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
+            ),
+            "the first index must reach fresh with graph serving: {reached:?}"
+        );
+        let text = registry
+            .retained_text_owner_for_root(fixture.path())
+            .await
+            .expect("text owner");
+        let snapshot = text.metadata().snapshot();
+        let scope = ResolvedScope::new(
+            project_id,
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree identity"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope");
+        Self {
+            registry,
+            graph_runtime,
+            scope,
+            generation_id: text.metadata().manifest().generation_id.clone(),
+            _database_scope: database_scope,
+            _profile: profile,
+        }
+    }
+
+    async fn shutdown(self) {
+        self.registry.shutdown().await;
+        self.graph_runtime
+            .shutdown_memory_graph_reconciliation_tasks()
+            .await
+            .expect("join graph reconciliation tasks");
+    }
+}
+
+/// The serving-graph owners the inventory reports for one generation.
+fn serving_graph_owners(
+    report: &ResidentOwnersReportV1,
+    generation: &str,
+) -> Vec<ResidentOwnerKindV1> {
+    report
+        .owners
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.kind,
+                ResidentOwnerKindV1::GraphCatalog | ResidentOwnerKindV1::GraphEngine
+            ) && row
+                .holders
+                .iter()
+                .any(|holder| holder.holding.as_str() == generation)
+        })
+        .map(|row| row.kind)
+        .collect()
+}
+
+/// Status reads the generation census and freshness on every poll. Neither
+/// needs the graph resident, so neither renews the residency lease that keeps
+/// it resident; a graph read does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_polls_let_the_graph_lease_lapse_and_graph_reads_renew_it() {
+    const POLL: Duration = Duration::from_millis(250);
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
+    let mount = PersistentGraphMountV1::mount(
+        CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
+            .with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+        "status polls leave the graph lease",
+    )
+    .await;
+    let graph_idle_for = || {
+        let report = owners.report(std::time::Instant::now());
+        assert!(
+            serving_graph_owners(&report, mount.generation_id.as_str())
+                .contains(&ResidentOwnerKindV1::GraphEngine),
+            "the serving graph engine is resident: {report:?}"
+        );
+        report
+            .owners
+            .iter()
+            .map(|row| row.idle_for)
+            .min()
+            .expect("resident owners")
+    };
+    let port = project_code_graph_projection_read_port(
+        mount.registry.clone(),
+        fixture.path().to_path_buf(),
+        mount.scope.clone(),
+    );
+    let context = graph_request_context(mount.scope.clone(), "status-lease");
+    port.open(CodeGraphReadRequest::from_context(&context, now_micros()))
+        .await
+        .expect("graph read");
+    let census = project_code_index_generation_census_reader(
+        mount.registry.clone(),
+        fixture.path().into(),
+        mount.scope.clone(),
+    );
+
+    let polled_from = std::time::Instant::now();
+    for _ in 0..6 {
+        tokio::time::sleep(POLL).await;
+        let GenerationCensusSnapshot::Observed {
+            generation_id,
+            freshness,
+            statistics,
+        } = census().await
+        else {
+            panic!("status reports the serving generation");
+        };
+        assert_eq!(generation_id, mount.generation_id.as_str());
+        assert_eq!(freshness, GenerationCensusServingFreshness::Current);
+        assert_eq!(statistics.symbol_count, 1, "`alpha` is the one symbol");
+        let freshness = mount
+            .registry
+            .dashboard_freshness_read(fixture.path())
+            .await
+            .expect("freshness reads")
+            .expect("mounted worktree");
+        assert_eq!(
+            freshness.staleness_state,
+            Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
+        );
+    }
+    let polled_for = polled_from.elapsed();
+    assert!(
+        graph_idle_for() >= polled_for,
+        "six status polls over {polled_for:?} renewed the graph lease"
+    );
+
+    let read = port
+        .open(CodeGraphReadRequest::from_context(&context, now_micros()))
+        .await
+        .expect("graph read");
+    assert_eq!(read.generation(), &mount.generation_id);
+    assert!(graph_idle_for() < POLL, "a graph read renews the lease");
+
+    mount.shutdown().await;
+}
+
+/// Issue #2619. The modelled process holds, beside the first generation's
+/// serving graph, everything else up to one byte under the admission
+/// watermark, so nothing the refresh after a commit charges fits until that
+/// graph is given back. Status is polled every 250 ms throughout, as a client
+/// waiting for the refresh does, and the refresh still reaches current with
+/// its own graph serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_refused_beside_the_serving_graph_publishes_under_status_polling() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
+    let resident = Arc::new(AtomicU64::new(0));
+    let limit = NonZeroU64::new(16 * GIB).expect("limit");
+    let sampled = Arc::clone(&resident);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            let bytes = sampled.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: bytes,
+                unreclaimable_bytes: bytes,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let beside_graph = pressure.high_watermark_bytes() - 1;
+    let mount = PersistentGraphMountV1::mount(
+        CodeIndexSchedulerRegistryV1::with_resident_memory(
+            1,
+            Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure)),
+        )
+        .with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+        "refresh beside the serving graph",
+    )
+    .await;
+    let first = mount.generation_id.as_str().to_owned();
+    let before = serving_graph_owners(&owners.report(std::time::Instant::now()), &first);
+    assert!(
+        before.contains(&ResidentOwnerKindV1::GraphEngine),
+        "the first generation's graph engine is resident: {before:?}"
+    );
+
+    let model = tokio::spawn({
+        let owners = Arc::clone(&owners);
+        let resident = Arc::clone(&resident);
+        let first = first.clone();
+        async move {
+            loop {
+                let graph_held =
+                    !serving_graph_owners(&owners.report(std::time::Instant::now()), &first)
+                        .is_empty();
+                resident.store(if graph_held { beside_graph } else { 0 }, Ordering::Release);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    });
+    let census = project_code_index_generation_census_reader(
+        mount.registry.clone(),
+        fixture.path().into(),
+        mount.scope.clone(),
+    );
+    let poller = tokio::spawn({
+        let registry = mount.registry.clone();
+        let root = fixture.path().to_path_buf();
+        let census = Arc::clone(&census);
+        async move {
+            loop {
+                census().await;
+                registry.dashboard_freshness_read(&root).await.ok();
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    });
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { 2 }\n",
+    );
+    git(fixture.path(), &["commit", "-qam", "refresh"]);
+    assert!(matches!(
+        mount
+            .registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        CodeIndexDemandAdmissionV1::Queued
+    ));
+
+    let deadline = std::time::Instant::now() + Duration::from_mins(2);
+    let (second, statistics) = loop {
+        let freshness = mount
+            .registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted worktree");
+        if let GenerationCensusSnapshot::Observed {
+            generation_id,
+            freshness: GenerationCensusServingFreshness::Current,
+            statistics,
+        } = census().await
+            && generation_id != first
+            && freshness.staleness_state
+                == Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                )
+            && freshness.code_graph_serving
+                == Some(
+                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
+                )
+        {
+            break (generation_id, statistics);
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "the refresh never reached current with its graph serving: {freshness:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    poller.abort();
+    model.abort();
+
+    assert_eq!(statistics.symbol_count, 2, "`alpha` and `beta`");
+    let report = owners.report(std::time::Instant::now());
+    assert_eq!(serving_graph_owners(&report, &first), []);
+    assert!(
+        serving_graph_owners(&report, &second).contains(&ResidentOwnerKindV1::GraphEngine),
+        "the refresh's own graph engine serves: {report:?}"
+    );
+
+    mount.shutdown().await;
 }
 
 fn graph_request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {

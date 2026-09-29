@@ -13,15 +13,16 @@ use tracedecay_domain::CodeGenerationId;
 
 use super::super::{
     CodeIndexCadenceTriggerV1, CodeIndexSchedulerErrorV1, GenerationDecodeAdmissionV1,
-    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, now_micros,
+    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, ServingReadLeaseV1, now_micros,
 };
 use super::graph_cursor_retention::GraphCursorRetentionV1;
 use super::scope_identity::{latest_matches_scope_identity, text_matches_scope_identity};
 use super::{
-    CodeIndexMountedScopeV1, CodeIndexSchedulerRegistryV1, CodeIndexServingScopeV1,
-    MountedCodeIndexWorktreeV1, PendingWakeClaimV1, ReadyProbeServingPartsV1,
-    dashboard_code_graph_serving, dashboard_freshness_identity, dashboard_terminal_status,
-    dashboard_text_freshness_identity, project_graph_publication_phase, unique_mounted_for_scope,
+    CodeIndexMountedScopeV1, CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexServingScopeV1, MountedCodeIndexWorktreeV1, PendingWakeClaimV1,
+    ReadyProbeServingPartsV1, dashboard_code_graph_serving, dashboard_freshness_identity,
+    dashboard_terminal_status, dashboard_text_freshness_identity, project_graph_publication_phase,
+    unique_mounted_for_scope,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -838,6 +839,61 @@ impl CodeIndexSchedulerRegistryV1 {
         latest_matches_scope_identity(&latest, scope).then_some(latest)
     }
 
+    /// [`Self::latest_complete_fresh_for_scope`] for a read that needs the
+    /// whole decoded generation. A publication seats only its text owner and
+    /// defers the decode until a reader needs it, so this read's own demand
+    /// is what starts that decode: it waits for the seat rather than answering
+    /// the demanding request unavailable. It stops waiting once no decode is
+    /// pending (seated, memory-refused, shutting down, or unmounted); the
+    /// caller's resolution deadline bounds the rest.
+    pub(crate) async fn latest_complete_fresh_for_scope_awaiting_seat(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let root = {
+            let mounted = self.mounted.lock().await;
+            unique_mounted_for_scope(&mounted, scope)
+                .unique()?
+                .0
+                .clone()
+        };
+        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, &root).await;
+        loop {
+            if let Some(latest) = self.latest_complete_fresh_for_scope(scope).await {
+                return Some(latest);
+            }
+            if !self.complete_seat_pending(&root).await {
+                // The seat can land between the miss above and this check.
+                return self.latest_complete_fresh_for_scope(scope).await;
+            }
+            signals.changed().await.ok()?;
+        }
+    }
+
+    /// Whether demand has asked the worker to seat the complete generation
+    /// of a published text owner and nothing yet stops it from doing so.
+    async fn complete_seat_pending(&self, project_root: &Path) -> bool {
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(project_root) else {
+            return false;
+        };
+        worktree
+            .complete_generation_requested
+            .load(Ordering::Acquire)
+            && !worktree.memory_retry.waiting()
+            && !worktree.shutting_down.load(Ordering::Acquire)
+            && worktree
+                .serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            && worktree
+                .text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+    }
+
     /// Resolve one exact scope and admit only an already-current generation.
     pub async fn latest_complete_ready_for_scope(
         &self,
@@ -1009,11 +1065,27 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Return the exact ready generation without blocking the async executor
     /// on the bounded synchronous freshness probe.
-    #[hotpath::measure(label = "daemon.code_index.query.latest_ready_decoded", future = true)]
     pub async fn latest_complete_ready_decoded_for_root_scope(
         &self,
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        self.latest_complete_ready_decoded_for_root_scope_with(
+            project_root,
+            scope,
+            ServingReadLeaseV1::Renew,
+        )
+        .await
+    }
+
+    /// [`Self::latest_complete_ready_decoded_for_root_scope`] under an
+    /// explicit residency lease.
+    #[hotpath::measure(label = "daemon.code_index.query.latest_ready_decoded", future = true)]
+    pub(crate) async fn latest_complete_ready_decoded_for_root_scope_with(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_contracts::ResolvedScope,
+        lease: ServingReadLeaseV1,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = canonical_existing_identity(project_root).ok()?;
         // Await the map mutex rather than try-locking it: its critical
@@ -1025,7 +1097,9 @@ impl CodeIndexSchedulerRegistryV1 {
             {
                 let mounted = self.mounted.lock().await;
                 let parts = Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?;
-                if let Some(worktree) = mounted.get(&project_root) {
+                if lease == ServingReadLeaseV1::Renew
+                    && let Some(worktree) = mounted.get(&project_root)
+                {
                     worktree.residency.touch();
                 }
                 parts
@@ -1388,10 +1462,11 @@ impl CodeIndexSchedulerRegistryV1 {
     /// last complete generation for the whole rebuild window; a caller that
     /// serves it must type the answer as the last complete generation rather
     /// than current.
-    pub async fn latest_complete_serving_for_root_scope(
+    pub(crate) async fn latest_complete_serving_for_root_scope(
         &self,
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
+        lease: ServingReadLeaseV1,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = canonical_existing_identity(project_root).ok()?;
         let serving_generation = {
@@ -1402,7 +1477,9 @@ impl CodeIndexSchedulerRegistryV1 {
             {
                 return None;
             }
-            worktree.residency.touch();
+            if lease == ServingReadLeaseV1::Renew {
+                worktree.residency.touch();
+            }
             Arc::clone(&worktree.serving_generation)
         };
         let latest = serving_generation

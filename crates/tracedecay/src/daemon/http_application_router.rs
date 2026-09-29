@@ -119,7 +119,7 @@ pub(super) async fn install_remote_http_application_router(
         // store is reset-required no remote request can be admitted, so the
         // remote protocol stays unmounted until the operator's reset restarts
         // the daemon on a fresh profile.
-        Err(error) if error.store_reset_required("profile authority").is_some() => {
+        Err(error) if error.is_store_reset_required() => {
             log_daemon_event(
                 "remote_protocol_router_unmounted",
                 &[

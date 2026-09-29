@@ -270,7 +270,16 @@ mod tests {
         let stream = open(&path, &content, &mut window).unwrap().unwrap();
         assert_eq!(stream.content_hash(), sha256_hex(&content));
         assert_eq!(stream.byte_count(), content.len() as u64);
-        assert!(!format!("{stream:?}").contains("payload.payload"));
+        let debug = format!("{stream:?}");
+        assert_eq!(
+            &debug[debug.find("content_hash:").expect("content hash field")..],
+            format!(
+                "content_hash: \"{}\", byte_count: {}, path: \"<redacted>\" }}",
+                stream.content_hash(),
+                content.len()
+            )
+        );
+        assert!(!debug.contains("payload.payload"));
 
         let (output, chunk_sizes) = collect(stream, &mut window).unwrap();
         assert_eq!(output, content);

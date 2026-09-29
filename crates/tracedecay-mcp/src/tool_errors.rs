@@ -1,8 +1,10 @@
 //! Semantic tool-failure classification and JSON-RPC error-response mapping.
 
 use serde_json::{Value, json};
-use tracedecay_contracts::ApplicationProblem;
-use tracedecay_domain::errors::{PROFILE_RESET_COMMAND, TraceDecayError};
+use tracedecay_contracts::{ApplicationProblem, ApplicationProblemRecord};
+use tracedecay_domain::errors::{
+    PROFILE_RESET_COMMAND, STALE_STORE_RESET_COMMAND, TraceDecayError,
+};
 use tracedecay_domain::{
     CURSOR_INVALID_CODE, CURSOR_PARAMETER_CHANGED_CODE, CursorBindingMismatchV1,
 };
@@ -12,6 +14,10 @@ use crate::response_handles::{
 };
 use crate::tools::ToolResult;
 use crate::transport::{ErrorCode, JsonRpcResponse};
+
+/// Reason code for `tracedecay tool` flags or an `--args` payload that do not
+/// form a request for the named tool.
+pub const TOOL_ARGUMENTS_INVALID: &str = "tool_arguments_invalid";
 
 fn plain_text_tool_failure(text: &str) -> bool {
     text.starts_with("git error:") || text.starts_with("git diff failed:")
@@ -113,32 +119,21 @@ pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
         .map(|text| text.trim_start().to_string())
 }
 
-/// Moves a tool result's typed `problem` into its MCP structured content.
+/// The MCP `structuredContent` member of a tool result that refuses with
+/// `problem`.
 ///
-/// `CallToolResult` has no extension members, so a problem left beside
-/// `content` reaches MCP clients only as prose. Every route that answers
-/// `tools/call` to a host renders the refusal record here.
-pub fn structure_tool_problem(result: &mut Value) {
-    let Some(object) = result.as_object_mut() else {
-        return;
-    };
-    let Some(problem) = object.remove("problem") else {
-        return;
-    };
-    match object
-        .get_mut("structuredContent")
-        .and_then(Value::as_object_mut)
-    {
-        Some(structured) => {
-            structured.insert("problem".to_owned(), problem);
-        }
-        None => {
-            object.insert(
-                "structuredContent".to_owned(),
-                json!({ "problem": problem }),
-            );
-        }
-    }
+/// `CallToolResult` has no extension members, so structured content is the
+/// only place a typed record reaches MCP clients. Every route, and the
+/// `tracedecay tool --json` output, carries the refusal record there and
+/// nowhere else; [`tool_result_problem`] is its one reader.
+pub fn problem_structured_content(problem: &ApplicationProblemRecord) -> serde_json::Result<Value> {
+    Ok(json!({ "problem": serde_json::to_value(problem)? }))
+}
+
+/// The typed problem record a tool result refuses with, if any.
+#[must_use]
+pub fn tool_result_problem(result: &Value) -> Option<&Value> {
+    result.get("structuredContent")?.get("problem")
 }
 
 pub fn mark_semantic_tool_error(result: &mut ToolResult) {
@@ -161,7 +156,8 @@ pub fn cursor_refusal(mismatch: &CursorBindingMismatchV1) -> TraceDecayError {
 /// and application-surface layers. The boundary owns this translation so
 /// clients (and the catalog sweep) can read a truthful `kind` alongside the
 /// machine `code` instead of inferring from prose.
-fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
+#[must_use]
+pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
     match reason_code {
         "tool_dispatch_deadline_exceeded" => Some("deadline_exceeded"),
         "tool_dispatch_cancelled" => Some("cancelled"),
@@ -173,8 +169,10 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         | "mcp_dispatch_effect_journey_unverified"
         | "application_surface_unavailable" => Some("unavailable"),
         "application_surface_invalid_request"
+        | TOOL_ARGUMENTS_INVALID
         | "project_required"
         | "project_not_enrolled"
+        | "unknown_tool"
         | CURSOR_PARAMETER_CHANGED_CODE
         | CURSOR_INVALID_CODE => Some("invalid_request"),
         "application_surface_not_found_or_not_authorized" => Some("denied"),
@@ -387,6 +385,22 @@ fn is_project_store_authority(authority: &str) -> bool {
     PROJECT_STORE_AUTHORITIES.contains(&authority)
 }
 
+/// Authorities refused while admitting a registered store. The daemon holds
+/// that store in its typed reset-required state, so the scoped reset deletes
+/// exactly the refused stores.
+const REGISTERED_STORE_AUTHORITIES: [&str; 6] = [
+    "observations",
+    "session temporal",
+    "workflow",
+    "authority schema",
+    "LCM profile schema",
+    "git correlation profile schema",
+];
+
+fn is_registered_store_authority(authority: &str) -> bool {
+    REGISTERED_STORE_AUTHORITIES.contains(&authority)
+}
+
 /// Authorities whose refused shape was written into an agent host's files.
 /// No profile reset reaches it; its reset deletes exactly the block or
 /// package the refusal reason names.
@@ -418,6 +432,8 @@ pub fn reset_required_command(authority: &str, project_root: Option<&std::path::
         )
     } else if is_host_artifact_authority(authority) {
         "delete the block or package directory named in the refusal".to_string()
+    } else if is_registered_store_authority(authority) {
+        STALE_STORE_RESET_COMMAND.to_string()
     } else {
         PROFILE_RESET_COMMAND.to_string()
     }
@@ -445,6 +461,15 @@ pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::P
              content is deleted, nothing is backed up):\n  \
              {command}\n\
              the next managed-skill export writes the current shape"
+        );
+    }
+    if is_registered_store_authority(authority) {
+        return format!(
+            "refused authority: {authority}\n\
+             this binary does not open or migrate that shape; reset it (its old data is \
+             deleted, nothing is backed up):\n  \
+             {command}    deletes only the stores the daemon reports as requiring reset\n\
+             the daemon recreates each one empty"
         );
     }
     format!(
@@ -531,11 +556,11 @@ mod tests {
         let remedy = wire["error"]["data"]["remedy"]
             .as_str()
             .expect("the refusal names its reset command");
-        assert!(remedy.contains("tracedecay wipe --all --yes"), "{remedy}");
+        assert!(remedy.contains("tracedecay wipe --stale --yes"), "{remedy}");
         assert!(
             wire["error"]["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("tracedecay wipe --all --yes")),
+                .is_some_and(|message| message.contains("tracedecay wipe --stale --yes")),
             "the human-readable message must carry the reset command too: {wire}"
         );
         assert!(
@@ -567,9 +592,17 @@ mod tests {
         );
         assert!(!project.contains("wipe --all"), "{project}");
 
-        let profile = super::reset_required_remedy("session temporal", None);
-        assert!(profile.contains("refused authority: session temporal"));
-        assert!(!profile.contains("tracedecay update"), "{profile}");
+        let stale = super::reset_required_remedy("session temporal", None);
+        assert!(stale.contains("refused authority: session temporal"));
+        assert!(!stale.contains("tracedecay update"), "{stale}");
+        assert!(
+            stale.contains("\n  tracedecay wipe --stale --yes"),
+            "{stale}"
+        );
+        assert!(!stale.contains("wipe --all"), "{stale}");
+
+        let profile = super::reset_required_remedy("project registry", None);
+        assert!(profile.contains("refused authority: project registry"));
         assert!(
             profile.contains("\n  tracedecay wipe --all --yes"),
             "{profile}"

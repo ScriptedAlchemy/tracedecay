@@ -566,6 +566,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 entry
             }
         };
+        let residency = Arc::new(super::super::residency::WorktreeResidencyV1::new(
+            super::super::residency::WorktreeResidencyPartsV1 {
+                serving_generation: Arc::clone(&serving_generation),
+                serving_generation_epoch: Arc::clone(&serving_generation_epoch),
+                serving_generation_changed: Arc::clone(&serving_generation_changed),
+                complete_generation_requested: Arc::clone(&complete_generation_requested),
+                reconcile_in_progress: Arc::clone(&reconcile_in_progress),
+                publication: residency_publication,
+                text_generation: Arc::clone(&text_generation),
+            },
+        ));
+        let worker_residency = Arc::clone(&residency);
+        let worker_resident_owners = Arc::clone(&self.resident_owners);
         // Boxed at definition on purpose: this worker's state machine is the
         // largest future in the daemon (reconcile + text advance + decode +
         // activation + swap inline), and an unboxed `let` materializes the
@@ -1887,6 +1900,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                      the graph after the serving decode"
                                 ),
                                 Ok(Ok((replay_binding, Ok(reservation)))) => {
+                                    super::CodeIndexWorkerPhaseV1::enter(
+                                        &worker_phase_signal,
+                                        super::CodeIndexWorkerPhaseV1::PublishingGraph,
+                                    );
                                     let published = worker_graph_activation
                                         .publish_sealed_graph(
                                             &worker_project_id,
@@ -1897,6 +1914,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                             Arc::clone(&worker_shutting_down),
                                         )
                                         .await;
+                                    super::CodeIndexWorkerPhaseV1::enter(
+                                        &worker_phase_signal,
+                                        super::CodeIndexWorkerPhaseV1::Working,
+                                    );
                                     drop(reservation);
                                     match published {
                                         Ok(published) => graph_head_published = published,
@@ -2255,6 +2276,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 if activate_graph && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result {
                     graph_seat_attempted =
                         Some(latest.generation().manifest().generation_id.clone());
+                    super::CodeIndexWorkerPhaseV1::enter(
+                        &worker_phase_signal,
+                        super::CodeIndexWorkerPhaseV1::PublishingGraph,
+                    );
                     let activation = worker_graph_activation
                         .activate(
                             &worker_project_id,
@@ -2265,6 +2290,10 @@ impl CodeIndexSchedulerRegistryV1 {
                             Arc::clone(&worker_shutting_down),
                         )
                         .await;
+                    super::CodeIndexWorkerPhaseV1::enter(
+                        &worker_phase_signal,
+                        super::CodeIndexWorkerPhaseV1::Working,
+                    );
                     match activation {
                         Ok(()) => {
                             next_seat_attempt_at = None;
@@ -2811,6 +2840,14 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                 }
                 drop(reconcile_pass.take());
+                let refused_for_memory = matches!(
+                    &result,
+                    Ok((Err(error), _, _)) if error.is_resident_memory_refusal()
+                );
+                worker_residency.set_refresh_waits_for_memory(refused_for_memory);
+                if refused_for_memory {
+                    worker_residency.yield_serving_graph_to_refresh(&worker_resident_owners);
+                }
                 if let Ok((Ok(outcome), _, _)) = &result {
                     // A pass that ran to a terminal outcome proves neither the
                     // panicking input nor the capacity contention is still
@@ -3182,17 +3219,6 @@ impl CodeIndexSchedulerRegistryV1 {
             label = "daemon.code_index.scheduler_worker"
         ));
         self.register_worker_shutdown_signal(&shutting_down, &wake, &serving_generation_changed);
-        let residency = Arc::new(super::super::residency::WorktreeResidencyV1::new(
-            super::super::residency::WorktreeResidencyPartsV1 {
-                serving_generation: Arc::clone(&serving_generation),
-                serving_generation_epoch: Arc::clone(&serving_generation_epoch),
-                serving_generation_changed: Arc::clone(&serving_generation_changed),
-                complete_generation_requested: Arc::clone(&complete_generation_requested),
-                reconcile_in_progress: Arc::clone(&reconcile_in_progress),
-                publication: residency_publication,
-                text_generation: Arc::clone(&text_generation),
-            },
-        ));
         let residency_registration = Arc::clone(&residency).register(
             &self.resident_owners,
             tracedecay_runtime_core::resident_memory::ResidentOwnerScopeV1 {
@@ -3200,10 +3226,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree_id: worktree_id.clone(),
             },
         );
-        // A text-artifact build or a native graph refused for memory records
-        // no retry of its own; memory given back anywhere in the process is
-        // its retry. Only a missing or unfinished text owner or a graph parked
-        // on resident memory wakes: a pass on a finished worktree would
+        // A text-artifact build, a native graph or a refresh refused for
+        // memory has no retry that outlasts its bounded backoff; memory given
+        // back anywhere in the process is its retry. Only a missing or
+        // unfinished text owner, a graph parked on resident memory or a
+        // refresh refused for it wakes: a pass on a finished worktree would
         // re-seat the decode a release just gave back. The watcher holds no
         // strong reference, so it ends with the worktree.
         let mut headroom = self.resident_owners.subscribe_headroom();
@@ -3211,13 +3238,15 @@ impl CodeIndexSchedulerRegistryV1 {
         let headroom_wake = Arc::downgrade(&wake);
         let headroom_text = Arc::downgrade(&text_generation);
         let headroom_park = Arc::downgrade(&convergence_park);
+        let headroom_residency = Arc::downgrade(&residency);
         tokio::spawn(async move {
             while headroom.changed().await.is_ok() {
-                let (Some(pending_wake), Some(wake), Some(text), Some(park)) = (
+                let (Some(pending_wake), Some(wake), Some(text), Some(park), Some(residency)) = (
                     headroom_pending_wake.upgrade(),
                     headroom_wake.upgrade(),
                     headroom_text.upgrade(),
                     headroom_park.upgrade(),
+                    headroom_residency.upgrade(),
                 ) else {
                     return;
                 };
@@ -3233,7 +3262,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     .is_some_and(|parked| {
                         parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
                     });
-                if !text_unfinished && !graph_refused_for_memory {
+                if !text_unfinished
+                    && !graph_refused_for_memory
+                    && !residency.refresh_waits_for_memory()
+                {
                     continue;
                 }
                 Self::note_wake_if_idle(

@@ -655,10 +655,9 @@ fn read_outcomes_validate_exact_partial_stale_and_unavailable_coverage() {
         [watermark(project_shard("project.one"), 9)],
     )
     .unwrap();
-    RuntimeReadOutcomeV1::new(None, RuntimeReadCoverageV1::Stale { coverage: stale })
-        .unwrap()
-        .validate_for(&at_least)
-        .unwrap();
+    let stale_outcome =
+        RuntimeReadOutcomeV1::new(None, RuntimeReadCoverageV1::Stale { coverage: stale }).unwrap();
+    assert_eq!(stale_outcome.validate_for(&at_least), Ok(()));
 
     let exact_watermark = watermark(project_shard("project.one"), 8);
     let exact = read_request(
@@ -680,17 +679,25 @@ fn read_outcomes_validate_exact_partial_stale_and_unavailable_coverage() {
         [exact_watermark.clone()],
     )
     .unwrap();
-    RuntimeReadOutcomeV1::new(
-        Some(RuntimeReadResultV1::CurrentWatermark {
-            watermark: exact_watermark,
-        }),
-        RuntimeReadCoverageV1::Complete {
-            coverage: exact_coverage,
-        },
-    )
-    .unwrap()
-    .validate_for(&exact)
-    .unwrap();
+    assert_eq!(
+        RuntimeReadOutcomeV1::new(
+            Some(RuntimeReadResultV1::CurrentWatermark {
+                watermark: exact_watermark,
+            }),
+            RuntimeReadCoverageV1::Complete {
+                coverage: exact_coverage,
+            },
+        )
+        .unwrap()
+        .validate_for(&exact),
+        Ok(())
+    );
+    assert_eq!(
+        stale_outcome.validate_for(&exact),
+        Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+            field: "read coverage required vector",
+        })
+    );
 
     let required = FrozenWatermarkVectorV1::new([
         watermark(project_shard("project.one"), 10),
@@ -712,27 +719,31 @@ fn read_outcomes_validate_exact_partial_stale_and_unavailable_coverage() {
         ],
     )
     .unwrap();
-    RuntimeReadOutcomeV1::new(
-        Some(RuntimeReadResultV1::FrozenCoverage {
-            coverage: partial.clone(),
-        }),
-        RuntimeReadCoverageV1::Partial { coverage: partial },
-    )
-    .unwrap()
-    .validate_for(&frozen)
-    .unwrap();
+    assert_eq!(
+        RuntimeReadOutcomeV1::new(
+            Some(RuntimeReadResultV1::FrozenCoverage {
+                coverage: partial.clone(),
+            }),
+            RuntimeReadCoverageV1::Partial { coverage: partial },
+        )
+        .unwrap()
+        .validate_for(&frozen),
+        Ok(())
+    );
 
     let unavailable = FrozenWatermarkCoverageV1::new(required, []).unwrap();
-    RuntimeReadOutcomeV1::new(
-        None,
-        RuntimeReadCoverageV1::Unavailable {
-            coverage: Some(unavailable),
-            reason: UnavailableReasonV1::MissingAuthority,
-        },
-    )
-    .unwrap()
-    .validate_for(&frozen)
-    .unwrap();
+    assert_eq!(
+        RuntimeReadOutcomeV1::new(
+            None,
+            RuntimeReadCoverageV1::Unavailable {
+                coverage: Some(unavailable),
+                reason: UnavailableReasonV1::MissingAuthority,
+            },
+        )
+        .unwrap()
+        .validate_for(&frozen),
+        Ok(())
+    );
 }
 
 fn graph_node(id: &str, name: &str) -> GraphNodeV1 {

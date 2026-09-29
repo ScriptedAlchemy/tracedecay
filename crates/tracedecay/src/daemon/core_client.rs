@@ -22,6 +22,7 @@ pub(crate) use tracedecay_daemon_protocol::connection::{
 pub use tracedecay_daemon_protocol::daemon_tool_response_bound;
 use tracedecay_daemon_protocol::tool_request_deadline;
 use tracedecay_mcp::server::attach_stateless_request_context;
+use tracedecay_mcp::tool_errors::tool_result_problem;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::{
@@ -539,14 +540,14 @@ fn daemon_tool_call_error(error: JsonRpcError) -> TraceDecayError {
 /// the publication-window mounting refusal.
 ///
 /// A project-scoped owner that registers behind the core publication answers
-/// `application.runtime.mounting` while it is still mounting. The daemon
-/// renders that record under the tool result's `problem` member. An admitted
-/// terminal, and every other completed problem (a retained authority that is
-/// unavailable, a saturated owner, an observed diagnostic), is the answer:
-/// its `after_delay` directive is for the caller, not a transport loop.
+/// `application.runtime.mounting` while it is still mounting, on every route.
+/// An admitted terminal, and every other completed problem (a retained
+/// authority that is unavailable, a saturated owner, an observed diagnostic),
+/// is the answer: its `after_delay` directive is for the caller, not a
+/// transport loop.
 fn tool_result_retry_after_delay(result: &serde_json::Value) -> Option<Duration> {
     let record: tracedecay_contracts::ApplicationProblemRecord =
-        serde_json::from_value(result.get("problem")?.clone()).ok()?;
+        serde_json::from_value(tool_result_problem(result)?.clone()).ok()?;
     record.owner_mount_resend_delay()
 }
 
@@ -813,6 +814,13 @@ pub fn is_truncation_envelope(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tracedecay_contracts::{
+        ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef,
+        SafeDiagnostic,
+    };
+    use tracedecay_mcp::application_output::tool_result::ApplicationRefusal;
+    use tracedecay_mcp::tool_errors::mark_semantic_tool_error;
+    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
 
     use super::super::{
         JsonRpcError, PROJECT_SERVER_CAPACITY_REASON_CODE,
@@ -873,6 +881,63 @@ mod tests {
             .is_some(),
             "a revoked response is re-sent, not returned"
         );
+    }
+
+    /// A problem tool result as the daemon's projectless retained route
+    /// renders it.
+    fn projectless_problem_result(problem: ApplicationProblem) -> serde_json::Value {
+        let refusal = ApplicationRefusal {
+            operation: ApplicationSurfaceOperation::MessageSearch,
+            binding_id: BindingId::new("binding.mcp.message_search.v1").expect("binding id"),
+            problem: ApplicationProblemEnvelope::new(
+                ResultContractRef::new(
+                    SchemaId::new("schema.application.retained.message-search.result")
+                        .expect("schema id"),
+                    1,
+                )
+                .expect("result contract"),
+                RequestId::new("request.mcp.projectless-mounting").expect("request id"),
+                problem,
+            )
+            .expect("problem envelope"),
+        };
+        let mut result = refusal
+            .render(None, &json!({ "format": "json" }))
+            .expect("rendered refusal");
+        mark_semantic_tool_error(&mut result);
+        result.value
+    }
+
+    #[test]
+    fn projectless_mounting_refusal_is_re_sent_after_its_delay() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mounting = projectless_problem_result(ApplicationProblem::runtime_mounting());
+        assert_eq!(mounting.get("problem"), None);
+        assert_eq!(
+            (
+                &mounting["isError"],
+                &mounting["structuredContent"]["problem"]["diagnostic"]["code"],
+                &mounting["structuredContent"]["problem"]["retry"],
+                &mounting["structuredContent"]["problem"]["retry_after_millis"],
+            ),
+            (
+                &json!(true),
+                &json!("application.runtime.mounting"),
+                &json!("after_delay"),
+                &json!(250),
+            ),
+            "{mounting}"
+        );
+        assert_eq!(
+            super::project_open_retry_wait(&Ok(mounting), deadline),
+            Some(std::time::Duration::from_millis(250))
+        );
+
+        let answer = projectless_problem_result(ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.retained.authority-unavailable".to_owned(),
+            message: "no retained runtime is registered for this scope".to_owned(),
+        }));
+        assert_eq!(super::project_open_retry_wait(&Ok(answer), deadline), None);
     }
 
     #[test]

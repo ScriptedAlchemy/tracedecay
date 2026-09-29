@@ -327,6 +327,9 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     )
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
+    // Git reads answer a typed retryable `mounting` problem until project open
+    // installs the owner's authority; the journeys start from a served project.
+    await_published_code_index(environment.home(), &project);
 
     let handshake = tracedecay::daemon::handshake_for_current_client(
         environment.profile(),
@@ -2201,9 +2204,10 @@ async fn workflow_json_preserves_a_typed_application_problem_envelope() {
         .output()
         .expect("invoke Workflow CLI");
 
-    assert!(
-        output.status.success(),
-        "typed application problems are successful CLI transport responses: {}",
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a typed problem exits non-zero with its envelope on stdout: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("Workflow JSON stdout");

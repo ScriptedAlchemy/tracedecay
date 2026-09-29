@@ -1575,6 +1575,27 @@ mod auxiliary_scheduling_tests {
         assert!(
             PendingBatchDwell::from_selected(&bytes_full, &byte_limited, enqueued_at).is_none()
         );
+
+        let mut dwelling = tracedecay_store::AdmissionConfigV1::default();
+        dwelling.foreground_batch.max_delay_ms = 1;
+        dwelling
+            .validate()
+            .expect("a one millisecond foreground dwell is valid");
+        let pending = PendingBatchDwell::from_selected(
+            &[accepted_request(
+                4,
+                enqueued_at,
+                OperationPriorityV1::Foreground,
+                false,
+            )],
+            &dwelling,
+            enqueued_at,
+        )
+        .expect("one foreground request below both budgets opens a dwell");
+        assert_eq!(
+            pending.window.deadline.duration_since(enqueued_at),
+            Duration::from_millis(1)
+        );
     }
 
     #[test]
@@ -1655,7 +1676,25 @@ mod auxiliary_scheduling_tests {
     #[test]
     fn health_isolated_and_interrupted_requests_never_dwell() {
         let admitted_at = Instant::now();
-        let config = tracedecay_store::AdmissionConfigV1::default();
+        let mut config = tracedecay_store::AdmissionConfigV1::default();
+        config.foreground_batch.max_delay_ms = 1;
+        config
+            .validate()
+            .expect("a one millisecond foreground dwell is valid");
+        let foreground = BatchCoalescingWindow::new(
+            admitted_at,
+            tracedecay_store::OperationPriorityV1::Foreground,
+            false,
+            false,
+            1,
+            1,
+            &config,
+        )
+        .expect("an ordinary foreground request dwells");
+        assert_eq!(
+            foreground.deadline.duration_since(admitted_at),
+            Duration::from_millis(1)
+        );
 
         assert!(
             BatchCoalescingWindow::new(
@@ -1710,6 +1749,7 @@ mod auxiliary_scheduling_tests {
         )
         .expect("one final byte still fits");
 
+        assert!(window.accepts(admitted_at, true, true, false, false, 1));
         assert!(!window.accepts(admitted_at, false, true, false, false, 1));
         assert!(!window.accepts(admitted_at, true, false, false, false, 1));
         assert!(!window.accepts(admitted_at, true, true, true, false, 1));

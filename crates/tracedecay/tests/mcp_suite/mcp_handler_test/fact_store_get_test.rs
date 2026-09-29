@@ -14,7 +14,9 @@ use tracedecay::mcp::McpServer;
 use super::memory_facts_test::{
     FactStoreCrossProjectFixture, close_test_graph, fact_store_cross_project_fixture, setup_project,
 };
-use crate::support::{extract_real_server_text, handle_real_server_tool_call_raw};
+use crate::support::{
+    application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
+};
 
 async fn call_tool(server: &McpServer, tool_name: &str, arguments: Value) -> Value {
     handle_real_server_tool_call_raw(server, tool_name, arguments).await
@@ -70,12 +72,10 @@ fn assert_problem(document: &Value, kind: &str) {
 }
 
 fn assert_rejected_get(document: &Value, diagnostic: &str) {
-    let message = format!(
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_get: {diagnostic}"
+    assert_eq!(
+        *document,
+        application_invalid_request_error("tracedecay_fact_store_get", diagnostic)
     );
-    assert_eq!(document["code"], -32603, "{document}");
-    assert_eq!(document["data"]["tool"], "tracedecay_fact_store_get");
-    assert_eq!(document["message"], message);
 }
 
 async fn project_id(server: &McpServer) -> String {

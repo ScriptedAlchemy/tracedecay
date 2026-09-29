@@ -52,11 +52,16 @@ impl StoreRuntimeRegistry {
     /// Closes every mounted runtime that no lease, queued work, profile pin,
     /// or graph lease still holds, so each writer runs its shutdown TRUNCATE
     /// checkpoint. The daemon process exits with this registry reachable, so
-    /// no destructor closes these attachments otherwise. Held runtimes stay
-    /// mounted and are logged with their blockers. Returns the number of
-    /// runtimes closed.
+    /// no destructor closes these attachments otherwise. In-flight opens are
+    /// cancelled and joined first, so none publishes or keeps a physical
+    /// handle after the scan. Held runtimes stay mounted and are logged with
+    /// their blockers. Each reserved runtime owns its own writer and readers,
+    /// so they close concurrently and the shutdown waits for the slowest
+    /// checkpoint rather than their sum. Returns the number of runtimes
+    /// closed.
     #[hotpath::measure(label = "runtime_core.registry.close_idle_for_shutdown", future = true)]
     pub async fn close_idle_for_shutdown(&self) -> Result<usize, StoreRuntimeRegistryFailure> {
+        self.cancel_and_join_opens_for_shutdown().await;
         let (reservations, reserve_failure) = {
             let mut state = self.lock_state();
             let mut idle = Vec::new();
@@ -102,22 +107,26 @@ impl StoreRuntimeRegistry {
             }
             (reservations, reserve_failure)
         };
-        let registry = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let closed = reservations.len();
-            let mut first_failure = reserve_failure;
-            for reservation in reservations {
-                if let Err(failure) = registry.complete_eviction(reservation) {
-                    first_failure.get_or_insert(failure);
-                }
+        let closes = reservations
+            .into_iter()
+            .map(|reservation| {
+                let registry = self.clone();
+                tokio::task::spawn_blocking(move || registry.complete_eviction(reservation))
+            })
+            .collect::<Vec<_>>();
+        let closed = closes.len();
+        let mut first_failure = reserve_failure;
+        for close in closes {
+            if let Err(failure) = close.await.unwrap_or_else(|error| {
+                Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "join shutdown close of idle registered runtimes",
+                    message: error.to_string(),
+                })
+            }) {
+                first_failure.get_or_insert(failure);
             }
-            first_failure.map_or(Ok(closed), Err)
-        })
-        .await
-        .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "join shutdown close of idle registered runtimes",
-            message: error.to_string(),
-        })?
+        }
+        first_failure.map_or(Ok(closed), Err)
     }
 
     #[hotpath::measure(label = "runtime_core.registry.close_path")]

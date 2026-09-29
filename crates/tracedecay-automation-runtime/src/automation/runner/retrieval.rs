@@ -795,10 +795,12 @@ mod authority_tests {
             .err()
             .expect("non-project authority must not become project retrieval");
 
-        assert!(
-            error
-                .to_string()
-                .contains("registered project session runtime authority mismatch")
+        let tracedecay_domain::errors::TraceDecayError::Config { message } = error else {
+            panic!("non-project scope must be a config refusal, got {error}");
+        };
+        assert_eq!(
+            message,
+            "registered project session runtime authority mismatch"
         );
     }
 

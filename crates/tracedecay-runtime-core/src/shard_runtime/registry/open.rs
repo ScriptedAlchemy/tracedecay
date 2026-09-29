@@ -252,6 +252,11 @@ impl StoreRuntimeRegistry {
                 };
             }
 
+            if self.inner.open_cancellation.is_cancelled() {
+                return StoreRuntimeOpenBegin::Rejected(
+                    StoreRuntimeRegistryFailure::OpenCancelled { key: Box::new(key) },
+                );
+            }
             let authority_epoch = match state.graph_publications.get(&key) {
                 Some(graph) => graph.binding.authority_epoch,
                 None => match allocate_authority_epoch() {
@@ -360,6 +365,12 @@ impl StoreRuntimeRegistry {
                 }
                 (outcome, _) => outcome,
             };
+            let outcome = match outcome {
+                Ok((published, ..)) if registry.inner.open_cancellation.is_cancelled() => {
+                    Err(close_cancelled_open(&key, published).await)
+                }
+                outcome => outcome,
+            };
             guard.complete(outcome);
         });
         StoreRuntimeOpenBegin::Started(join)
@@ -396,6 +407,32 @@ impl StoreRuntimeRegistry {
         }
     }
 
+    /// Cancels every open and waits until each in-flight attempt has settled,
+    /// so none can publish or hold a physical handle afterwards.
+    pub(super) async fn cancel_and_join_opens_for_shutdown(&self) {
+        self.cancel_opens_for_shutdown();
+        let openings = self
+            .lock_state()
+            .entries
+            .values()
+            .filter_map(|entry| match entry {
+                RegistryEntry::Opening(opening) => Some(opening.updates.subscribe()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for mut updates in openings {
+            // A closed channel means the attempt's guard already settled it.
+            loop {
+                if !matches!(*updates.borrow_and_update(), OpenState::Opening) {
+                    break;
+                }
+                if updates.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
     fn fail_reserved_open(
         &self,
         key: &StoreRuntimeKey,
@@ -427,6 +464,7 @@ impl StoreRuntimeRegistry {
         Result<BuiltShardRuntimePublication, StoreRuntimeRegistryFailure>,
     > {
         Box::pin(async move {
+            self.open_checkpoint(key)?;
             let resolved = self
                 .inner
                 .resolver
@@ -457,6 +495,7 @@ impl StoreRuntimeRegistry {
                 }
             }
             let locator = RuntimeLocatorRecord::new(key.clone(), resolved);
+            self.open_checkpoint(key)?;
             let published = self
                 .inner
                 .publisher
@@ -466,6 +505,7 @@ impl StoreRuntimeRegistry {
                     mode,
                     access,
                     database_authority.clone(),
+                    self.inner.open_cancellation.clone(),
                 ))
                 .await?;
             if published.binding() != &binding {
@@ -476,6 +516,36 @@ impl StoreRuntimeRegistry {
             }
             Ok((published, locator, database_authority))
         })
+    }
+
+    fn open_checkpoint(&self, key: &StoreRuntimeKey) -> Result<(), StoreRuntimeRegistryFailure> {
+        if self.inner.open_cancellation.is_cancelled() {
+            return Err(StoreRuntimeRegistryFailure::OpenCancelled {
+                key: Box::new(key.clone()),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Closes a runtime that finished opening after shutdown cancelled it, so the
+/// open ends with nothing published and no physical handle left behind.
+async fn close_cancelled_open(
+    key: &StoreRuntimeKey,
+    published: PublishedShardRuntime,
+) -> StoreRuntimeRegistryFailure {
+    let close = tokio::task::spawn_blocking(move || close_unpublished_runtime(published))
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+    match close {
+        Ok(()) => StoreRuntimeRegistryFailure::OpenCancelled {
+            key: Box::new(key.clone()),
+        },
+        Err(message) => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "close cancelled registered runtime open",
+            message,
+        },
     }
 }
 

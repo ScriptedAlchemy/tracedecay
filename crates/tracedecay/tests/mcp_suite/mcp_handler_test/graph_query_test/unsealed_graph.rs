@@ -87,7 +87,7 @@ async fn graph_reads_refuse_as_unavailable_until_the_graph_seals() {
         ),
     ] {
         let result = tool_result(&harness, &project, tool, arguments).await;
-        let problem = &result["problem"];
+        let problem = &result["structuredContent"]["problem"];
         assert_eq!(
             (
                 &result["isError"],

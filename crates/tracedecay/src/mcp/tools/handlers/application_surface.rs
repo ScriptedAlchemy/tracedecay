@@ -8,7 +8,8 @@ use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
-    ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationToolRequest,
+    parse_application_surface_request,
 };
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -19,7 +20,6 @@ use tracedecay_mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
-use tracedecay_project::project::TraceDecay;
 
 pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
@@ -88,9 +88,11 @@ fn complete_protocol_controls_with_ceiling(
     Ok(Some((deadline, cancellation)))
 }
 
+/// Run one application-surface tool through `executor` and render its result,
+/// spilling oversized payloads under `response_handle_root` when one is given.
 #[hotpath::measure(future = true, label = "mcp.application.surface.total")]
-pub(super) async fn handle_application_surface(
-    cg: &TraceDecay,
+pub async fn handle_application_surface(
+    response_handle_root: Option<&std::path::Path>,
     operation: ApplicationSurfaceOperation,
     normalized: ApplicationToolRequest,
     executor: Option<&dyn DaemonInvocationExecutor>,
@@ -114,11 +116,7 @@ pub(super) async fn handle_application_surface(
                 &error,
             )
             .await;
-            return Err(TraceDecayError::project_route(
-                "application_surface_invalid_request",
-                false,
-                error.to_string(),
-            ));
+            return Err(error.into_trace_decay_error());
         }
     };
     let controls = complete_protocol_controls(
@@ -159,36 +157,8 @@ pub(super) async fn handle_application_surface(
             .await
         }
     }
-    .map_err(application_surface_dispatch_error)?;
-    render_application_surface_result(Some(&cg.store_layout().response_handle_root), &result)
-}
-
-/// Map surface-resolution failures to typed reason codes so MCP clients see
-/// truthful unavailable/denied states instead of an untyped internal error.
-fn application_surface_dispatch_error(
-    error: tracedecay_daemon_protocol::ApplicationSurfaceAdapterError,
-) -> TraceDecayError {
-    use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError as AdapterError;
-    let (reason_code, retryable) = match &error {
-        AdapterError::DaemonUnavailable => ("application_surface_unavailable", true),
-        // Keep the transport's own reason code (`daemon_connect_down` /
-        // `daemon_connect_saturated`) so every dispatch surface names the
-        // dead-daemon state identically.
-        AdapterError::DaemonUnreachable { reason_code, .. } => {
-            return TraceDecayError::project_route(reason_code.clone(), true, error.to_string());
-        }
-        AdapterError::UnknownOrNotAuthorized => {
-            ("application_surface_not_found_or_not_authorized", false)
-        }
-        AdapterError::InvalidRequestHandle | AdapterError::InvalidSurfaceRequest { .. } => {
-            ("application_surface_invalid_request", false)
-        }
-        AdapterError::Catalog(_)
-        | AdapterError::Contract(_)
-        | AdapterError::Identifier(_)
-        | AdapterError::CatalogValidation(_) => ("application_surface_catalog_invalid", false),
-    };
-    TraceDecayError::project_route(reason_code, retryable, error.to_string())
+    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
+    render_application_surface_result(response_handle_root, &result)
 }
 
 /// Render one settled application-surface call as its tool result. MCP and
@@ -280,19 +250,19 @@ pub fn retained_tool_target(
                 | Op::LcmExpandQuery
                 | Op::MessageSearch
         ) {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "unknown parameter `storage_scope` for `tracedecay_{}`",
-                    operation.as_str()
-                ),
-            });
+            return Err(ApplicationSurfaceAdapterError::invalid_request(format!(
+                "unknown parameter `storage_scope` for `tracedecay_{}`",
+                operation.as_str()
+            ))
+            .into_trace_decay_error());
         }
         return match storage_scope.as_str() {
             Some("user") => Ok(InvocationTarget::Profile),
             Some("project") => Ok(InvocationTarget::CurrentProject),
-            _ => Err(TraceDecayError::Config {
-                message: "storage_scope must be one of project, user".to_owned(),
-            }),
+            _ => Err(ApplicationSurfaceAdapterError::invalid_request(
+                "storage_scope must be one of project, user",
+            )
+            .into_trace_decay_error()),
         };
     }
     let profile = match operation {
@@ -350,19 +320,15 @@ pub async fn execute_retained_surface_tool(
     if let Some(arguments) = args.as_object_mut() {
         arguments.remove("storage_scope");
     }
-    let normalized =
-        tracedecay_daemon_protocol::separate_application_tool_request(args).map_err(|error| {
-            TraceDecayError::Config {
-                message: error.to_string(),
-            }
-        })?;
+    let normalized = tracedecay_daemon_protocol::separate_application_tool_request(args)
+        .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     let requested_format = normalized.requested_format;
     let request = hotpath::measure_block!(
         "mcp.retained.decode",
         tracedecay_daemon_protocol::decode_retained_request(retained, normalized.request)
     )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("invalid retained application request for {tool_name}: {error}"),
+    .map_err(|error| {
+        ApplicationSurfaceAdapterError::invalid_request(error).into_trace_decay_error()
     })?;
     let request_id = match protocol_request_id {
         Some(request_id) => request_id,
@@ -392,7 +358,7 @@ pub async fn execute_retained_surface_tool(
         cancellation,
         requested_format,
     )
-    .map_err(application_surface_dispatch_error)?;
+    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     dispatched.invocation.invocation.scope = target;
     let binding_id = dispatched.invocation.binding_id.clone();
     let result_contract =
@@ -425,13 +391,11 @@ pub async fn execute_retained_surface_tool(
         .await
         {
             Ok(result) => result.result,
-            Err(
-                tracedecay_daemon_protocol::ApplicationSurfaceAdapterError::DaemonUnreachable {
-                    reason_code,
-                    detail,
-                },
-            ) => Err(unavailable(reason_code, detail)?),
-            Err(error) => return Err(application_surface_dispatch_error(error)),
+            Err(ApplicationSurfaceAdapterError::DaemonUnreachable {
+                reason_code,
+                detail,
+            }) => Err(unavailable(reason_code, detail)?),
+            Err(error) => return Err(error.into_trace_decay_error()),
         },
     };
     Ok(RetainedSurfaceExecution {
@@ -466,16 +430,8 @@ pub async fn execute_graph_tool_surface(
     let profile_owner_request = args
         .as_object()
         .is_some_and(|arguments| operation.is_profile_owner_request(arguments));
-    let request = parse_application_surface_request(operation, args).map_err(|error| {
-        TraceDecayError::Config {
-            message: match error {
-                tracedecay_daemon_protocol::ApplicationSurfaceAdapterError::InvalidSurfaceRequest {
-                    detail,
-                } => detail,
-                error => error.to_string(),
-            },
-        }
-    })?;
+    let request = parse_application_surface_request(operation, args)
+        .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     let request_id = match protocol_request_id {
         Some(request_id) => request_id,
         None => self::request_id()?,
@@ -502,7 +458,7 @@ pub async fn execute_graph_tool_surface(
         cancellation,
         RequestedOutputFormat::Json,
     )
-    .map_err(application_surface_dispatch_error)?;
+    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     // A request that names no project, only the profile, is the daemon's
     // profile owner's whatever project this caller's executor serves.
     if profile_owner_request {
@@ -513,7 +469,7 @@ pub async fn execute_graph_tool_surface(
         operation, dispatched, executor,
     )
     .await
-    .map_err(application_surface_dispatch_error)?
+    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?
     .result;
     settle_graph_tool_result(operation, binding_id, result)
 }
@@ -612,7 +568,25 @@ pub(crate) fn graph_tool_error_problem(
             retryable,
             detail,
             ..
-        } => graph_tool_unavailable(reason_code, *retryable, detail),
+        } => match (!*retryable)
+            .then(|| tracedecay_mcp::tool_errors::project_route_problem_kind(reason_code))
+            .flatten()
+        {
+            // A retryable route refusal is a transient state the caller
+            // rides out, whatever reason code it carries.
+            Some("invalid_request") => {
+                tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
+                    reason_code.clone(),
+                    safe_diagnostic_message(detail),
+                )
+            }
+            Some("denied") => {
+                tracedecay_contracts::ApplicationProblem::not_found_or_not_authorized(
+                    tracedecay_contracts::RetryDirective::Never,
+                )
+            }
+            _ => graph_tool_unavailable(reason_code, *retryable, detail),
+        },
         error => tracedecay_contracts::ApplicationProblem::ExecutionFailed {
             classification: tracedecay_contracts::ApplicationExecutionFailureClassV1::Permanent,
             diagnostic: tracedecay_contracts::SafeDiagnostic {
@@ -737,16 +711,22 @@ mod tests {
             (
                 Op::MemoryStatus,
                 json!({"memory_scope": "user", "storage_scope": "user"}),
-                "unknown parameter `storage_scope` for `tracedecay_memory_status`",
+                "application surface request does not match its reviewed schema: unknown \
+                 parameter `storage_scope` for `tracedecay_memory_status`",
             ),
             (
                 Op::LcmDoctor,
                 json!({"storage_scope": "hermes_profile"}),
-                "storage_scope must be one of project, user",
+                "application surface request does not match its reviewed schema: \
+                 storage_scope must be one of project, user",
             ),
         ] {
             let error = retained_tool_target(operation, &arguments).unwrap_err();
-            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(
+                error.project_route_context(),
+                Some(("application_surface_invalid_request", false, message)),
+                "{error}"
+            );
         }
     }
 
@@ -985,7 +965,7 @@ mod tests {
             tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut rendered);
 
             assert_eq!(rendered.value["isError"], true, "{error}");
-            let problem = &rendered.value["problem"];
+            let problem = &rendered.value["structuredContent"]["problem"];
             assert_eq!(problem["kind"], kind, "{error}");
             assert_eq!(problem["code"], code, "{error}");
             assert_eq!(problem["retry"], retry, "{error}");

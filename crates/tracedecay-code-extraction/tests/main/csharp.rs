@@ -346,6 +346,34 @@ public class Foo
 }
 
 #[test]
+fn test_cs_attribute_inside_preprocessor_conditional() {
+    let source = r#"
+public class Foo
+{
+#if DEBUG
+    [Conditional("DEBUG")]
+#elif TRACE
+    [Traced]
+#else
+    [Obsolete]
+#endif
+    public void Log() {}
+}
+"#;
+    let extractor = CSharpExtractor;
+    let result = extractor.extract_artifact("test.cs", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [
+            ("Conditional", "Log"),
+            ("Traced", "Log"),
+            ("Obsolete", "Log")
+        ]
+    );
+}
+
+#[test]
 fn test_cs_inheritance() {
     let source = r#"
 public interface IAnimal

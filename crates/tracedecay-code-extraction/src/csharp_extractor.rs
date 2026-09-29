@@ -298,6 +298,7 @@ impl CSharpExtractor {
             column: start_column,
             file_path: state.file_path.clone(),
             unmodeled_import: None,
+            argument_count: None,
         });
     }
 
@@ -1192,6 +1193,7 @@ impl CSharpExtractor {
                         column: start_column,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
 
                     if let Some(ref tid) = target_id {
@@ -1452,6 +1454,7 @@ impl CSharpExtractor {
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
                 if !cursor.goto_next_sibling() {
@@ -1472,8 +1475,15 @@ impl CSharpExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "attribute_list" {
-                    Self::visit_attribute_list_for_target(state, child, target_id);
+                match child.kind() {
+                    "attribute_list" => {
+                        Self::visit_attribute_list_for_target(state, child, target_id);
+                    }
+                    // `#if`/`#elif`/`#else` around an attribute nest its `attribute_list`.
+                    "preproc_if_in_attribute_list" | "preproc_elif" | "preproc_else" => {
+                        Self::extract_attributes_from_declaration(state, child, target_id);
+                    }
+                    _ => {}
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1658,6 +1668,7 @@ impl CSharpExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
@@ -1671,6 +1682,7 @@ impl CSharpExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }

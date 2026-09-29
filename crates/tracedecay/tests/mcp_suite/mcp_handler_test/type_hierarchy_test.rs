@@ -214,6 +214,12 @@ async fn type_hierarchy_reports_literal_trees_and_typed_refusals() {
     for (arguments, context) in [
         (json!({}), "a missing node_id"),
         (json!({"node_id": "   "}), "a blank node_id"),
+        // Inside the request's 4 KiB text bound, past the 512-byte occurrence
+        // id bound: the port, not the contract, must refuse it.
+        (
+            json!({"node_id": "x".repeat(600)}),
+            "a node_id that is not an occurrence id",
+        ),
         (
             json!({"node_id": named, "maximum_depth": 0}),
             "maximum_depth 0",
@@ -239,7 +245,10 @@ async fn type_hierarchy_reports_literal_trees_and_typed_refusals() {
         .as_ref()
         .unwrap_or_else(|| panic!("{absent:?}"));
     assert_eq!(
-        (&absent["isError"], &absent["problem"]["kind"]),
+        (
+            &absent["isError"],
+            &absent["structuredContent"]["problem"]["kind"],
+        ),
         (&json!(true), &json!("not_found_or_not_authorized")),
         "an absent root is a typed miss, not an empty hierarchy: {absent}"
     );
@@ -333,7 +342,8 @@ fn assert_refused(response: &JsonRpcResponse, context: &str) {
         .and_then(|error| error.data.as_ref())
         .is_some_and(|data| data["reason_code"] == "application_surface_invalid_request");
     let refused_by_contract = response.result.as_ref().is_some_and(|result| {
-        result["isError"] == true && result["problem"]["kind"] == "invalid_request"
+        result["isError"] == true
+            && result["structuredContent"]["problem"]["kind"] == "invalid_request"
     });
     assert!(
         refused_at_parse || refused_by_contract,

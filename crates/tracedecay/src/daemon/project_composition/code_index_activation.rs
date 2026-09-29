@@ -6,7 +6,11 @@
 
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler::{
-    CodeIndexDemandAdmissionV1, CodeIndexDemandV1, query_runtime::QueryRuntimeMountErrorV1,
+    CodeIndexDemandAdmissionV1, CodeIndexDemandV1,
+    query_runtime::{
+        DeferredMountAttemptV1, QueryRuntimeMountErrorV1,
+        retry_deferred_query_authority_until_serving,
+    },
 };
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_temporal_store::SessionTemporalAccess;
@@ -67,11 +71,6 @@ pub(super) fn code_index_activation_mount(
                 }
                 let query_project_id = project_id.clone();
                 let query_graph_runtime = Arc::clone(&graph_runtime);
-                // Order-sensitive: subscribing before the mount is what keeps the
-                // first generation publication observable by the waiter below.
-                let publications = invocation
-                    .code_index_schedulers
-                    .subscribe_generation_publications();
                 let mount = invocation.mount_code_index(
                     project_id,
                     &project_root,
@@ -96,7 +95,6 @@ pub(super) fn code_index_activation_mount(
                 // mounted. Keep that wait in its own route-fenced task.
                 spawn_query_authority_when_generation_ready(QueryAuthorityWaitInputs {
                     invocation: invocation.clone(),
-                    publications,
                     project_root: project_root.clone(),
                     project_id: query_project_id,
                     graph_runtime: query_graph_runtime,
@@ -115,8 +113,6 @@ pub(super) fn code_index_activation_mount(
 /// Route-fenced inputs for the post-mount query-authority wait.
 struct QueryAuthorityWaitInputs {
     invocation: DaemonInvocationState,
-    publications:
-        tokio::sync::broadcast::Receiver<code_index_scheduler::CodeIndexGenerationPublishedV1>,
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,
     graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
@@ -125,99 +121,72 @@ struct QueryAuthorityWaitInputs {
     cancellation: CancellationToken,
 }
 
-/// Wait for this project's first sealed generation, then mount the checked-in
-/// core query policy from the project's durable cursor-key authority. Route revocation (which cancels this route's own token) and a
-/// closed publication channel each end the wait without mounting.
+/// Wait for this project's first retained generation, then mount the
+/// checked-in core query policy from the project's durable cursor-key
+/// authority. Route revocation (which cancels this route's own token) ends
+/// the wait without mounting.
 ///
-/// A publication is announced before its generation is seated, and a retained
-/// `Noop` restore seats without announcing at all, so the subscription alone
-/// can miss the first serving generation. The serving-seat signal covers both:
-/// every slot write records a seat, and the loop re-reads the exact state
-/// (`latest_generation_id`) on each wake. Subscribing before the first read is
-/// what keeps a seat that lands during it observable.
+/// The wait is the same one the full route's deferred mount uses: a restart
+/// restores its retained generation without announcing it and may leave the
+/// decoded serving slot empty, so only the retained text owner proves the
+/// generation a mount needs.
 fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs) {
     let QueryAuthorityWaitInputs {
-        invocation: authority_invocation,
-        mut publications,
-        project_root: authority_project,
-        project_id: authority_project_id,
-        graph_runtime: authority_graph_runtime,
-        scope: authority_scope,
-        route_registered: authority_route_registered,
-        cancellation: authority_cancellation,
+        invocation,
+        project_root,
+        project_id,
+        graph_runtime,
+        scope,
+        route_registered,
+        cancellation,
     } = inputs;
     tokio::spawn(hotpath::future!(
         async move {
-            // Order-sensitive: subscribe before the first exact-state read.
-            let mut seats = authority_invocation
-                .code_index_schedulers
-                .subscribe_serving_seats();
-            let generation_ready = loop {
-                if authority_invocation
-                    .code_index_schedulers
-                    .latest_generation_id(&authority_project)
-                    .await
-                    .is_some()
-                {
-                    break true;
-                }
-                tokio::select! {
-                    () = authority_cancellation.cancelled() => break false,
-                    Ok(()) = seats.changed() => {}
-                    publication = publications.recv() => match publication {
-                        Ok(publication) if publication.project_root == authority_project => {
-                            break true;
-                        }
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break false,
-                    }
-                }
-            };
-            if !generation_ready
-                || authority_cancellation.is_cancelled()
-                || !authority_route_registered.load(Ordering::Acquire)
-            {
-                return;
-            }
+            let schedulers = invocation.code_index_schedulers.clone();
             let mut awaiting_generation_logged = false;
-            loop {
-                let outcome = tokio::select! {
-                    biased;
-                    () = authority_cancellation.cancelled() => return,
-                    outcome = mount_core_query_authority_from_project_sessions(
-                        &authority_invocation,
-                        &authority_graph_runtime,
-                        &authority_project_id,
-                        &authority_project,
-                        &authority_scope,
-                    ) => outcome,
-                };
-                if authority_cancellation.is_cancelled()
-                    || !authority_route_registered.load(Ordering::Acquire)
-                {
-                    return;
-                }
-                match outcome {
-                    Err(error @ QueryRuntimeMountErrorV1::GenerationUnavailable) => {
-                        if !awaiting_generation_logged {
-                            log_query_authority_activation_outcome(&authority_project, Err(error));
-                            awaiting_generation_logged = true;
+            let retry = retry_deferred_query_authority_until_serving(
+                &schedulers,
+                project_root.clone(),
+                || {
+                    let first_await = !awaiting_generation_logged;
+                    awaiting_generation_logged = true;
+                    let invocation = invocation.clone();
+                    let graph_runtime = Arc::clone(&graph_runtime);
+                    let project_id = project_id.clone();
+                    let project_root = project_root.clone();
+                    let scope = scope.clone();
+                    let route_registered = Arc::clone(&route_registered);
+                    async move {
+                        if !route_registered.load(Ordering::Acquire) {
+                            return DeferredMountAttemptV1::Terminal;
                         }
-                        tokio::select! {
-                            () = authority_cancellation.cancelled() => return,
-                            Ok(()) = seats.changed() => {}
-                            publication = publications.recv() => match publication {
-                                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                            }
+                        let outcome = mount_core_query_authority_from_project_sessions(
+                            &invocation,
+                            &graph_runtime,
+                            &project_id,
+                            &project_root,
+                            &scope,
+                        )
+                        .await;
+                        let awaiting = matches!(
+                            outcome,
+                            Err(QueryRuntimeMountErrorV1::GenerationUnavailable)
+                        );
+                        if !awaiting || first_await {
+                            log_query_authority_activation_outcome(&project_root, outcome);
+                        }
+                        if awaiting {
+                            DeferredMountAttemptV1::AwaitNextPublication
+                        } else {
+                            DeferredMountAttemptV1::Terminal
                         }
                     }
-                    outcome => {
-                        log_query_authority_activation_outcome(&authority_project, outcome);
-                        return;
-                    }
-                }
+                },
+            );
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {}
+                () = retry => {}
             }
         },
         label = "daemon.project.activate.query_authority"
@@ -233,7 +202,10 @@ async fn mount_core_query_authority_from_project_sessions(
     project_root: &Path,
     scope: &tracedecay_contracts::ResolvedScope,
 ) -> std::result::Result<(), QueryRuntimeMountErrorV1> {
-    let Some(session_db) = graph_runtime.mounted_project_sessions(project_id).await else {
+    let Some(session_db) = graph_runtime
+        .mounted_project_session_store(project_id)
+        .await
+    else {
         return Err(QueryRuntimeMountErrorV1::Mount(
             "project session database is not mounted".to_owned(),
         ));

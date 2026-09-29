@@ -211,7 +211,7 @@ async fn persist_derived_record(
     control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
     checkpoint_relation_rebuild_control(control)?;
-    ensure_derived_anchor(conn, record).await?;
+    ensure_derived_anchor(conn, session_id, generation, record).await?;
     let evidence_json =
         serde_json::to_string(record).map_err(|error| storage(PERSIST_OPERATION, error))?;
     conn.execute(
@@ -263,19 +263,30 @@ async fn persist_derived_record(
     Ok(())
 }
 
+/// The evidence foreign key binds its first occurrence to the same session
+/// generation; `occurrence_id` alone is unindexed and scanned every occurrence.
+const DERIVED_ANCHOR_OWNER_SQL: &str = "SELECT anchor.owner_json
+     FROM session_occurrences AS occurrence
+     JOIN retrieval_anchors AS anchor
+       ON anchor.anchor_id = occurrence.retrieval_anchor_id
+     WHERE occurrence.session_id = ?1
+       AND occurrence.generation = ?2
+       AND occurrence.occurrence_id = ?3";
+
 async fn ensure_derived_anchor(
     conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+    generation: i64,
     record: &SessionDerivedEvidenceRecordV1,
 ) -> SessionStoreResult<()> {
     let mut owner_rows = conn
         .query(
-            "SELECT anchor.owner_json
-             FROM session_occurrences AS occurrence
-             JOIN retrieval_anchors AS anchor
-               ON anchor.anchor_id = occurrence.retrieval_anchor_id
-             WHERE occurrence.occurrence_id = ?1
-             LIMIT 1",
-            params![record.first_occurrence_id().as_str()],
+            DERIVED_ANCHOR_OWNER_SQL,
+            params![
+                session_id.as_str(),
+                generation,
+                record.first_occurrence_id().as_str()
+            ],
         )
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?;

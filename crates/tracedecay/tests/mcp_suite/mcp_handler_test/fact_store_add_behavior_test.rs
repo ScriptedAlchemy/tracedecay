@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
 use crate::support::{
-    ProductionCompositionFixture, handle_real_server_tool_call_raw, production_composition_fixture,
+    ProductionCompositionFixture, application_invalid_request_error,
+    handle_real_server_tool_call_raw, production_composition_fixture,
 };
 
 const TOOL: &str = "tracedecay_fact_store_add";
@@ -575,7 +576,7 @@ async fn fact_store_add_user_scope_stores_a_profile_owned_fact() {
     close_fixture(fixture).await;
 }
 
-fn assert_argument_error(response: &Value, message: &str) {
+fn assert_argument_error(response: &Value, detail: &str) {
     assert!(
         response.get("result").is_none(),
         "a decode rejection must be a JSON-RPC error, not a tool result: {response}"
@@ -583,14 +584,7 @@ fn assert_argument_error(response: &Value, message: &str) {
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(
         response["error"],
-        json!({
-            "code": -32603,
-            "message": message,
-            "data": {
-                "tool": TOOL,
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool fact_store_add ...` (`tracedecay tool fact_store_add --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-            }
-        })
+        application_invalid_request_error(TOOL, detail)
     );
 }
 
@@ -652,7 +646,8 @@ async fn fact_store_add_rejects_unknown_fields_categories_and_out_of_range_trust
             }),
         )
         .await,
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_add: category: unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`",
+        "category: unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, \
+         `tool`, `decision`, `code_area`",
     );
     assert_argument_error(
         &call_add(
@@ -663,11 +658,12 @@ async fn fact_store_add_rejects_unknown_fields_categories_and_out_of_range_trust
             }),
         )
         .await,
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_add: action: unknown field `action`, expected one of `content`, `memory_scope`, `category`, `tags`, `entities`, `trust`, `source_label`, `metadata`, `project_selector`",
+        "action: unknown field `action`, expected one of `content`, `memory_scope`, `category`, \
+         `tags`, `entities`, `trust`, `source_label`, `metadata`, `project_selector`",
     );
     assert_argument_error(
         &call_add(&fixture.server, json!({"category": "decision"})).await,
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_add: missing field `content`",
+        "missing field `content`",
     );
 
     for trust in [1.5, -0.1] {

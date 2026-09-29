@@ -12,6 +12,8 @@ pub(crate) mod lcm_privacy_rescan;
 #[cfg(test)]
 mod lcm_schema;
 #[cfg(test)]
+mod schema_install_cancellation;
+#[cfg(test)]
 mod session_sync;
 
 #[cfg(test)]

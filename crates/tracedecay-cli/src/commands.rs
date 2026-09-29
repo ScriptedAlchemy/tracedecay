@@ -6,6 +6,7 @@ mod index;
 mod profile_storage;
 mod scope;
 mod settings;
+mod stale_store_reset;
 mod storage;
 
 pub(crate) use admin_project::{
@@ -26,6 +27,7 @@ pub(crate) use settings::{
     handle_upload_counter, mutate_project_configuration, project_configuration_set,
     report_configuration_receipt,
 };
+pub(crate) use stale_store_reset::handle_wipe_stale;
 pub(crate) use storage::{
     ProfileOfflineAuthority, annotate_reset_required, handle_list, handle_wipe,
     join_outcome_and_restore, process_error_text, take_profile_offline, try_admit_profile_registry,

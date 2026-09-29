@@ -6,8 +6,9 @@
 #![cfg(all(target_os = "linux", target_env = "gnu"))]
 
 use tracedecay_runtime_core::resident_memory::{
-    ProcessAllocatorTrimV1, install_process_allocator_release_v1, release_c_library_heap_v1,
-    release_process_allocator_memory_v1, sampled_process_resident_bytes_v1,
+    ProcessAllocatorReleaseV1, ProcessAllocatorTrimV1, install_process_allocator_release_v1,
+    release_c_library_heap_v1, release_process_allocator_memory_v1,
+    sampled_process_resident_bytes_v1,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -87,7 +88,11 @@ fn assert_release_returns_freed_c_heap(label: &str, release: fn() -> ProcessAllo
 /// that freed heap back.
 #[test]
 fn releases_return_freed_c_heap_while_a_rust_allocator_release_is_installed() {
-    install_process_allocator_release_v1(rust_allocator_release).expect("first installation");
+    install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
+        release: rust_allocator_release,
+        collect_calling_thread: rust_allocator_release,
+    })
+    .expect("first installation");
     assert_release_returns_freed_c_heap("full release", release_process_allocator_memory_v1);
     assert_release_returns_freed_c_heap("sampling release", release_c_library_heap_v1);
 }

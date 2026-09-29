@@ -1187,6 +1187,47 @@ async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
     replacement.shutdown().await.expect("replacement shutdown");
 }
 
+/// A project open that loses its runtime registration to daemon shutdown
+/// drops its observability owner, whose background drain holds the store
+/// lease; shutdown joins that drain before the stores close.
+#[tokio::test]
+async fn joined_retirement_drains_settle_a_dropped_last_alias() {
+    let (_project, project_id, database, _runtime) = runtime("observability-joined-drop").await;
+    let registry = StoreObservabilityRegistryV1::default();
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "daemon:joined-drop".to_owned(),
+        producer_revision: "producer.v1".to_owned(),
+        configuration_revision: digest('6').as_str().to_owned(),
+        policy_revision: digest('7').as_str().to_owned(),
+    };
+    let mount_as = |process_boot_id: &str| {
+        let identity = ObservabilityProducerIdentityV1 {
+            process_boot_id: process_boot_id.to_owned(),
+            ..identity.clone()
+        };
+        registry.acquire_or_start(&database, &store_mount(&identity), || {
+            BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 1)
+                .map_err(StoreObservabilityMountErrorV1::Unavailable)
+        })
+    };
+    drop(mount_as("daemon:joined-drop").expect("registered observability producer"));
+    assert!(matches!(
+        mount_as("daemon:joined-drop-overlap"),
+        Err(StoreObservabilityMountErrorV1::Retiring)
+    ));
+
+    registry.join_retirement_drains().await;
+
+    let replacement = mount_as("daemon:joined-drop-replacement")
+        .expect("a joined drain vacated the store for a fresh owner");
+    assert_eq!(
+        replacement.producer().identity().process_boot_id,
+        "daemon:joined-drop-replacement"
+    );
+    replacement.shutdown().await.expect("replacement shutdown");
+}
+
 #[tokio::test]
 async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_confirms() {
     let (_project, project_id, database, _runtime) =

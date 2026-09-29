@@ -11,8 +11,8 @@
 use serde_json::{Value, json};
 
 use crate::support::{
-    extract_real_server_text, handle_real_server_tool_call_raw, production_composition_fixture,
-    retained_envelope_payload,
+    application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
+    production_composition_fixture, retained_envelope_payload,
 };
 
 const REMOVED_CONTENT: &str = "Cerulean ledger stores the quay invoice under dock 17.";
@@ -22,9 +22,9 @@ const STALE_EVENT_ID: &str = "event.stale-remove-token";
 const TOOL: &str = "tracedecay_fact_store_remove";
 const REMOVE_RESULT_SCHEMA: &str = "schema.application.retained.fact-store-remove.result";
 
-const MISSING_FACT_ID_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_remove: missing field `fact_id`";
-const NUMERIC_FACT_ID_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_remove: fact_id: invalid type: integer `41`, expected a string";
-const UNKNOWN_FIELD_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_remove: action: unknown field `action`, expected one of `fact_id`, `expected_last_event_id`, `memory_scope`, `project_selector`";
+const MISSING_FACT_ID_DETAIL: &str = "missing field `fact_id`";
+const NUMERIC_FACT_ID_DETAIL: &str = "fact_id: invalid type: integer `41`, expected a string";
+const UNKNOWN_FIELD_DETAIL: &str = "action: unknown field `action`, expected one of `fact_id`, `expected_last_event_id`, `memory_scope`, `project_selector`";
 
 struct AddedFact {
     fact_id: String,
@@ -35,11 +35,7 @@ struct AddedFact {
 enum ToolAnswer {
     Payload(Value),
     Problem(Value),
-    Protocol {
-        code: i64,
-        message: String,
-        tool: String,
-    },
+    Protocol(Value),
 }
 
 async fn call_tool(
@@ -49,20 +45,7 @@ async fn call_tool(
 ) -> ToolAnswer {
     let response = handle_real_server_tool_call_raw(server, tool_name, arguments).await;
     if !response["error"].is_null() {
-        let error = &response["error"];
-        return ToolAnswer::Protocol {
-            code: error["code"]
-                .as_i64()
-                .unwrap_or_else(|| panic!("JSON-RPC error code: {response}")),
-            message: error["message"]
-                .as_str()
-                .unwrap_or_else(|| panic!("JSON-RPC error message: {response}"))
-                .to_owned(),
-            tool: error["data"]["tool"]
-                .as_str()
-                .unwrap_or_else(|| panic!("JSON-RPC error tool: {response}"))
-                .to_owned(),
-        };
+        return ToolAnswer::Protocol(response["error"].clone());
     }
     let result = &response["result"];
     let text = extract_real_server_text(result);
@@ -80,26 +63,14 @@ fn payload(answer: ToolAnswer) -> Value {
     match answer {
         ToolAnswer::Payload(payload) => payload,
         ToolAnswer::Problem(problem) => panic!("expected a payload, got a problem: {problem}"),
-        ToolAnswer::Protocol {
-            code,
-            message,
-            tool,
-        } => {
-            panic!("expected a payload, got JSON-RPC {code} from {tool}: {message}")
-        }
+        ToolAnswer::Protocol(error) => panic!("expected a payload, got a JSON-RPC error: {error}"),
     }
 }
 
-fn assert_protocol_error(answer: ToolAnswer, message: &str) {
+fn assert_protocol_error(answer: ToolAnswer, detail: &str) {
     match answer {
-        ToolAnswer::Protocol {
-            code,
-            message: actual,
-            tool,
-        } => {
-            assert_eq!(code, -32603, "{actual}");
-            assert_eq!(tool, TOOL);
-            assert_eq!(actual, message);
+        ToolAnswer::Protocol(error) => {
+            assert_eq!(error, application_invalid_request_error(TOOL, detail));
         }
         ToolAnswer::Payload(payload) => {
             panic!("expected a protocol error, got a payload: {payload}")
@@ -333,11 +304,11 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
 
     assert_protocol_error(
         call_tool(&server, TOOL, json!({})).await,
-        MISSING_FACT_ID_MESSAGE,
+        MISSING_FACT_ID_DETAIL,
     );
     assert_protocol_error(
         call_tool(&server, TOOL, json!({"fact_id": 41})).await,
-        NUMERIC_FACT_ID_MESSAGE,
+        NUMERIC_FACT_ID_DETAIL,
     );
     assert_protocol_error(
         call_tool(
@@ -346,7 +317,7 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
             json!({"fact_id": "not-a-fact", "action": "remove"}),
         )
         .await,
-        UNKNOWN_FIELD_MESSAGE,
+        UNKNOWN_FIELD_DETAIL,
     );
 
     let empty = payload(
@@ -672,16 +643,7 @@ impl std::fmt::Debug for ToolAnswer {
         match self {
             Self::Payload(payload) => formatter.debug_tuple("Payload").field(payload).finish(),
             Self::Problem(problem) => formatter.debug_tuple("Problem").field(problem).finish(),
-            Self::Protocol {
-                code,
-                message,
-                tool,
-            } => formatter
-                .debug_struct("Protocol")
-                .field("code", code)
-                .field("message", message)
-                .field("tool", tool)
-                .finish(),
+            Self::Protocol(error) => formatter.debug_tuple("Protocol").field(error).finish(),
         }
     }
 }

@@ -839,7 +839,7 @@ async fn install_profile_worker_plan(
         // dead daemon. Its persisted worker selection is unreadable, so the
         // plan runs on the selection a reset profile initializes to until the
         // operator resets it.
-        Err(error) if error.store_reset_required("profile sessions").is_some() => {
+        Err(error) if error.is_store_reset_required() => {
             log_daemon_event(
                 "profile_worker_plan_reset_required",
                 &[

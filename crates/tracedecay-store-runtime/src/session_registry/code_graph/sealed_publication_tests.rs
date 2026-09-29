@@ -592,6 +592,177 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
     });
 }
 
+/// A publication refused or interrupted after its journal append leaves a
+/// pending replay, and retention moves that superseded generation's seal
+/// into the project replay pool. The next generation's publication journals
+/// while it holds that pool, so it must set the superseded predecessor
+/// aside without rebuilding its rows from the pooled seal: it lands its own
+/// head in one call and the predecessor's row is gone from the journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_predecessor_pooled_by_retention_yields_to_the_next_generation() {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn pooled_predecessor_value() -> usize { 1 }\n",
+    )
+    .expect("project source");
+    git(&project_root, &["add", "."]);
+    git(&project_root, &["commit", "-qm", "predecessor generation"]);
+    let project_id = ProjectId::new("project.pooled-pending-predecessor").expect("project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let canonical_project = project_root.canonicalize().expect("canonical project root");
+    let scoped_store =
+        scoped_code_index_store_root(&root.join("code-index-store"), &canonical_project);
+    let generations_root = scoped_store.join("code-generations-v1");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &canonical_project,
+        scoped_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open worktree scheduler");
+    let sealed = |scheduler: &mut CodeIndexWorktreeSchedulerV1| {
+        scheduler.reconcile_now().expect("seal generation");
+        let latest = scheduler.latest_complete().expect("complete generation");
+        let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+            &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+                .expect("active generation pointer"),
+        )
+        .expect("decode active generation pointer");
+        (latest, pointer.state_digest)
+    };
+    let (predecessor, predecessor_digest) = sealed(&mut scheduler);
+
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        53,
+        "pooled pending predecessor",
+    )
+    .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(project_id.clone(), [canonical_project.clone()])
+        .await
+        .expect("project graph database");
+    let worktree_id = scheduler.identity().worktree_id().clone();
+    let predecessor_runtime = registry
+        .retain_code_graph_runtime(
+            project_id.clone(),
+            predecessor.generation().snapshot().repository.clone(),
+            worktree_id.clone(),
+            predecessor.generation().snapshot().reference.clone(),
+            predecessor.generation().manifest().generation_id.clone(),
+            Arc::clone(&project_database),
+            CodeGraphReplayBindingV1 {
+                generations_root: generations_root.clone(),
+                sealed_state_digest: SealedGraphStateDigest::try_from(predecessor_digest.clone())
+                    .expect("predecessor sealed state digest"),
+            },
+        )
+        .await
+        .expect("retain predecessor code graph runtime");
+    journal_publication_without_head(&predecessor_runtime);
+    let (_, predecessor_key) = publication_key(&predecessor_runtime);
+    drop(predecessor);
+
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn pooled_predecessor_value() -> usize { 2 }\n\
+         pub fn successor_value() -> usize { pooled_predecessor_value() }\n",
+    )
+    .expect("successor project source");
+    git(&project_root, &["add", "."]);
+    git(&project_root, &["commit", "-qm", "successor generation"]);
+    let (successor, successor_digest) = sealed(&mut scheduler);
+    let successor_runtime = registry
+        .retain_code_graph_runtime(
+            project_id,
+            successor.generation().snapshot().repository.clone(),
+            worktree_id,
+            successor.generation().snapshot().reference.clone(),
+            successor.generation().manifest().generation_id.clone(),
+            Arc::clone(&project_database),
+            CodeGraphReplayBindingV1 {
+                generations_root: generations_root.clone(),
+                sealed_state_digest: SealedGraphStateDigest::try_from(successor_digest)
+                    .expect("successor sealed state digest"),
+            },
+        )
+        .await
+        .expect("retain successor code graph runtime");
+    let (_, successor_key) = publication_key(&successor_runtime);
+
+    drop(
+        super::seals::lock_project_graph_replay_pool(&successor_runtime.replay_root, &|| Ok(()))
+            .expect("create the project replay pool"),
+    );
+    let seal_file = format!(
+        "generation-{}.json",
+        sha256_hex_suffix(&predecessor_digest).expect("sha256 predecessor digest")
+    );
+    std::fs::rename(
+        generations_root.join(&seal_file),
+        successor_runtime.replay_root.join(&seal_file),
+    )
+    .expect("retention pools the superseded predecessor seal");
+
+    // Publishing this fixture takes well under a second; an unbounded wait
+    // answers the watchdog's cancellation instead of hanging the suite.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (finished, watchdog_wait) = std::sync::mpsc::channel::<()>();
+    let watchdog = {
+        let cancelled = Arc::clone(&cancelled);
+        std::thread::spawn(move || {
+            if watchdog_wait.recv_timeout(Duration::from_secs(60)).is_err() {
+                cancelled.store(true, Ordering::Release);
+            }
+        })
+    };
+    let published = successor_runtime.publish_verified_snapshot(Arc::clone(&cancelled));
+    drop(finished);
+    watchdog.join().expect("publication watchdog");
+    let snapshot = published.expect("the successor publishes past its pooled pending predecessor");
+    assert_eq!(snapshot.verified_head().key, successor_key);
+    with_publication_context("inspect-pooled-pending-predecessor", |context| {
+        let mut storage = successor_runtime
+            .project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        assert!(matches!(
+            storage
+                .replay(&predecessor_key, context)
+                .expect("predecessor replay lookup"),
+            GraphPublicationReplayLookupV1::Missing
+        ));
+        assert!(matches!(
+            storage
+                .replay(&successor_key, context)
+                .expect("successor replay lookup"),
+            GraphPublicationReplayLookupV1::Active(_)
+        ));
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sealed_generation_publishes_and_republishes_without_eager_replay_payload() {
     let temporary = tempfile::tempdir().expect("temporary fixture parent");
@@ -1223,7 +1394,8 @@ async fn graph_reads_during_engine_warm_up_are_typed_pending_and_warmed_reads_su
     let is_warming = |outcome: &Result<_, CodeGraphProjectionError>| {
         matches!(
             outcome,
-            Err(CodeGraphProjectionError::Unavailable(detail)) if detail.contains("warming")
+            Err(CodeGraphProjectionError::Unavailable(detail))
+                if detail == "code graph engine is warming in the background"
         )
     };
     let started = Instant::now();
@@ -1330,13 +1502,114 @@ async fn a_released_serving_engine_closes_and_rewarms_on_the_next_read() {
     );
 }
 
-/// A pending predecessor owns the projector revision its durable replay
-/// recorded, even after the current reader advanced. The provider rebuilds
-/// that exact historical generation's rows from the seal on disk, and the
-/// rebuilt rows bind the digests the predecessor journaled, which is what
-/// lets an interrupted predecessor finish before the current publication
-/// appends. A foreign sealed digest is refused, and nothing is served once
-/// the seal is gone.
+/// A crate of documented functions that call each other and structs with
+/// methods, so the graph carries symbol records, docstrings, and edges.
+fn accounting_source(functions: usize) -> String {
+    let mut source = String::new();
+    for ordinal in 0..functions {
+        let next = (ordinal + 1) % functions;
+        write!(
+            source,
+            "/// Transform the input for step {ordinal} and hand it to step {next}.\n\
+             pub fn transform_{ordinal}(input: &str, limit: usize) -> usize {{\n    \
+             let total = input.len().min(limit) * {ordinal};\n    \
+             if total > 7 {{ transform_{next}(input, limit - 1) }} else {{ total }}\n}}\n\n\
+             /// Holder for step {ordinal}.\npub struct Holder{ordinal} {{ value: u32 }}\n\n\
+             impl Holder{ordinal} {{\n    /// The held value, doubled.\n    \
+             pub fn doubled(&self) -> u32 {{ self.value * 2 + transform_{ordinal}(\"x\", 1) as u32 }}\n}}\n\n"
+        )
+        .expect("write source");
+    }
+    source
+}
+
+fn within_a_tenth(charged: u64, measured: isize) -> bool {
+    let measured = u64::try_from(measured).expect("an owner holds a positive byte count");
+    charged * 10 >= measured * 9 && charged * 10 <= measured * 11
+}
+
+/// What the resident-memory inventory charges the serving graph owners is
+/// what admission subtracts and what pressure release expects back, so each
+/// owner's charge must be the heap its release gives back, and together the
+/// engine's cold open and the catalog's build must leave nothing live that
+/// neither owner charges.
+///
+/// Fails if either owner reports a structural estimate that leaves out the
+/// maps, strings, and spare capacity it allocates, or if warming the graph
+/// retains heap that no owner charges or releases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serving_graph_owners_charge_the_heap_they_hold() {
+    use tracedecay_code_index::graph_projection::{
+        CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1, CodeGraphProjectionStore,
+    };
+
+    let fixture =
+        sealed_generation_fixture("project.graph-owner-accounting", &accounting_source(600)).await;
+    let snapshot = fixture
+        .runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("seal the code graph");
+    let store =
+        CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
+            .expect("projection store over the sealed snapshot");
+    store.warm_serving_engine().expect("first warm");
+    assert!(matches!(
+        store.release_serving_engine().expect("release"),
+        CodeGraphEngineReleaseV1::Released { .. }
+    ));
+
+    let ((), warmed) = crate::thread_allocation::live_after(|| {
+        store.warm_serving_engine().expect("cold warm");
+        store
+            .warm_interactive_catalog_with_cancellation(Arc::new(
+                tracedecay_graph_db::NeverCancelled,
+            ))
+            .expect("catalog warm");
+    });
+    let catalog_charge = store
+        .interactive_catalog_bytes()
+        .expect("a warmed catalog reports its bytes");
+    let engine_charge = store
+        .serving_engine_bytes()
+        .expect("engine bytes")
+        .expect("a pinned engine reports its bytes");
+
+    let (catalog_release, catalog_freed) =
+        crate::thread_allocation::live_after(|| store.release_interactive_catalog());
+    assert_eq!(
+        catalog_release,
+        CodeGraphCatalogReleaseV1::Released {
+            bytes: catalog_charge
+        }
+    );
+    let (engine_release, engine_freed) = crate::thread_allocation::live_after(|| {
+        store.release_serving_engine().expect("engine release")
+    });
+    assert_eq!(
+        engine_release,
+        CodeGraphEngineReleaseV1::Released {
+            bytes: Some(engine_charge)
+        }
+    );
+
+    assert!(
+        within_a_tenth(catalog_charge, -catalog_freed)
+            && within_a_tenth(engine_charge, -engine_freed)
+            && within_a_tenth(catalog_charge + engine_charge, warmed),
+        "graph_catalog charges {catalog_charge} bytes and its release freed {}; \
+         graph_engine charges {engine_charge} bytes and its release freed {}; \
+         warming both left {warmed} bytes live",
+        -catalog_freed,
+        -engine_freed
+    );
+}
+
+/// A journaled replay owns the projector revision it recorded, even after
+/// the current reader advanced. The provider rebuilds that exact historical
+/// generation's rows from the seal on disk, and the rebuilt rows bind the
+/// digests the replay journaled, which is what lets recovery re-project a
+/// journaled generation. A foreign sealed digest is refused, and nothing is
+/// served once the seal is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn historical_predecessor_rows_rebuild_from_the_seal_at_their_journaled_revision() {
     use tracedecay_graph_db::{
