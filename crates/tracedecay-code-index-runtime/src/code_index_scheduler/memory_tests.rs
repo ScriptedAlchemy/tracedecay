@@ -15,6 +15,7 @@ use tracedecay_runtime_core::resident_memory::{
 
 use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
 
+use super::publication_store::{ActiveGenerationDecodeChargeV1, ActiveGenerationWorkV1};
 use super::tests::OwnerSignals;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
@@ -455,7 +456,23 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
     );
     let limit = NonZeroU64::new(worker_reservation_bytes(&runtime).saturating_mul(4))
         .expect("positive test limit");
-    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let measured = Arc::new(Mutex::new(None));
+    let sampled = Arc::clone(&measured);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            sampled
+                .lock()
+                .expect("measurement")
+                .map(|unreclaimable_bytes| ProcessResidentSampleV1 {
+                    resident_bytes: unreclaimable_bytes,
+                    unreclaimable_bytes,
+                    swapped_bytes: 0,
+                    cgroup_committed_bytes: None,
+                })
+        }),
+    ));
+    let measure = |bytes: u64| *measured.lock().expect("measurement") = Some(bytes);
     scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
         limit,
         Arc::clone(&pressure),
@@ -468,7 +485,7 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
             .expect("an unobserved process admits on the reservation ceiling alone"),
     );
 
-    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
+    measure(pressure.high_watermark_bytes() + 1);
     let failure = scheduler
         .reserve_worker_memory()
         .expect_err("measured RSS over the high watermark refuses new worker admission");
@@ -499,14 +516,14 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
         pressure.high_watermark_bytes(),
     );
     for _ in 0..3 {
-        pressure.publish_observed_resident_bytes(between);
+        measure(between);
         assert!(
             scheduler.reserve_worker_memory().is_err(),
             "admission must not flap between the watermarks"
         );
     }
 
-    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    measure(pressure.low_watermark_bytes());
     drop(
         scheduler
             .reserve_worker_memory()
@@ -581,6 +598,101 @@ fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
     let refreshed = scheduler
         .reconcile_now()
         .expect("the refresh is admitted within measured headroom");
+    assert!(matches!(
+        refreshed,
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    let latest = scheduler.latest_complete().expect("refreshed generation");
+    let mut symbols = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.as_str())
+        .collect::<Vec<_>>();
+    symbols.sort_unstable();
+    assert_eq!(
+        symbols,
+        [
+            "src/lib.rs::refreshed_generation",
+            "src/lib.rs::retained_generation"
+        ]
+    );
+}
+
+/// A refresh decodes its active parent generation and builds under one worker
+/// slab. Here another holder leaves the parent's measured decode plus 64 MiB
+/// below the admission watermark: room for the parent, not for the parent
+/// beside a 128 MiB worker. The refresh still publishes, with its slab
+/// planned against what the resident parent leaves.
+#[test]
+fn a_refresh_decodes_its_parent_before_planning_its_worker_slab() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-refresh-parent-decode").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    bind_automatic_worker_runtime(
+        &scheduler,
+        8,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
+    let limit = NonZeroU64::new(4 * GIB).expect("limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 0,
+                unreclaimable_bytes: 0,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let high_watermark = pressure.high_watermark_bytes();
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+    assert!(matches!(
+        scheduler.reconcile_now().expect("cold index publishes"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    scheduler
+        .publication
+        .release_decoded_active_after_seal()
+        .expect("release the sealed decode");
+    let ActiveGenerationDecodeChargeV1::Measured {
+        bytes: decode_bytes,
+        ..
+    } = scheduler
+        .publication
+        .active_generation_charge(ActiveGenerationWorkV1::Decode)
+        .expect("decode charge")
+    else {
+        panic!("the cold index measured the generation it published");
+    };
+    let holder_bytes = high_watermark - authority.snapshot().used_bytes - decode_bytes - 64 * MIB;
+    let _holder = authority
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-text-build").expect("component"),
+            NonZeroU64::new(holder_bytes).expect("holder bytes"),
+        )
+        .expect("the holder fits the ledger");
+
+    fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn retained_generation() -> u32 { 1 }\npub fn refreshed_generation() -> u32 { 2 }\n",
+    )
+    .expect("write source");
+    git(project.path(), &["commit", "-q", "-am", "refresh"]);
+    let refreshed = scheduler
+        .reconcile_now()
+        .expect("the refresh decodes its parent and builds");
     assert!(matches!(
         refreshed,
         CodeIndexReconcileOutcomeV1::Published(_)

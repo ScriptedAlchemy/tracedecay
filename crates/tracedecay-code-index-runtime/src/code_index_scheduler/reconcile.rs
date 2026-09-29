@@ -1403,20 +1403,30 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Reserve the installed worker plan on the canonical process authority.
     /// The returned RAII guard spans source capture and the complete production
     /// build, releasing on success, typed failure, cancellation, or unwind.
+    ///
+    /// Every build decodes its active parent generation under this slab, and
+    /// that decode is admitted against the ledger the slab is part of. The
+    /// parent is decoded first, so the slab is planned against the headroom
+    /// the resident parent leaves instead of refusing the parent for the slab
+    /// this same build just took.
     pub(super) fn reserve_worker_memory(
         &self,
     ) -> Result<ResidentMemoryReservationV1, CodeIndexSchedulerErrorV1> {
         let _workers = self.ensure_worker_plan()?;
+        self.publication
+            .load_active_shared()
+            .map_err(CodeIndexProductionErrorV1::Publication)?;
         let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
         let snapshot = self.resident_memory.snapshot();
         // Admission refuses a request larger than the measured headroom, so
         // the slab is planned against that too: the ledger alone does not see
         // live state no owner charges, and a width planned from it asks for
-        // more than the process has left and is refused on every retry.
+        // more than the process has left and is refused on every retry. The
+        // decoded parent is such state, so the measurement is taken now.
         let pressure = self.resident_memory.pressure();
         let measured_remaining = pressure
             .limit_bytes()
-            .saturating_sub(pressure.state().observed_bytes().unwrap_or(0));
+            .saturating_sub(pressure.measure_admission_bytes());
         let remaining = snapshot
             .limit_bytes
             .saturating_sub(snapshot.used_bytes)
