@@ -655,6 +655,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
     let socket = temp.path().join("daemon.sock");
     let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let (client_done, client_done_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         super::super::reject_saturated_daemon_client(
@@ -666,6 +667,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
             },
         )
         .await;
+        accept_liveness_probes_until(&listener, client_done_rx).await;
     });
 
     let error = tokio::time::timeout(
@@ -687,6 +689,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
         message.contains("daemon client capacity reached"),
         "expected a matching saturation response, got: {message}"
     );
+    client_done.send(()).expect("fake daemon awaits the client");
     server.await.expect("saturation server task");
 }
 
