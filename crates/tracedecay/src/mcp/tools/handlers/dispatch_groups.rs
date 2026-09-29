@@ -700,17 +700,20 @@ async fn compute_run_affected_tests(
     args: Value,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
-    let store = options.registered_project_session_db.clone().ok_or_else(|| {
-        TraceDecayError::project_route(
-            "runtime_mounting",
-            true,
-            "managed test runs are recorded in the project session store, which is still mounting",
-        )
-    })?;
-    let recording = workflow::ManagedTestRunRecording {
-        store,
-        session_id: mcp_analytics_session_id(&args),
-    };
+    let recording = options
+        .registered_project_session_db
+        .clone()
+        .map(|store| workflow::ManagedTestRunRecording {
+            store,
+            session_id: mcp_analytics_session_id(&args),
+        })
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "runtime_mounting",
+                true,
+                "managed test runs are recorded in the project session store, which is still mounting",
+            )
+        });
     workflow::compute_run_affected_tests(
         cg,
         admitted_graph_query(options, "file_dependents"),

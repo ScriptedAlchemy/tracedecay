@@ -453,12 +453,14 @@ pub struct ManagedTestRunRecording {
 
 /// Computes `tracedecay_run_affected_tests` on the graph-tool owner's side:
 /// selects the tests covering the changed-path manifest, runs them once each,
-/// and reports every observed outcome.
+/// and reports every observed outcome. `recording` carries the owner's typed
+/// refusal when the session store is not mounted; it is surfaced only once a
+/// run would be recorded, after request validation and graph admission.
 pub async fn compute_run_affected_tests<F>(
     cg: &TraceDecay,
     graph: F,
     args: Value,
-    recording: ManagedTestRunRecording,
+    recording: Result<ManagedTestRunRecording>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<GraphToolCompletionV1>
 where
@@ -482,7 +484,7 @@ async fn run_affected_tests_with_runner<F, Runner, RunFuture>(
     cg: &TraceDecay,
     graph: F,
     request: RunAffectedTestsSurfaceRequestV1,
-    recording: ManagedTestRunRecording,
+    recording: Result<ManagedTestRunRecording>,
     cancellation: Option<CancellationSignal>,
     runner: Runner,
 ) -> Result<GraphToolCompletionV1>
@@ -541,7 +543,7 @@ where
         cg,
         &changed_paths,
         ManagedTestRunAdmission {
-            recording,
+            recording: recording?,
             started_at,
             deadline: effective_deadline,
             code_generation_id: graph.generation().clone(),

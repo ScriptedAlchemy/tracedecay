@@ -51,7 +51,8 @@ where
         session_id: None,
     };
     let completion =
-        run_affected_tests_with_runner(cg, graph, request, recording, cancellation, runner).await?;
+        run_affected_tests_with_runner(cg, graph, request, Ok(recording), cancellation, runner)
+            .await?;
     crate::handlers::graph_tool::render_graph_tool(None, &args, completion)
 }
 
@@ -568,6 +569,84 @@ async fn non_string_changed_paths_are_rejected_before_test_selection() {
     assert_eq!(
         error.to_string(),
         "config error: invalid arguments for tracedecay_run_affected_tests: invalid type: integer `7`, expected a string"
+    );
+
+    cg.close();
+}
+
+/// The project session store is needed only to record a run, so an unmounted
+/// store answers a selection that runs nothing and refuses a run that would
+/// be recorded, before the runner starts.
+#[tokio::test]
+async fn unmounted_session_store_refuses_only_a_run_it_would_record() {
+    let profile = tempfile::TempDir::new().unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
+        dir.path(),
+        "project.mcp-affected-tests-unmounted-store",
+    )
+    .await
+    .unwrap();
+    let unmounted = || {
+        Err(TraceDecayError::project_route(
+            "runtime_mounting",
+            true,
+            "session store fixture is still mounting",
+        ))
+    };
+    let graph = || {
+        verified_graph(&[FixtureSymbol {
+            path: "tests/covered.rs",
+            qualified_name: "covered",
+            annotated_test: true,
+        }])
+    };
+    let request = |path: &str| {
+        serde_json::from_value(json!({ "changed_paths": [path] })).expect("typed request")
+    };
+
+    let uncovered = run_affected_tests_with_runner(
+        &cg,
+        ready(Ok(graph())),
+        request("src/unrelated.rs"),
+        unmounted(),
+        None,
+        |_root, _profile, _tests, _timeout_duration, _control| async move {
+            panic!("an uncovered change must not start the test runner")
+        },
+    )
+    .await
+    .expect("a selection that runs nothing needs no session store");
+    let GraphToolResultV1::RunAffectedTests(RunAffectedTestsResultV1::NotRun(not_run)) =
+        uncovered.result
+    else {
+        panic!("an uncovered change is a not-run answer");
+    };
+    assert_eq!(
+        not_run.note.as_deref(),
+        Some("no tests cover the changed paths (1 file(s))")
+    );
+
+    let error = run_affected_tests_with_runner(
+        &cg,
+        ready(Ok(graph())),
+        request("tests/covered.rs"),
+        unmounted(),
+        None,
+        |_root, _profile, _tests, _timeout_duration, _control| async move {
+            panic!("a run that cannot be recorded must not start the test runner")
+        },
+    )
+    .await
+    .expect_err("a run that would be recorded refuses the unmounted store");
+    assert_eq!(
+        error.project_route_context(),
+        Some((
+            "runtime_mounting",
+            true,
+            "session store fixture is still mounting"
+        ))
     );
 
     cg.close();
