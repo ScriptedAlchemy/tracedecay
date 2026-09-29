@@ -177,6 +177,7 @@ pub struct FactStoreListRequestV1 {
 #[cfg(test)]
 mod tests {
     use schemars::schema_for;
+    use serde::de::DeserializeOwned;
     use serde_json::{Value, json};
 
     use super::{
@@ -185,62 +186,72 @@ mod tests {
     };
     use crate::retained_surfaces::FactFeedbackRequestV1;
 
+    fn rejection<T: DeserializeOwned>(body: Value) -> String {
+        serde_json::from_value::<T>(body)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string()
+    }
+
+    fn assert_unknown_field(error: &str, field: &str) {
+        assert!(
+            error.starts_with(&format!("unknown field `{field}`, expected one of")),
+            "{error}"
+        );
+    }
+
     #[test]
     fn route_selected_fact_request_rejects_an_action_tag() {
-        assert!(
-            serde_json::from_value::<FactStoreSearchRequestV1>(json!({
-                "action": "search",
-                "query": "session"
-            }))
-            .is_err()
+        assert_eq!(
+            rejection::<FactStoreSearchRequestV1>(json!({"action": "search", "query": "session"})),
+            "unknown field `action`"
         );
     }
 
     #[test]
     fn exact_fact_requests_reject_legacy_aliases_and_numeric_ids() {
-        for alias in [
-            json!({"content": "remember", "entity": "compiler"}),
-            json!({"content": "remember", "source": "operator"}),
-            json!({"content": "remember", "project_id": "project.alpha"}),
-            json!({"content": "remember", "project_path": "/tmp/project"}),
-            json!({"content": "remember", "format": "json"}),
+        for (field, value) in [
+            ("entity", json!("compiler")),
+            ("source", json!("operator")),
+            ("project_id", json!("project.alpha")),
+            ("project_path", json!("/tmp/project")),
+            ("format", json!("json")),
         ] {
-            assert!(serde_json::from_value::<FactStoreAddRequestV1>(alias).is_err());
+            let mut alias = json!({"content": "remember"});
+            alias[field] = value;
+            assert_unknown_field(&rejection::<FactStoreAddRequestV1>(alias), field);
         }
-        assert!(
-            serde_json::from_value::<FactStoreAddRequestV1>(json!({
+        assert_eq!(
+            rejection::<FactStoreAddRequestV1>(json!({
                 "content": "remember",
                 "project_selector": {"path": "/tmp/project"}
-            }))
-            .is_err()
+            })),
+            "unknown field `path`, expected `project_id`"
         );
-        assert!(
-            serde_json::from_value::<FactStoreSearchRequestV1>(json!({
-                "query": "remember",
-                "format": "json"
-            }))
-            .is_err()
+        assert_eq!(
+            rejection::<FactStoreSearchRequestV1>(json!({"query": "remember", "format": "json"})),
+            "unknown field `format`"
         );
-        assert!(
-            serde_json::from_value::<FactStoreReasonRequestV1>(json!({
-                "entity": "compiler"
-            }))
-            .is_err()
+        assert_eq!(
+            rejection::<FactStoreReasonRequestV1>(json!({"entity": "compiler"})),
+            "missing field `entities`"
         );
-        assert!(serde_json::from_value::<FactStoreGetRequestV1>(json!({"fact_id": 41})).is_err());
-        for ignored in [
-            json!({"fact_id": "fact.test", "category": "decision"}),
-            json!({"fact_id": "fact.test", "min_trust": 0.5}),
-            json!({"fact_id": "fact.test", "limit": 10}),
+        assert_eq!(
+            rejection::<FactStoreGetRequestV1>(json!({"fact_id": 41})),
+            "invalid type: integer `41`, expected a string"
+        );
+        for (field, value) in [
+            ("category", json!("decision")),
+            ("min_trust", json!(0.5)),
+            ("limit", json!(10)),
         ] {
-            assert!(serde_json::from_value::<FactStoreGetRequestV1>(ignored).is_err());
+            let mut ignored = json!({"fact_id": "fact.test"});
+            ignored[field] = value;
+            assert_unknown_field(&rejection::<FactStoreGetRequestV1>(ignored), field);
         }
-        assert!(
-            serde_json::from_value::<FactFeedbackRequestV1>(json!({
-                "fact_id": "fact.test",
-                "helpful": true
-            }))
-            .is_err()
+        assert_unknown_field(
+            &rejection::<FactFeedbackRequestV1>(json!({"fact_id": "fact.test", "helpful": true})),
+            "helpful",
         );
     }
 
