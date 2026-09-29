@@ -1048,14 +1048,32 @@ async fn daemon_http_shutdown_releases_loopback_listener() {
         [inode] => *inode,
         inodes => panic!("the service must hold one listener at {endpoint}: {inodes:?}"),
     };
+    #[cfg(target_os = "linux")]
+    let held = descriptors_of_socket(listener);
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        held.len(),
+        1,
+        "the daemon must hold its listener at {endpoint} through one descriptor: {held:?}"
+    );
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    assert_ne!(
+        held[0].1 & u32::try_from(libc::O_CLOEXEC).expect("O_CLOEXEC is a flag bit"),
+        0,
+        "the daemon HTTP listener must be close-on-exec so no spawned child keeps it listening"
+    );
     service.shutdown().await.expect("shutdown HTTP service");
 
     // A freed ephemeral port goes back to the kernel pool, where any process
     // may bind it, so neither rebinding nor connecting to it proves release.
-    // The listener's socket inode does: no other socket can take it over.
+    // The kernel socket table is no proof either: a child that sibling tests
+    // fork holds a copy of every descriptor until its exec closes the
+    // close-on-exec ones, so it can list this listener after the daemon closed
+    // it. Release is the daemon process no longer referencing the socket.
     #[cfg(target_os = "linux")]
-    assert!(
-        !listening_socket_inodes(endpoint).contains(&listener),
+    assert_eq!(
+        descriptors_of_socket(listener),
+        Vec::<(u32, u32)>::new(),
         "the daemon HTTP listener at {endpoint} must be closed on shutdown"
     );
     #[cfg(not(target_os = "linux"))]
@@ -1086,6 +1104,33 @@ fn listening_socket_inodes(endpoint: SocketAddr) -> Vec<u64> {
             let fields = row.split_whitespace().collect::<Vec<_>>();
             (fields[1] == local && fields[3] == TCP_LISTEN)
                 .then(|| fields[9].parse().expect("socket inode"))
+        })
+        .collect()
+}
+
+/// `(descriptor, open flags)` of every descriptor this process holds on the
+/// socket with `inode`.
+#[cfg(target_os = "linux")]
+fn descriptors_of_socket(inode: u64) -> Vec<(u32, u32)> {
+    let socket = format!("socket:[{inode}]");
+    std::fs::read_dir("/proc/self/fd")
+        .expect("own descriptor table")
+        .map(|entry| entry.expect("descriptor entry"))
+        .filter(|entry| {
+            // Descriptors other test threads close mid-scan are not this socket.
+            std::fs::read_link(entry.path())
+                .is_ok_and(|target| target.as_os_str() == socket.as_str())
+        })
+        .map(|entry| {
+            let descriptor = entry.file_name().to_string_lossy().into_owned();
+            let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{descriptor}"))
+                .expect("descriptor info");
+            let flags = info
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .map(|flags| u32::from_str_radix(flags.trim(), 8).expect("octal descriptor flags"))
+                .expect("descriptor flags");
+            (descriptor.parse().expect("numeric descriptor"), flags)
         })
         .collect()
 }

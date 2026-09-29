@@ -422,6 +422,10 @@ impl DaemonInvocationService {
         step("lsp_registries_cleared");
         let project_runtimes_clean = self.project_runtimes.shut_down_all().await;
         step("project_runtimes_shut_down");
+        // A project open that lost its registration to this shutdown dropped
+        // its observability owner, whose drain still holds the store lease.
+        self.store_observability.join_retirement_drains().await;
+        step("observability_retirements_joined");
         self.session_holder_databases.lock().await.clear();
         // The operation-event authority is process-global, not owned by this
         // composition: only frontiers without a live producer expire here.
