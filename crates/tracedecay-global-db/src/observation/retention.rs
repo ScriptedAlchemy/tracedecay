@@ -576,7 +576,7 @@ async fn run_anchor_pass(
              WHERE a.anchor_id IN ({{ids}})
                AND a.anchor_json <> ?1
                AND {RELEASED_DISPOSITION}
-             RETURNING a.anchor_id"
+             RETURNING anchor_id"
         ),
         label: "anchor",
     };
@@ -689,7 +689,7 @@ async fn run_observation_pass(
                    WHERE bound.observation_id = o.observation_id
                )
                AND {live}
-             RETURNING o.observation_id",
+             RETURNING observation_id",
             live = no_live_binding("o.observation_id"),
         ),
         label: "observation",
@@ -766,7 +766,7 @@ async fn run_provenance_pass(
                    WHERE a.anchor_id = p.retrieval_anchor_id
                      AND {RELEASED_DISPOSITION}
                )
-             RETURNING p.observation_id"
+             RETURNING observation_id"
         ),
         label: "provenance",
     };
