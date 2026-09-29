@@ -569,9 +569,9 @@ fn delete_boundary_refuses_empty_directory_replacement() {
     assert!(displaced.is_dir(), "inspected empty directory must survive");
 }
 
-/// Cancellation is checked before any recursive SHA-256 read. A cancelled
-/// maintenance admission cannot turn a deep inventory into a partial plan or
-/// an implicit deletion permit.
+/// Once the apply loop admits a finding, the payload-mtime fence is the first
+/// gate to read the admission control. A cancellation it observes is a typed
+/// interruption, never a per-store refusal or an implicit deletion permit.
 #[tokio::test]
 async fn registered_collection_payload_fence_cancellation_is_terminal() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -580,41 +580,23 @@ async fn registered_collection_payload_fence_cancellation_is_terminal() {
     seed_payload_fence_work(&data_root);
     let (_runtime, db) = open_registered_db(&profile_root).await;
     let finding = payload_fence_finding(data_root.clone(), "stores/payload-fence-cancelled");
-    let plan = CollectionPlan {
-        collect: vec![finding],
-        ..CollectionPlan::default()
-    };
     let cancellation = CancellationToken::new();
-    let started = std::sync::Arc::new(AtomicBool::new(false));
-    let started_thread = std::sync::Arc::clone(&started);
-    let cancellation_thread = cancellation.clone();
-    let signal = std::thread::spawn(move || {
-        while !started_thread.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
-        std::thread::sleep(Duration::from_millis(20));
-        cancellation_thread.cancel();
-    });
-    started.store(true, Ordering::Release);
+    cancellation.cancel();
 
-    let (outcome, retired) = execute_registered_collection_controlled(
+    let step = collect_registered_finding(
         &db,
-        &plan,
+        &finding,
         &profile_root,
-        CollectionControl::new(
-            &cancellation,
-            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
-        ),
+        CollectionControl::new(&cancellation, unbounded_deadline()),
     )
     .await
     .unwrap();
-    signal.join().unwrap();
 
-    assert_eq!(retired, 0);
-    assert_eq!(outcome.completion, CollectionCompletionV1::Cancelled);
-    assert!(outcome.errors.is_empty());
-    assert!(outcome.collected.is_empty());
-    assert!(data_root.exists());
+    assert_eq!(
+        step,
+        FindingStep::Interrupted(CollectionCompletionV1::Cancelled)
+    );
+    assert!(data_root.join("bucket/payload.bin").is_file());
 }
 
 #[tokio::test]
@@ -625,39 +607,33 @@ async fn unregistered_collection_payload_fence_deadline_is_distinct() {
     seed_payload_fence_work(&data_root);
     let (_runtime, db) = open_registered_db(&profile_root).await;
     let finding = payload_fence_finding(data_root.clone(), "projects/proj_payload_fence_deadline");
-    let plan = UnregisteredCollectionPlan {
-        collect: vec![UnregisteredStoreFinding {
-            project_dir_name: "proj_payload_fence_deadline".to_owned(),
-            data_root: finding.data_root,
-            age_secs: finding.age_secs,
-            size_bytes: finding.size_bytes,
-            expected_payload_mtime_secs: finding.expected_payload_mtime_secs,
-            expected_data_root_fence: finding.expected_data_root_fence,
-            expected_content_fence: finding.expected_content_fence,
-            abandoned_root: false,
-        }],
-        ..UnregisteredCollectionPlan::default()
+    let finding = UnregisteredStoreFinding {
+        project_dir_name: "proj_payload_fence_deadline".to_owned(),
+        data_root: finding.data_root,
+        age_secs: finding.age_secs,
+        size_bytes: finding.size_bytes,
+        expected_payload_mtime_secs: finding.expected_payload_mtime_secs,
+        expected_data_root_fence: finding.expected_data_root_fence,
+        expected_content_fence: finding.expected_content_fence,
+        abandoned_root: false,
     };
-
     let cancellation = CancellationToken::new();
-    let (outcome, deadline) = {
-        let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_millis(20));
-        let outcome = execute_unregistered_collection_controlled(
-            &db,
-            &plan,
-            &profile_root,
-            CollectionControl::new(&cancellation, deadline),
-        )
-        .await
-        .unwrap();
-        (outcome, deadline)
-    };
+    let expired = MonotonicDeadline::at(Instant::now());
 
-    assert!(deadline.is_elapsed_at(Instant::now()));
-    assert_eq!(outcome.completion, CollectionCompletionV1::DeadlineExceeded);
-    assert!(outcome.errors.is_empty());
-    assert!(outcome.collected.is_empty());
-    assert!(data_root.exists());
+    let step = collect_unregistered_finding(
+        &db,
+        &finding,
+        &profile_root,
+        CollectionControl::new(&cancellation, expired),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        step,
+        FindingStep::Interrupted(CollectionCompletionV1::DeadlineExceeded)
+    );
+    assert!(data_root.join("bucket/payload.bin").is_file());
 }
 
 /// A durable-memory guard applies to unregistered directories exactly as it
