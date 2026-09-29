@@ -2402,54 +2402,6 @@ fn restart_rejects_pointer_generation_mismatch() {
     );
 }
 
-#[derive(Clone)]
-struct CapturedLogWriter {
-    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
-}
-
-impl std::io::Write for CapturedLogWriter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl tracing_subscriber::fmt::MakeWriter<'_> for CapturedLogWriter {
-    type Writer = Self;
-
-    fn make_writer(&self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-fn captured_tracing<T>(scope: impl FnOnce() -> T) -> (T, String) {
-    let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .without_time()
-        .with_ansi(false)
-        .with_writer(CapturedLogWriter {
-            bytes: Arc::clone(&bytes),
-        })
-        .finish();
-    let value = tracing::subscriber::with_default(subscriber, scope);
-    let bytes = bytes
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    (
-        value,
-        String::from_utf8(bytes).expect("captured tracing is UTF-8"),
-    )
-}
-
 fn rewrite_active_generation_as_previous_revision(
     store: &Path,
     keeps_census: bool,
@@ -2550,7 +2502,9 @@ fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .expect("foreground open defers sealed validation");
-        let (outcome, log) = captured_tracing(|| reopened.activate_or_reconcile());
+        let (outcome, log) = tracedecay_runtime_core::logging::capture_formatted_tracing(|| {
+            reopened.activate_or_reconcile()
+        });
         published(outcome.expect("a retired revision must rebuild, not fail activation"));
         let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
         assert!(

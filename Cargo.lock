@@ -6164,7 +6164,6 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
- "tracing-subscriber",
  "url",
  "walkdir",
 ]
@@ -6225,7 +6224,6 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-runtime-core",
  "tracing",
- "tracing-subscriber",
  "windows 0.62.2",
 ]
 
@@ -6708,7 +6706,7 @@ dependencies = [
  "hex",
  "hotpath",
  "percent-encoding",
- "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -6842,6 +6840,7 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracing",
+ "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 

@@ -567,52 +567,63 @@ fn cross_file_edges_require_path_binding_evidence() {
     }));
 }
 
+/// A full build retains no parse tree; an increment retains the files it
+/// re-extracts, and the next increment editing one of them reparses only the
+/// changed region.
 #[test]
 fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
         .expect("production owner");
-    owner
-        .build_and_publish(
-            request_with_source(
-                "file.retained.1",
-                1_100_000,
-                "commit.retained.1",
-                "tree.retained.1",
-                "fn unchanged() -> u32 { 1 }\nfn edited() -> u32 { 2 }\n",
-            ),
-            &ActiveControl,
-        )
-        .expect("initial generation");
+    let build = |owner: &mut CodeIndexProductionOwnerV1<
+        SharedPublicationStore,
+        ApplyingProjectionSink,
+    >,
+                 ordinal: i64,
+                 edited: u32| {
+        owner
+            .build_and_publish(
+                request_with_source(
+                    &format!("file.retained.{ordinal}"),
+                    1_000_000 + ordinal * 100_000,
+                    &format!("commit.retained.{ordinal}"),
+                    &format!("tree.retained.{ordinal}"),
+                    &format!("fn unchanged() -> u32 {{ 1 }}\nfn edited() -> u32 {{ {edited} }}\n"),
+                ),
+                &ActiveControl,
+            )
+            .expect("generation");
+    };
+    build(&mut owner, 1, 2);
+    let cold = owner.retained_parse_stats();
+    assert_eq!(cold.initial_parses, 1);
+    assert_eq!(cold.full_extractions, 1);
+    assert_eq!(cold.retained_documents, 0);
     let initial_clone_stats = owner.physical_artifact_pool_stats();
     assert_eq!(initial_clone_stats.clone_payloads_computed, 2);
     assert_eq!(initial_clone_stats.clone_payloads_reused, 0);
-    owner
-        .build_and_publish(
-            request_with_source(
-                "file.retained.2",
-                1_200_000,
-                "commit.retained.2",
-                "tree.retained.2",
-                "fn unchanged() -> u32 { 1 }\nfn edited() -> u32 { 20 }\n",
-            ),
-            &ActiveControl,
-        )
-        .expect("incremental generation");
 
+    build(&mut owner, 2, 20);
+    let first_increment = owner.retained_parse_stats();
+    assert_eq!(first_increment.initial_parses, 2);
+    assert_eq!(first_increment.incremental_parses, 0);
+    assert_eq!(first_increment.full_extractions, 2);
+    assert_eq!(first_increment.retained_documents, 1);
+
+    build(&mut owner, 3, 200);
     let stats = owner.retained_parse_stats();
-    assert_eq!(stats.initial_parses, 1);
+    assert_eq!(stats.initial_parses, 2);
     assert_eq!(stats.incremental_parses, 1);
-    assert_eq!(stats.full_extractions, 1);
+    assert_eq!(stats.full_extractions, 2);
     assert_eq!(stats.incremental_extractions, 1);
     assert_eq!(stats.reset_extractions, 0);
     assert_eq!(stats.retained_documents, 1);
-    assert!(stats.changed_bytes < 60);
-    assert!(stats.visited_top_level_nodes <= 3);
-    assert!(stats.extracted_bytes < 120);
+    assert!(stats.changed_bytes - first_increment.changed_bytes < 60);
+    assert!(stats.visited_top_level_nodes - first_increment.visited_top_level_nodes <= 3);
+    assert!(stats.extracted_bytes - first_increment.extracted_bytes < 120);
     let clone_stats = owner.physical_artifact_pool_stats();
-    assert_eq!(clone_stats.clone_payloads_reused, 1);
-    assert_eq!(clone_stats.clone_payloads_computed, 3);
+    assert_eq!(clone_stats.clone_payloads_reused, 2);
+    assert_eq!(clone_stats.clone_payloads_computed, 4);
 }
 
 /// Carry-forward rematerialize already succeeds for unchanged files, including
