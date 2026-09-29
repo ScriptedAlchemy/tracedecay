@@ -39,6 +39,9 @@ pub enum PreparedQueryErrorV1 {
     ParameterChanged { parameter: &'static str },
     #[error("prepared query authority is unavailable")]
     Unavailable,
+    /// The request pins a generation id the mounted scope does not hold.
+    #[error("the pinned code generation is not held by this scope")]
+    GenerationNotHeld,
 }
 
 impl From<CursorBindingMismatchV1> for PreparedQueryErrorV1 {
