@@ -49,7 +49,7 @@ pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executa
 /// `sync.orphan_db_gc_days.v1` shipped through v0.1.0-beta.50 and left with
 /// the orphan branch-database sweep. The upload, watcher-debounce, and
 /// extraction-timeout user settings were stored in each project's snapshot
-/// through v1.0.0-beta.60 and now live only in the profile store
+/// through v1.0.0-beta.61 and now live only in the profile store
 /// ([`PROFILE_SETTING_KEYS_V1`]).
 pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &[
     "semantic.runtime.v1",
