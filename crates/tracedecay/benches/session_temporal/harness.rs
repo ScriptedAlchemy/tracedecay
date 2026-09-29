@@ -22,7 +22,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ActorId, ObservationScopeV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
-    TemporalModeV1, UtcMicros, WorktreeId,
+    TemporalModeV1, UserProfileId, UtcMicros, WorktreeId,
 };
 use tracedecay_store::SessionRefreshCompletionRequestV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -226,8 +226,9 @@ struct PreparedRepetition {
     registered: RegisteredGlobalDbLeaseV1,
     session: SessionId,
     root_sessions: Vec<SessionId>,
-    context: RequestContext,
-    binding: SessionRequestBinding,
+    repetition: usize,
+    project_id: ProjectId,
+    profile_id: UserProfileId,
     complete_request: SessionRefreshCompletionRequestV1,
     rebuild_activate_ns: u64,
     root_record_count: usize,
@@ -236,6 +237,16 @@ struct PreparedRepetition {
     _memory: std::sync::Arc<tracedecay_runtime_core::db::Database>,
     _daemon_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
     _env: IsolatedBenchmarkEnv,
+}
+
+impl PreparedRepetition {
+    fn request(&self, phase: &str) -> BenchResult<(RequestContext, SessionRequestBinding)> {
+        request_context(
+            &format!("request.session-temporal.{}.{phase}", self.repetition),
+            &self.project_id,
+            self.profile_id.as_str(),
+        )
+    }
 }
 
 struct RepetitionMeasurement {
@@ -767,16 +778,19 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     }
 
     let db = registered.as_ref();
-    let (context, binding) = request_context(
-        &format!("request.session-temporal.{repetition}"),
-        &project_id,
-        profile_id.as_str(),
-    )?;
     let started = Instant::now();
     let root_fixture = root_relation_fixture::refresh_sessions(
         db,
-        &context,
-        &binding,
+        |session| {
+            request_context(
+                &format!(
+                    "request.session-temporal.{repetition}.refresh.{}",
+                    session.as_str()
+                ),
+                &project_id,
+                profile_id.as_str(),
+            )
+        },
         root_sessions,
         observation_count,
     )
@@ -799,8 +813,9 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         registered,
         session: root_fixture.anchor_session,
         root_sessions: root_fixture.sessions,
-        context,
-        binding,
+        repetition,
+        project_id,
+        profile_id,
         complete_request: root_fixture.anchor_complete_request,
         rebuild_activate_ns,
         root_record_count: root_fixture.record_count,
@@ -855,13 +870,14 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurem
         .unwrap()
     };
 
+    let (context, binding) = prepared.request("compact-rank")?;
     let compact_started = Instant::now();
     require_retrieval_success(
         "compact_rank",
         retrieval
             .retrieve(
-                &prepared.context,
-                &prepared.binding,
+                &context,
+                &binding,
                 query(RetrievalGrainV1::LogicalMessage, "pipeline"),
             )
             .await,
@@ -870,11 +886,12 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurem
 
     // Preserve the frozen wire shape: the existing late-hydrate sample records
     // the root-wide occurrence hydration rather than minting another phase.
+    let (context, binding) = prepared.request("late-hydrate")?;
     let hydrate_started = Instant::now();
     let root_hydration = retrieval
         .retrieve(
-            &prepared.context,
-            &prepared.binding,
+            &context,
+            &binding,
             root_relation_fixture::root_relation_query(prepared.session.clone())?,
         )
         .await;
