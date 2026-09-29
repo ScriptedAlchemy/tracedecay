@@ -39,9 +39,9 @@ use super::{
     CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
     ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1, MountedCodeIndexWorktreeV1,
-    PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingGenerationSlot, ServingSwapOutcomeV1,
-    TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
-    clear_graph_resident_memory_park, convergence_park_retries_on_wake,
+    PUBLISHED_PROJECTION_ABORT_BUDGET_V1, PendingWakeV1, PublishedTextProjectionOutcomeV1,
+    ServingGenerationSlot, ServingSwapOutcomeV1, TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1,
+    clear_convergence_park, clear_graph_resident_memory_park, convergence_park_retries_on_wake,
     is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
     retained_noop_requires_follow_up_wake,
 };
@@ -683,6 +683,11 @@ impl CodeIndexSchedulerRegistryV1 {
             // sealed text owner already serves reads; the build task wakes a
             // later pass to seat the decoded generation when it finishes.
             let mut published_projection_detached = false;
+            // Detached builds aborted by external edits since one last
+            // finished. Each abort costs the successor a full rebuild, so
+            // the budget bounds how long edits can keep lexical serving from
+            // converging.
+            let mut published_projection_aborts: u32 = 0;
             loop {
                 let notified = worker_wake.notified();
                 tokio::pin!(notified);
@@ -1204,10 +1209,32 @@ impl CodeIndexSchedulerRegistryV1 {
                 // generation's lexical build. Retire that build before this
                 // pass captures source. A worker-owned continuation is the
                 // seat pass for the build still in flight and leaves it alone.
+                //
+                // Only up to the abort budget: a successor carries rows from
+                // its immediate parent's published artifact alone, so a build
+                // aborted every pass never publishes and every successor
+                // rebuilds from scratch. Past the budget the edit stays
+                // pending and this worker parks until the build's completion
+                // wakes it; the edit then seals against a published parent.
                 if published_projection_detached
                     && arrival.wake_micros().is_some()
-                    && let Some(previous_projection) = retained_text_projection.take()
+                    && retained_text_projection
+                        .as_ref()
+                        .is_some_and(|projection| !projection.is_finished())
                 {
+                    if published_projection_aborts >= PUBLISHED_PROJECTION_ABORT_BUDGET_V1 {
+                        tracing::info!(
+                            event = "code_index_reconcile_pass_deferred",
+                            path = "background_worker",
+                            trigger = trigger.label(),
+                            arrival = arrival.label(),
+                            published_projection_aborts,
+                            "external arrival waits for the published lexical build after repeated aborts"
+                        );
+                        Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
+                        drop(reconcile_pass.take());
+                        continue;
+                    }
                     if let Some(previous) = worker_text_generation
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1215,8 +1242,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     {
                         previous.text_execution_control().retire();
                     }
-                    previous_projection.abort();
+                    if let Some(previous_projection) = retained_text_projection.take() {
+                        previous_projection.abort();
+                    }
                     published_projection_detached = false;
+                    published_projection_aborts += 1;
                 }
                 tracing::info!(
                     event = "code_index_reconcile_pass_started",
@@ -1435,6 +1465,15 @@ impl CodeIndexSchedulerRegistryV1 {
                             .clone()
                         {
                             previous.text_execution_control().retire();
+                        }
+                        if published_projection_detached {
+                            // A finished build already published its artifact;
+                            // only a running one counts against the budget.
+                            if previous_projection.is_finished() {
+                                published_projection_aborts = 0;
+                            } else {
+                                published_projection_aborts += 1;
+                            }
                         }
                         previous_projection.abort();
                         published_projection_detached = false;
@@ -2503,6 +2542,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 {
                     published_text_projection = retained_text_projection.take();
                     published_projection_detached = false;
+                    published_projection_aborts = 0;
                 }
                 // Join the publication's projection, then process its outcome
                 // at the existing source-proof and serving-swap boundary. Graph
@@ -3231,6 +3271,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     if finished {
                         drop(retained_text_projection.take());
                         published_projection_detached = false;
+                        published_projection_aborts = 0;
                         let still_needs_work = worker_text_generation
                             .read()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)

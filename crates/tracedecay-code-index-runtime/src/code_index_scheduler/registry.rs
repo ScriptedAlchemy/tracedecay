@@ -143,6 +143,15 @@ pub(crate) fn is_repeated_conflict_verdict(
 /// reaching it defers graph seating to a later pass instead of spinning.
 const TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
 
+/// How many consecutive external arrivals may abort a detached published
+/// lexical build before the next one waits for it. A successor carries rows
+/// only from its immediate parent's published artifact, so every abort costs
+/// the successor a full rebuild; edits arriving faster than one build would
+/// otherwise abort every build and no generation would become lexical-ready.
+/// Below the budget an edit still seals at once; at it, the edit stays pending
+/// until the build publishes and coalesces into the following projection.
+pub(super) const PUBLISHED_PROJECTION_ABORT_BUDGET_V1: u32 = 2;
+
 /// Whether a reconcile pass may prepare the sealed generation for graph
 /// serving, and when it may not, why.
 ///

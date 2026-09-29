@@ -3179,6 +3179,104 @@ async fn sealed_generation_serves_and_next_edit_seals_while_text_projection_is_h
     registry.shutdown().await;
 }
 
+/// Edits arriving faster than one lexical build must still converge. Each
+/// edit within the abort budget seals at once and aborts the held build; the
+/// edit past it waits for that build to publish, then seals against the
+/// published parent and becomes lexical-ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_edits_during_held_projection_converge_to_lexical_ready() {
+    use super::super::registry::PUBLISHED_PROJECTION_ABORT_BUDGET_V1;
+
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let first = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let mut previous_id = first.generation().manifest().generation_id.clone();
+    // Every held build keeps its release: dropping one releases that build,
+    // and an aborted build's sender is inert.
+    let mut releases = Vec::new();
+    for edit in 0..PUBLISHED_PROJECTION_ABORT_BUDGET_V1 {
+        let (projection_started, release) = registry
+            .pause_next_published_text_projection(canonical_root.clone())
+            .await;
+        releases.push(release);
+        fixture.edit(
+            "src/lib.rs",
+            &format!("pub fn alpha() -> u32 {{ {} }}\n", edit + 2),
+        );
+        assert!(
+            matches!(
+                registry
+                    .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+                    .await,
+                super::super::CodeIndexDemandAdmissionV1::Queued
+            ),
+            "edit {edit} reaches the worker"
+        );
+        tokio::time::timeout(Duration::from_secs(10), projection_started)
+            .await
+            .expect("publication did not reach text projection")
+            .expect("publication projection gate stays armed");
+        let sealed = registry
+            .sealed_publication_identity(fixture.path(), Some(&previous_id))
+            .await
+            .expect("sealed identity read")
+            .expect("an edit within the abort budget seals while the previous build is held");
+        previous_id = sealed.generation_id().clone();
+    }
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 99 }\n");
+    assert!(
+        matches!(
+            registry
+                .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+                .await,
+            super::super::CodeIndexDemandAdmissionV1::Queued
+        ),
+        "the edit past the budget reaches the worker"
+    );
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        assert!(
+            registry
+                .sealed_publication_identity(fixture.path(), Some(&previous_id))
+                .await
+                .expect("sealed identity read")
+                .is_none(),
+            "the edit past the budget waits for the held build instead of aborting it"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let _ = releases
+        .pop()
+        .expect("the last held build has a release")
+        .send(());
+    let ready =
+        wait_for_queryable_text_generation_change(&registry, fixture.path(), &previous_id).await;
+    let ready_id = ready.metadata().manifest().generation_id.clone();
+    let sealed = registry
+        .sealed_publication_identity(fixture.path(), Some(&previous_id))
+        .await
+        .expect("sealed identity read")
+        .expect("the deferred edit seals once the held build publishes");
+    assert_eq!(
+        sealed.generation_id(),
+        &ready_id,
+        "the deferred edit's generation is the lexical-ready one"
+    );
+    registry.shutdown().await;
+}
+
 /// Between the seal and a ready lexical artifact, search keeps returning the
 /// predecessor generation's hits and marks them stale. An empty success, or a
 /// typed miss while that predecessor still exists, is the failure.
