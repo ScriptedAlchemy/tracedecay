@@ -4387,7 +4387,7 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
         .await
         .expect("mount retained generation");
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     loop {
         let freshness = registry

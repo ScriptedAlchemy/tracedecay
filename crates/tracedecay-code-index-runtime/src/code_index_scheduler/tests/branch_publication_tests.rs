@@ -11,7 +11,10 @@ use super::super::branch_publication::{
     BranchPublicationContextV1, branch_generation_work_is_active, branch_refresh_admission_error,
 };
 use super::super::demand_admission::{CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1};
-use super::{ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, test_project_id};
+use super::{
+    ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING,
+    test_project_id,
+};
 
 async fn mounted_registry(fixture: &GitFixture, store: &TempDir) -> CodeIndexSchedulerRegistryV1 {
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -144,7 +147,7 @@ async fn cancelled_generation_wait_rolls_back_prepared_branch_metadata() {
             )
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if tracedecay_runtime_core::branch_meta::load_branch_meta(store.path())
                 .is_some_and(|meta| meta.is_tracked("cancelled-publication"))
@@ -209,7 +212,7 @@ async fn transient_serving_claim_does_not_erase_pending_branch_tracking() {
             )
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if tracedecay_runtime_core::branch_meta::load_branch_meta(store.path())
                 .is_some_and(|meta| meta.is_tracked("feature/replay"))
@@ -277,7 +280,7 @@ async fn mid_wait_branch_publication_surfaces_terminal_publication_park() {
             )
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if tracedecay_runtime_core::branch_meta::load_branch_meta(store.path())
                 .is_some_and(|meta| meta.is_tracked("feature/mid-wait-park"))
@@ -351,7 +354,7 @@ async fn exact_branch_publication_completes_from_a_retained_graph_head() {
     let cancellation = CancellationToken::new();
 
     let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        SERVING_SEAT_FAILURE_CEILING,
         context.track_exact_worktree_branch(
             &registry,
             fixture.path(),
