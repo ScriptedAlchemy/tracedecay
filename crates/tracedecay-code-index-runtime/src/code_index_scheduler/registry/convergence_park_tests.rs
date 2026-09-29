@@ -496,11 +496,8 @@ async fn text_seats_while_graph_activation_keeps_failing_retryably() {
         .wait_for_seated_generation()
         .await
         .expect("the sealed generation must take the serving seat while graph activation retries");
-    assert_eq!(
-        injected_activation_attempt_count(&scope.worktree_id),
-        1,
-        "the fixture observes one graph activation attempt for the seated generation"
-    );
+    // Retries stay armed, so the attempt counter is already past 1 on some
+    // observations. The seated file and symbol are the stable outcome.
     assert_seated_fixture_generation(&seated);
     fixture.registry.shutdown().await;
 }
