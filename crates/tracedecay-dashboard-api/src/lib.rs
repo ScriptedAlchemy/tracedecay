@@ -141,6 +141,7 @@ pub use delivery_api::{
     DashboardProximityAttentionReadFutureV1,
 };
 mod doctor_findings_api;
+pub use doctor_findings_api::{DoctorFindingsPayloadV1, DoctorFindingsReadV1, doctor_findings};
 mod events_api;
 mod events_delivery;
 mod explorer_api;

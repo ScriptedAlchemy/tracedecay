@@ -18,7 +18,8 @@ use tracedecay_api::doctor::{
 use tracedecay_contracts::doctor::{
     DOCTOR_FINDING_FAMILIES, DoctorCoverageCompletenessV1, DoctorEvidenceStateV1,
     DoctorFamilyConsultationV1, DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1,
-    DoctorFindingFamilyV1, DoctorReportCoverageV1, DoctorReportEntryV1, DoctorStorageFindingKindV1,
+    DoctorFindingFamilyV1, DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1,
+    DoctorStorageFindingKindV1,
 };
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
 
@@ -97,60 +98,83 @@ async fn findings_with_authorities(
             return envelope;
         }
     };
-    let Some(reader) = doctor_report_reader.as_ref() else {
-        return envelope(
-            scope,
+    let read = match doctor_report_reader.as_ref() {
+        None => DoctorFindingsReadV1::unavailable(
             DoctorReadPresentationV1::source_unsupported(),
-            unavailable_payload(family_filter, DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE),
-        );
-    };
-
-    // The admitted daemon composes the report across every finding producer;
-    // this single await is the expensive phase behind `/api/doctor/*`, and
-    // the span records failed reads too.
-    let admitted =
-        match hotpath::future!(reader(), label = "dashboard_api.doctor.report_read").await {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                return envelope(
-                    scope,
+            family_filter,
+            DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE,
+        ),
+        // The admitted daemon composes the report across every finding
+        // producer; this single await is the expensive phase behind
+        // `/api/doctor/*`, and the span records failed reads too.
+        Some(reader) => {
+            match hotpath::future!(reader(), label = "dashboard_api.doctor.report_read").await {
+                Ok(admitted) => doctor_findings(
+                    &admitted.report,
+                    admitted.schema_convergences,
+                    family_filter,
+                ),
+                Err(error) => DoctorFindingsReadV1::unavailable(
                     DoctorReadPresentationV1::source_failed(),
-                    unavailable_payload(family_filter, doctor_report_failure_note(&error)),
-                );
+                    family_filter,
+                    doctor_report_failure_note(&error),
+                ),
             }
-        };
-
-    let projection = match project_doctor_report(&admitted.report, family_filter) {
-        Ok(projection) => projection,
-        Err(rejection) => {
-            return envelope(
-                scope,
-                DoctorReadPresentationV1::source_failed(),
-                unavailable_payload(family_filter, rejection.note()),
-            );
         }
     };
-
-    envelope(
-        scope,
-        projection.presentation,
-        DoctorFindingsPayloadV1 {
-            family_filter,
-            entries: projection.entries,
-            report_coverage: Some(projection.report_coverage),
-            known_families: DOCTOR_FINDING_FAMILIES.to_vec(),
-            schema_convergences: admitted.schema_convergences,
-            storage_kind_statuses: Vec::new(),
-            note: projection.note,
-        },
-    )
+    envelope(scope, read.presentation, read.payload)
 }
 
-fn envelope(
-    scope: DashboardScopeV1,
-    presentation: DoctorReadPresentationV1,
-    mut payload: DoctorFindingsPayloadV1,
-) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
+/// One Doctor findings read: the envelope axes and the payload. Every surface
+/// that shows Doctor findings (`/api/doctor/findings`, `tracedecay doctor`)
+/// projects the daemon's canonical report through [`doctor_findings`].
+#[derive(Clone, Debug)]
+pub struct DoctorFindingsReadV1 {
+    pub presentation: DoctorReadPresentationV1,
+    pub payload: DoctorFindingsPayloadV1,
+}
+
+impl DoctorFindingsReadV1 {
+    fn unavailable(
+        presentation: DoctorReadPresentationV1,
+        family_filter: Option<DoctorFindingFamilyV1>,
+        note: impl Into<String>,
+    ) -> Self {
+        Self {
+            presentation,
+            payload: with_storage_kind_statuses(unavailable_payload(family_filter, note)),
+        }
+    }
+}
+
+/// Project the daemon's canonical Doctor report for one optional family.
+pub fn doctor_findings(
+    report: &DoctorReportV1,
+    schema_convergences: Vec<SchemaConvergenceFindingV1>,
+    family_filter: Option<DoctorFindingFamilyV1>,
+) -> DoctorFindingsReadV1 {
+    match project_doctor_report(report, family_filter) {
+        Ok(projection) => DoctorFindingsReadV1 {
+            presentation: projection.presentation,
+            payload: with_storage_kind_statuses(DoctorFindingsPayloadV1 {
+                family_filter,
+                entries: projection.entries,
+                report_coverage: Some(projection.report_coverage),
+                known_families: DOCTOR_FINDING_FAMILIES.to_vec(),
+                schema_convergences,
+                storage_kind_statuses: Vec::new(),
+                note: projection.note,
+            }),
+        },
+        Err(rejection) => DoctorFindingsReadV1::unavailable(
+            DoctorReadPresentationV1::source_failed(),
+            family_filter,
+            rejection.note(),
+        ),
+    }
+}
+
+fn with_storage_kind_statuses(mut payload: DoctorFindingsPayloadV1) -> DoctorFindingsPayloadV1 {
     if payload
         .family_filter
         .is_none_or(|family| family == DoctorFindingFamilyV1::Storage)
@@ -160,6 +184,14 @@ fn envelope(
             .map(|kind| storage_kind_status(&payload, kind))
             .collect();
     }
+    payload
+}
+
+fn envelope(
+    scope: DashboardScopeV1,
+    presentation: DoctorReadPresentationV1,
+    payload: DoctorFindingsPayloadV1,
+) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
     DashboardEnvelopeV1::new(
         scope,
         presentation.domain_state,
