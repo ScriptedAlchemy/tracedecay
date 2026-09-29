@@ -217,109 +217,144 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
+enum LspOpenInterrupt {
+    Cancel,
+    /// Jumps the frozen clock to the deadline instead of spending it in wall
+    /// time. Real time resumes before the client notifies cancellation and
+    /// closes its stream, so that I/O never races an auto-advanced timer.
+    ExpireDeadline,
+}
+
+#[cfg(unix)]
+impl LspOpenInterrupt {
+    async fn fire(
+        self,
+        cancellation: &tracedecay_contracts::CancellationSignal,
+        expiry: tokio::time::Instant,
+    ) {
+        match self {
+            Self::Cancel => {
+                cancellation.cancel(tracedecay_contracts::clock::now_micros());
+            }
+            Self::ExpireDeadline => {
+                tokio::time::pause();
+                tokio::time::advance(expiry.saturating_duration_since(tokio::time::Instant::now()))
+                    .await;
+                tokio::time::resume();
+            }
+        }
+    }
+}
+
+/// What one LSP open against a never-answering daemon settled to: the open's
+/// error, the control its `lsp_open` carried (`None` when the client settled
+/// before sending one), and the daemon's next read after the interruption
+/// (`None` once the client closed the stream).
+#[cfg(unix)]
+type UnansweredLspOpen = (
+    Option<tracedecay_contracts::InvocationError>,
+    Option<Value>,
+    Option<String>,
+);
+
+/// Opens an LSP session against a daemon that reads the `lsp_open` and never
+/// answers it; `interrupt` fires once the request is in flight.
+///
+/// The daemon's `accept` is bounded by the client's own deadline, because a
+/// client that settles before connecting leaves nothing to wake it. Once
+/// connected, every client exit closes the stream and ends the daemon's reads.
+/// The whole exchange is bounded one second past the deadline, so a client
+/// that ignores its control yields `Err(Elapsed)` rather than a hang.
+#[cfg(unix)]
+async fn interrupt_unanswered_lsp_open(
+    client_instance_id: &str,
+    interrupt: LspOpenInterrupt,
+) -> Result<UnansweredLspOpen, tokio::time::error::Elapsed> {
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
         &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
-    let deadline = future_lsp_deadline(std::time::Duration::from_millis(40));
+    let profile = TempDir::new().expect("profile");
+    let invocation = lsp_test_invocation(endpoint, &profile, client_instance_id);
+    let (deadline, cancellation) = active_lsp_control(&format!("cancel.{client_instance_id}"));
     let expected_deadline = deadline.expires_at.0;
-    let server = tokio::spawn(async move {
-        let stream = listener.accept().await.expect("accept client");
-        let (reader, _writer) = stream.into_split();
+    let expiry = tokio::time::Instant::now()
+        + tracedecay_daemon_protocol::deadline_remaining(&deadline).expect("future LSP deadline");
+    let daemon_cancellation = cancellation.clone();
+    let daemon = async move {
+        let Ok(stream) = tokio::time::timeout_at(expiry, listener.accept()).await else {
+            return (None, None);
+        };
+        let (reader, _writer) = stream.expect("accept client").into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
         super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
-        let open: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("read open")
-                .expect("open request"),
+        let Some(open) = lines.next_line().await.expect("read open") else {
+            return (None, None);
+        };
+        let open: Value = serde_json::from_str(&open).expect("open json");
+        let control = serde_json::json!({
+            "operation": open["operation"],
+            "carries_deadline": open["deadline"]["expires_at"] == expected_deadline,
+            "cancellation": open["cancellation"]["state"]["state"],
+        });
+        interrupt.fire(&daemon_cancellation, expiry).await;
+        (
+            Some(control),
+            lines.next_line().await.expect("read after interruption"),
         )
-        .expect("open json");
-        assert_eq!(open["operation"], "lsp_open");
-        assert_eq!(open["deadline"]["expires_at"], expected_deadline);
-        assert_eq!(open["cancellation"]["state"]["state"], "active");
-        lines.next_line().await.expect("client disconnect");
-    });
-    let profile = TempDir::new().expect("profile");
-    let invocation = lsp_test_invocation(endpoint, &profile, "client.lsp-deadline-test");
-    let cancellation = tracedecay_contracts::CancellationSignal::active("cancel.lsp.deadline-test")
-        .expect("cancellation");
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        tracedecay_daemon_protocol::DaemonLspSessionClient::open(
-            invocation,
-            env!("CARGO_PKG_VERSION"),
-            None,
-            Vec::new(),
-            deadline,
-            cancellation,
-        ),
-    )
-    .await
-    .expect("gateway deadline must terminate the open");
-
-    assert!(matches!(
-        result,
-        Err(tracedecay_contracts::InvocationError::DeadlineExceeded)
+    };
+    let open = Box::pin(tracedecay_daemon_protocol::DaemonLspSessionClient::open(
+        invocation,
+        env!("CARGO_PKG_VERSION"),
+        None,
+        Vec::new(),
+        deadline,
+        cancellation,
     ));
-    server.await.expect("server task");
+
+    tokio::time::timeout_at(expiry + std::time::Duration::from_secs(1), async {
+        let (result, (control, after_interrupt)) = tokio::join!(open, daemon);
+        (result.err(), control, after_interrupt)
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
+    assert_eq!(
+        interrupt_unanswered_lsp_open("client.lsp-deadline-test", LspOpenInterrupt::ExpireDeadline)
+            .await,
+        Ok((
+            Some(tracedecay_contracts::InvocationError::DeadlineExceeded),
+            Some(serde_json::json!({
+                "operation": "lsp_open",
+                "carries_deadline": true,
+                "cancellation": "active",
+            })),
+            None,
+        )),
+        "a timed-out open must carry its control, settle typed, and close its stream"
+    );
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn lsp_gateway_open_returns_typed_cancellation() {
-    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
-        &tracedecay_daemon_protocol::default_loopback_endpoint(),
-    )
-    .await
-    .expect("loopback listener");
-    let server = tokio::spawn(async move {
-        let stream = listener.accept().await.expect("accept client");
-        let (reader, _writer) = stream.into_split();
-        let mut lines = tokio::io::BufReader::new(reader).lines();
-        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
-        lines
-            .next_line()
-            .await
-            .expect("read open")
-            .expect("open request");
-        lines.next_line().await.expect("client disconnect");
-    });
-    let profile = TempDir::new().expect("profile");
-    let invocation = lsp_test_invocation(endpoint, &profile, "client.lsp-cancel-test");
-    let cancellation = tracedecay_contracts::CancellationSignal::active("cancel.lsp.cancel-test")
-        .expect("cancellation");
-    let cancellation_request = cancellation.clone();
-    let cancel = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        cancellation_request.cancel(tracedecay_contracts::clock::now_micros());
-    });
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        tracedecay_daemon_protocol::DaemonLspSessionClient::open(
-            invocation,
-            env!("CARGO_PKG_VERSION"),
+    assert_eq!(
+        interrupt_unanswered_lsp_open("client.lsp-cancel-test", LspOpenInterrupt::Cancel).await,
+        Ok((
+            Some(tracedecay_contracts::InvocationError::Cancelled),
+            Some(serde_json::json!({
+                "operation": "lsp_open",
+                "carries_deadline": true,
+                "cancellation": "active",
+            })),
             None,
-            Vec::new(),
-            future_lsp_deadline(std::time::Duration::from_secs(1)),
-            cancellation,
-        ),
-    )
-    .await
-    .expect("gateway cancellation must terminate the open");
-
-    assert!(matches!(
-        result,
-        Err(tracedecay_contracts::InvocationError::Cancelled)
-    ));
-    cancel.await.expect("cancellation task");
-    server.await.expect("server task");
+        )),
+        "a cancelled open must carry its control, settle typed, and close its stream"
+    );
 }
 
 #[cfg(unix)]
