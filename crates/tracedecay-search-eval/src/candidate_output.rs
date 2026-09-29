@@ -1823,13 +1823,25 @@ pub(crate) mod tests {
     fn profile_material_digest_binds_every_checked_in_weight() {
         let workload = workload();
         let profile = workload.profile_matrix.first().expect("profile");
+        assert_eq!(profile.profile_id, "query-fallback");
+        assert_eq!(profile.lexical_weight_ppm, 1_000_000);
+        assert_eq!(profile.graph_weight_ppm, 250_000);
         let digest = compute_profile_material_digest(profile).expect("digest");
-        let mut changed = profile.clone();
-        changed.graph_weight_ppm = changed.graph_weight_ppm.saturating_add(1);
+
+        let mut lexical = profile.clone();
+        lexical.lexical_weight_ppm = 1_000_001;
+        let mut graph = profile.clone();
+        graph.graph_weight_ppm = 250_001;
 
         assert_ne!(
             digest,
-            compute_profile_material_digest(&changed).expect("changed digest")
+            compute_profile_material_digest(&lexical).expect("lexical digest"),
+            "the material digest must bind the checked-in lexical weight"
+        );
+        assert_ne!(
+            digest,
+            compute_profile_material_digest(&graph).expect("graph digest"),
+            "the material digest must bind the checked-in graph weight"
         );
     }
 
