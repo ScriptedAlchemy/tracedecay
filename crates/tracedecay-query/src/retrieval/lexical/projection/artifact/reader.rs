@@ -36,7 +36,7 @@ use tracedecay_domain::{
     ManifestDigest, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
     SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
-use tracedecay_private_fs::open_private_file;
+use tracedecay_private_fs::{RewriteWitness, open_private_file};
 
 use super::builder::compute_section_digests;
 use super::clone_codec::{
@@ -254,12 +254,10 @@ struct StableArtifactFileStateV1 {
 }
 
 /// Whether an unchanged [`StableArtifactFileStateV1`] proves the artifact's
-/// bytes unchanged since the full verification that recorded it. Unix ctime
-/// advances on every write and cannot be set back. No Windows timestamp
-/// witnesses a same-length rewrite that restores `LastWriteTime` (NTFS
-/// `ChangeTime` stays put too), so there the state only guards an open against
-/// a concurrent replacement and every reopen re-verifies the content digest.
-const NATIVE_FILE_STATE_WITNESSES_REWRITES: bool = cfg!(unix);
+/// bytes unchanged since the full verification that recorded it. Without a
+/// native [`RewriteWitness`] the state only guards an open against a
+/// concurrent replacement and every reopen re-verifies the content digest.
+const NATIVE_FILE_STATE_WITNESSES_REWRITES: bool = RewriteWitness::NATIVE.proves_unchanged_bytes();
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]

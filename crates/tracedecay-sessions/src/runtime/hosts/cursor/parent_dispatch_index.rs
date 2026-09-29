@@ -18,15 +18,15 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_private_fs::RewriteWitness;
 use tracedecay_store::cursor_dispatch::{
     cursor_dispatch_model, is_subagent_dispatch_tool, record_bytes_may_name_subagent_dispatch,
 };
 
 use crate::runtime::source::{
-    JSONL_CHANGE_TOKEN_WITNESSES_REWRITES, JsonlFileChangeToken, JsonlNativeFileIdentity,
-    MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader, ResumeDigest,
-    jsonl_change_token_settled, jsonl_file_change_token, jsonl_native_file_identity,
-    jsonl_prefix_digest,
+    JsonlFileChangeToken, JsonlNativeFileIdentity, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
+    RawJsonlFrameReader, ResumeDigest, jsonl_change_token_settled, jsonl_file_change_token_under,
+    jsonl_native_file_identity, jsonl_prefix_digest,
 };
 
 /// Bound on retained parent-transcript entries.
@@ -90,7 +90,10 @@ struct ParentFileRevision {
     change: JsonlFileChangeToken,
 }
 
-fn parent_file_revision(file: &File) -> std::io::Result<Option<ParentFileRevision>> {
+fn parent_file_revision(
+    file: &File,
+    witness: RewriteWitness,
+) -> std::io::Result<Option<ParentFileRevision>> {
     let metadata = file.metadata()?;
     let Some(identity) = jsonl_native_file_identity(file, &metadata) else {
         return Ok(None);
@@ -98,23 +101,23 @@ fn parent_file_revision(file: &File) -> std::io::Result<Option<ParentFileRevisio
     Ok(Some(ParentFileRevision {
         identity,
         len: metadata.len(),
-        change: jsonl_file_change_token(&metadata),
+        change: jsonl_file_change_token_under(&metadata, witness),
     }))
 }
 
 impl ParentFileRevision {
     /// Whether an equal revision proves the file's bytes unchanged, which
-    /// only a platform whose change token witnesses rewrites can say.
+    /// only a change token carrying a rewrite witness can say.
     fn proves_unchanged(self, observed: Self) -> bool {
-        JSONL_CHANGE_TOKEN_WITNESSES_REWRITES && self == observed
+        self.change.witnesses_rewrites() && self == observed
     }
 }
 
 /// Whether `revision` can authorize a later zero-I/O hit: its change token
-/// witnesses rewrites on this platform and is already behind the coarse
-/// clock, so a later write must move it.
+/// carries a rewrite witness that is already behind the coarse clock, so a
+/// later write must move it.
 fn parent_revision_settled(revision: &ParentFileRevision) -> bool {
-    JSONL_CHANGE_TOKEN_WITNESSES_REWRITES && jsonl_change_token_settled(revision.change)
+    jsonl_change_token_settled(revision.change)
 }
 
 struct ParentDispatchEntry {
@@ -150,13 +153,17 @@ struct ScanCommit<'a> {
 }
 
 struct ParentDispatchIndex {
+    /// The stat field revisions are captured under. Without one, every
+    /// lookup and post-scan commit re-proves the verified prefix digest.
+    witness: RewriteWitness,
     entries: HashMap<PathBuf, ParentDispatchEntry>,
     lru: VecDeque<PathBuf>,
 }
 
 impl ParentDispatchIndex {
-    fn new() -> Self {
+    fn new(witness: RewriteWitness) -> Self {
         Self {
+            witness,
             entries: HashMap::new(),
             lru: VecDeque::new(),
         }
@@ -174,7 +181,7 @@ impl ParentDispatchIndex {
                 return (None, DispatchScanReceipt::EMPTY);
             }
         };
-        let revision = match parent_file_revision(&file) {
+        let revision = match parent_file_revision(&file, self.witness) {
             Ok(Some(revision)) => revision,
             Ok(None) | Err(_) => {
                 self.forget(parent_path);
@@ -331,6 +338,7 @@ impl ParentDispatchIndex {
         };
         let (final_revision, digest_bytes) = match revalidate_scanned_prefix(
             &mut delta.file,
+            self.witness,
             scan.revision,
             delta.verified_cursor,
             &delta.resume_digest,
@@ -435,11 +443,12 @@ impl ParentDispatchIndex {
 /// one consumed-prefix digest per scan whose revision is not proven unchanged.
 fn revalidate_scanned_prefix(
     file: &mut File,
+    witness: RewriteWitness,
     scanned: ParentFileRevision,
     verified_cursor: u64,
     parsed_digest: &ResumeDigest,
 ) -> std::io::Result<(Option<ParentFileRevision>, u64)> {
-    let Some(current) = parent_file_revision(file)? else {
+    let Some(current) = parent_file_revision(file, witness)? else {
         return Ok((None, 0));
     };
     if current.identity != scanned.identity
@@ -457,7 +466,7 @@ fn revalidate_scanned_prefix(
     if observed.witness(verified_cursor) != expected {
         return Ok((None, digest_bytes));
     }
-    if parent_file_revision(file)? != Some(current) {
+    if parent_file_revision(file, witness)? != Some(current) {
         return Ok((None, digest_bytes));
     }
     Ok((Some(current), digest_bytes))
@@ -476,7 +485,7 @@ struct ScanDelta {
 
 fn shared_parent_dispatch_index() -> &'static Mutex<ParentDispatchIndex> {
     static INDEX: OnceLock<Mutex<ParentDispatchIndex>> = OnceLock::new();
-    INDEX.get_or_init(|| Mutex::new(ParentDispatchIndex::new()))
+    INDEX.get_or_init(|| Mutex::new(ParentDispatchIndex::new(RewriteWitness::NATIVE)))
 }
 
 /// Resolve the model a parent Cursor transcript assigned to `agent_id`.
@@ -747,9 +756,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use tempfile::TempDir;
+    use tracedecay_private_fs::RewriteWitness;
 
     use super::{
-        DispatchScanReceipt, parent_dispatch_model_for_subagent_with_receipt,
+        DispatchScanReceipt, ParentDispatchIndex, parent_dispatch_model_for_subagent_with_receipt,
         uncached_dispatch_model_for_agent,
     };
     use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
@@ -757,10 +767,14 @@ mod tests {
     const TEST_UNCHANGED_TAIL_BYTES: u64 = 4096;
 
     /// Prefix bytes the post-scan commit re-hashes when the revision did not
-    /// move during the scan: none under Unix ctime, which witnesses rewrites;
-    /// no Windows timestamp does, so the verified prefix is re-proven there.
-    fn commit_proof_bytes(verified: u64) -> u64 {
-        if cfg!(unix) { 0 } else { verified }
+    /// move during the scan: none under a witness such as Unix ctime; without
+    /// one (Windows) the verified prefix is re-proven.
+    fn commit_proof_bytes(witness: RewriteWitness, verified: u64) -> u64 {
+        if witness.proves_unchanged_bytes() {
+            0
+        } else {
+            verified
+        }
     }
 
     static FIXTURE_SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -901,7 +915,7 @@ mod tests {
         assert_eq!(appended.bytes_parsed, delta);
         assert_eq!(
             appended.prefix_digest_bytes,
-            before_len + commit_proof_bytes(after_len),
+            before_len + commit_proof_bytes(RewriteWitness::NATIVE, after_len),
             "one changed revision performs exactly one cached-prefix proof"
         );
         assert_eq!(appended.records_parsed, 1);
@@ -1008,9 +1022,14 @@ mod tests {
         filetime::set_file_mtime(path, original).unwrap();
     }
 
-    #[test]
-    fn exact_mtime_rewrite_with_unchanged_trailing_anchor_rescans_from_zero() {
+    /// A same-length in-place rewrite that restores the exact mtime and keeps
+    /// the trailing anchor window. Under a rewrite witness the moved change
+    /// time sends the lookup to the prefix digest; without one (NTFS keeps
+    /// `ChangeTime` too) the equal revision proves nothing, so the digest
+    /// decides as well and every commit re-proves the prefix.
+    fn exact_mtime_rewrite_rescans_from_zero_under(witness: RewriteWitness) {
         let layout = layout();
+        let mut index = ParentDispatchIndex::new(witness);
         let old = dispatch_record("agent_id", "rewrite-agent", "old-model");
         let new = dispatch_record("agent_id", "rewrite-agent", "new-model");
         let unchanged_tail = ordinary_record(&"x".repeat(TEST_UNCHANGED_TAIL_BYTES as usize));
@@ -1021,13 +1040,16 @@ mod tests {
         );
 
         write_lines(&layout.candidate_two, &[old, unchanged_tail.clone()]);
-        assert_eq!(
-            lookup(&layout, "rewrite-agent").0.as_deref(),
-            Some("old-model")
-        );
+        crate::runtime::source::spin_until_jsonl_change_settled(&layout.candidate_two);
+        let (model, cold) = index.lookup(&layout.candidate_two, "rewrite-agent");
+        assert_eq!(model.as_deref(), Some("old-model"));
         let original_metadata = fs::metadata(&layout.candidate_two).unwrap();
         let original_len = original_metadata.len();
         let original_mtime = filetime::FileTime::from_last_modification_time(&original_metadata);
+        assert_eq!(
+            cold.prefix_digest_bytes,
+            commit_proof_bytes(witness, original_len)
+        );
 
         rewrite_in_place(&layout.candidate_two, &[new, unchanged_tail]);
         assert_eq!(
@@ -1037,13 +1059,23 @@ mod tests {
         );
         restore_exact_mtime(&layout.candidate_two, original_mtime);
 
-        let (model, receipt) = lookup(&layout, "rewrite-agent");
+        let (model, receipt) = index.lookup(&layout.candidate_two, "rewrite-agent");
         assert_eq!(model.as_deref(), Some("new-model"));
         assert!(receipt.rescanned_from_zero);
         assert_eq!(
             receipt.prefix_digest_bytes,
-            original_len + commit_proof_bytes(original_len)
+            original_len + commit_proof_bytes(witness, original_len)
         );
+    }
+
+    #[test]
+    fn exact_mtime_rewrite_with_unchanged_trailing_anchor_rescans_from_zero() {
+        exact_mtime_rewrite_rescans_from_zero_under(RewriteWitness::NATIVE);
+    }
+
+    #[test]
+    fn without_a_rewrite_witness_an_exact_mtime_rewrite_rescans_from_zero() {
+        exact_mtime_rewrite_rescans_from_zero_under(RewriteWitness::Absent);
     }
 
     #[test]
@@ -1183,7 +1215,9 @@ mod tests {
         agent_id: &'a str,
     ) -> (super::ScanCommit<'a>, super::ScanDelta) {
         let file = fs::File::open(parent_path).unwrap();
-        let revision = super::parent_file_revision(&file).unwrap().unwrap();
+        let revision = super::parent_file_revision(&file, index.witness)
+            .unwrap()
+            .unwrap();
         index.insert_reset(parent_path, revision);
         let resume_digest = crate::runtime::source::ResumeDigest::new();
         let delta = super::scan_parent_delta(file, 0, resume_digest.clone(), agent_id).unwrap();
@@ -1211,7 +1245,7 @@ mod tests {
             &[dispatch_record("agent_id", "live-agent", "live-model")],
         );
         let initial_len = fs::metadata(&layout.candidate_two).unwrap().len();
-        let mut index = super::ParentDispatchIndex::new();
+        let mut index = ParentDispatchIndex::new(RewriteWitness::NATIVE);
         let (commit, delta) = parsed_scan(&mut index, &layout.candidate_two, "live-agent");
 
         let late = dispatch_record("agent_id", "late-agent", "late-model");
@@ -1237,7 +1271,7 @@ mod tests {
         assert_eq!(caught_up.bytes_parsed, appended_len);
         assert_eq!(
             caught_up.prefix_digest_bytes,
-            initial_len + commit_proof_bytes(initial_len + appended_len)
+            initial_len + commit_proof_bytes(RewriteWitness::NATIVE, initial_len + appended_len)
         );
         assert!(!caught_up.rescanned_from_zero);
 
@@ -1292,7 +1326,7 @@ mod tests {
         let partial_b = dispatch_record("agent_id", "tail-agent", "model-b");
         assert_eq!(partial_a.len(), partial_b.len());
         fs::write(&layout.candidate_two, format!("{complete}\n{partial_a}")).unwrap();
-        let mut index = super::ParentDispatchIndex::new();
+        let mut index = ParentDispatchIndex::new(RewriteWitness::NATIVE);
         let (commit, parsed) = parsed_scan(&mut index, &layout.candidate_two, "tail-agent");
         assert_eq!(parsed.transient_model.as_deref(), Some("model-a"));
 
