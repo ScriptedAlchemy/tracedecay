@@ -70,10 +70,49 @@ reported timings before increasing either limit.
 
 ## Verify automatic ownership
 
-For a new eligible PR head, check that **Hauler CI / enqueue** creates four
+For a new eligible PR head, check that **Hauler CI / enqueue** creates eight
 pending Hauler checks, then inspect the ordinary CI scope job. Its successful
 `Hauler route / delegated / <policy>` step is the handoff receipt. Equivalent
 native heavy jobs should be skipped while repository gates still run. The
 workers update those same pending checks with the pinned snapshot and results.
 A successful controller workflow does not mean every PR passed; the individual
 Hauler checks contain the test verdicts.
+
+## Hosted reuse trial, 29 September 2026
+
+Two documentation-only PR snapshots used identical Rust inputs. The first
+snapshot was cold in each worker; the second reused that worker's build state.
+Both trials tested the same pinned head/base/merge commits. The eight-lane
+trial also included the Git-subtree timestamp fix, so its improvement cannot
+be attributed to parallelism alone.
+
+| Measurement | Four-worker trial | Eight-worker trial |
+| --- | --- | --- |
+| First PR, full results | 77m 10s after preliminary gates | 49m 17s after dispatch |
+| Second PR, full results | 111m 08s after preliminary gates | 55m 38s after dispatch |
+| Heavy worker allocation, both PRs | 310m 59s | 272m 38s |
+| Heavy worker starts, both PRs | 4 | 8 |
+
+The first trial used automatic admission. The second used manual dispatch and
+includes pending-job interference and recovery in its wall time. The timing
+origins differ; this is not a controlled percentage improvement in PR latency.
+Heavy runner allocation fell 12.3% with comparable job-start/end boundaries,
+but excludes enqueue, controller-only and native CI jobs. During the second
+trial window, 33 additional Hauler jobs consumed about 23 runner-minutes;
+that is an upper bound on avoidable overhead, not proof every job was empty.
+
+Each snapshot executed the same 13,762 unique Linux testcases with zero skips.
+The second trial reported 17 test failures per snapshot; all seven compile
+checks and both product tasks passed. No infrastructure error was reported.
+These results demonstrate warm reuse for unchanged build inputs, not the cost
+of recompiling a representative Rust change or a guarantee for a larger queue.
+
+The first trial evidence is in Actions runs
+[36508095645](https://github.com/ScriptedAlchemy/tracedecay/actions/runs/36508095645)
+and [36508250975](https://github.com/ScriptedAlchemy/tracedecay/actions/runs/36508250975).
+The second is in
+[36517035115](https://github.com/ScriptedAlchemy/tracedecay/actions/runs/36517035115)
+and [36517214575](https://github.com/ScriptedAlchemy/tracedecay/actions/runs/36517214575).
+Some redundant pending jobs were cancelled; the eight workers supplying the
+reported snapshots completed successfully. Worker success means the controller
+reported results, not that the product tests passed.
