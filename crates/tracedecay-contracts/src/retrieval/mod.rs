@@ -283,11 +283,12 @@ pub use search_surface::{
     SEARCH_MAX_LEXICAL_ALIASES, SEARCH_MAX_LEXICAL_ANCHOR_BYTES, SEARCH_MAX_LEXICAL_ANCHORS,
     SEARCH_MAX_LEXICAL_PHRASES, SEARCH_MAX_LEXICAL_PROXIMITIES, SEARCH_MAX_LEXICAL_PROXIMITY_GAP,
     SEARCH_MAX_LEXICAL_PROXIMITY_TERMS, SearchCompleteV1, SearchCoverageV1,
-    SearchExternalImportCandidatesV1, SearchExternalImportHintV1, SearchExternalImportV1,
-    SearchLaneStateV1, SearchLaneStatusV1, SearchLexicalAliasV1, SearchLexicalAlternativeReasonV1,
-    SearchLexicalFieldFilterV1, SearchLexicalFieldV1, SearchLexicalProximityV1,
-    SearchLexicalRouteV1, SearchResultDisplayV1, SearchResultRowV1, SearchResultV1,
-    SearchRouteMatchV1, SearchSpellingVariantV1, SearchSurfaceRequestV1, SearchUnavailableV1,
+    SearchDisplayUnavailableV1, SearchExternalImportCandidatesV1, SearchExternalImportHintV1,
+    SearchExternalImportV1, SearchLaneStateV1, SearchLaneStatusV1, SearchLexicalAliasV1,
+    SearchLexicalAlternativeReasonV1, SearchLexicalFieldFilterV1, SearchLexicalFieldV1,
+    SearchLexicalProximityV1, SearchLexicalRouteV1, SearchResultDisplayV1, SearchResultRowV1,
+    SearchResultV1, SearchRouteMatchV1, SearchSpellingVariantV1, SearchSurfaceRequestV1,
+    SearchUnavailableV1,
 };
 pub use source_read::{
     MAX_SOURCE_READ_PATH_BYTES, SourceReadModeV1, SourceReadPortContext, SourceReadPortFuture,

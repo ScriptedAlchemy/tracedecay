@@ -255,3 +255,88 @@ async fn find_exact_symbol_applies_limit_and_rejects_bad_arguments() {
 
     fixture.harness.shutdown().await;
 }
+
+const GO_SHAPES_SOURCE: &str = "package shapes
+
+type Shape interface {
+\tArea() float64
+}
+
+type Circle struct{ R float64 }
+
+func (c Circle) Area() float64 { return c.R * c.R }
+";
+
+const JAVA_SHAPES_SOURCE: &str = "package app;
+
+interface Shape {
+    double area();
+}
+
+class Circle implements Shape {
+    @Override
+    public double area() {
+        return 1.0;
+    }
+}
+";
+
+/// A Go interface's method spec is a symbol the interface contains, and a Java
+/// method is located at its declaration, not at the annotation above it.
+#[tokio::test]
+async fn find_exact_symbol_locates_interface_methods_at_their_declarations() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("shapes")).expect("go fixture dir");
+        fs::write(project.join("shapes/shapes.go"), GO_SHAPES_SOURCE).expect("go source");
+        fs::create_dir_all(project.join("src/app")).expect("java fixture dir");
+        fs::write(project.join("src/app/Shapes.java"), JAVA_SHAPES_SOURCE).expect("java source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    warm_code_index_search(&server, "Circle").await;
+
+    // The bare-name probe folds case, so one query names both languages.
+    let area = exact_payload(&server, json!({"name": "Area", "format": "json"})).await;
+    assert_eq!(
+        sorted_without_ids(area)["matches"],
+        json!([
+            symbol(
+                "Area",
+                "shapes/shapes.go::Shape::Area",
+                "abstract_method",
+                "shapes/shapes.go",
+                4,
+                "Area() float64",
+            ),
+            symbol(
+                "Area",
+                "shapes/shapes.go::Area",
+                "struct_method",
+                "shapes/shapes.go",
+                9,
+                "func (c Circle) Area() float64",
+            ),
+            symbol(
+                "area",
+                "src/app/Shapes.java::Shape::area",
+                "abstract_method",
+                "src/app/Shapes.java",
+                4,
+                "double area()",
+            ),
+            symbol(
+                "area",
+                "src/app/Shapes.java::Circle::area",
+                "method",
+                "src/app/Shapes.java",
+                9,
+                "@Override\n    public double area()",
+            ),
+        ])
+    );
+
+    fixture.harness.shutdown().await;
+}

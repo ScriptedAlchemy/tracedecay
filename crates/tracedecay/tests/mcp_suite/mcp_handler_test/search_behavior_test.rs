@@ -319,5 +319,100 @@ async fn a_search_cursor_pages_only_the_request_and_operation_that_minted_it() {
             .all(|name| LEDGER_FAMILY.contains(&name.as_str()) && !first_names.contains(name)),
         "page two repeated page one: {first_names:?} / {second_names:?}"
     );
+
+    fixture.harness.shutdown().await;
+}
+
+const UTIL_SOURCE: &str = "\
+pub fn normalize(s: &str) -> String {\n    \
+    s.trim().to_lowercase()\n\
+}\n\
+\n\
+pub fn clamp(v: i64, lo: i64, hi: i64) -> i64 {\n    \
+    if v < lo { lo } else if v > hi { hi } else { v }\n\
+}\n";
+
+const MATH_SOURCE: &str = "\
+use crate::util::clamp;\n\
+\n\
+pub fn normalize_score(v: i64) -> i64 {\n    \
+    clamp(v, 0, 100)\n\
+}\n";
+
+const LIB_SOURCE: &str = "mod math;\nmod util;\n";
+
+fn display(name: &str, file: &str) -> Value {
+    json!({
+        "name": name,
+        "qualified_name": format!("{file}::{name}"),
+        "kind": "function",
+        "path": file,
+    })
+}
+
+/// `clamp` does not contain the query text: the graph lane ranks it as the
+/// callee of `normalize_score`. That candidate is hydrated like the text hits.
+#[tokio::test]
+async fn search_names_every_ranked_symbol_including_graph_reached_callees() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("search fixture sources");
+        fs::write(project.join("src/lib.rs"), LIB_SOURCE).expect("write lib source");
+        fs::write(project.join("src/util.rs"), UTIL_SOURCE).expect("write util source");
+        fs::write(project.join("src/math.rs"), MATH_SOURCE).expect("write math source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production search server");
+    warm_code_index_search(&server, "normalize").await;
+
+    let response = handle_real_server_tool_call(
+        &server,
+        "tracedecay_search",
+        json!({ "query": "normalize", "limit": 5, "format": "json" }),
+    )
+    .await;
+    let page: Value = serde_json::from_str(extract_real_server_text(&response)).expect("JSON");
+    let mut displays = search_displays(&page);
+    displays.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    assert_eq!(
+        displays,
+        vec![
+            display("clamp", "src/util.rs"),
+            display("normalize", "src/util.rs"),
+            display("normalize_score", "src/math.rs"),
+        ],
+        "{page}"
+    );
+    assert!(
+        page["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .all(|row| row.get("display_unavailable").is_none()),
+        "{page}"
+    );
+
+    let rendered = handle_real_server_tool_call(
+        &server,
+        "tracedecay_search",
+        json!({ "query": "normalize", "limit": 5, "format": "markdown" }),
+    )
+    .await;
+    let rendered = extract_real_server_text(&rendered);
+    let mut titles = rendered
+        .lines()
+        .filter_map(|line| line.strip_prefix("- **"))
+        .filter_map(|line| line.split_once("** ("))
+        .map(|(title, _)| title)
+        .collect::<Vec<_>>();
+    titles.sort_unstable();
+    assert_eq!(
+        titles,
+        vec!["clamp", "normalize", "normalize_score"],
+        "{rendered}"
+    );
+
     fixture.harness.shutdown().await;
 }
