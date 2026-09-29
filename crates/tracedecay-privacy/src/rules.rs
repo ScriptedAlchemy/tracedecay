@@ -1823,14 +1823,11 @@ mod tests {
     #[test]
     fn wide_word_repetitions_compile_within_the_default_program_limit() {
         let upstream = r"pypi-AgEIcHlwaS5vcmc[\w-]{50,1000}";
-        assert!(matches!(
-            Regex::new(upstream),
-            Err(regex::Error::CompiledTooBig(_))
-        ));
+        assert!(Regex::new(upstream).is_err_and(|error| error.size_limit().is_some()));
         let translated = Regex::new(&re2_compatible_regex(upstream)).unwrap();
         let token = format!("pypi-AgEIcHlwaS5vcmc{}", "aZ_9-".repeat(12));
         assert_eq!(
-            translated.find(&token).map(|found| found.as_str()),
+            translated.find(&token).map(|found| &token[found.range()]),
             Some(token.as_str())
         );
         assert_eq!(translated.find("pypi-AgEIcHlwaS5vcmcshort"), None);
