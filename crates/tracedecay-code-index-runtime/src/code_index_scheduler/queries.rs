@@ -29,8 +29,8 @@ use tracedecay_contracts::{
     LexicalOccurrenceRecord, ModuleApiRequest, Omission, OmissionReason, OpaqueCursor,
     OperationBudgetUsage, PageCursor, PageState, PhraseSearchRequest, QualifiedNameRequest,
     RequestAdmission, RequestContext, RequestCostReceiptV1, RetrievalEvidence,
-    RetrievalPortContext, RetrievalPortOutcome, SourceMetadataRecord, SourceMetadataRequest,
-    TemporalState,
+    RetrievalPortContext, RetrievalPortOutcome, RetryDirective, SourceMetadataRecord,
+    SourceMetadataRequest, TemporalState,
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
