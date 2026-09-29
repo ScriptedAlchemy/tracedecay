@@ -29,7 +29,8 @@
     "rm -rf target/nextest target/test-profile",
     "pnpm install --frozen-lockfile --store-dir /cache/pnpm",
     "rustup show active-toolchain && rustup which rust-analyzer",
-    "python3 scripts/test-linux-test-partitions.py && python3 scripts/linux-test-partitions.py check"
+    "python3 scripts/test-linux-test-partitions.py && python3 scripts/linux-test-partitions.py check",
+    "python3 -c 'import json,subprocess; actual={row[\"group\"] for row in json.loads(subprocess.check_output([\"python3\",\"scripts/linux-test-partitions.py\",\"linux-matrix\"]))[\"include\"]}; assert actual == {'\"'\"'core-contracts'\"'\"', '\"'\"'runtime'\"'\"', '\"'\"'root-lib-sessions'\"'\"', '\"'\"'root-journeys'\"'\"', '\"'\"'core-storage'\"'\"', '\"'\"'root-transport'\"'\"'}, \"Linux groups changed; update the trusted Hauler recipe before delegation\"'"
   ],
   "reports": [
     "target/nextest/linux"
