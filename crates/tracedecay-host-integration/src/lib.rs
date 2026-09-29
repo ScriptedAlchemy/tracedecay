@@ -91,6 +91,11 @@ pub enum HostBundleError {
         absence: tracedecay_domain::errors::HostAbsence,
         detail: String,
     },
+    /// The host integration refused or failed its native registration step.
+    /// The payload is the integration's own diagnosis, typically the host
+    /// CLI's stderr.
+    #[error("host-native registration failed: {0}")]
+    RegistrationFailed(String),
     #[error("bundle manifest schema version is unsupported")]
     UnsupportedManifestVersion,
     #[error("bundle manifest is structurally invalid")]
