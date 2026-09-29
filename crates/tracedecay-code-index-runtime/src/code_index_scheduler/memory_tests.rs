@@ -517,9 +517,30 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
     );
     for _ in 0..3 {
         measure(between);
+        let failure = scheduler
+            .reserve_worker_memory()
+            .expect_err("admission must not flap between the watermarks");
+        let super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(admission) = &failure else {
+            panic!(
+                "expected a worker resident-memory admission failure between the watermarks, got {failure:?}"
+            );
+        };
         assert!(
-            scheduler.reserve_worker_memory().is_err(),
-            "admission must not flap between the watermarks"
+            admission.is_observed_over_budget(),
+            "the between-watermark refusal must name measured pressure, not a full reservation ledger"
+        );
+        let rendered = failure.to_string();
+        assert!(
+            rendered.contains(&between.to_string()),
+            "the between-watermark refusal names observed bytes: {rendered}"
+        );
+        assert!(
+            rendered.contains(&limit.get().to_string()),
+            "the between-watermark refusal names configured bytes: {rendered}"
+        );
+        assert!(
+            failure.is_transient_capacity_failure(),
+            "an over-budget refusal between the watermarks is retryable as pressure falls"
         );
     }
 
