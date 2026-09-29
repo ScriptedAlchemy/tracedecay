@@ -9,7 +9,6 @@ use tracedecay_daemon_protocol::{
     parse_application_surface_request,
 };
 use tracedecay_domain::errors::Result;
-use tracedecay_mcp::tool_errors::structure_tool_problem;
 use tracedecay_mcp::tools::catalog_discovery::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
 };
@@ -181,9 +180,6 @@ async fn projectless_response(
                     store_administration,
                 ))
                 .await;
-            if let Some(result) = response.result.as_mut() {
-                structure_tool_problem(result);
-            }
             attach_projectless_tool_timing(
                 &mut response,
                 started.map(|started| started.elapsed().as_micros() as u64),

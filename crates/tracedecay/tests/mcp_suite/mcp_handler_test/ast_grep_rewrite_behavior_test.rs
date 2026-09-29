@@ -370,7 +370,7 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
     .await
     .expect("a daemon refusal renders as a tool result");
     assert_eq!(conflict.semantic_error(), Some(true), "{}", conflict.value);
-    let problem = &conflict.value["problem"];
+    let problem = &conflict.value["structuredContent"]["problem"];
     assert_eq!(
         (
             &problem["kind"],

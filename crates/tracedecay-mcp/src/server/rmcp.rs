@@ -20,7 +20,6 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, Semaphore};
 
-use crate::tool_errors::structure_tool_problem;
 use crate::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 use super::{
@@ -787,12 +786,9 @@ where
         }
         let started =
             (self.timings_enabled || self.context.timings_enabled()).then(std::time::Instant::now);
-        let mut response = self
+        let response = self
             .dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
             .await?;
-        if let Some(result) = response.result.as_mut() {
-            structure_tool_problem(result);
-        }
         let mut result = rmcp_response_result::<CallToolResult>(response)?;
         if let Some(started) = started {
             result

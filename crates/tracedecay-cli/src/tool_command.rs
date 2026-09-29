@@ -69,7 +69,7 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_mcp::tool_errors::project_route_problem;
+use tracedecay_mcp::tool_errors::{project_route_problem, tool_result_problem};
 use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
 use tracedecay_mcp::tools::response_trailers::{
     CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, REQUEST_COST_TRAILER_PREFIX,
@@ -1198,9 +1198,7 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
     // returning the status-only error so the process boundary can drop its
     // profiling guard and then return the nonzero `ExitCode`.
     std::io::stdout().flush()?;
-    let problem = result_value
-        .get("problem")
-        .or_else(|| result_value.pointer("/structuredContent/problem"));
+    let problem = tool_result_problem(result_value);
     let problem_text = |key: &str| {
         problem
             .and_then(|problem| problem.get(key))

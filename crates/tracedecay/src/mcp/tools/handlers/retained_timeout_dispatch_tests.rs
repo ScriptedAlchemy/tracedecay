@@ -685,7 +685,10 @@ async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
     .await
     .expect("scope mismatch must render an unavailable result");
 
-    assert_eq!(result.value["problem"]["kind"], "unavailable");
+    assert_eq!(
+        result.value["structuredContent"]["problem"]["kind"],
+        "unavailable"
+    );
     cg.close();
 }
 
@@ -732,7 +735,10 @@ async fn fact_store_curate_pre_commit_cancellation_does_not_mutate() {
 
     assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
     assert_eq!(executor.mutations.load(Ordering::SeqCst), 0);
-    assert_eq!(result.value["problem"]["kind"], "cancelled");
+    assert_eq!(
+        result.value["structuredContent"]["problem"]["kind"],
+        "cancelled"
+    );
     cg.close();
 }
 
@@ -859,7 +865,7 @@ async fn a_stale_refresh_frontier_reaches_mcp_as_typed_detail() {
         .await
         .expect("a stale frontier renders a typed problem");
 
-        let problem = result.value["problem"].clone();
+        let problem = result.value["structuredContent"]["problem"].clone();
         assert_eq!(
             (
                 &problem["kind"],
