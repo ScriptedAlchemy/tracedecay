@@ -14,19 +14,20 @@ use tracedecay_contracts::retrieval::{
     ActiveProjectBranchV1, ActiveProjectResolutionSourceV1, ActiveProjectResultV1,
     ActiveProjectStorageV1, ProjectStatusV1, StatusAdmissionV1, StatusBranchMismatchV1,
     StatusCodeIndexFreshnessV1, StatusGitStalenessUnavailableV1, StatusGitStalenessV1,
-    StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1,
-    StatusRetrievalServingV1, StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1,
-    StatusServingConditionV1, StatusServingFreshnessV1, StatusSessionGitEvidenceUnavailableV1,
-    StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
+    StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryRuntimeHeapV1, StatusMemoryV1,
+    StatusResultV1, StatusRetrievalServingV1, StatusSchemaConvergenceStateV1,
+    StatusSchemaConvergenceV1, StatusServingConditionV1, StatusServingFreshnessV1,
+    StatusSessionGitEvidenceUnavailableV1, StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{GlobalDbGitCorrelationStore, RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::resident_memory::{
-    RESIDENT_OWNER_SHED_ORDER_V1, ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
-    ResidentOwnerKindV1, ResidentOwnersV1, process_resident_memory_pressure_v1,
-    process_resident_owners_v1, sampled_memory_pressure_some_avg10_v1,
+    PROCESS_RUNTIME_ALLOWANCE_BYTES_V1, ProcessRuntimeHeapSampleV1, RESIDENT_OWNER_SHED_ORDER_V1,
+    ResidentMemoryPressureStateV1, ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnersV1,
+    process_resident_memory_pressure_v1, process_resident_owners_v1,
+    sample_process_runtime_heap_v1, sampled_memory_pressure_some_avg10_v1,
 };
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
@@ -211,6 +212,7 @@ fn project_memory_value(project_id: &ProjectId) -> StatusMemoryV1 {
         sampled_memory_pressure_some_avg10_v1(),
         std::time::Instant::now(),
         project_id,
+        &sample_process_runtime_heap_v1(),
     )
 }
 
@@ -220,6 +222,7 @@ fn memory_value(
     psi_some_avg10: Option<f64>,
     now: std::time::Instant,
     project_id: &ProjectId,
+    runtime: &[ProcessRuntimeHeapSampleV1],
 ) -> StatusMemoryV1 {
     let (status, resident_bytes) = match pressure.state() {
         ResidentMemoryPressureStateV1::Unobserved => (StatusMemoryPressureV1::Unobserved, None),
@@ -270,6 +273,14 @@ fn memory_value(
         retained_bytes: report.measured_bytes,
         unmeasured_owners: report.unmeasured_owners,
         owners,
+        runtime: runtime
+            .iter()
+            .map(|heap| StatusMemoryRuntimeHeapV1 {
+                kind: heap.kind.as_str().to_owned(),
+                bytes: heap.bytes.measured(),
+            })
+            .collect(),
+        runtime_allowance_bytes: PROCESS_RUNTIME_ALLOWANCE_BYTES_V1,
     }
 }
 
@@ -1051,8 +1062,9 @@ mod tests {
     fn status_memory_reports_the_projects_own_owners_and_daemon_totals() {
         use std::sync::Arc;
         use tracedecay_runtime_core::resident_memory::{
-            ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnerScopeV1, ResidentOwnerV1,
-            ResidentOwnersV1,
+            PROCESS_RUNTIME_ALLOWANCE_BYTES_V1, ProcessRuntimeHeapKindV1,
+            ProcessRuntimeHeapSampleV1, ResidentMemoryPressureV1, ResidentOwnerBytesV1,
+            ResidentOwnerKindV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1,
         };
         let pressure =
             ResidentMemoryPressureV1::new(std::num::NonZeroU64::new(10_000).expect("limit"));
@@ -1087,6 +1099,16 @@ mod tests {
             Some(1.5),
             std::time::Instant::now(),
             &project,
+            &[
+                ProcessRuntimeHeapSampleV1 {
+                    kind: ProcessRuntimeHeapKindV1::SqliteHeap,
+                    bytes: ResidentOwnerBytesV1::Measured(2_048),
+                },
+                ProcessRuntimeHeapSampleV1 {
+                    kind: ProcessRuntimeHeapKindV1::CanonicalScratch,
+                    bytes: ResidentOwnerBytesV1::Unmeasured,
+                },
+            ],
         );
 
         assert_eq!(
@@ -1115,6 +1137,11 @@ mod tests {
                     "idle_seconds": 0,
                     "protected": true,
                 }],
+                "runtime": [
+                    {"kind": "sqlite_heap", "bytes": 2_048},
+                    {"kind": "canonical_scratch", "bytes": null},
+                ],
+                "runtime_allowance_bytes": PROCESS_RUNTIME_ALLOWANCE_BYTES_V1,
             })
         );
     }

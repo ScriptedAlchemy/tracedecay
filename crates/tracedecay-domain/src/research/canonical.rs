@@ -12,12 +12,50 @@ use super::error::DomainError;
 use super::id::ManifestDigest;
 use crate::canonical_text::encode_tagged_lowercase_hex;
 
+/// A thread's pooled digest sink buffer, counted in the process's pooled
+/// canonical scratch while it is held.
+#[derive(Default)]
+struct PooledSinkBuffer(String);
+
+impl PooledSinkBuffer {
+    fn pool(buffer: String) -> Self {
+        canonical_serializer::pool_scratch_bytes(buffer.capacity());
+        Self(buffer)
+    }
+
+    fn take(mut self) -> String {
+        let buffer = std::mem::take(&mut self.0);
+        canonical_serializer::unpool_scratch_bytes(buffer.capacity());
+        buffer
+    }
+}
+
+impl Drop for PooledSinkBuffer {
+    fn drop(&mut self) {
+        canonical_serializer::unpool_scratch_bytes(self.0.capacity());
+    }
+}
+
 thread_local! {
     /// One 64 KiB canonical-hash buffer per worker. `canonical_sha256` is
     /// called once per chunk during sealed restore; a fresh `BufferedSink`
     /// per call was 85% of seating allocation traffic.
-    static CANONICAL_SHA256_SINK_BUFFER: RefCell<String> =
-        const { RefCell::new(String::new()) };
+    static CANONICAL_SHA256_SINK_BUFFER: RefCell<PooledSinkBuffer> =
+        RefCell::new(PooledSinkBuffer::default());
+}
+
+/// Bytes every thread's canonical serialization scratch keeps for reuse.
+#[must_use]
+pub fn pooled_canonical_scratch_bytes() -> u64 {
+    canonical_serializer::pooled_scratch_bytes()
+}
+
+/// Drop the calling thread's pooled canonical serialization scratch. The next
+/// serialization on this thread allocates it again.
+pub fn release_thread_canonical_scratch() {
+    canonical_serializer::release_thread_object_buffers();
+    // An exiting thread has already dropped its buffer.
+    let _ = CANONICAL_SHA256_SINK_BUFFER.try_with(|cell| cell.take());
 }
 
 impl ManifestDigest {
@@ -90,7 +128,7 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<ManifestDigest, Domai
         // `replace` keeps the buffer owned across a panic in serialize so the
         // thread-local is never left borrowed; a panicked call drops one
         // buffer and the next remint reallocates.
-        let buffer = cell.replace(String::new());
+        let buffer = cell.take().take();
         let mut sink = if buffer.capacity() == 0 {
             BufferedSink::new(Sha256::new())
         } else {
@@ -98,7 +136,7 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<ManifestDigest, Domai
         };
         let serialize = canonical_serializer::serialize_canonical(value, &mut sink);
         let (hasher, buffer) = sink.finish_reuse();
-        cell.replace(buffer);
+        cell.replace(PooledSinkBuffer::pool(buffer));
         serialize?;
         ManifestDigest::from_sha256_bytes(&hasher.finalize())
     })

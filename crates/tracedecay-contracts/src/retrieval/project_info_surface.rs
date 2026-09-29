@@ -184,6 +184,21 @@ pub struct StatusMemoryV1 {
     /// This project's retained owners; other projects' belong to the
     /// daemon-wide Doctor inventory.
     pub owners: Vec<StatusMemoryOwnerV1>,
+    /// Heap the daemon holds for its own lifetime, where it is measured.
+    pub runtime: Vec<StatusMemoryRuntimeHeapV1>,
+    /// Fixed process memory with no live measure (catalogs, thread stacks,
+    /// allocator metadata, the binary's writable data). A settled daemon's
+    /// anonymous memory stays within `retained_bytes`, the `runtime` heap and
+    /// this allowance.
+    pub runtime_allowance_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusMemoryRuntimeHeapV1 {
+    pub kind: String,
+    /// `None` when the holder could not measure itself.
+    pub bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

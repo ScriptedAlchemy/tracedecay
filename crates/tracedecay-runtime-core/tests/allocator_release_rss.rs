@@ -5,9 +5,11 @@
 
 #![cfg(all(target_os = "linux", target_env = "gnu"))]
 
+use tracedecay_domain::process_heap::{
+    ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
+};
 use tracedecay_runtime_core::resident_memory::{
-    ProcessAllocatorReleaseV1, ProcessAllocatorTrimV1, install_process_allocator_release_v1,
-    release_c_library_heap_v1, release_process_allocator_memory_v1,
+    ProcessAllocatorTrimV1, release_c_library_heap_v1, release_process_allocator_memory_v1,
     sampled_process_resident_bytes_v1,
 };
 

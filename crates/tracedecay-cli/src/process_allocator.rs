@@ -10,7 +10,7 @@
 ))]
 mod mimalloc_v3 {
     use tracedecay_code_index::parallelism::run_on_every_installed_worker;
-    use tracedecay_runtime_core::resident_memory::{
+    use tracedecay_domain::process_heap::{
         ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
     };
 

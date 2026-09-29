@@ -74,6 +74,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::retrieval::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use tracedecay_daemon_service::logging::StderrTracingDefault;
+use tracedecay_domain::process_heap::collect_idle_thread_heap_v1;
 use tracedecay_runtime_core::config::{ProfileRoot, admit_process_host_program_search_path};
 
 pub(crate) fn current_unix_timestamp() -> i64 {
@@ -739,6 +740,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
                 .worker_threads(worker_threads)
                 .max_blocking_threads(blocking_threads)
                 .thread_stack_size(ASYNC_STACK_BYTES)
+                .on_thread_park(collect_idle_thread_heap_v1)
                 .build(),
         };
         build.map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {

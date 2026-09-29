@@ -15,7 +15,7 @@ use tracedecay_domain::{
     CommitId, ContentDigest, ManifestDigest, ProjectId, RefId, RepositoryDirtyStateV1,
     RepositoryId, TreeId, WorktreeId,
 };
-use tree_sitter::{InputEdit, ParseOptions, Parser, Point, Tree};
+use tree_sitter::{InputEdit, Language, ParseOptions, Parser, Point, Tree};
 
 use crate::ts_provider;
 
@@ -285,7 +285,10 @@ pub struct RetainedParseDocument {
     /// grammar). Retaining only the divergent case avoids storing two
     /// identical full-source copies per document.
     parsed_source: Option<String>,
-    parser: Parser,
+    /// Each parse takes a fresh parser: a retained parser keeps its parse
+    /// stacks, which outweigh the tree (12.2 MB across 38 retained
+    /// documents), and the retained tree alone carries incremental reuse.
+    language: Language,
     tree: Tree,
     limits: ParseLimits,
     state_epoch: u64,
@@ -374,22 +377,15 @@ impl RetainedParseDocument {
         if let Some(parsed) = parsed_source.as_deref() {
             validate_prepared_source(&source, parsed)?;
         }
-        let mut parser = crate::hotpath_observe::measure_language(|| {
+        let (language, mut parser) = crate::hotpath_observe::measure_language(|| {
             let language = ts_provider::try_language(&grammar_key).map_err(|_| {
                 crate::hotpath_observe::record_grammar_lookup_miss();
                 ParseError::UnsupportedLanguage {
                     language_id: language_id.clone(),
                 }
             })?;
-            let mut parser = Parser::new();
-            parser.set_language(&language).map_err(|error| {
-                crate::hotpath_observe::record_grammar_rejected();
-                ParseError::GrammarRejected {
-                    language_id: language_id.clone(),
-                    detail: error.to_string(),
-                }
-            })?;
-            Ok::<_, ParseError>(parser)
+            let parser = parser_for(&language_id, &language)?;
+            Ok::<_, ParseError>((language, parser))
         })?;
         let parse_text = parsed_source.as_deref().unwrap_or(&source);
         let (tree, elapsed) =
@@ -423,7 +419,7 @@ impl RetainedParseDocument {
                 language_id,
                 source,
                 parsed_source,
-                parser,
+                language,
                 tree,
                 limits,
                 state_epoch: 1,
@@ -547,7 +543,7 @@ impl RetainedParseDocument {
         let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
         let (new_tree, elapsed) = parse_with_deadline(
             &self.language_id,
-            &mut self.parser,
+            &mut parser_for(&self.language_id, &self.language)?,
             parse_text,
             Some(&edited_tree),
             self.limits,
@@ -687,7 +683,7 @@ impl RetainedParseDocument {
         let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
         let (new_tree, elapsed) = parse_with_deadline(
             &self.language_id,
-            &mut self.parser,
+            &mut parser_for(&self.language_id, &self.language)?,
             parse_text,
             None,
             self.limits,
@@ -725,6 +721,18 @@ impl RetainedParseDocument {
         self.state_epoch = report.state_epoch;
         Ok(report)
     }
+}
+
+fn parser_for(language_id: &str, language: &Language) -> Result<Parser, ParseError> {
+    let mut parser = Parser::new();
+    parser.set_language(language).map_err(|error| {
+        crate::hotpath_observe::record_grammar_rejected();
+        ParseError::GrammarRejected {
+            language_id: language_id.to_owned(),
+            detail: error.to_string(),
+        }
+    })?;
+    Ok(parser)
 }
 
 fn ensure_source_bound(source: &str, limits: ParseLimits) -> Result<(), ParseError> {
