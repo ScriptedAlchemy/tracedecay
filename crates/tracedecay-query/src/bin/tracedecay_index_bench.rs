@@ -408,6 +408,7 @@ struct GenerationRun {
     increment_wall: Duration,
     increment_clone_payloads_computed: u64,
     increment_clone_payloads_reused: u64,
+    retained_parses: serde_json::Value,
     body_refresh: BodyRefreshMetrics,
 }
 
@@ -440,6 +441,7 @@ fn build_generations(
     let clean_wall = clean_started.elapsed();
     let clean_chunks = clean.chunks().chunks().len() as u64;
     let clean_pool_stats = owner.physical_artifact_pool_stats();
+    let clean_parse_stats = owner.retained_parse_stats();
 
     let (edited, edited_paths) = edit(files);
     let edited_files = edited_paths.len() as u64;
@@ -457,6 +459,20 @@ fn build_generations(
         .map_err(|error| format!("build incremental generation: {error}"))?;
     let increment_wall = increment_started.elapsed();
     let increment_pool_stats = owner.physical_artifact_pool_stats();
+    let increment_parse_stats = owner.retained_parse_stats();
+    let retained_parses = serde_json::json!({
+        "clean_retained_documents": clean_parse_stats.retained_documents,
+        "increment_retained_reparses": (increment_parse_stats.incremental_parses
+            + increment_parse_stats.noop_parses)
+            .saturating_sub(clean_parse_stats.incremental_parses + clean_parse_stats.noop_parses),
+        "increment_initial_parses": increment_parse_stats
+            .initial_parses
+            .saturating_sub(clean_parse_stats.initial_parses),
+        "increment_reset_parses": increment_parse_stats
+            .reset_parses
+            .saturating_sub(clean_parse_stats.reset_parses),
+        "increment_retained_documents": increment_parse_stats.retained_documents,
+    });
     let (generation, body_refresh) = if clone_envelope {
         build_body_refresh(
             &mut owner,
@@ -491,6 +507,7 @@ fn build_generations(
         increment_clone_payloads_reused: increment_pool_stats
             .clone_payloads_reused
             .saturating_sub(clean_pool_stats.clone_payloads_reused),
+        retained_parses,
         body_refresh,
     })
 }
@@ -602,6 +619,7 @@ fn run(options: &Options) -> Result<String, String> {
         clone_census,
         increment_clone_payloads_computed: generations.increment_clone_payloads_computed,
         increment_clone_payloads_reused: generations.increment_clone_payloads_reused,
+        retained_parses: generations.retained_parses,
         body_refresh: generations.body_refresh,
         sealed_bytes: sealed_len,
         sealed_state_digest: state_digest.as_str(),
@@ -1091,6 +1109,7 @@ struct SummaryFields<'a> {
     clone_census: serde_json::Value,
     increment_clone_payloads_computed: u64,
     increment_clone_payloads_reused: u64,
+    retained_parses: serde_json::Value,
     body_refresh: BodyRefreshMetrics,
     sealed_bytes: u64,
     sealed_state_digest: &'a str,
@@ -1121,6 +1140,7 @@ fn summary(fields: SummaryFields<'_>) -> String {
         "language_files": fields.language_files,
         "edited_files": fields.edited_files,
         "clean_chunks": fields.clean_chunks,
+        "retained_parses": fields.retained_parses,
         "source_total_bytes": fields.source_total_bytes,
         "symbol_count": fields.symbol_count,
         "clones": {
