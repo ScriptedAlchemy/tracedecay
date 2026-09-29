@@ -216,7 +216,7 @@ fn dispatch_application_surface_tools_inner<'a>(
                 }
             };
         application_surface::handle_application_surface(
-            cg,
+            Some(&cg.store_layout().response_handle_root),
             operation,
             normalized_args,
             options.application_invocation_executor,

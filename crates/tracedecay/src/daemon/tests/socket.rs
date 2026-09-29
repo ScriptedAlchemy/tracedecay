@@ -948,6 +948,22 @@ async fn projectless_tools_list_advertises_registry_tools() {
         !names.contains("tracedecay_search"),
         "projectless tools/list must not advertise project-mounted graph tools: {names:?}"
     );
+    let configuration: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| name.starts_with("tracedecay_configuration_"))
+        .collect();
+    assert_eq!(
+        configuration,
+        [
+            "tracedecay_configuration_batch",
+            "tracedecay_configuration_get",
+            "tracedecay_configuration_set",
+            "tracedecay_configuration_unset",
+        ],
+        "projectless tools/list advertises only the configuration tools a user setting \
+         can address"
+    );
 
     server_task
         .await
