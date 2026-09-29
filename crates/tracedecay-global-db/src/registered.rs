@@ -4,6 +4,7 @@ use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::{
+    cancellation::CancellationToken,
     db::{
         Database, DatabaseAuthority, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
         DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1,
@@ -98,8 +99,12 @@ impl RegisteredGlobalDbOwnerV1 {
     ) -> tracedecay_domain::errors::Result<Self> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
-        let (_, refused_authority) =
-            super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
+        // Short-lived attaches have no daemon shutdown to observe.
+        let (_, refused_authority) = super::schema_stages::ensure_attached_registered_schema(
+            &registered.database,
+            &CancellationToken::new(),
+        )
+        .await?;
         // A store refused for reset is never converged: its reset deletes it.
         if refused_authority.is_none() {
             super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
@@ -114,16 +119,23 @@ impl RegisteredGlobalDbOwnerV1 {
     }
 
     /// Returns the resumable convergence plan for an already admitted schema
-    /// without retaining an unowned client lease.
+    /// without retaining an unowned client lease. A `cancellation` observed
+    /// before the admission transaction commits rolls it back and fails with
+    /// [`TraceDecayError::store_open_cancelled`].
     #[hotpath::measure(future = true, label = "global_db.registered.admit_daemon")]
     pub async fn admit_and_attach_for_daemon(
         database: DatabaseOwnerV1,
+        cancellation: &CancellationToken,
     ) -> tracedecay_domain::errors::Result<(Self, super::schema_stages::RegisteredSchemaConvergence)>
     {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
         let (convergence, refused_authority) =
-            super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
+            super::schema_stages::ensure_attached_registered_schema(
+                &registered.database,
+                cancellation,
+            )
+            .await?;
         drop(registered);
         Ok((
             Self {

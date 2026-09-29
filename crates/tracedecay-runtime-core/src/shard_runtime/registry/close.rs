@@ -52,11 +52,13 @@ impl StoreRuntimeRegistry {
     /// Closes every mounted runtime that no lease, queued work, profile pin,
     /// or graph lease still holds, so each writer runs its shutdown TRUNCATE
     /// checkpoint. The daemon process exits with this registry reachable, so
-    /// no destructor closes these attachments otherwise. Held runtimes stay
-    /// mounted and are logged with their blockers. Returns the number of
-    /// runtimes closed.
+    /// no destructor closes these attachments otherwise. In-flight opens are
+    /// cancelled and joined first, so none publishes or keeps a physical
+    /// handle after the scan. Held runtimes stay mounted and are logged with
+    /// their blockers. Returns the number of runtimes closed.
     #[hotpath::measure(label = "runtime_core.registry.close_idle_for_shutdown", future = true)]
     pub async fn close_idle_for_shutdown(&self) -> Result<usize, StoreRuntimeRegistryFailure> {
+        self.cancel_and_join_opens_for_shutdown().await;
         let (reservations, reserve_failure) = {
             let mut state = self.lock_state();
             let mut idle = Vec::new();

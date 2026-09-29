@@ -991,6 +991,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         databases
     }
 
+    /// Stops every in-flight store open and schema install at its next safe
+    /// point and refuses new ones, so a draining daemon never waits for a
+    /// mount to run to completion.
+    pub fn cancel_store_opens_for_shutdown(&self) {
+        self.registry.cancel_opens_for_shutdown();
+    }
+
     /// Releases exclusive Grafeo writers at daemon shutdown, after graph
     /// operation settlement and reconciliation workers have joined.
     ///

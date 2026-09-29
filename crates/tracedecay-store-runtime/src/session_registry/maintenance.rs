@@ -640,7 +640,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             let long_lived = self.long_lived_session_maintenance;
             let (database, convergence) = if long_lived {
                 let (database, convergence) =
-                    RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database).await?;
+                    RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+                        database,
+                        self.registry.open_cancellation(),
+                    )
+                    .await?;
                 (database, Some(convergence))
             } else {
                 (
