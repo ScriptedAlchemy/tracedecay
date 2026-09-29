@@ -48,7 +48,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Publish pending lane checks
-        uses: ScriptedAlchemy/cargo-hauler@f7e84610425e659f67985aea991bf525e87d956b
+        uses: ScriptedAlchemy/cargo-hauler@8e3d776d96309864eb62fd9ba5bb33e5d85119f1
         with:
           mode: enqueue
           pull-requests: ${{ format('{0}', github.event.pull_request.number) }}
@@ -56,11 +56,39 @@ jobs:
           recipe: .github/hauler-ci.json
           admission-workflow: ci.yml
 
-  manage:
+  plan:
     if: >-
       github.repository == 'ScriptedAlchemy/tracedecay' &&
       github.event_name != 'pull_request_target' &&
       (github.event_name == 'workflow_dispatch' || vars.HAULER_CI_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
+    outputs:
+      lanes: ${{ steps.plan.outputs.lanes }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select lanes with eligible work
+        id: plan
+        uses: ScriptedAlchemy/cargo-hauler@8e3d776d96309864eb62fd9ba5bb33e5d85119f1
+        with:
+          mode: plan
+          token: ${{ github.token }}
+          recipe: .github/hauler-ci.json
+          admission-workflow: ci.yml
+          pull-requests: ${{ inputs.pull_requests || '' }}
+
+  manage:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
     name: Hauler pool / ${{ matrix.lane }}
     concurrency:
       group: hauler-ci-${{ matrix.lane }}
@@ -68,24 +96,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - lane: linux-journeys
-            runner: ubuntu-24.04-arm
-          - lane: linux-transport
-            runner: ubuntu-24.04-arm
-          - lane: linux-storage
-            runner: ubuntu-24.04-arm
-          - lane: linux-sessions
-            runner: ubuntu-24.04-arm
-          - lane: linux-runtime
-            runner: ubuntu-24.04-arm
-          - lane: linux-contracts
-            runner: ubuntu-24.04-arm
-          - lane: checks
-            runner: ubuntu-24.04-arm
-          - lane: product
-            runner: ubuntu-24.04
-    runs-on: ${{ matrix.runner }}
+        lane: ${{ fromJSON(needs.plan.outputs.lanes) }}
+    runs-on: ${{ matrix.lane == 'product' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 350
     permissions:
       contents: read
@@ -99,7 +111,7 @@ jobs:
           persist-credentials: false
       - name: Drain eligible PR snapshots
         id: hauler
-        uses: ScriptedAlchemy/cargo-hauler@f7e84610425e659f67985aea991bf525e87d956b
+        uses: ScriptedAlchemy/cargo-hauler@8e3d776d96309864eb62fd9ba5bb33e5d85119f1
         with:
           token: ${{ github.token }}
           recipe: .github/hauler-ci.json
