@@ -2790,12 +2790,30 @@ impl CodeIndexSchedulerRegistryV1 {
                                     pending.owner = 0;
                                 }
                             }
-                            // Source truth after the projection was swept by
-                            // the build task before it woke this pass (see
-                            // `source_moved_during_text_projection`); a pass
-                            // that finds the write it observed publishes
-                            // instead of reaching this seat.
-                            //
+                            // The build task swept source truth before it woke
+                            // this pass (see `source_moved_during_text_projection`)
+                            // so no ready read served the owner while the pass
+                            // waited for admission. This seat's decode and
+                            // activation ran after that sweep, and a plain
+                            // write in between moves no proof, so the swap
+                            // below must bind source truth observed here, at
+                            // the seat, not at the build.
+                            if let Some(text) = graph_text.as_ref()
+                                && Self::source_moved_during_text_projection(
+                                    text,
+                                    Arc::clone(&worker_scheduler),
+                                    Arc::clone(&worker_shutting_down),
+                                    worker_source_freshness.clone(),
+                                    &worker_project_root,
+                                )
+                                .await
+                            {
+                                Self::note_wake(
+                                    &worker_pending_wake,
+                                    &worker_wake,
+                                    CodeIndexCadenceTriggerV1::Overflow,
+                                );
+                            }
                             // The ready text owner now serves this generation,
                             // with or without a decoded seat after it.
                             worker_serving_generation_changed.send_replace(());

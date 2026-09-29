@@ -4055,6 +4055,146 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
     registry.shutdown().await;
 }
 
+/// A plain write lands after the build task swept the sealed digests but
+/// before the seat: the publication's decode and activation run in between,
+/// and the write moves neither the source epoch nor Git metadata. The swap
+/// must bind source truth observed at the seat, not at the build, so the
+/// seat is not reported current and the next pass indexes the write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_edit_between_build_sweep_and_seat_is_stale_after_seat() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let first = wait_for_ready_generation(&registry, fixture.path())
+        .await
+        .expect("the first generation reaches ready");
+
+    let [
+        (before_decode, release_decode),
+        (after_decode, release_after_decode),
+    ] = registry.pause_around_next_graph_decode(canonical_root.clone());
+    let (build_completed, release_build) = registry
+        .pause_next_published_text_projection_completion(canonical_root)
+        .await;
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn hinted() -> u32 { 2 }\n",
+    );
+    assert!(matches!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    tokio::time::timeout(Duration::from_secs(10), before_decode)
+        .await
+        .expect("the publication reaches its serving decode")
+        .expect("decode gate stays armed");
+    // The publishing pass released the admission before its projection. Hold
+    // it so the pass the write below wakes waits at its dequeue point while
+    // the seat is observed.
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the successor pass at its dequeue point");
+    // The build task waits at its completion gate after its source sweep and
+    // its wake, so the write lands after everything the build observed.
+    tokio::time::timeout(Duration::from_secs(10), build_completed)
+        .await
+        .expect("the publication's build completes")
+        .expect("completion gate stays armed");
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn hinted() -> u32 { 2 }\n\
+         pub fn edited_after_sweep() -> u32 { 3 }\n",
+    );
+    release_build.send(()).expect("release the build");
+    release_decode.send(()).expect("release the decode");
+    tokio::time::timeout(Duration::from_secs(10), after_decode)
+        .await
+        .expect("the decode returns")
+        .expect("decode gate stays armed");
+    release_after_decode
+        .send(())
+        .expect("release graph prepare");
+    let root = fixture.path();
+    let first = first.as_str();
+    let registry = &registry;
+    let seated = wait_until_serving_seat(registry, root, Duration::from_secs(10), || async move {
+        registry
+            .latest_complete_serving_for_test(root)
+            .await
+            .filter(|seat| seat.generation().manifest().generation_id.as_str() != first)
+    })
+    .await;
+    wait_for_worker_phase(
+        registry,
+        fixture.path(),
+        CodeIndexWorkerPhaseV1::AwaitingAdmission,
+    )
+    .await;
+
+    let witness = registry
+        .serving_source_witness_for_root(fixture.path())
+        .await
+        .expect("mounted witness");
+    assert!(
+        witness
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none(),
+        "a seat whose source moved after the build's sweep binds no currency witness"
+    );
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Refreshing),
+        "a seat whose source moved before it was taken is not current"
+    );
+
+    drop(admission);
+    let simple_names = |latest: &LatestCompleteCodeIndexV1| {
+        latest
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.simple_name.clone())
+            .collect::<BTreeSet<_>>()
+    };
+    let reconciled = wait_until_serving_seat(
+        registry,
+        fixture.path(),
+        Duration::from_secs(10),
+        || async {
+            registry
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+                .filter(|latest| simple_names(latest).contains("edited_after_sweep"))
+        },
+    )
+    .await;
+    assert_ne!(
+        reconciled.generation.manifest().generation_id,
+        seated.generation().manifest().generation_id,
+        "the generation sealed before the write is not the one that serves it"
+    );
+    registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
     let fixture = GitFixture::new(&[("assets/blob.bin", "not source\n")]);
