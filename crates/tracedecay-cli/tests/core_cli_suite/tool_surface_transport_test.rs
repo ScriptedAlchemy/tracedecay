@@ -303,6 +303,25 @@ fn application_surface_primitive_tools_resolve_the_working_directory_project() {
         "storage_status",
         r#"{"format":"json"}"#,
     );
+    // `init` returns before the sealed generation serves, and until then the
+    // graph read answers a typed `application.code-graph.unavailable`. Wait
+    // for the published readiness point, then require the resolved route.
+    let ready = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "status",
+        &format!(
+            r#"{{"wait_for":{{"state":"ready","timeout_ms":{}}},"format":"json"}}"#,
+            SURFACE_TIMEOUT.as_millis()
+        ),
+    );
+    assert_eq!(
+        ready.payload()["wait"]["outcome"],
+        "reached",
+        "code index never became ready\nstdout:\n{}\nstderr:\n{}",
+        ready.stdout,
+        ready.stderr
+    );
     assert_surface_resolves_project(
         &home_path,
         &project_path,
