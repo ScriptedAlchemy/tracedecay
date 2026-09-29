@@ -417,7 +417,8 @@ use project_routing::{
     prefer_recorded_open_failure, project_open_cancellation_checkpoint,
     project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
     project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
-    project_server_capacity_error, project_warming_error, resolved_project_server_key,
+    project_server_capacity_error, project_server_retirement_blocked_error, project_warming_error,
+    resolved_project_server_key,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
