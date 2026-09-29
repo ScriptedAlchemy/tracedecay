@@ -1461,12 +1461,15 @@ mod tests {
             "cwd": "/tmp/project",
             "route": { "session_id": "private-session-beta" }
         }));
-        let first_source = first.admission_source();
-        assert_eq!(first_source, same_session.admission_source());
-        assert_ne!(first_source, other_session.admission_source());
-        assert!(first_source.starts_with("claude:"));
-        assert!(first_source.len() < 96);
-        assert!(!first_source.contains("private-session-alpha"));
+        assert_eq!(
+            first.admission_source(),
+            "claude:ec6861dabc0aa56ebb6c26b50d93f5be93bd6f26b7b82870605791b0600cc41e"
+        );
+        assert_eq!(same_session.admission_source(), first.admission_source());
+        assert_eq!(
+            other_session.admission_source(),
+            "claude:ce7e7b5940bcf4a6acbaff77766b4d377e0c32d5c829ef161dfba30ad62310cd"
+        );
 
         let fallback = parse_or_panic(&json!({
             "agent": "cursor",
@@ -1478,10 +1481,13 @@ mod tests {
             "event": "afterFileEdit",
             "rel_paths": ["src/two.rs"]
         }));
-        assert_eq!(fallback.admission_source(), fallback.admission_source());
-        assert_ne!(
+        assert_eq!(
             fallback.admission_source(),
-            other_fallback.admission_source()
+            "cursor:f369e161a1f2c9f9487dd29d67d87cf9716cd31869f24cee2b50dd4a26343a93"
+        );
+        assert_eq!(
+            other_fallback.admission_source(),
+            "cursor:324b50412757e4ad290d17a464bd30d43580169eedcc638d9906f402d773595b"
         );
     }
 

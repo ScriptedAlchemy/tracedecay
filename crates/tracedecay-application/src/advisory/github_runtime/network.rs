@@ -2489,7 +2489,14 @@ mod tests {
     #[test]
     fn anonymous_requests_never_emit_authorization() {
         let headers = captured_get_headers(GitHubReadOnlyCredentialV1::anonymous(), "tracedecay");
-        assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+        assert!(headers.starts_with("GET /fixture HTTP/1.1\r\n"));
+        assert_eq!(
+            headers
+                .lines()
+                .filter(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
     }
 
     #[test]
@@ -2585,6 +2592,20 @@ mod tests {
             pull_request_number: 421,
             pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
         };
+        assert!(matches!(
+            credential
+                .authorization_for_target(&wrong_repository, GitHubReadPermissionV1::PullRequests,),
+            GitHubCredentialAuthorizationV1::Denied
+        ));
+        let bound_repository = GitHubRepositoryTargetV1 {
+            repository: "permission-drift".to_owned(),
+            ..wrong_repository.clone()
+        };
+        assert!(matches!(
+            credential
+                .authorization_for_target(&bound_repository, GitHubReadPermissionV1::PullRequests,),
+            GitHubCredentialAuthorizationV1::Private(_)
+        ));
         assert!(
             GitHubReadOnlyClientV1::new(
                 wrong_repository,
