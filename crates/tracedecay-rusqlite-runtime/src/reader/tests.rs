@@ -377,12 +377,13 @@ fn pinned_reader_accepts_an_equivalent_hard_link_spelling() {
     let alias = store._directory.path().join("reader-alias.db");
     std::fs::hard_link(&store.path, &alias).unwrap();
     let opened = OpenedDatabaseFile::pin(&store.path).unwrap();
+    let identity = opened.identity();
     let locator = store.locator_at(alias).with_opened_database(opened);
 
     let pool = ReaderPool::start(locator, AdmissionConfigV1::default().readers, CountExecutor)
         .expect("reader startup is bound by file identity, not pathname spelling");
 
-    assert!(pool.opened_file_identity().is_some());
+    assert_eq!(pool.opened_file_identity(), Some(identity));
 }
 
 #[test]

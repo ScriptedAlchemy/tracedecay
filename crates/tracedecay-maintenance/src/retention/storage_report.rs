@@ -1727,7 +1727,15 @@ mod tests {
         let transient = profile.join("transient");
         std::fs::create_dir_all(&transient).unwrap();
 
-        assert!(validate_external_scratch(&profile, &transient).is_err());
+        let rejected = validate_external_scratch(&profile, &transient).unwrap_err();
+        assert_eq!(rejected.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            rejected.to_string(),
+            "read-snapshot scratch must be outside the inspected profile"
+        );
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(validate_external_scratch(&profile, &outside).unwrap(), ());
     }
 
     /// The report must never freeze a store family to size it: a snapshot
