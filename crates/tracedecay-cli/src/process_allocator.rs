@@ -43,7 +43,10 @@ mod mimalloc_v3 {
         fn mi_heap_delete(heap: *mut c_void);
         fn mi_heap_collect(heap: *mut c_void, force: bool);
         fn mi_heap_theap(heap: *mut c_void) -> *mut c_void;
-        fn mi_theap_set_default(theap: *mut c_void) -> *mut c_void;
+        fn mi_theap_get_default() -> *mut c_void;
+        // 3.3.2 declares `mi_theap_set_default` without defining it; this is
+        // the definition its allocation path reads the default theap from.
+        fn _mi_theap_default_set(theap: *mut c_void);
         fn mi_heap_visit_blocks(
             heap: *mut c_void,
             visit_blocks: bool,
@@ -95,13 +98,17 @@ mod mimalloc_v3 {
         // SAFETY: `heap` came from `mi_heap_new` and is not deleted while an
         // owner heap scope runs. v3 heaps allocate from any thread through
         // that thread's theap, which `mi_heap_theap` creates on first use.
-        unsafe { mi_theap_set_default(mi_heap_theap(heap.get() as *mut c_void)) as usize }
+        unsafe {
+            let previous = mi_theap_get_default();
+            _mi_theap_default_set(mi_heap_theap(heap.get() as *mut c_void));
+            previous as usize
+        }
     }
 
     fn heap_leave(previous: usize) {
         // SAFETY: `previous` is the calling thread's default theap that
         // `heap_enter` replaced on this same thread.
-        unsafe { mi_theap_set_default(previous as *mut c_void) };
+        unsafe { _mi_theap_default_set(previous as *mut c_void) };
     }
 
     unsafe extern "C" fn add_committed(
@@ -143,6 +150,46 @@ mod mimalloc_v3 {
         // `mi_heap_delete` frees its empty pages and moves live blocks to the
         // main heap, so anything that escaped the owner stays valid.
         unsafe { mi_heap_delete(heap.get() as *mut c_void) };
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use tracedecay_domain::process_heap::OwnerHeapV1;
+
+        const BLOCKS: usize = 16 * 1024;
+        const BLOCK_BYTES: usize = 256;
+
+        fn blocks() -> Vec<Box<[u8; BLOCK_BYTES]>> {
+            (0..BLOCKS).map(|_| Box::new([7; BLOCK_BYTES])).collect()
+        }
+
+        /// An owner heap holds exactly what its scope allocated: its pages
+        /// cover the owner's blocks, nothing allocated outside the scope, and
+        /// none once the owner dropped. Blocks that outlive the heap stay
+        /// valid in the process heap.
+        #[test]
+        fn an_owner_heap_charges_its_own_pages_and_returns_them_whole() {
+            super::install();
+            let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let outside = blocks();
+            assert_eq!(heap.resident_bytes(), 0);
+
+            let owned = heap.scope(blocks);
+            let charged = heap.resident_bytes();
+            assert!(
+                (BLOCKS * BLOCK_BYTES) as u64 <= charged
+                    && charged <= (2 * BLOCKS * BLOCK_BYTES) as u64,
+                "the heap charges its {BLOCKS} blocks of {BLOCK_BYTES} B: {charged}"
+            );
+
+            drop(owned);
+            assert_eq!(heap.resident_bytes(), 0);
+
+            let escaped = heap.scope(|| Box::new([9_u8; BLOCK_BYTES]));
+            drop(heap);
+            assert_eq!(escaped[BLOCK_BYTES - 1], 9);
+            assert_eq!(outside.len(), BLOCKS);
+        }
     }
 }
 

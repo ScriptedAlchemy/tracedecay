@@ -187,8 +187,8 @@ pub struct StatusMemoryV1 {
     /// Canonical serialization buffers the daemon's threads hold for reuse;
     /// each thread returns its own when it idles.
     pub canonical_scratch_bytes: u64,
-    /// Process-lifetime memory with no live measure. A settled daemon's
-    /// anonymous memory (resident plus swapped) stays within
+    /// Process-lifetime memory with no live measure. A settled daemon serving
+    /// its graph keeps its anonymous memory (resident plus swapped) within
     /// `retained_bytes + canonical_scratch_bytes + runtime_allowance_bytes`.
     pub runtime_allowance_bytes: u64,
 }
