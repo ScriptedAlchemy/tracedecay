@@ -1,10 +1,14 @@
-//! Ordered generation retention for one mounted project.
+//! Ordered generation retention for one mounted project, and code-generation
+//! retention for the unmounted scopes of one registered project.
+
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use crate::compaction_receipt::record_live_compaction_outcome;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
 use crate::store_maintenance::{
-    CodeGenerationRetentionOutcomeV1, run_code_generation_retention,
-    run_code_index_scope_reconciliation,
+    CodeGenerationRetentionOutcomeV1, RegisteredProjectStoreV1, run_code_generation_retention,
+    run_code_index_scope_reconciliation, run_registered_code_generation_retention,
 };
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
@@ -78,6 +82,38 @@ pub async fn run_project_generation_maintenance(
             }
         });
     }
+    finalize_generation_outcome(outcome, cancellation)
+}
+
+/// Run code-generation retention over the scopes of one registered project
+/// that no mounted graph owns. It is the whole unit on a full tick and on a
+/// code-generation continuation alike: an unmounted store has no compaction
+/// pass of its own here.
+#[hotpath::measure(label = "daemon.maintenance.registered_generation", future = true)]
+pub async fn run_registered_project_generation_maintenance(
+    store: &RegisteredProjectStoreV1,
+    mounted_store_roots: &BTreeSet<PathBuf>,
+    code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    profile_database: &tracedecay_global_db::RegisteredGlobalDb,
+    maintenance_observations: &StoreTelemetrySamplingRegistry,
+    cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+) -> MaintenanceTickOutcome {
+    let outcome = match run_registered_code_generation_retention(
+        store,
+        mounted_store_roots,
+        code_index_schedulers,
+        profile_database,
+        maintenance_observations,
+        cancellation,
+    )
+    .await
+    {
+        CodeGenerationRetentionOutcomeV1::Complete => MaintenanceTickOutcome::Complete,
+        CodeGenerationRetentionOutcomeV1::MoreWork => {
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention)
+        }
+        CodeGenerationRetentionOutcomeV1::Failed => MaintenanceTickOutcome::Retry,
+    };
     finalize_generation_outcome(outcome, cancellation)
 }
 

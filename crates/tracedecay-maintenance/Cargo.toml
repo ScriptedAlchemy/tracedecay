@@ -11,6 +11,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 # Forwards the registered global-db test harness so this crate's unit tests
 # can open a profile store without daemon session-registry types.
 test-helpers = [
+    "tracedecay-code-index-retention/test-helpers",
     "tracedecay-global-db/test-helpers",
     "tracedecay-runtime-core/test-helpers",
 ]
@@ -43,6 +44,7 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
 filetime = "0.2"
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", features = ["test-helpers"] }
 tracedecay-lcm = { path = "../tracedecay-lcm", features = ["test-helpers"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }

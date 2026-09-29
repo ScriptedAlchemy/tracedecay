@@ -232,7 +232,21 @@ measurements, not inferred table sizes.
   quarantine, and durable receipt, with crash replay on the next pass. It runs
   from the daemon maintenance cadence and semantic-runtime publication, under a
   lease and with the vector inventory pinned before any sweep. Doctor and the
-  storage report observe its state but never trigger a sweep.
+  storage report observe its state but never trigger a sweep. (Amended
+  2026-09-28, #2400/#2401.) Every registered project's scopes that no mounted
+  graph owns are a unit of the maintenance tick too, so a project nothing has
+  opened since a restart is collected within one cadence; its graph-replay
+  releases wait in the durable queue for the next mount. One fully verified
+  plan batches up to 32 superseded generations, so a backlog drains in
+  batch-count passes (measured on tree-sitter: 8 generations and their 8 text
+  artifacts, 167 MB, in two ticks one minute apart, unmounted). Generation and
+  text-artifact receipts are pruned once no pending journal or queued release
+  names them. Graph-replay tombstones stay for the life of the store, because
+  append and compare-and-swap refuse a retired key through them; they cost
+  about 2.4 KB per retired replay. The storage report sizes each store by
+  family (graph database, sealed graph, text artifacts, generation artifacts,
+  sessions, other) and lists the backlog against the daemon's resolved
+  protection set.
 - Code-index *scope-root* reconciliation is implemented and engaged. It is the
   only pass that reaches a scope directory whose canonical project root no
   longer exists. It runs beside generation retention on the maintenance cadence,

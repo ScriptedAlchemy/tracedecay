@@ -13,7 +13,7 @@ fn durable_deletion_receipt_enqueues_restart_safe_graph_release() {
         None,
     )
     .expect("plan retention");
-    let deleted = plan.collectable_generations[0].clone();
+    let deleted = plan.collectable_generations.clone();
     execute_code_generation_retention(
         store.path(),
         plan,
@@ -25,12 +25,24 @@ fn durable_deletion_receipt_enqueues_restart_safe_graph_release() {
 
     let page = code_generation_graph_replay_release_page(store.path(), None)
         .expect("read durable graph replay release");
-    assert_eq!(page.releases.len(), 1);
-    assert_eq!(page.releases[0].generation, deleted);
-    assert_ne!(page.releases[0].generation.generation_id, generations[2].id);
+    assert_eq!(page.releases.len(), 2);
+    let mut released = page
+        .releases
+        .iter()
+        .map(|release| release.generation.clone())
+        .collect::<Vec<_>>();
+    released.sort_by(|left, right| left.generation_id.cmp(&right.generation_id));
+    assert_eq!(released, deleted);
+    assert!(
+        page.releases
+            .iter()
+            .all(|release| release.generation.generation_id != generations[2].id)
+    );
 
-    complete_code_generation_graph_replay_release(store.path(), &page.releases[0])
-        .expect("checkpoint graph replay release");
+    for release in &page.releases {
+        complete_code_generation_graph_replay_release(store.path(), release)
+            .expect("checkpoint graph replay release");
+    }
     assert!(
         code_generation_graph_replay_release_page(store.path(), None)
             .expect("read empty graph replay release queue")
@@ -385,7 +397,9 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
 #[cfg(unix)]
 #[test]
 fn graph_release_queue_rejects_symlink_evidence() {
-    let (store, _) = fixture_store(4);
+    // One superseded generation, so the queue holds exactly the release this
+    // test replaces with a symlink.
+    let (store, _) = fixture_store(2);
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
