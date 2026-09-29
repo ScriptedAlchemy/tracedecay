@@ -346,10 +346,10 @@ pub fn unavailable_error(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     socket_path: &Path,
 ) -> TraceDecayError {
-    TraceDecayError::project_route(
+    TraceDecayError::project_route_with_detail(
         tracedecay_daemon_protocol::DAEMON_CONNECT_DOWN,
         true,
-        tracedecay_daemon_control::unavailable_daemon_socket_message(profile, socket_path),
+        tracedecay_daemon_control::unreachable_daemon_detail(profile, socket_path),
     )
 }
 

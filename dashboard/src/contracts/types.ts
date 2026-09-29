@@ -322,6 +322,12 @@ export type ApplicationExecutionFailureClassV1 = "denied" | "malformed_output" |
 
 export type ApplicationProblemDetailV1 = 
   | {
+    kind: "daemon_unreachable";
+    named_by: string | null;
+    service_unit: DaemonServiceUnitObservationV1;
+    socket: string;
+  }
+  | {
     generation: string | null;
     kind: "diagnostics_pending";
     producer: string;
@@ -1040,6 +1046,20 @@ export type CrossMergePolicyV1 = {
   allowed_modes: Array<CrossMergeModeV1>;
   default_mode: CrossMergeModeV1;
 };
+
+export type DaemonServiceUnitObservationV1 = 
+  | {
+    path: string;
+    serves: string;
+    state: "installed";
+  }
+  | {
+    state: "not_installed";
+  }
+  | {
+    error: string;
+    state: "unobservable";
+  };
 
 export type DashboardAuthorizationV1 = 
   | {

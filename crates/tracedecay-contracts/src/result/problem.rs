@@ -898,7 +898,8 @@ impl ApplicationProblem {
     /// the committed value. A lock
     /// deadline is capacity: the same request may succeed after a delay. A
     /// diagnostics scope no compiler owns is routed to publishing the
-    /// project's own check; a pending producer answers after a delay.
+    /// project's own check; a pending producer, and a daemon that may be
+    /// restarting, answer after a delay.
     pub fn from_detail(detail: ApplicationProblemDetailV1) -> Self {
         let diagnostic = SafeDiagnostic {
             code: detail.code().to_owned(),
@@ -937,7 +938,8 @@ impl ApplicationProblem {
                 legal_actions: vec![LegalAction::CorrectRequest],
                 detail: Some(Box::new(detail)),
             },
-            ApplicationProblemDetailV1::DiagnosticsPending { .. } => Self::Unavailable {
+            ApplicationProblemDetailV1::DiagnosticsPending { .. }
+            | ApplicationProblemDetailV1::DaemonUnreachable { .. } => Self::Unavailable {
                 classification: ApplicationUnavailableClassV1::Authority,
                 diagnostic,
                 retry: RetryDirective::AfterDelay,

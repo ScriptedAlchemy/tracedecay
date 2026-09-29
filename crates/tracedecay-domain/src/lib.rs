@@ -45,7 +45,9 @@ pub mod workflow_fan_out_census;
 pub mod workflow_receipt;
 pub mod workflow_run;
 
-pub use application_problem_detail::{ApplicationProblemDetailV1, DiagnosticsSearchedTsconfigV1};
+pub use application_problem_detail::{
+    ApplicationProblemDetailV1, DaemonServiceUnitObservationV1, DiagnosticsSearchedTsconfigV1,
+};
 pub use automation::{SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED};
 pub use canonical_text::{encode_lowercase_hex, nonnegative_sha256_prefix, sha256_hex_suffix};
 pub use code_intelligence::{

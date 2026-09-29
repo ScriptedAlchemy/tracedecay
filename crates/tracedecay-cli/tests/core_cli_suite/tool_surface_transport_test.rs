@@ -87,7 +87,7 @@ impl SurfaceOutcome {
 
     fn problem_code(&self) -> Option<String> {
         self.payload()
-            .get("problem")
+            .pointer("/structuredContent/problem")
             .and_then(|problem| problem.get("code"))
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -138,19 +138,26 @@ fn tool_argument_errors_are_typed_invalid_requests() {
         "fact_store_list",
         &["--limit", "abc", "--json"],
     );
+    let printed = outcome.payload();
+    let problem = &printed["structuredContent"]["problem"];
     assert_eq!(
-        outcome.payload(),
-        serde_json::json!({
-            "problem": {
-                "tool": "tracedecay_fact_store_list",
-                "code": "tool_arguments_invalid",
-                "reason_code": "tool_arguments_invalid",
-                "kind": "invalid_request",
-                "retryable": false,
-                "detail": detail,
-            }
-        }),
-        "stderr:\n{}",
+        (
+            &printed["isError"],
+            &problem["kind"],
+            &problem["code"],
+            &problem["message"],
+            &problem["retry"],
+            &problem["legal_actions"],
+        ),
+        (
+            &serde_json::json!(true),
+            &serde_json::json!("invalid_request"),
+            &serde_json::json!("tool_arguments_invalid"),
+            &serde_json::json!(detail),
+            &serde_json::json!("never"),
+            &serde_json::json!([]),
+        ),
+        "stderr:\n{}\n{printed}",
         outcome.stderr
     );
     assert_eq!(
@@ -553,7 +560,7 @@ fn tool_diagnostics_names_the_install_command_without_a_compiler() {
         outcome.stdout,
         outcome.stderr
     );
-    let problem = &outcome.payload()["problem"];
+    let problem = &outcome.payload()["structuredContent"]["problem"];
     assert_eq!(
         problem["legal_actions"],
         serde_json::json!(["refresh"]),
@@ -581,7 +588,7 @@ fn tool_diagnostics_json_carries_the_unowned_scope_detail() {
         r#"{"scope":"file","path":"src/lib.rs"}"#,
     );
     assert!(!outcome.success, "stdout:\n{}", outcome.stdout);
-    let problem = &outcome.payload()["problem"];
+    let problem = &outcome.payload()["structuredContent"]["problem"];
     assert_eq!(
         (&problem["code"], &problem["detail"]),
         (
@@ -639,7 +646,7 @@ fn tool_diagnostics_json_carries_the_pending_producer_detail() {
         }
     };
     assert_eq!(
-        pending["problem"]["detail"],
+        pending["structuredContent"]["problem"]["detail"],
         serde_json::json!({
             "kind": "diagnostics_pending",
             "producer": "node_modules/.bin/tsc",
@@ -706,7 +713,7 @@ fn tool_diagnostics_names_pnpm_install_for_an_uninstalled_monorepo() {
         outcome.stdout,
         outcome.stderr
     );
-    let problem = &outcome.payload()["problem"];
+    let problem = &outcome.payload()["structuredContent"]["problem"];
     assert_eq!(
         problem["legal_actions"],
         serde_json::json!(["refresh"]),
@@ -872,10 +879,10 @@ fn work_and_workflow_tools_answer_through_their_typed_owner() {
     );
 }
 
-/// A refusal raised before dispatch answers `--json` with the same typed
-/// problem record MCP puts in the JSON-RPC error `data`, so a shell caller
-/// branches on `code` instead of parsing prose, and the refused edit writes
-/// nothing.
+/// A refusal raised before dispatch answers `--json` with the typed problem
+/// record at `structuredContent.problem`, as every refusal does, so a shell
+/// caller branches on `code` instead of parsing prose, and the refused edit
+/// writes nothing.
 #[test]
 fn tool_json_reports_argument_refusals_as_typed_problems() {
     let (_home, _project, home_path, project_path) = surface_fixture();
@@ -910,19 +917,24 @@ fn tool_json_reports_argument_refusals_as_typed_problems() {
             "`tracedecay tool {tool}` must fail\nstdout:\n{}\nstderr:\n{}",
             outcome.stdout, outcome.stderr
         );
+        let printed = outcome.payload();
+        let problem = &printed["structuredContent"]["problem"];
         assert_eq!(
-            outcome.payload(),
-            serde_json::json!({
-                "problem": {
-                    "tool": format!("tracedecay_{tool}"),
-                    "code": "application_surface_invalid_request",
-                    "reason_code": "application_surface_invalid_request",
-                    "kind": "invalid_request",
-                    "retryable": false,
-                    "detail": detail,
-                }
-            }),
-            "stderr:\n{}",
+            (
+                &printed["isError"],
+                &problem["kind"],
+                &problem["code"],
+                &problem["message"],
+                &problem["retry"],
+            ),
+            (
+                &serde_json::json!(true),
+                &serde_json::json!("invalid_request"),
+                &serde_json::json!("application_surface_invalid_request"),
+                &serde_json::json!(detail),
+                &serde_json::json!("never"),
+            ),
+            "stderr:\n{}\n{printed}",
             outcome.stderr
         );
         assert_eq!(
@@ -947,7 +959,7 @@ fn tool_json_reports_argument_refusals_as_typed_problems() {
         "an unknown tool must fail: {}",
         unknown.stderr
     );
-    let problem = &unknown.payload()["problem"];
+    let problem = &unknown.payload()["structuredContent"]["problem"];
     assert_eq!(
         (&problem["code"], &problem["kind"], &problem["retryable"]),
         (

@@ -69,7 +69,7 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_mcp::tool_errors::{project_route_problem, tool_result_problem};
+use tracedecay_mcp::tool_errors::{mark_semantic_tool_error, tool_result_problem};
 use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
 use tracedecay_mcp::tools::response_trailers::{
     CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, REQUEST_COST_TRAILER_PREFIX,
@@ -79,7 +79,7 @@ use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, render_tool_cli_help,
     short_tool_name,
 };
-use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use crate::cli::dispatch::resolve_cli_application_surface;
 
@@ -149,13 +149,38 @@ pub(crate) async fn run(
     let json_requested = args.iter().any(|arg| arg == "--json");
     let tool_name = name.as_deref().map(canonical_tool_name);
     let result = run_inner(profile, project, name, args).await;
-    if json_requested
-        && let (Err(error), Some(tool_name)) = (&result, tool_name.as_deref())
-        && let Some(problem) = project_route_problem(tool_name, error)
-    {
-        println!("{}", serde_json::json!({ "problem": problem }));
+    match (&result, tool_name.as_deref()) {
+        (Err(error), Some(tool_name)) if json_requested => {
+            print_settled_route_refusal(tool_name, error).map_err(|print_error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "{error}; the --json refusal could not be rendered: {print_error}"
+                    ),
+                }
+            })?;
+            result
+        }
+        _ => result,
     }
-    result
+}
+
+/// A `--json` call refused before any owner answered it prints the same
+/// tool-result refusal an answered call does.
+fn print_settled_route_refusal(tool_name: &str, error: &TraceDecayError) -> Result<()> {
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate a refusal request id".to_owned(),
+        })?;
+    if let Some(rendered) = tracedecay::mcp::tools::render_settled_route_refusal(
+        BindingSurface::Cli,
+        tool_name,
+        request_id,
+        error,
+        &serde_json::json!({ "format": "json" }),
+    ) {
+        print_tool_output(&rendered?.value, true);
+    }
+    Ok(())
 }
 
 fn run_inner(
@@ -989,11 +1014,15 @@ fn print_cli_application_surface(
         &result,
     )?;
     account_tool_result(project, &mut rendered);
-    if raw_json {
-        print!("{}", crate::cli::output::json::json_line(&result.result)?);
-        print_beside_result_blocks(&rendered.value);
-    } else {
-        print_tool_output(&rendered.value, false);
+    mark_semantic_tool_error(&mut rendered);
+    match (&result.result, raw_json) {
+        // A refusal prints as the tool result every route answers.
+        (Err(_), true) => print_tool_output(&rendered.value, true),
+        (Ok(_), true) => {
+            print!("{}", crate::cli::output::json::json_line(&result.result)?);
+            print_beside_result_blocks(&rendered.value);
+        }
+        (_, false) => print_tool_output(&rendered.value, false),
     }
     if application_problem.is_some() {
         std::io::stdout().flush()?;

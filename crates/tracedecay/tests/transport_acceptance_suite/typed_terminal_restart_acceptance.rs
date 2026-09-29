@@ -523,7 +523,7 @@ fn reset_required_survives_physical_daemon_restart_via_cli() {
         "tracedecay_storage_status",
         &json!({ "include_details": false }),
     );
-    assert_reset_required(&reset_payload, "first observation");
+    assert_reset_required(&reset_payload["structuredContent"], "first observation");
 
     // Replace the serving process again. The reset-only legal action must be
     // reported identically: the tampered store is never repaired implicitly,
@@ -546,7 +546,10 @@ fn reset_required_survives_physical_daemon_restart_via_cli() {
         "tracedecay_storage_status",
         &json!({ "include_details": false }),
     );
-    assert_reset_required(&reset_payload_after_restart, "after a physical restart");
+    assert_reset_required(
+        &reset_payload_after_restart["structuredContent"],
+        "after a physical restart",
+    );
 
     let _ = daemon.kill_and_wait();
 }
