@@ -3582,14 +3582,22 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
         .generation_id,
         generation
     );
-    assert!(
-        registry
-            .event_to_ready_receipts()
-            .iter()
-            .skip(receipts_before)
-            .any(CodeIndexEventToReadyReceiptV1::is_noop),
-        "source verification records an unchanged-source receipt"
-    );
+    // The pass records its receipt after it seats the renewed proof.
+    wait_for_owner(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "the source verification's unchanged-source receipt",
+        || async {
+            registry
+                .event_to_ready_receipts()
+                .iter()
+                .skip(receipts_before)
+                .any(CodeIndexEventToReadyReceiptV1::is_noop)
+                .then_some(())
+        },
+    )
+    .await;
 
     fixture.edit("src/lib.rs", "pub fn changed_after_seat() {}\n");
     assert!(

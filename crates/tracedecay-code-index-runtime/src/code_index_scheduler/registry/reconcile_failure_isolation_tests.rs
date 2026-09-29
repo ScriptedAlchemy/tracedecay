@@ -660,30 +660,32 @@ async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix
     );
     // The admitted reconcile alone must converge. Injecting arrivals here
     // would keep a wake pending behind every pass that outlasts the spacing,
-    // and a pending wake never reads as fresh.
+    // and a pending wake never reads as fresh. Fresh text seats before the
+    // complete generation does, so the wait covers both.
     let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
     let mut signals = OwnerSignals::subscribe(&restarted.registry, &restarted.project).await;
-    let freshness = loop {
+    let (freshness, serving) = loop {
         let freshness = restarted
             .registry
             .dashboard_freshness(&restarted.project)
             .await
             .expect("mounted freshness");
-        if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh) {
-            break freshness;
+        let serving = restarted
+            .registry
+            .latest_complete_serving_for_test(&restarted.project)
+            .await;
+        if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+            && let Some(serving) = serving
+        {
+            break (freshness, serving);
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the fixed worktree never reached fresh: {freshness:?}"
+            "the fixed worktree never served a fresh complete generation: {freshness:?}"
         );
         signals.changed_before(deadline).await;
     };
     assert!(freshness.parked.is_none(), "{freshness:?}");
-    let serving = restarted
-        .registry
-        .latest_complete_serving_for_test(&restarted.project)
-        .await
-        .expect("the converged generation serves");
     assert_eq!(
         serving
             .generation()
