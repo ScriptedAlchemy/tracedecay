@@ -157,12 +157,7 @@ impl CatalogHostComponentRegistrationAuthority {
                 detail: error.to_string(),
             };
         }
-        // The transaction error vocabulary is fixed, so surface the
-        // integration's own message here before it is collapsed into the
-        // generic storage failure, otherwise the actionable cause (for
-        // example a refused symlinked project config) is lost.
-        eprintln!("{error}");
-        host_bundle_storage_failure!()
+        crate::agents::host_bundle::HostBundleError::RegistrationFailed(error.to_string())
     }
 
     fn registration_mode(
@@ -1218,9 +1213,12 @@ mod tests {
                 message: "malformed Kiro MCP config".to_string(),
             },
         );
-        assert!(
-            matches!(config_failure, HostBundleError::StorageFailure(_)),
-            "a genuine host config failure must retain the existing lifecycle failure mapping"
+        assert_eq!(
+            config_failure,
+            HostBundleError::RegistrationFailed(
+                "config error: malformed Kiro MCP config".to_string()
+            ),
+            "a host config failure must carry the integration's diagnosis, not a filesystem failure"
         );
     }
 

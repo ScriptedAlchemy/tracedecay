@@ -29,6 +29,7 @@ mod git_correlation_adapter;
 mod git_index_transactions;
 mod git_topology_anchor;
 mod hotpath_observe;
+mod managed_test_runs;
 mod native_integration;
 mod observability_rollup;
 pub mod observation;
@@ -46,6 +47,9 @@ mod support;
 pub use discovery_queue::HostDiscoveryQueueEntry;
 pub use git_correlation_adapter::{GitSessionEvidence, GlobalDbGitCorrelationStore};
 pub use git_topology_anchor::RegisteredGitTopologyAnchorAuthority;
+pub use managed_test_runs::{
+    ManagedTestRunOutcomeV1, ManagedTestRunRecordV1, ManagedTestRunStartV1,
+};
 pub use observability_rollup::{
     ObservabilityRollupCompactionCandidateV1, ObservabilityRollupCompactionReceiptV1,
     ObservabilityRollupCompactionV1, ObservabilityRollupDirtyDayClaimV1,

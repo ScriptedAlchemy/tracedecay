@@ -63,7 +63,8 @@ use tracedecay_daemon_protocol::{
     adapt_application_tool_request, parse_application_surface_request,
 };
 use tracedecay_daemon_protocol::{
-    DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
+    DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, requested_output_format,
+    tool_request_deadline,
 };
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
@@ -760,17 +761,37 @@ async fn dispatch_cli_graph_tool(
     let outcome =
         invoke_cli_graph_tool(profile, handshake, operation, &tool_args, deadline).await?;
     let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
-    let mut result = match outcome {
-        Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-            response_handle_root.as_deref(),
-            &tool_args,
-            completion,
-        )?,
-        Err(refusal) => refusal.render(response_handle_root.as_deref(), &tool_args)?,
+    // `--format json` prints the whole typed result. The rendered body is
+    // bounded for agent contexts, so it feeds only the human view, `--json`'s
+    // exact tool-result object, the beside-result blocks, and the exit status.
+    let typed_format_json =
+        !raw_json && requested_output_format(&tool_args) == RequestedOutputFormat::Json;
+    let (mut result, typed_json) = match outcome {
+        Ok(completion) => {
+            let typed_json = typed_format_json
+                .then(|| completion.result.result_value())
+                .transpose()?;
+            let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+                response_handle_root.as_deref(),
+                &tool_args,
+                completion,
+            )?;
+            (rendered, typed_json)
+        }
+        Err(refusal) => (
+            refusal.render(response_handle_root.as_deref(), &tool_args)?,
+            None,
+        ),
     };
     account_tool_result(project.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    print_tool_output(&result.value, raw_json);
+    match typed_json {
+        Some(typed_json) => {
+            println!("{typed_json}");
+            print_beside_result_blocks(&result.value);
+        }
+        None => print_tool_output(&result.value, raw_json),
+    }
     tool_result_process_outcome(&result.value, tool_name)
 }
 

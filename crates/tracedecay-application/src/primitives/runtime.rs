@@ -5,13 +5,14 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_contracts::retrieval::grep_analysis::{
@@ -40,7 +41,9 @@ use tracedecay_contracts::{
     TemporalState,
 };
 use tracedecay_domain::text::forward_slash_path;
-use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
+use tracedecay_domain::{
+    CodeGenerationId, CommitId, ComponentVersion, CursorBindingMismatchV1, UtcMicros,
+};
 use tracedecay_lsp::SearchedTsconfig;
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
@@ -58,9 +61,12 @@ use crate::diagnostics_producer::{
     typescript_diagnostics_availability,
 };
 use crate::operation_stream::{
-    CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
-    ManagedTestRunStaleReason, OperationEventAuthority, OperationEventError,
-    current_managed_test_run,
+    ManagedTestRunCurrentScope, ManagedTestRunReadOutcome, ManagedTestRunStaleReason,
+    managed_test_run_source_refusal,
+};
+use tracedecay_contracts::feedback::TestResultsResultV1;
+use tracedecay_global_db::{
+    ManagedTestRunOutcomeV1, ManagedTestRunRecordV1, RegisteredGlobalDbLeaseV1,
 };
 use tracedecay_runtime_core::db::Database;
 
@@ -143,6 +149,84 @@ pub type ManagedTestRunCurrentIdentityFuture<'a> = Pin<
 
 pub trait ManagedTestRunCurrentScopePort: Send + Sync {
     fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_>;
+}
+
+/// Authenticated continuation over one retained managed run's result list.
+/// The cursor binds the run and the code generation it ran against.
+pub trait ManagedTestResultCursorPort: Send + Sync {
+    /// The cursor resuming at `offset` under pages of `page_size`; `None`
+    /// when the authority cannot mint one for this request.
+    fn encode(
+        &self,
+        context: &RequestContext,
+        operation_id: &str,
+        generation: &CodeGenerationId,
+        page_size: u32,
+        offset: usize,
+    ) -> Option<OpaqueCursor>;
+
+    /// The offset `cursor` resumes at, or the refusal a cursor minted for
+    /// another request, run, or page size receives (`None` when the cursor is
+    /// merely stale).
+    fn decode(
+        &self,
+        cursor: &OpaqueCursor,
+        context: &RequestContext,
+        operation_id: &str,
+        generation: &CodeGenerationId,
+        page_size: u32,
+    ) -> Result<usize, Option<CursorBindingMismatchV1>>;
+}
+
+/// The durable managed test-run record `test_results` reads, and the cursor
+/// authority its result pages continue under.
+#[derive(Clone)]
+pub struct RetainedManagedTestRuns {
+    pub store: RegisteredGlobalDbLeaseV1,
+    pub cursors: Arc<dyn ManagedTestResultCursorPort>,
+}
+
+impl RetainedManagedTestRuns {
+    /// Where `page` resumes in a run's `available` results, or the refusal
+    /// of a cursor this request, run, and generation did not issue.
+    fn resume_offset(
+        &self,
+        page: &PageRequest,
+        context: &RequestContext,
+        operation_id: &str,
+        generation: &CodeGenerationId,
+        available: usize,
+    ) -> Result<usize, Option<CursorBindingMismatchV1>> {
+        let Some(cursor) = page.cursor.as_ref() else {
+            return Ok(0);
+        };
+        let offset =
+            self.cursors
+                .decode(cursor, context, operation_id, generation, page.page_size)?;
+        if offset > available {
+            return Err(Some(CursorBindingMismatchV1::Foreign));
+        }
+        Ok(offset)
+    }
+
+    /// The cursor continuing after `end`, absent once the page reached the end.
+    fn next_cursor(
+        &self,
+        context: &RequestContext,
+        operation_id: &str,
+        generation: &CodeGenerationId,
+        page_size: u32,
+        end: usize,
+        available: usize,
+    ) -> Result<Option<OpaqueCursor>, ()> {
+        if end >= available {
+            return Ok(None);
+        }
+        self.cursors
+            .encode(context, operation_id, generation, page_size, end)
+            .map(Some)
+            .ok_or(())
+    }
 }
 
 pub type CodeIndexConvergenceParkFuture<'a> =
@@ -302,7 +386,7 @@ pub struct OwnedPrimitiveRuntime {
     /// The filesystem root `admitted_root_uri` names; diagnostics reads probe
     /// the producer state here when no publication exists.
     admitted_project_root: PathBuf,
-    test_runs: CanonicalManagedTestRunReader,
+    test_runs: RetainedManagedTestRuns,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
     convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
     capacity: PrimitiveCapacity,
@@ -493,7 +577,7 @@ pub fn open_primitive_project_runtime(
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
-    operation_events: OperationEventAuthority,
+    test_runs: RetainedManagedTestRuns,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
     convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
 ) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {
@@ -542,7 +626,7 @@ pub fn open_primitive_project_runtime(
         access,
         admitted_root_uri,
         admitted_project_root,
-        test_runs: CanonicalManagedTestRunReader::new(operation_events),
+        test_runs,
         test_run_scope,
         convergence_park,
         capacity: PrimitiveCapacity::new(MAX_CONCURRENT_PRIMITIVES),
@@ -1651,6 +1735,36 @@ fn evidence_result(
     )))
 }
 
+/// The `range` page of a retained run's results, with the run's recorded
+/// attribution, times, and outcome counts.
+fn test_results_payload(
+    record: &ManagedTestRunRecordV1,
+    generation: CodeGenerationId,
+    range: Range<usize>,
+) -> TestResultsResultV1 {
+    let outcome = record.outcome.as_ref();
+    let results = outcome.map_or(&[][..], |outcome| outcome.results.as_slice());
+    TestResultsResultV1 {
+        operation_id: record.start.operation_id.clone(),
+        session_id: record.start.session_id.clone(),
+        head_commit_id: record.start.head_commit_id.clone(),
+        code_generation_id: Some(generation),
+        started_at: record.start.started_at,
+        finished_at: outcome.map(|outcome| outcome.receipt.ended_at),
+        exit_code: outcome.and_then(|outcome| outcome.exit_code),
+        passed: outcome.map(ManagedTestRunOutcomeV1::passed),
+        failed: outcome.map(ManagedTestRunOutcomeV1::failed),
+        ignored: outcome.map(|outcome| outcome.ignored),
+        completed: outcome.map_or(0, |outcome| results.len() as u64 + outcome.ignored),
+        total: Some(record.start.requested_tests),
+        termination: record.termination(),
+        receipt: outcome.map(|outcome| outcome.receipt.clone()),
+        result_offset: range.start as u64,
+        available_results: results.len() as u64,
+        results: results[range].to_vec(),
+    }
+}
+
 #[hotpath::measure(label = "usecases.primitives.recent_test_results", future = true)]
 async fn recent_test_results(
     runtime: &OwnedPrimitiveRuntime,
@@ -1659,26 +1773,20 @@ async fn recent_test_results(
     page: &PageRequest,
     observed_at: UtcMicros,
 ) -> Result<ApplicationResult<Value>, ApplicationContractError> {
-    let snapshot = match runtime
+    let record = match runtime
         .test_runs
-        .latest_page(&runtime.admitted_root_uri, page)
+        .store
+        .latest_managed_test_run(&runtime.admitted_root_uri)
         .await
     {
-        Ok(snapshot) => snapshot,
-        // No managed test run is retained for this root: none has run since
-        // the daemon started, or it was evicted. Retrying cannot produce one.
-        Err(OperationEventError::FrontierExpired) => {
+        Ok(Some(record)) => record,
+        // No managed test run is retained for this root. Retrying cannot
+        // produce one.
+        Ok(None) => {
             return problem(
                 context,
                 operation,
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-            );
-        }
-        Err(OperationEventError::CursorRefused(mismatch)) => {
-            return problem(
-                context,
-                operation,
-                ApplicationProblem::cursor_refused(&mismatch),
             );
         }
         Err(_) => return unavailable(context, operation),
@@ -1693,11 +1801,15 @@ async fn recent_test_results(
         },
         Err(_) => return unavailable(context, operation),
     };
-    let snapshot = match current_managed_test_run(snapshot, &current) {
-        ManagedTestRunReadOutcome::Current(snapshot) => snapshot,
-        ManagedTestRunReadOutcome::Stale(
+    match managed_test_run_source_refusal(
+        record.start.head_commit_id.as_ref(),
+        record.start.code_generation_id.as_ref(),
+        &current,
+    ) {
+        None => {}
+        Some(ManagedTestRunReadOutcome::Stale(
             ManagedTestRunStaleReason::SourceIdentity | ManagedTestRunStaleReason::DocumentContent,
-        ) => {
+        )) => {
             return problem(
                 context,
                 operation,
@@ -1707,38 +1819,59 @@ async fn recent_test_results(
                 )?),
             );
         }
-        ManagedTestRunReadOutcome::Unavailable(_) => return unavailable(context, operation),
+        Some(_) => return unavailable(context, operation),
+    }
+    // The identity check above bound the retained generation.
+    let Some(generation) = record.start.code_generation_id.clone() else {
+        return unavailable(context, operation);
     };
-    let returned = snapshot.results.len() as u64;
-    let available_results = snapshot.available_results as u64;
-    let termination = snapshot.termination;
-    let receipt = snapshot.receipt;
-    let next_cursor = snapshot.next_cursor;
-    let partial = !matches!(termination, Some(OperationTermination::Completed))
-        || next_cursor.is_some()
-        || available_results < snapshot.completed;
-    let payload = json!({
-        "operation_id": snapshot.operation_id.to_string(),
-        "generation": snapshot.generation,
-        "head_commit_id": snapshot
-            .head_commit_id
-            .as_ref()
-            .map(CommitId::as_str),
-        "code_generation_id": snapshot
-            .code_generation_id
-            .as_ref()
-            .map(CodeGenerationId::as_str),
-        "results": snapshot.results.into_iter().map(|result| json!({
-            "test": result.test,
-            "passed": result.passed,
-        })).collect::<Vec<_>>(),
-        "completed": snapshot.completed,
-        "total": snapshot.total,
-        "termination": termination,
-        "receipt": receipt,
-        "result_offset": snapshot.result_offset,
-        "available_results": available_results,
-    });
+    let operation_id = record.start.operation_id.as_str();
+    let available = record
+        .outcome
+        .as_ref()
+        .map_or(0, |outcome| outcome.results.len());
+    let offset =
+        match runtime
+            .test_runs
+            .resume_offset(page, context, operation_id, &generation, available)
+        {
+            Ok(offset) => offset,
+            Err(Some(mismatch)) => {
+                return problem(
+                    context,
+                    operation,
+                    ApplicationProblem::cursor_refused(&mismatch),
+                );
+            }
+            Err(None) => {
+                return problem(
+                    context,
+                    operation,
+                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+                );
+            }
+        };
+    let end = offset
+        .saturating_add(page.page_size as usize)
+        .min(available);
+    let Ok(next_cursor) = runtime.test_runs.next_cursor(
+        context,
+        operation_id,
+        &generation,
+        page.page_size,
+        end,
+        available,
+    ) else {
+        return contract_problem(context, operation);
+    };
+    let partial = !matches!(record.termination(), Some(OperationTermination::Completed))
+        || next_cursor.is_some();
+    let available_results = available as u64;
+    let payload = value_or_problem!(
+        serde_json::to_value(test_results_payload(&record, generation, offset..end)),
+        context,
+        operation
+    );
     evidence_result(
         &runtime.access,
         context,
@@ -1751,7 +1884,7 @@ async fn recent_test_results(
             } else {
                 CoverageCompleteness::Complete
             },
-            returned,
+            returned: (end - offset) as u64,
             visited: Some(available_results),
             eligible: Some(available_results),
             unsupported_languages: Vec::new(),

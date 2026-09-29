@@ -8,6 +8,6 @@ pub use test_identity::{libtest_identity, libtest_module_prefix};
 pub(crate) use test_request::refused_run;
 pub use test_request::{MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile};
 pub use test_runner::{
-    TestRunControl, TestRunFailure, TestRunOutput, TestRunStream, cargo_test_args,
+    LibtestReport, TestRunControl, TestRunFailure, TestRunOutput, TestRunStream, cargo_test_args,
     parse_libtest_output, run_cargo_tests,
 };

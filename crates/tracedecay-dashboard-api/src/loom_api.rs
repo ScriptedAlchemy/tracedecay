@@ -2,8 +2,9 @@
 //!
 //! The endpoint composes existing authorities; it does not collect new data.
 //! `sessions`/`lcm_raw_messages` provide thread bounds and the page's recorded
-//! tool-call and pull-request events, and `sessions.metadata_json` provides
-//! provider-native edited-file rollups. Git
+//! tool-call and pull-request events, `managed_test_runs` provides the
+//! daemon-managed test runs recorded against the page's sessions, and
+//! `sessions.metadata_json` provides provider-native edited-file rollups. Git
 //! correlation is read through [`DashboardGitCorrelationReadPortV1`], the
 //! daemon-owned typed read over the session Git evidence rows; a state composed without that authority reports the git
 //! sources unavailable instead of inferring relationships from session rows.
@@ -182,6 +183,31 @@ const PAGE_EVENTS_SQL: &str = "
 /// Newest recorded events one page serves; older ones are counted as omitted.
 const EVENT_LIMIT: i64 = 2_000;
 
+/// Managed test runs recorded against the page's sessions, and every run the
+/// store recorded without a session (those are counted, never placed).
+const PAGE_TEST_RUN_COUNTS_SQL: &str = "
+    SELECT (SELECT COUNT(*)
+            FROM json_each(?1) page
+            CROSS JOIN sessions s ON s.rowid = page.value
+            CROSS JOIN managed_test_runs r ON r.session_id = s.session_id) AS attributed,
+           (SELECT COUNT(*)
+            FROM json_each(?1) page
+            CROSS JOIN sessions s ON s.rowid = page.value
+            CROSS JOIN managed_test_runs r ON r.session_id = s.session_id
+            WHERE r.finished_at_micros IS NULL) AS unfinished,
+           (SELECT COUNT(*) FROM managed_test_runs WHERE session_id IS NULL) AS unattributed";
+
+/// The newest `?2` managed test runs recorded against the page's sessions,
+/// each on the lane of the session that requested it.
+const PAGE_TEST_RUNS_SQL: &str = "
+    SELECT s.provider, s.session_id, r.operation_id, r.started_at_micros,
+           r.finished_at_micros, r.termination, r.exit_code, r.passed, r.failed, r.ignored
+    FROM json_each(?1) page
+    CROSS JOIN sessions s ON s.rowid = page.value
+    CROSS JOIN managed_test_runs r ON r.session_id = s.session_id
+    ORDER BY r.started_at_micros DESC, r.operation_id DESC, s.provider DESC
+    LIMIT ?2";
+
 const PAGE_GENERATIONS_SQL: &str = "
     SELECT COUNT(*) AS active_generations, MAX(generation.activated_at) AS latest_activated_at
     FROM json_each(?1) page
@@ -338,35 +364,88 @@ struct LoomBranchSpanV1 {
     source: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum LoomEventKindV1 {
-    ToolCall,
-    PullRequest,
+/// The outcome a finished managed test run recorded.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+struct LoomTestRunOutcomeV1 {
+    /// Unix microseconds the run terminated.
+    finished_at_micros: i64,
+    termination: String,
+    /// The test process exit status; absent when it never exited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i64>,
+    passed: u64,
+    failed: u64,
+    ignored: u64,
 }
 
-/// One event a host transcript recorded for a displayed session.
+/// One recorded event on a displayed session's lane.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
-struct LoomEventV1 {
-    provider: String,
-    session_id: String,
-    kind: LoomEventKindV1,
-    /// The stored message that recorded the event, the id the session's
-    /// transcript page serves for the same row.
-    message_id: String,
-    /// Position in the session's recorded order.
-    ordinal: i64,
-    /// Epoch seconds the host recorded for the event. A row the host recorded
-    /// without one is not served; the source status counts it.
-    recorded_at: i64,
-    /// Tool names for a tool call; the recorded link or number for a pull
-    /// request. Absent when the row carries neither.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-    /// The host's own identifier of the tool invocation, the value a child
-    /// session's `parent_tool_use_id` names.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    tool_use_id: Option<String>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LoomEventV1 {
+    /// A tool call the host transcript recorded.
+    ToolCall {
+        provider: String,
+        session_id: String,
+        /// The stored message that recorded the event, the id the session's
+        /// transcript page serves for the same row.
+        message_id: String,
+        /// Position in the session's recorded order.
+        ordinal: i64,
+        /// Epoch seconds the host recorded for the event. A row the host
+        /// recorded without one is not served; the source status counts it.
+        recorded_at: i64,
+        /// The recorded tool names; absent when the row carries none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// The host's own identifier of the tool invocation, the value a
+        /// child session's `parent_tool_use_id` names.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+    },
+    /// A pull-request link the host transcript recorded.
+    PullRequest {
+        provider: String,
+        session_id: String,
+        message_id: String,
+        ordinal: i64,
+        recorded_at: i64,
+        /// The recorded link or number; absent when the row carries neither.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// A daemon-managed test run the session requested.
+    TestRun {
+        provider: String,
+        session_id: String,
+        /// The managed run's operation, the id `tracedecay_test_results`
+        /// and the run's terminal receipt name.
+        operation_id: String,
+        /// Epoch seconds the run started.
+        recorded_at: i64,
+        /// Unix microseconds the run started.
+        started_at_micros: i64,
+        /// Absent while the run has not recorded a terminal outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<LoomTestRunOutcomeV1>,
+    },
+}
+
+impl LoomEventV1 {
+    fn provider(&self) -> &String {
+        match self {
+            Self::ToolCall { provider, .. }
+            | Self::PullRequest { provider, .. }
+            | Self::TestRun { provider, .. } => provider,
+        }
+    }
+
+    fn recorded_at(&self) -> i64 {
+        match self {
+            Self::ToolCall { recorded_at, .. }
+            | Self::PullRequest { recorded_at, .. }
+            | Self::TestRun { recorded_at, .. } => *recorded_at,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -378,7 +457,7 @@ pub(super) struct LoomTemporalPayloadV1 {
     commits: Vec<LoomCommitV1>,
     edited_files: Vec<LoomEditedFileV1>,
     branch_spans: Vec<LoomBranchSpanV1>,
-    /// Recorded tool-call and pull-request events, oldest first.
+    /// Recorded tool-call, pull-request, and test-run events, oldest first.
     events: Vec<LoomEventV1>,
     temporal_refresh: LoomTemporalRefreshV1,
 }
@@ -619,6 +698,14 @@ async fn read_temporal(
     let edited_files = query_rows(conn, PAGE_EDITED_FILES_SQL, params![page.as_str()]).await?;
     let event_counts = query_rows(conn, PAGE_EVENT_COUNTS_SQL, params![page.as_str()]).await?;
     let event_rows = query_rows(conn, PAGE_EVENTS_SQL, params![page.as_str(), EVENT_LIMIT]).await?;
+    let test_run_counts =
+        query_rows(conn, PAGE_TEST_RUN_COUNTS_SQL, params![page.as_str()]).await?;
+    let test_run_rows = query_rows(
+        conn,
+        PAGE_TEST_RUNS_SQL,
+        params![page.as_str(), EVENT_LIMIT],
+    )
+    .await?;
     let generation_rows = query_rows(conn, PAGE_GENERATIONS_SQL, params![page.as_str()]).await?;
     let generation = generation_rows
         .first()
@@ -642,17 +729,25 @@ async fn read_temporal(
     let git = resolve_git_sources(git_correlation, &page_keys, examined_sessions)
         .map_err(LoomReadFailureV1::Failed)?;
     let spawn_calls = spawn_call_status(&sessions)?;
-    let events = event_rows
+    let mut events = event_rows
         .iter()
         .map(loom_event)
         .collect::<Result<Vec<_>, _>>()?;
     let (tool_status, pull_request_status) = event_statuses(&event_counts, &events)?;
+    let test_runs = test_run_rows
+        .iter()
+        .map(loom_test_run)
+        .collect::<Result<Vec<_>, _>>()?;
+    let test_run_status = test_run_status(&test_run_counts, &test_runs)?;
+    // Both reads are recorded-time ordered; one stable sort interleaves them.
+    events.extend(test_runs.into_iter().rev());
+    events.sort_by_key(LoomEventV1::recorded_at);
 
     let statuses = vec![
         spawn_calls,
         tool_status,
         pull_request_status,
-        test_run_status(),
+        test_run_status,
         git.session_commit,
         source_status(SourceStatusInput {
             id: "session_file",
@@ -781,26 +876,53 @@ fn loom_event(row: &Value) -> Result<LoomEventV1, LoomReadFailureV1> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
     };
-    let (kind, label) = if required_i64(row, "is_pull_request")? != 0 {
-        (
-            LoomEventKindV1::PullRequest,
-            optional("pull_request_content").and_then(pull_request_label),
-        )
+    let provider = required_str(row, "provider")?.to_owned();
+    let session_id = required_str(row, "session_id")?.to_owned();
+    let message_id = required_str(row, "message_id")?.to_owned();
+    let ordinal = required_i64(row, "ordinal")?;
+    let recorded_at = required_i64(row, "recorded_at")?;
+    Ok(if required_i64(row, "is_pull_request")? != 0 {
+        LoomEventV1::PullRequest {
+            provider,
+            session_id,
+            message_id,
+            ordinal,
+            recorded_at,
+            label: optional("pull_request_content").and_then(pull_request_label),
+        }
     } else {
-        (
-            LoomEventKindV1::ToolCall,
-            optional("tool_names").map(str::to_owned),
-        )
+        LoomEventV1::ToolCall {
+            provider,
+            session_id,
+            message_id,
+            ordinal,
+            recorded_at,
+            label: optional("tool_names").map(str::to_owned),
+            tool_use_id: optional("tool_use_id").map(str::to_owned),
+        }
+    })
+}
+
+fn loom_test_run(row: &Value) -> Result<LoomEventV1, LoomReadFailureV1> {
+    let started_at_micros = required_i64(row, "started_at_micros")?;
+    let outcome = match row.get("finished_at_micros").and_then(Value::as_i64) {
+        None => None,
+        Some(finished_at_micros) => Some(LoomTestRunOutcomeV1 {
+            finished_at_micros,
+            termination: required_str(row, "termination")?.to_owned(),
+            exit_code: row.get("exit_code").and_then(Value::as_i64),
+            passed: required_u64(row, "passed")?,
+            failed: required_u64(row, "failed")?,
+            ignored: required_u64(row, "ignored")?,
+        }),
     };
-    Ok(LoomEventV1 {
+    Ok(LoomEventV1::TestRun {
         provider: required_str(row, "provider")?.to_owned(),
         session_id: required_str(row, "session_id")?.to_owned(),
-        kind,
-        message_id: required_str(row, "message_id")?.to_owned(),
-        ordinal: required_i64(row, "ordinal")?,
-        recorded_at: required_i64(row, "recorded_at")?,
-        label,
-        tool_use_id: optional("tool_use_id").map(str::to_owned),
+        operation_id: required_str(row, "operation_id")?.to_owned(),
+        recorded_at: started_at_micros.div_euclid(1_000_000),
+        started_at_micros,
+        outcome,
     })
 }
 
@@ -837,9 +959,16 @@ fn event_statuses(
             (required_u64(row, "recorded")?, required_u64(row, "dated")?),
         );
     }
-    let status = |kind: LoomEventKindV1, token: &str| {
+    let status = |pull_request: bool, token: &str| {
         let (eligible, dated) = recorded.get(token).copied().unwrap_or((0, 0));
-        let served: Vec<&LoomEventV1> = events.iter().filter(|event| event.kind == kind).collect();
+        let served: Vec<&LoomEventV1> = events
+            .iter()
+            .filter(|event| match event {
+                LoomEventV1::ToolCall { .. } => !pull_request,
+                LoomEventV1::PullRequest { .. } => pull_request,
+                LoomEventV1::TestRun { .. } => false,
+            })
+            .collect();
         let served_count = served.len() as u64;
         let undated = eligible.saturating_sub(dated);
         let beyond_bound = dated.saturating_sub(served_count);
@@ -849,7 +978,7 @@ fn event_statuses(
              {undated} recorded without a timestamp are not placed; {beyond_bound} older than \
              the newest {EVENT_LIMIT} page events are omitted"
         );
-        let providers = distinct_strings(served.iter().map(|event| &event.provider));
+        let providers = distinct_strings(served.iter().map(|event| event.provider()));
         (
             served_count,
             omitted,
@@ -865,10 +994,8 @@ fn event_statuses(
             },
         )
     };
-    let (tool_served, tool_omitted, tool_providers, tool_coverage) =
-        status(LoomEventKindV1::ToolCall, "tool_call");
-    let (pr_served, _, pr_providers, pr_coverage) =
-        status(LoomEventKindV1::PullRequest, "pull_request");
+    let (tool_served, tool_omitted, tool_providers, tool_coverage) = status(false, "tool_call");
+    let (pr_served, _, pr_providers, pr_coverage) = status(true, "pull_request");
     Ok((
         LoomSourceStatusV1 {
             id: "session_tool",
@@ -908,31 +1035,55 @@ fn event_statuses(
     ))
 }
 
-const TEST_RUN_REASON: &str = "host transcripts record a test command only as a tool call \
-with no typed outcome, and daemon-managed test runs are in-memory operations with no session \
-attribution; no recorded test event can be placed on a session";
+const TEST_RUN_AUTHORITY: &str = "managed_test_runs recorded against the requesting session";
 
-fn test_run_status() -> LoomSourceStatusV1 {
-    LoomSourceStatusV1 {
+/// Coverage of the served test runs: every run recorded against a displayed
+/// session is placed at its recorded start; a run whose request named no
+/// session is counted but has no lane.
+fn test_run_status(
+    counts: &[Value],
+    runs: &[LoomEventV1],
+) -> Result<LoomSourceStatusV1, LoomReadFailureV1> {
+    let counts = counts.first().ok_or_else(|| {
+        LoomReadFailureV1::Failed("test-run count query returned no row".to_owned())
+    })?;
+    let attributed = required_u64(counts, "attributed")?;
+    let unfinished = required_u64(counts, "unfinished")?;
+    let unattributed = required_u64(counts, "unattributed")?;
+    let served = runs.len() as u64;
+    let beyond_bound = attributed.saturating_sub(served);
+    let omitted = unattributed + beyond_bound;
+    let eligible = attributed + unattributed;
+    let reason = format!(
+        "{served} of {eligible} recorded test runs served at their recorded start; \
+         {unattributed} recorded without a requesting session are counted, not placed; \
+         {beyond_bound} older than the newest {EVENT_LIMIT} page runs are omitted; \
+         {unfinished} served runs have no recorded outcome yet"
+    );
+    Ok(LoomSourceStatusV1 {
         id: "session_test",
         label: "Session → test run",
-        state: DashboardDomainStateV1::Unsupported,
-        authority: None,
-        granularity: "recorded test outcome",
-        providers: Vec::new(),
-        item_count: None,
-        reason: Some(TEST_RUN_REASON.to_owned()),
-        required_authority: Some("a session-attributed test-run recording authority"),
-        coverage: LoomSourceCoverageV1 {
-            completeness: "unknown",
-            eligible: None,
-            examined: None,
-            matched: None,
-            omitted: None,
-            unit: None,
-            reason: TEST_RUN_REASON.to_owned(),
+        state: if omitted == 0 {
+            DashboardDomainStateV1::Ready
+        } else {
+            DashboardDomainStateV1::Partial
         },
-    }
+        authority: Some(TEST_RUN_AUTHORITY),
+        granularity: "managed test run",
+        providers: distinct_strings(runs.iter().map(LoomEventV1::provider)),
+        item_count: Some(served),
+        reason: Some(reason.clone()),
+        required_authority: None,
+        coverage: LoomSourceCoverageV1 {
+            completeness: if omitted == 0 { "complete" } else { "partial" },
+            eligible: Some(eligible),
+            examined: Some(eligible),
+            matched: Some(served),
+            omitted: Some(omitted),
+            unit: Some("recorded test runs"),
+            reason,
+        },
+    })
 }
 
 struct LoomGitSourcesV1 {
@@ -1405,7 +1556,12 @@ fn unavailable_payload(reason: &str) -> LoomTemporalPayloadV1 {
                 "lcm_raw_messages kind git_pull_request | pr_link at the host-recorded timestamp",
                 "host-recorded pull-request link",
             ),
-            test_run_status(),
+            unavailable(
+                "session_test",
+                "Session → test run",
+                TEST_RUN_AUTHORITY,
+                "managed test run",
+            ),
             unavailable_required(
                 "session_commit",
                 "Session ↔ commit",
