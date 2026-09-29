@@ -1403,20 +1403,6 @@ async fn describe_without_a_refresh_worker_does_not_pretend_history_is_convergin
     }
 }
 
-struct CurrentRefreshServing;
-
-impl tracedecay_sessions::serving::SessionProjectionServingStatusPort for CurrentRefreshServing {
-    fn serving_status(&self) -> tracedecay_sessions::serving::SessionProjectionServingStatus {
-        tracedecay_sessions::serving::SessionProjectionServingStatus {
-            state: tracedecay_sessions::serving::SessionProjectionServingState::Current,
-            last_progress_at_unix_micros: None,
-            backlog: 0,
-            blocker: None,
-            retry_class: None,
-        }
-    }
-}
-
 /// Profile catch-up mounts the real refresh worker's serving-status port. When
 /// that port reports current, `RequireFresh` must not be refused as
 /// `RefreshWorkerMissing`.
@@ -1445,7 +1431,9 @@ async fn require_fresh_with_a_current_refresh_worker_is_not_refused_as_worker_mi
     let service = DaemonSessionRetrievalService::new_admitted_profile(
         harness.registered.clone(),
         root.identity().clone(),
-        Some(std::sync::Arc::new(CurrentRefreshServing)),
+        Some(std::sync::Arc::new(FixedRefreshServing(
+            SessionProjectionServingState::Current,
+        ))),
     )
     .expect("registered retrieval service");
     let context = admitted_lookup_context(scope);
@@ -1483,7 +1471,7 @@ async fn require_fresh_with_a_current_refresh_worker_is_not_refused_as_worker_mi
     }
 }
 
-struct FixedRefreshServing(tracedecay_sessions::serving::SessionProjectionServingState);
+struct FixedRefreshServing(SessionProjectionServingState);
 
 impl tracedecay_sessions::serving::SessionProjectionServingStatusPort for FixedRefreshServing {
     fn serving_status(&self) -> tracedecay_sessions::serving::SessionProjectionServingStatus {
