@@ -2204,9 +2204,10 @@ async fn workflow_json_preserves_a_typed_application_problem_envelope() {
         .output()
         .expect("invoke Workflow CLI");
 
-    assert!(
-        output.status.success(),
-        "typed application problems are successful CLI transport responses: {}",
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a typed problem exits non-zero with its envelope on stdout: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("Workflow JSON stdout");
