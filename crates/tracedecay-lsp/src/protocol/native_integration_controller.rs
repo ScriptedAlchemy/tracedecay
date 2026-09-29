@@ -175,13 +175,28 @@ mod tests {
 
     #[test]
     fn sessions_before_initialization_receive_no_native_integration_notifications() {
-        let port =
-            ScriptedStatusPort::holding(projection(NativeIntegrationPhaseV1::Prepared, 1, None));
+        let held = projection(NativeIntegrationPhaseV1::Prepared, 1, None);
+        let port = ScriptedStatusPort::holding(held.clone());
         let mut session = session().with_native_integration_status_port(port as Arc<_>);
 
         session.flush_due(1);
+        assert_eq!(
+            native_integration_notifications(session.drain_outbound()),
+            Vec::<Value>::new()
+        );
 
-        assert!(native_integration_notifications(session.drain_outbound()).is_empty());
+        initialize(&mut session);
+        let notifications = native_integration_notifications(session.drain_outbound());
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0]["jsonrpc"], "2.0");
+        assert_eq!(
+            notifications[0]["method"],
+            TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD
+        );
+        assert_eq!(
+            notifications[0]["params"],
+            serde_json::to_value(&held).expect("status projection serializes")
+        );
     }
 
     #[test]

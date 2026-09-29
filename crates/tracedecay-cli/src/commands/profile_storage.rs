@@ -751,9 +751,12 @@ mod reset_project_store_tests {
         let error =
             reset_refused_project_graph_store(&profile_root, "proj_not_sqlite", false).unwrap_err();
 
-        assert!(
-            error.to_string().contains("is not a SQLite database"),
-            "unexpected refusal: {error}"
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "config error: {} is not a SQLite database; the scoped reset covers only stores refused for an incompatible schema version",
+                db_path.display()
+            )
         );
         assert!(
             db_path.exists(),
@@ -769,9 +772,17 @@ mod reset_project_store_tests {
         let error =
             reset_refused_project_graph_store(&profile_root, "proj_absent", false).unwrap_err();
 
-        assert!(
-            error.to_string().contains("nothing to reset"),
-            "unexpected refusal: {error}"
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "config error: no project graph store exists at {}; nothing to reset",
+                tracedecay_runtime_core::storage::profile_sharded_data_root(
+                    &profile_root,
+                    "proj_absent"
+                )
+                .join(tracedecay_runtime_core::config::DB_FILENAME)
+                .display()
+            )
         );
     }
 
@@ -823,6 +834,17 @@ mod reset_project_store_tests {
         let outcome =
             reset_refused_project_graph_store(&profile_root, "proj_absent", true).unwrap();
 
-        assert!(outcome.reset_graph_db.is_none());
+        assert!(matches!(outcome.reset_graph_db, None));
+        assert_eq!(
+            outcome.canonical_schema_version,
+            tracedecay_runtime_core::db::migrations::SCHEMA_VERSION
+        );
+        assert_eq!(
+            outcome.data_root,
+            tracedecay_runtime_core::storage::profile_sharded_data_root(
+                &profile_root,
+                "proj_absent"
+            )
+        );
     }
 }

@@ -360,36 +360,70 @@ mod tests {
 
     use super::hook_row_to_analytics_event;
 
+    fn canonical_project_id(path: &Path) -> String {
+        std::fs::canonicalize(path)
+            .expect("fixture project root exists")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn maps_hook_invoked_row_with_attribution() {
-        let line = r#"{"agent":"claude","event":"hook_invoked","hook_name":"preToolUse","project_root":"/repo","session_id":"s1","tool_name":"Agent","ts_unix_ms":1783000000000}"#;
-        let Some(event) = hook_row_to_analytics_event(line, None) else {
-            panic!("row should map");
-        };
+        let root = tempfile::tempdir().expect("project root");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("real root");
+        let alias = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &alias).expect("alias root");
+        let line = serde_json::json!({
+            "agent": "claude",
+            "event": "hook_invoked",
+            "hook_name": "preToolUse",
+            "project_root": alias,
+            "session_id": "s1",
+            "tool_name": "Agent",
+            "ts_unix_ms": 1_783_000_000_000_i64,
+        })
+        .to_string();
+        let event = hook_row_to_analytics_event(&line, None).expect("row should map");
         assert_eq!(event.provider, "hook_claude");
         assert_eq!(event.event_kind, "hook_invoked");
         assert_eq!(event.hook_name.as_deref(), Some("preToolUse"));
         assert_eq!(event.session_id.as_deref(), Some("s1"));
+        assert_eq!(event.tool_name.as_deref(), Some("Agent"));
+        assert_eq!(event.outcome.as_deref(), Some("observed"));
         assert_eq!(event.timestamp, 1_783_000_000);
-        assert!(event.project_id.ends_with("repo"));
+        assert_eq!(event.project_id, canonical_project_id(&real));
+        assert_ne!(event.project_id, alias.to_string_lossy());
     }
 
     #[test]
     fn unattributed_row_falls_back_to_default_project() {
+        let root = tempfile::tempdir().expect("project root");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("real root");
+        let alias = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &alias).expect("alias root");
         let line = r#"{"agent":"cursor","event":"hook_invoked","hook_name":"postToolUse","ts_unix_ms":1783000000000}"#;
-        let Some(event) = hook_row_to_analytics_event(line, Some(Path::new("/repo"))) else {
-            panic!("row should map");
-        };
-        assert!(event.project_id.ends_with("repo"));
-        let Some(event) = hook_row_to_analytics_event(line, None) else {
-            panic!("row should map");
-        };
+        let event = hook_row_to_analytics_event(line, Some(&alias)).expect("row should map");
+        assert_eq!(event.provider, "hook_cursor");
+        assert_eq!(event.hook_name.as_deref(), Some("postToolUse"));
+        assert_eq!(event.project_id, canonical_project_id(&real));
+        let event = hook_row_to_analytics_event(line, None).expect("row should map");
         assert_eq!(event.project_id, "");
+        assert_eq!(event.session_id, None);
     }
 
     #[test]
     fn rows_without_event_field_are_skipped() {
-        assert!(hook_row_to_analytics_event("{}", None).is_none());
-        assert!(hook_row_to_analytics_event("not json", None).is_none());
+        assert_eq!(hook_row_to_analytics_event("{}", None), None);
+        assert_eq!(hook_row_to_analytics_event("not json", None), None);
+        let event =
+            hook_row_to_analytics_event(r#"{"agent":"claude","event":"hook_invoked"}"#, None)
+                .expect("a row with an event field maps");
+        assert_eq!(event.provider, "hook_claude");
+        assert_eq!(event.event_kind, "hook_invoked");
+        assert_eq!(event.project_id, "");
+        assert_eq!(event.timestamp, 0);
+        assert_eq!(event.outcome.as_deref(), Some("observed"));
     }
 }

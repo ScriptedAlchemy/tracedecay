@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use clap::Parser;
+use clap::error::ErrorKind;
 use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{
     RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
@@ -28,7 +29,7 @@ use super::{
     SessionRefreshOutcomeView, SessionRefreshSelectors, dispatch_session_refresh,
     execute_session_refresh, session_refresh_human_outcome,
 };
-use crate::cli::Cli;
+use crate::cli::{Cli, Commands, SessionsAction, SessionsRefreshAction};
 
 const PROFILE_ID: &str = "profile.0f2f1c3d4e5f60718293a4b5c6d7e8f9";
 
@@ -723,6 +724,22 @@ fn a_cancelled_outcome_without_a_receipt_is_not_durable() {
     );
 }
 
+fn refresh_action(cli: &Cli) -> &SessionsRefreshAction {
+    match &cli.command {
+        Some(Commands::Sessions {
+            action: SessionsAction::Refresh { action },
+        }) => action,
+        _ => panic!("expected sessions refresh"),
+    }
+}
+
+fn assert_refresh_parse_kind(args: &[&str], kind: ErrorKind) {
+    let Err(error) = Cli::try_parse_from(args.iter().copied()) else {
+        panic!("refresh parse must fail");
+    };
+    assert_eq!(error.kind(), kind, "{error}");
+}
+
 #[test]
 fn refresh_cli_accepts_begin_status_cancel_only() {
     let selectors = [
@@ -736,41 +753,44 @@ fn refresh_cli_accepts_begin_status_cancel_only() {
         "--target",
         "7",
     ];
-    Cli::try_parse_from(
+    let begin = Cli::try_parse_from(
         ["tracedecay", "sessions", "refresh", "begin"]
             .into_iter()
             .chain(selectors),
     )
     .unwrap_or_else(|error| panic!("refresh begin should parse: {error}"));
+    assert!(matches!(
+        refresh_action(&begin),
+        SessionsRefreshAction::Begin(_)
+    ));
     for action in ["status", "cancel"] {
-        Cli::try_parse_from(
+        let parsed = Cli::try_parse_from(
             ["tracedecay", "sessions", "refresh", action]
                 .into_iter()
                 .chain(selectors)
                 .chain(["--handle", "opaque-handle"]),
         )
         .unwrap_or_else(|error| panic!("refresh action `{action}` should parse: {error}"));
-        assert!(
-            Cli::try_parse_from(
-                ["tracedecay", "sessions", "refresh", action]
-                    .into_iter()
-                    .chain(selectors)
-                    .chain(["--operation-id", "opaque-handle"]),
-            )
-            .is_err(),
-            "the removed --operation-id alias must not parse for `{action}`"
-        );
+        match action {
+            "status" => assert!(matches!(
+                refresh_action(&parsed),
+                SessionsRefreshAction::Status(_)
+            )),
+            "cancel" => assert!(matches!(
+                refresh_action(&parsed),
+                SessionsRefreshAction::Cancel(_)
+            )),
+            _ => unreachable!("only status and cancel"),
+        }
+        let mut rejected = vec!["tracedecay", "sessions", "refresh", action];
+        rejected.extend(selectors);
+        rejected.extend(["--operation-id", "opaque-handle"]);
+        assert_refresh_parse_kind(&rejected, ErrorKind::UnknownArgument);
     }
     for removed in ["start", "join", "resume"] {
-        assert!(
-            Cli::try_parse_from(
-                ["tracedecay", "sessions", "refresh", removed]
-                    .into_iter()
-                    .chain(selectors),
-            )
-            .is_err(),
-            "removed alias `{removed}` must not parse"
-        );
+        let mut rejected = vec!["tracedecay", "sessions", "refresh", removed];
+        rejected.extend(selectors);
+        assert_refresh_parse_kind(&rejected, ErrorKind::InvalidSubcommand);
     }
 }
 

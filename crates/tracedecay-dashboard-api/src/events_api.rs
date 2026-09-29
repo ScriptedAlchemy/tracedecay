@@ -1088,7 +1088,11 @@ pub(crate) async fn dashboard_state_fixture(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     use super::*;
+    use tracedecay_runtime_core::db::engine::QueryExecutor;
 
     async fn registered_database_for_test(
         path: &Path,
@@ -1497,9 +1501,35 @@ mod tests {
 
         // First poll primes the baselines and emits nothing.
         let primed = state.poll_sources(&dash, &scope).await;
-        assert!(primed.is_empty(), "baseline poll must not emit events");
-        // The storage baseline is a real summed size read.
-        assert!(state.last_store_total_bytes.unwrap_or(0) > 0);
-        assert!(state.last_registry_digest.is_some());
+        assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
+        assert_eq!(
+            state.last_store_total_bytes,
+            Some(
+                sqlite_page_bytes(&dash.graph_conn).await
+                    + sqlite_page_bytes(&dash.mem_db.read_connection()).await
+            )
+        );
+        let mut hasher = DefaultHasher::new();
+        0_u64.hash(&mut hasher);
+        assert_eq!(
+            state.last_registry_digest.as_deref(),
+            Some(format!("{:016x}", hasher.finish())).as_deref()
+        );
+    }
+
+    async fn sqlite_page_bytes(conn: &(impl QueryExecutor + ?Sized)) -> u64 {
+        async fn pragma(conn: &(impl QueryExecutor + ?Sized), name: &str) -> u64 {
+            let mut rows = conn
+                .query(&format!("PRAGMA {name}"), ())
+                .await
+                .expect("pragma query");
+            let row = rows
+                .next()
+                .await
+                .expect("pragma row")
+                .expect("pragma value");
+            row.get::<i64>(0).expect("pragma integer").max(0) as u64
+        }
+        pragma(conn, "page_size").await * pragma(conn, "page_count").await
     }
 }

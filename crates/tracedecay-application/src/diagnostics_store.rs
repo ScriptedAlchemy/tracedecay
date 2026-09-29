@@ -1367,6 +1367,19 @@ mod tests {
         conn
     }
 
+    fn assert_database_refusal(error: TraceDecayError, operation: &str, message: impl AsRef<str>) {
+        match error {
+            TraceDecayError::Database {
+                operation: actual_operation,
+                message: actual_message,
+            } => {
+                assert_eq!(actual_operation, operation);
+                assert_eq!(actual_message, message.as_ref());
+            }
+            other => panic!("expected a database refusal, got {other}"),
+        }
+    }
+
     #[tokio::test]
     async fn persist_restart_read_back() {
         let temp = tempfile::tempdir().unwrap();
@@ -1481,15 +1494,18 @@ mod tests {
 
         // Overlays are generation-bound: stale or foreign-generation records
         // are rejected even in memory.
-        assert!(
+        let foreign = fixture_record("generation.clean.2", "anchor.overlay.2");
+        assert_database_refusal(
             overlay
-                .replace_document(
-                    "client.a",
-                    "file:///src/lib.rs",
-                    1,
-                    vec![fixture_record("generation.clean.2", "anchor.overlay.2")],
-                )
-                .is_err()
+                .replace_document("client.a", "file:///src/lib.rs", 1, vec![foreign.clone()])
+                .unwrap_err(),
+            "diagnostics overlay replace_document",
+            format!(
+                "overlay record {} names generation {} but the overlay is bound to {}",
+                foreign.diagnostic_anchor,
+                foreign.generation_id,
+                id::<tracedecay_domain::CodeGenerationId>(gen1)
+            ),
         );
 
         // The merged read keeps durable and overlay lanes separate.
@@ -1589,25 +1605,35 @@ mod tests {
         let stale = fixture_record(gen1, "anchor.diagnostic.1")
             .clear(id(gen2))
             .unwrap();
-        assert!(
+        assert_database_refusal(
             store
                 .publish_clean_generation(&id(gen1), std::slice::from_ref(&stale))
                 .await
-                .is_err()
+                .unwrap_err(),
+            "diagnostics publish_clean_generation",
+            format!(
+                "record {} is not current; stale findings cannot cross snapshots",
+                stale.diagnostic_anchor
+            ),
         );
 
         // A clean publication is single-generation.
-        assert!(
+        let mixed = fixture_record(gen2, "anchor.diagnostic.2");
+        assert_database_refusal(
             store
                 .publish_clean_generation(
                     &id(gen1),
-                    &[
-                        fixture_record(gen1, "anchor.diagnostic.1"),
-                        fixture_record(gen2, "anchor.diagnostic.2"),
-                    ],
+                    &[fixture_record(gen1, "anchor.diagnostic.1"), mixed.clone()],
                 )
                 .await
-                .is_err()
+                .unwrap_err(),
+            "diagnostics publish_clean_generation",
+            format!(
+                "record {} names generation {} but publication targets {}",
+                mixed.diagnostic_anchor,
+                mixed.generation_id,
+                id::<tracedecay_domain::CodeGenerationId>(gen1)
+            ),
         );
 
         // Overlay release drops every entry without touching the store.
@@ -1735,12 +1761,16 @@ mod tests {
             .unwrap();
 
         let collision = fixture_record(gen2, "anchor.diagnostic.shared");
-        assert!(
+        assert_database_refusal(
             store
-                .publish_clean_generation(&id(gen2), &[collision])
+                .publish_clean_generation(&id(gen2), &[collision.clone()])
                 .await
-                .is_err(),
-            "one durable anchor must never be rebound to another generation"
+                .unwrap_err(),
+            "diagnostics publish_clean_generation",
+            format!(
+                "diagnostic anchor {} is already bound to another generation",
+                collision.diagnostic_anchor
+            ),
         );
         assert_eq!(
             store.current_records(&id(gen1)).await.unwrap(),
@@ -1773,12 +1803,16 @@ mod tests {
             .publish_clean_generation(&id(gen2), &[])
             .await
             .unwrap();
-        assert!(
+        assert_database_refusal(
             store
                 .publish_clean_generation(&id(gen1), std::slice::from_ref(&cleared))
                 .await
-                .is_err(),
-            "a cleared generation must stay historical"
+                .unwrap_err(),
+            "diagnostics publish_clean_generation",
+            format!(
+                "generation {} is already historical and cannot be republished",
+                id::<tracedecay_domain::CodeGenerationId>(gen1)
+            ),
         );
     }
 
@@ -1795,7 +1829,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(
+        assert_database_refusal(
             overlay
                 .replace_document(
                     "client.a",
@@ -1803,7 +1837,9 @@ mod tests {
                     6,
                     vec![fixture_record(gen1, "anchor.overlay.stale")],
                 )
-                .is_err()
+                .unwrap_err(),
+            "diagnostics overlay replace_document",
+            "document version 6 is older than current version 7",
         );
         let records = overlay.records_for("client.a", "file:///src/main.rs");
         assert_eq!(records.len(), 1);
@@ -1817,7 +1853,7 @@ mod tests {
                 .records_for("client.a", "file:///src/main.rs")
                 .is_empty()
         );
-        assert!(
+        assert_database_refusal(
             overlay
                 .replace_document(
                     "client.a",
@@ -1825,8 +1861,9 @@ mod tests {
                     7,
                     vec![fixture_record(gen1, "anchor.overlay.stale.after-clear")],
                 )
-                .is_err(),
-            "an empty newer overlay snapshot must still fence stale updates"
+                .unwrap_err(),
+            "diagnostics overlay replace_document",
+            "document version 7 is older than current version 8",
         );
     }
 }
