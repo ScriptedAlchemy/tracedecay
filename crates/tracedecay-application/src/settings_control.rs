@@ -6,15 +6,15 @@
 //! authorization, CAS, receipt issuance, status, and rollback.
 
 use serde::Deserialize;
-use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationSnapshotV1, ConfigurationValueV1, ContextScoutConfigurationStateV1,
     ContextScoutSettingsV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
-    INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SettingKey,
+    TELEMETRY_TIMINGS_SETTING_KEY,
 };
+use tracedecay_domain::{ProjectId, validate_index_path_patterns};
 
 use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 use tracedecay_contracts::{ProjectSettingsPatchInputV1, validate_project_settings_patch};
@@ -36,8 +36,6 @@ pub struct ProjectSettingsPatchV1 {
     pub extract_docstrings: Option<bool>,
     #[serde(default)]
     pub track_call_sites: Option<bool>,
-    #[serde(default)]
-    pub git_ignore: Option<bool>,
     #[serde(default)]
     pub telemetry: Option<TelemetrySettingsPatchV1>,
     #[serde(default)]
@@ -137,11 +135,11 @@ pub fn preview_project_settings(
     let supplied_values_are_current = patch
         .include
         .as_ref()
-        .is_none_or(|value| value == &current.config().include)
+        .is_none_or(|value| value == current.config().index_paths.include_patterns())
         && patch
             .exclude
             .as_ref()
-            .is_none_or(|value| value == &current.config().exclude)
+            .is_none_or(|value| value == current.config().index_paths.exclude_patterns())
         && patch
             .max_file_size
             .is_none_or(|value| value == current.config().max_file_size)
@@ -151,9 +149,6 @@ pub fn preview_project_settings(
         && patch
             .track_call_sites
             .is_none_or(|value| value == current.config().track_call_sites)
-        && patch
-            .git_ignore
-            .is_none_or(|value| value == current.config().git_ignore)
         && patch.telemetry.as_ref().is_none_or(|telemetry| {
             telemetry
                 .timings
@@ -199,12 +194,6 @@ pub fn preview_project_settings(
         &layer,
         INDEX_TRACK_CALL_SITES_SETTING_KEY,
         patch.track_call_sites.map(ConfigurationValueV1::Boolean),
-    )?;
-    push(
-        &mut mutations,
-        &layer,
-        INDEX_GIT_IGNORE_SETTING_KEY,
-        patch.git_ignore.map(ConfigurationValueV1::Boolean),
     )?;
     if let Some(telemetry) = patch.telemetry {
         push(
@@ -283,11 +272,8 @@ fn validate_globs(field: &str, globs: &[String], issues: &mut Vec<SettingsValida
     for pattern in globs {
         if pattern.trim().is_empty() {
             issues.push(issue(field, &format!("{field} patterns must not be empty")));
-        } else if let Err(error) = glob::Pattern::new(pattern) {
-            issues.push(issue(
-                field,
-                &format!("invalid glob pattern '{pattern}': {error}"),
-            ));
+        } else if let Err(error) = validate_index_path_patterns(std::slice::from_ref(pattern)) {
+            issues.push(issue(field, &error.to_string()));
         }
     }
 }

@@ -396,6 +396,35 @@ impl DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
+    /// Whether one sealed row is what capture under this owner's path policy
+    /// would produce: excluded paths, and only they, are omitted as
+    /// `Generated`.
+    pub(super) fn row_follows_path_policy(&self, file: &SanitizedCodeFileV1) -> bool {
+        (file.disposition == SnapshotFileDispositionV1::Generated)
+            == self.path_policy.excludes(&file.logical_path)
+    }
+
+    /// Whether a sealed roster was captured under this owner's path policy.
+    /// A roster sealed under other `index.exclude.v1` / `index.include.v1`
+    /// values is not reusable: its rows would keep or drop the wrong files.
+    /// Explicitly admitted ignored sources bypass the policy by design.
+    pub(super) fn roster_follows_path_policy(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> bool {
+        let admitted = generation
+            .ignored_source_admissions()
+            .iter()
+            .map(|admission| admission.logical_path.as_str())
+            .collect::<BTreeSet<_>>();
+        generation
+            .snapshot()
+            .files
+            .iter()
+            .filter(|file| !admitted.contains(file.logical_path.as_str()))
+            .all(|file| self.row_follows_path_policy(file))
+    }
+
     fn omitted_source_file(
         &self,
         logical_path: &str,
@@ -434,7 +463,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     logical_path.to_owned(),
                 ));
             }
-            if !explicitly_admitted && crate::config::is_generated_path_segment(logical_path) {
+            if !explicitly_admitted && self.path_policy.excludes(logical_path) {
                 return self
                     .omitted_source_file(
                         logical_path,
@@ -831,6 +860,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !generation
             .compatibility_with(&self.production_config)
             .is_reusable()
+            || !self.roster_follows_path_policy(&generation)
         {
             return Ok(None);
         }

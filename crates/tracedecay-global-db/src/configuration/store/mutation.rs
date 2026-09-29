@@ -491,7 +491,7 @@ pub(super) fn apply_direct_mutation_to_snapshot(
                     .validate_layer(key, layer)
                     .map_err(ConfigurationError::validation)?;
                 registry
-                    .validate_value(key, value)
+                    .validate_written_value(key, value)
                     .map_err(ConfigurationError::validation)?;
                 replace_direct_effective_value(
                     effective_values,

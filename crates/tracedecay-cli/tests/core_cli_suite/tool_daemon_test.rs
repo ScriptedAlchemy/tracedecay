@@ -3631,7 +3631,7 @@ fn user_settings_resolve_from_the_profile_outside_any_project() {
         "a write made outside a project must be the value the project reads: {disabled}"
     );
 
-    let (code, refused) = configuration_get_from(&home, &outside, "index.git_ignore.v1");
+    let (code, refused) = configuration_get_from(&home, &outside, "index.max_file_size.v1");
     assert_eq!(code, Some(1), "{refused}");
     assert_eq!(
         (&refused["problem"]["kind"], &refused["problem"]["code"]),

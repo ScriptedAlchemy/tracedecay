@@ -24,6 +24,7 @@ use tracedecay_contracts::{
     CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, Omission,
     OmissionReason,
 };
+use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
@@ -58,6 +59,7 @@ fn grep_match(hit: GrepSearchHit) -> GrepMatchV1 {
 #[hotpath::measure(future = true, label = "mcp.search.grep.total")]
 pub async fn compute_grep(
     project_root: &Path,
+    path_policy: &IndexPathPolicyV1,
     graph: std::result::Result<&VerifiedGraphQuery, &TraceDecayError>,
     args: Value,
     scope_prefix: Option<&str>,
@@ -79,6 +81,7 @@ pub async fn compute_grep(
         .map_or(0, |v| (v as usize).min(MAX_CONTEXT_LINES));
 
     let project_root_buf = project_root.to_path_buf();
+    let path_policy = path_policy.clone();
     let pattern = request.pattern.clone();
     let query = GrepSearchQuery {
         pattern: request.pattern,
@@ -95,7 +98,7 @@ pub async fn compute_grep(
             deadline,
             cancellation,
             move |cancelled, transport_cancellation| {
-                search_tree_with_cancel(&project_root_buf, &query, || {
+                search_tree_with_cancel(&project_root_buf, &query, &path_policy, || {
                     cancelled.load(std::sync::atomic::Ordering::Acquire)
                         || transport_cancellation
                             .as_ref()
@@ -430,6 +433,7 @@ mod tests {
                 context_lines: 0,
                 max_results,
             },
+            &tracedecay_code_index_runtime::registry_default_index_path_policy(),
             is_cancelled,
         )
         .expect("bounded scan")
@@ -962,6 +966,7 @@ mod tests {
     ) -> Value {
         let completion = compute_grep(
             project,
+            &tracedecay_code_index_runtime::registry_default_index_path_policy(),
             Ok(graph),
             json!({"pattern": ENRICHMENT_TOKEN, "fixed_strings": true, "format": "json"}),
             None,

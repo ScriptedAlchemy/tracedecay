@@ -4020,7 +4020,6 @@ export type ProjectEditableSettingsV1 = {
   context_scout: boolean;
   exclude: Array<string>;
   extract_docstrings: boolean;
-  git_ignore: boolean;
   include: Array<string>;
   max_file_size: number;
   sync: SyncSettingsV1;
@@ -4081,7 +4080,6 @@ export type ProjectSettingsPatch = {
   exclude?: Array<string> | null | undefined;
   expected_revision_id: string;
   extract_docstrings?: boolean | null | undefined;
-  git_ignore?: boolean | null | undefined;
   idempotency_key: string;
   include?: Array<string> | null | undefined;
   max_file_size?: number | null | undefined;

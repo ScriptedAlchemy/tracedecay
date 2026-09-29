@@ -86,6 +86,7 @@ url = "2"
 rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", features = ["test-helpers"] }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", features = ["test-helpers"] }
 # The dashboard LCM adapter's unit tests build request controls through the

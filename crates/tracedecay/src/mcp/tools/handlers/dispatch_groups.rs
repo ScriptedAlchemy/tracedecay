@@ -445,6 +445,7 @@ fn admitted_project_authorities(
         cg.db_path(),
         cg.store_runtime_registry.clone(),
         cg.configuration_runtime().clone(),
+        cg.get_config().index_paths.clone(),
         options.registered_project_session_db.clone(),
     )
     .map_err(Into::into)

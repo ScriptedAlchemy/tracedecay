@@ -6186,6 +6186,7 @@ dependencies = [
  "tracedecay-policy",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
+ "tracing",
 ]
 
 [[package]]
@@ -6371,6 +6372,7 @@ dependencies = [
 name = "tracedecay-domain"
 version = "0.1.0"
 dependencies = [
+ "globset",
  "hotpath",
  "schemars",
  "serde",

@@ -659,7 +659,7 @@ fn primitive_read_description(operation: &str) -> &'static str {
             "Run one first-party CLI profile action: registry, accounting, storage, analytics, or session-sync maintenance."
         }
         "admin_project" => {
-            "Maintain the served project's daemon bookkeeping: its usage counter, registry token accounting, gitignore status, automatic-fact receipts, and automation scheduler reconcile."
+            "Maintain the served project's daemon bookkeeping: its usage counter, registry token accounting, automatic-fact receipts, and automation scheduler reconcile."
         }
         "hook_runtime" => {
             "Record one agent-host hook's session evidence (a transcript, a hook admission, or a receipt) in the daemon-owned session stores."

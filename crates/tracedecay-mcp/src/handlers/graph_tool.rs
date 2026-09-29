@@ -107,7 +107,7 @@ pub async fn compute_graph_tool(
         | ApplicationSurfaceOperation::UnsafePatterns
         | ApplicationSurfaceOperation::Constructors
         | ApplicationSurfaceOperation::FieldSites => {
-            compute_analysis_report(ctx.project_root(), open, operation, args, scope_prefix).await
+            compute_analysis_report(ctx, open, operation, args, scope_prefix).await
         }
         ApplicationSurfaceOperation::FindExactSymbol => {
             compute_find_exact_symbol(
@@ -137,6 +137,7 @@ pub async fn compute_graph_tool(
             };
             compute_grep(
                 ctx.project_root(),
+                ctx.index_path_policy(),
                 graph.as_ref(),
                 args,
                 scope_prefix,
@@ -148,6 +149,7 @@ pub async fn compute_graph_tool(
         ApplicationSurfaceOperation::AstGrepSearch => {
             compute_ast_grep_search(
                 ctx.project_root(),
+                ctx.index_path_policy(),
                 args,
                 scope_prefix,
                 ctx.deadline().cloned(),

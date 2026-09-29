@@ -24,7 +24,6 @@ const FIXTURE_SETTINGS: ReadonlyArray<readonly [string, readonly string[]]> = [
       'project.config.context_scout',
       'project.config.exclude',
       'project.config.extract_docstrings',
-      'project.config.git_ignore',
       'project.config.include',
       'project.config.max_file_size',
       'project.config.sync.auto_track_pr_branches',

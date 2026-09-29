@@ -524,7 +524,7 @@ fn validate_direct_mutation(
                 .validate_layer(key, layer)
                 .map_err(ConfigurationError::validation)?;
             registry
-                .validate_value(key, value)
+                .validate_written_value(key, value)
                 .map_err(ConfigurationError::validation)
         }
         DirectConfigurationMutation::Unset { layer, key } => {

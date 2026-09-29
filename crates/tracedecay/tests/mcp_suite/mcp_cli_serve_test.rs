@@ -1031,7 +1031,7 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
             configuration_get_request(2, "user.upload_enabled.v1"),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
-            configuration_get_request(4, "index.git_ignore.v1"),
+            configuration_get_request(4, "index.max_file_size.v1"),
         ],
     );
     assert!(output.status.success(), "{output:?}");
@@ -1104,7 +1104,7 @@ async fn unenrolled_directory_session_serves_user_settings() {
         &[
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
             configuration_get_request(2, "user.upload_enabled.v1"),
-            configuration_get_request(3, "index.git_ignore.v1"),
+            configuration_get_request(3, "index.max_file_size.v1"),
         ],
     );
     assert!(output.status.success(), "{output:?}");
