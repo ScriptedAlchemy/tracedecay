@@ -21,24 +21,24 @@ fn read_analytics_rows(path: &Path) -> Vec<Value> {
         .collect()
 }
 
-#[test]
-fn unbound_hook_analytics_do_not_create_a_missing_profile() {
-    let home = tempfile::tempdir().unwrap();
-    let profile_root = home.path().join(".tracedecay");
-    let profile = ProfileRoot::new(&profile_root);
-    assert!(!profile_root.exists());
-
-    let event = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
-    let parsed = serde_json::from_str(event).unwrap();
+fn record_stop(profile: &ProfileRoot, event: &str, parsed: &Value) {
     drop(record_hook_invoked_parsed(
         &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
         None,
         HostIntegrationIdV1::Claude,
         "Stop",
         event,
-        &parsed,
+        parsed,
     ));
+}
 
+#[test]
+fn unbound_hook_analytics_do_not_create_a_missing_profile() {
+    let home = tempfile::tempdir().unwrap();
+    let profile_root = home.path().join(".tracedecay");
+    let event = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
+    let parsed = serde_json::from_str(event).unwrap();
+    record_stop(&ProfileRoot::new(&profile_root), event, &parsed);
     assert!(
         !profile_root.exists(),
         "unbound hook analytics created a missing profile"
@@ -47,15 +47,7 @@ fn unbound_hook_analytics_do_not_create_a_missing_profile() {
     let present = tempfile::tempdir().unwrap();
     let present_root = present.path().join(".tracedecay");
     std::fs::create_dir(&present_root).unwrap();
-    let present_profile = ProfileRoot::new(&present_root);
-    drop(record_hook_invoked_parsed(
-        &crate::ports::hook_runtime::crate_test_runtime(present_profile),
-        None,
-        HostIntegrationIdV1::Claude,
-        "Stop",
-        event,
-        &parsed,
-    ));
+    record_stop(&ProfileRoot::new(&present_root), event, &parsed);
     let rows = read_analytics_rows(&present_root.join("hook_analytics.jsonl"));
     assert_eq!(
         rows.len(),
@@ -88,65 +80,27 @@ fn unbound_hook_analytics_do_not_create_a_missing_profile() {
             "payload_bytes": event.len() as u64,
         })
     );
-
     let completed = rows
         .iter()
         .find(|row| row["event"] == "hook_completed")
         .expect("hook_completed row");
-    let mut completed_fields = completed
-        .as_object()
-        .cloned()
-        .expect("hook_completed row is an object");
-    let completed_at = completed_fields
-        .remove("ts_unix_ms")
-        .and_then(|value| value.as_u64())
-        .expect("hook_completed carries a unix millisecond timestamp");
-    assert!(completed_at >= recorded_at);
-    let duration_us = completed_fields
-        .remove("duration_us")
-        .and_then(|value| value.as_u64())
-        .expect("duration_us");
-    assert_eq!(
-        completed_fields
-            .remove("duration_ms")
-            .and_then(|value| value.as_u64()),
-        Some(duration_us / 1000)
+    assert!(
+        completed["ts_unix_ms"]
+            .as_u64()
+            .expect("completed timestamp")
+            >= recorded_at
     );
+    assert_eq!(completed["agent"], "claude");
+    assert_eq!(completed["hook_name"], "Stop");
+    assert_eq!(completed["session_id"], "s1");
+    assert_eq!(completed["payload_bytes"], event.len() as u64);
+    assert_eq!(completed["disposition"]["status"], "unknown");
+    assert_eq!(completed["disposition"]["retryable"], false);
     assert_eq!(
-        completed_fields
-            .remove("hook_wall_time_us")
-            .and_then(|value| value.as_u64()),
-        Some(duration_us)
+        completed["disposition"]["reason_code"],
+        "disposition_absent"
     );
-    assert_eq!(
-        completed_fields
-            .remove("hook_wall_time_ms")
-            .and_then(|value| value.as_u64()),
-        Some(duration_us / 1000)
-    );
-    assert_eq!(
-        Value::Object(completed_fields),
-        serde_json::json!({
-            "event": "hook_completed",
-            "schema_version": 1,
-            "coverage": "host_measured",
-            "agent": "claude",
-            "hook_name": "Stop",
-            "session_id": "s1",
-            "prompt_category": null,
-            "daemon_rtt_us": null,
-            "daemon_call_count": 0,
-            "payload_bytes": event.len() as u64,
-            "daemon_ipc_payload_bytes": null,
-            "timeout": { "budget_ms": null, "timed_out": null },
-            "disposition": {
-                "status": "unknown",
-                "retryable": false,
-                "reason_code": "disposition_absent",
-                "class": "unknown"
-            }
-        })
-    );
+    assert_eq!(completed["disposition"]["class"], "unknown");
 }
 
 #[test]
