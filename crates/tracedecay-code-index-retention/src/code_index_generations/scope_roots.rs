@@ -1164,8 +1164,9 @@ mod worktree_inventory_tests {
     #[test]
     fn live_roots_fail_closed_outside_a_repository() {
         let temporary = tempfile::TempDir::new().expect("non-repository root");
-        assert!(
-            resolve_live_code_index_roots(temporary.path()).is_err(),
+        assert_eq!(
+            resolve_live_code_index_roots(temporary.path()).expect_err("non-repository"),
+            "git_repository_unavailable",
             "an unresolvable repository must never produce a smaller live set"
         );
     }
