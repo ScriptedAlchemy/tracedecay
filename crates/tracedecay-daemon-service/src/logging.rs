@@ -346,15 +346,10 @@ pub fn unavailable_error(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     socket_path: &Path,
 ) -> TraceDecayError {
-    let advice =
-        tracedecay_daemon_control::unavailable_daemon_socket_advice(profile, socket_path, None);
     TraceDecayError::project_route(
         tracedecay_daemon_protocol::DAEMON_CONNECT_DOWN,
         true,
-        format!(
-            "TraceDecay daemon socket '{}' is not available. {advice}",
-            socket_path.display()
-        ),
+        tracedecay_daemon_control::unavailable_daemon_socket_message(profile, socket_path),
     )
 }
 

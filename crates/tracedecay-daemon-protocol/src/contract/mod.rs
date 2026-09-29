@@ -416,6 +416,7 @@ pub enum DaemonInvocationOperation {
     RetainedApplication,
     ProfileRetainedApplication,
     ProfileGraphTool,
+    ProfileConfiguration,
     MultiRootScopeSetRead,
     MultiRootScopeSetCompareAndSwap,
     MultiRootExecute,
@@ -484,6 +485,7 @@ impl DaemonInvocationOperation {
             Self::RetainedApplication => "retained_application",
             Self::ProfileRetainedApplication => "profile_retained_application",
             Self::ProfileGraphTool => "profile_graph_tool",
+            Self::ProfileConfiguration => "profile_configuration",
             Self::MultiRootScopeSetRead => "multi_root_scope_set_read",
             Self::MultiRootScopeSetCompareAndSwap => "multi_root_scope_set_compare_and_swap",
             Self::MultiRootExecute => "multi_root_execute",
@@ -698,6 +700,17 @@ pub enum DaemonInvocationPayload {
     ProfileGraphTool {
         surface_operation: ApplicationSurfaceOperation,
         arguments: serde_json::Map<String, serde_json::Value>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    /// A configuration request of profile settings only
+    /// ([`ConfigurationWireRequestV1::targets_profile_settings`]). It names no
+    /// project: the daemon composition root serves it from the profile's own
+    /// configuration store.
+    ProfileConfiguration {
+        surface_operation: ApplicationSurfaceOperation,
+        request: ConfigurationWireRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1291,6 +1304,8 @@ impl DaemonInvocationRequest {
         }
     }
 
+    /// A configuration request, routed to the profile's configuration store
+    /// when it touches profile settings only and to the project's otherwise.
     pub fn configuration(
         request_id: impl Into<String>,
         surface_operation: ApplicationSurfaceOperation,
@@ -1299,19 +1314,30 @@ impl DaemonInvocationRequest {
         deadline: Deadline,
         cancellation: CancellationContext,
     ) -> Self {
-        Self {
-            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
-            revision: DAEMON_INVOCATION_REVISION,
-            request_id: request_id.into(),
-            delivery_route: None,
-            payload: DaemonInvocationPayload::Configuration {
+        let payload = if request.targets_profile_settings() {
+            DaemonInvocationPayload::ProfileConfiguration {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            }
+        } else {
+            DaemonInvocationPayload::Configuration {
                 surface_operation,
                 request,
                 resolved_scope: None,
                 observed_at,
                 deadline,
                 cancellation,
-            },
+            }
+        };
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload,
         }
     }
 
@@ -1757,7 +1783,8 @@ impl DaemonInvocationRequest {
                 *resolved_scope = scope;
                 Ok(self)
             }
-            (_, None) => Ok(self),
+            // A profile setting resolves the same under every project selector.
+            (DaemonInvocationPayload::ProfileConfiguration { .. }, _) | (_, None) => Ok(self),
             (_, Some(_)) => Err(DaemonInvocationProblem::InvalidRequest),
         }
     }
@@ -1933,6 +1960,9 @@ impl DaemonInvocationRequest {
             }
             DaemonInvocationPayload::ProfileGraphTool { .. } => {
                 DaemonInvocationOperation::ProfileGraphTool
+            }
+            DaemonInvocationPayload::ProfileConfiguration { .. } => {
+                DaemonInvocationOperation::ProfileConfiguration
             }
             DaemonInvocationPayload::MultiRootScopeSetRead { .. } => {
                 DaemonInvocationOperation::MultiRootScopeSetRead
@@ -2308,6 +2338,19 @@ impl DaemonInvocationRequest {
                 ..
             } => {
                 if !valid_observation_window(observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::ProfileConfiguration {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || !request.targets_profile_settings()
+                {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }

@@ -52,6 +52,26 @@ impl DaemonConfigurationGrantAuthority {
         )
     }
 
+    /// A grant authority for direct writes to exactly `layer`, valid until
+    /// `expires_at`.
+    pub fn for_layer(
+        actor: ActorId,
+        policy_digest: AccessPolicyDigest,
+        expires_at: UtcMicros,
+        layer: ConfigurationLayerIdV1,
+    ) -> Result<Self, DaemonInvocationProblem> {
+        let digest = configuration_layer_scope_digest(&layer)
+            .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+        Ok(Self {
+            actor,
+            policy_epoch: 1,
+            policy_digest,
+            expires_at,
+            direct_layers: Arc::new(BTreeMap::from([(digest, layer)])),
+            grants: Arc::new(RwLock::new(BTreeMap::new())),
+        })
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn for_test(
         layers: impl IntoIterator<Item = ConfigurationLayerIdV1>,

@@ -2545,13 +2545,16 @@ fn project_routed_tool_names_a_held_managed_daemon() {
         "pub fn answer() -> u32 { 42 }\n",
     )
     .unwrap();
+    // The test command names the profile socket through TRACEDECAY_DAEMON_SOCKET.
     let socket = home_path.join(".tracedecay/daemon.sock");
     let socket = socket.display();
     let not_installed = format!(
-        "TraceDecay daemon socket '{socket}' is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
     );
+    let unit_dir = home_path.join(".config/systemd/user");
     let held = format!(
-        "TraceDecay daemon socket '{socket}' is not available. TraceDecay daemon unit is installed but socket '{socket}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running."
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+        unit_dir.join("tracedecay.service").display()
     );
     let project_arg = project_path.to_string_lossy().to_string();
     let search_probe = [
@@ -2629,13 +2632,14 @@ fn authority_routed_clients_name_a_held_managed_daemon() {
     std::fs::write(&workflow_request, "{}").unwrap();
     let record = home_path.join(".tracedecay/daemon-authority.json");
     let record = record.display();
-    let socket = home_path.join(".tracedecay/daemon.sock");
-    let socket = socket.display();
     let not_installed = format!(
         "TraceDecay daemon is not available: no authority record at '{record}'. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
     );
     let held = format!(
-        "TraceDecay daemon is not available: no authority record at '{record}'. TraceDecay daemon unit is installed but socket '{socket}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running."
+        "TraceDecay daemon is not available: no authority record at '{record}'. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+        home_path
+            .join(".config/systemd/user/tracedecay.service")
+            .display()
     );
     let project_arg = project_path.to_string_lossy().to_string();
     let work_request_arg = work_request.to_string_lossy().to_string();
@@ -2664,6 +2668,52 @@ fn authority_routed_clients_name_a_held_managed_daemon() {
         &not_installed,
         &held,
     );
+}
+
+/// A missing `TRACEDECAY_DAEMON_SOCKET` is reported as that socket being
+/// unavailable, and the installed managed service is reported as observed
+/// beside it rather than denied.
+#[cfg(target_os = "linux")]
+#[test]
+fn tool_cli_reports_a_missing_override_socket_apart_from_the_installed_service() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let unit = home_path.join(".config/systemd/user/tracedecay.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(
+        &unit,
+        "[Service]\nExecStart=/usr/local/bin/tracedecay daemon run\n",
+    )
+    .unwrap();
+    let missing_socket = socket_dir.path().join("missing.sock");
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+        .args(["tool", "status", "--json"])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(
+            tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+        )),
+        "{output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected = format!(
+        "TraceDecay daemon socket '{}' named by TRACEDECAY_DAEMON_SOCKET is not available. \
+         The managed TraceDecay daemon service is installed at '{}' and serves '{}', not this \
+         socket.",
+        missing_socket.display(),
+        unit.display(),
+        home_path.join(".tracedecay/daemon.sock").display(),
+    );
+    assert!(stderr.contains(&expected), "{stderr}");
 }
 
 #[test]
@@ -3493,5 +3543,94 @@ fn projectless_json_tool_call_prints_the_typed_refusal() {
             ),
         ),
         "{multi_root}"
+    );
+}
+
+fn configuration_get_from(home: &Path, cwd: &Path, key: &str) -> (Option<i32>, Value) {
+    let output = tracedecay_command_with_home(home)
+        .current_dir(cwd)
+        .args(["tool", "configuration_get", "--json", "--args"])
+        .arg(json!({ "key": key }).to_string())
+        .stdin(Stdio::null())
+        .output()
+        .expect("tracedecay tool should run");
+    let body = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "configuration_get printed non-JSON ({error}):\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.code(), body)
+}
+
+fn run_upload_counter_command(home: &Path, cwd: &Path, command: &str) {
+    let output = tracedecay_command_with_home(home)
+        .current_dir(cwd)
+        .arg(command)
+        .stdin(Stdio::null())
+        .output()
+        .expect("upload counter command should run");
+    assert!(output.status.success(), "{command} failed: {output:?}");
+}
+
+/// A user-scoped setting belongs to the profile, so it resolves wherever the
+/// command runs: a value written inside a project is the one doctor and
+/// `configuration_get` report outside any project, and a write made outside a
+/// project is the one the project then reads. A project-scoped key still needs
+/// a project.
+#[test]
+fn user_settings_resolve_from_the_profile_outside_any_project() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    let outside = canonical_existing_path(outside.path());
+    init_committed_git_project_with_cli(&home, &project);
+    let _daemon = spawn_tracedecay_daemon(&home);
+
+    run_upload_counter_command(&home, &project, "enable-upload-counter");
+
+    let doctor = tracedecay_command_with_home(&home)
+        .current_dir(&outside)
+        .arg("doctor")
+        .stdin(Stdio::null())
+        .output()
+        .expect("doctor should run");
+    let doctor_stderr = String::from_utf8_lossy(&doctor.stderr);
+    assert!(
+        doctor_stderr.contains("Worldwide counter upload enabled"),
+        "doctor outside a project must report the profile's upload setting:\n{doctor_stderr}"
+    );
+    assert!(
+        !doctor_stderr.contains("upload setting unavailable")
+            && !doctor_stderr.contains("canonical configuration is unavailable"),
+        "doctor outside a project reported the user setting unavailable:\n{doctor_stderr}"
+    );
+
+    let (code, enabled) = configuration_get_from(&home, &outside, "user.upload_enabled.v1");
+    assert_eq!(code, Some(0), "{enabled}");
+    assert_eq!(
+        enabled["outcome"]["value"]["payload"]["effective_value"],
+        json!({ "kind": "boolean", "value": true }),
+        "{enabled}"
+    );
+
+    run_upload_counter_command(&home, &outside, "disable-upload-counter");
+    let (code, disabled) = configuration_get_from(&home, &project, "user.upload_enabled.v1");
+    assert_eq!(code, Some(0), "{disabled}");
+    assert_eq!(
+        disabled["outcome"]["value"]["payload"]["effective_value"],
+        json!({ "kind": "boolean", "value": false }),
+        "a write made outside a project must be the value the project reads: {disabled}"
+    );
+
+    let (code, refused) = configuration_get_from(&home, &outside, "index.git_ignore.v1");
+    assert_eq!(code, Some(1), "{refused}");
+    assert_eq!(
+        (&refused["problem"]["kind"], &refused["problem"]["code"]),
+        (&json!("invalid_request"), &json!("project_required")),
+        "{refused}"
     );
 }

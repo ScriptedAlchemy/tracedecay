@@ -1201,6 +1201,11 @@ impl McpServer {
         self.profile_identity.as_deref()
     }
 
+    /// The profile's registered `ProfileSessions` store, when daemon-owned.
+    pub(crate) fn profile_session_db(&self) -> Option<&RegisteredGlobalDbLeaseV1> {
+        self.profile_session_db.as_ref()
+    }
+
     pub fn diagnostics_lsp(
         &self,
     ) -> Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>> {

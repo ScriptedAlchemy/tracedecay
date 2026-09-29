@@ -22,8 +22,8 @@ use tracedecay_global_db::configuration::contracts::ports::{
 };
 use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
 use tracedecay_global_db::configuration::{
-    GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
-    ProfileCodeIndexWorkerConfigurationV1,
+    GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationV1,
+    ProfileConfigurationStore, ProfileConfigurationV1,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
@@ -355,14 +355,25 @@ pub async fn read_or_initialize_profile_code_index_worker_selection(
         .map(|configuration| configuration.selection)
 }
 
-#[hotpath::measure(label = "daemon.config.profile_workers.read", future = true)]
 pub async fn read_or_initialize_profile_code_index_worker_configuration(
     database: RegisteredGlobalDbLeaseV1,
     profile_id: &UserProfileId,
 ) -> Result<ProfileCodeIndexWorkerConfigurationV1> {
-    let store =
-        ProfileCodeIndexWorkerConfigurationStore::new_registered(database.as_ref(), profile_id)
-            .map_err(map_configuration_error)?;
+    read_or_initialize_profile_configuration(database, profile_id)
+        .await?
+        .code_index_workers()
+        .map_err(map_configuration_error)
+}
+
+/// Resolve every user-profile setting from the exact registered
+/// `ProfileSessions` authority. No project is consulted.
+#[hotpath::measure(label = "daemon.config.profile.read", future = true)]
+pub async fn read_or_initialize_profile_configuration(
+    database: RegisteredGlobalDbLeaseV1,
+    profile_id: &UserProfileId,
+) -> Result<ProfileConfigurationV1> {
+    let store = ProfileConfigurationStore::new_registered(database.as_ref(), profile_id)
+        .map_err(map_configuration_error)?;
     store
         .read_or_initialize(now_micros())
         .await

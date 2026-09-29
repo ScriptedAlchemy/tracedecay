@@ -898,22 +898,17 @@ async fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
     // is deferred (the next command retries); the flush-bearing commands
     // (`sync`, `status`) still surface it, so a persistent failure
     // stays visible exactly where the flush is expected to happen.
-    // `init` cannot resolve this setting until it creates the requested
-    // project, which may differ from the current directory.
-    if runs_worldwide_counter_flush(command)
-        && user_config.pending_upload > 0
-        && let Ok(cwd) = std::env::current_dir()
-        && let Some(project_root) =
-            tracedecay_project::config::discover_project_root_with_identity(profile, &cwd).await
-    {
-        match commands::canonical_upload_enabled(profile, &project_root).await {
+    // The setting belongs to the profile, so the flush does not depend on
+    // the current directory.
+    if runs_worldwide_counter_flush(command) && user_config.pending_upload > 0 {
+        match commands::canonical_upload_enabled(profile).await {
             Ok(upload_enabled) => {
                 global::try_flush(&mut user_config, is_force_flush, upload_enabled);
             }
             Err(error) if is_force_flush => {
                 eprintln!(
                     "warning: canonical worldwide-counter upload setting is unavailable: {}",
-                    commands::annotate_reset_required(error, Some(&project_root))
+                    commands::annotate_reset_required(error, None)
                 );
             }
             Err(error) => {
