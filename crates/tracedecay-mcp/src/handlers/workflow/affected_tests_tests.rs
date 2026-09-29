@@ -42,8 +42,16 @@ where
     RunFuture: Future<Output = std::result::Result<TestRunOutput, TestRunFailure>>,
 {
     let request = decode_primitive_request(&args, "tracedecay_run_affected_tests")?;
+    let sessions = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "affected-tests-recording",
+    )
+    .await;
+    let recording = ManagedTestRunRecording {
+        store: sessions.registered.clone(),
+        session_id: None,
+    };
     let completion =
-        run_affected_tests_with_runner(cg, graph, request, cancellation, runner).await?;
+        run_affected_tests_with_runner(cg, graph, request, recording, cancellation, runner).await?;
     crate::handlers::graph_tool::render_graph_tool(None, &args, completion)
 }
 
@@ -55,13 +63,23 @@ fn bounds(arguments: Value) -> Value {
 }
 
 #[allow(dead_code)]
-fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
+fn assert_begin_test_run_future_is_send(
+    cg: &TraceDecay,
+    deadline: Deadline,
+    recording: ManagedTestRunRecording,
+) {
     fn assert_send<T: Send>(_: T) {}
     assert_send(begin_test_run(
         cg,
         &[],
-        deadline,
-        CodeGenerationId::new("generation.managed-test.send").expect("fixture generation"),
+        ManagedTestRunAdmission {
+            recording,
+            started_at: UtcMicros(1),
+            deadline,
+            code_generation_id: CodeGenerationId::new("generation.managed-test.send")
+                .expect("fixture generation"),
+            requested_tests: 0,
+        },
     ));
 }
 
@@ -910,8 +928,14 @@ test bar ... FAILED
 test baz ... ignored
 test result: FAILED. 1 passed; 1 failed; 1 ignored
 ";
-    let results = parse_libtest_output(stdout);
-    assert_eq!(results, vec![("foo".into(), true), ("bar".into(), false)]);
+    let report = parse_libtest_output(stdout);
+    assert_eq!(
+        report,
+        LibtestReport {
+            results: vec![("foo".into(), true), ("bar".into(), false)],
+            ignored: vec!["baz".into()],
+        }
+    );
 }
 
 #[test]

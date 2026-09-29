@@ -17,6 +17,8 @@ mod daemon_runtime_acceptance;
 mod grafeo_restart_acceptance;
 mod host_event_fixture_test;
 mod lifecycle_production_authority_test;
+#[cfg(unix)]
+mod managed_test_run_restart_acceptance;
 mod private_route_restart_acceptance;
 mod runtime_surface_acceptance;
 // Not implied by `test-transport`: an unconditional evaluator dependency

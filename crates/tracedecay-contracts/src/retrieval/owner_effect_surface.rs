@@ -63,6 +63,9 @@ pub struct ManagedTestTerminalV1 {
     pub operation_id: String,
     /// The tool that reads the recorded results back.
     pub result_tool: String,
+    /// The requesting session the run is recorded against; null when the
+    /// request carried no session.
+    pub session_id: Option<String>,
     pub receipt: OperationReceipt,
 }
 
@@ -73,6 +76,8 @@ pub struct AffectedTestRunV1 {
     pub exit_code: Option<i32>,
     pub passed: u64,
     pub failed: u64,
+    /// Dispatched tests libtest reported as ignored.
+    pub ignored: u64,
     pub total_observed: u64,
     pub dispatched_tests: Vec<String>,
     /// More affected tests existed than `max_tests` admitted.

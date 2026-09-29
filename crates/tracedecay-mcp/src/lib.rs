@@ -120,7 +120,7 @@ pub use tracedecay_mcp_catalog::{
     retain_host_available_tool_definitions, tool_defaults_to_markdown,
 };
 pub use workflow::{
-    MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile, TestRunControl,
-    TestRunFailure, TestRunOutput, TestRunStream, cargo_test_args, libtest_identity,
-    libtest_module_prefix, parse_libtest_output, run_cargo_tests,
+    LibtestReport, MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile,
+    TestRunControl, TestRunFailure, TestRunOutput, TestRunStream, cargo_test_args,
+    libtest_identity, libtest_module_prefix, parse_libtest_output, run_cargo_tests,
 };
