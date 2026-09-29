@@ -239,24 +239,7 @@ async fn discover_pending_effects(
     cursor: &mut SessionTemporalRefreshDiscoveryCursor,
     requests: &mut BTreeMap<String, SessionRefreshBeginOrJoinRequestV1>,
 ) -> SessionStoreResult<bool> {
-    if let Some((rowid, observation_id)) = &cursor.effects_through {
-        let same_row = effect_rows(
-            conn,
-            "SELECT rowid, observation_id, session_id
-             FROM session_temporal_observation_effects WHERE rowid = ?1",
-            params![*rowid],
-        )
-        .await?
-        .first()
-        .is_some_and(|(_, current, _)| current == observation_id);
-        if !same_row {
-            cursor.effects_through = None;
-        }
-    }
-    let after = cursor
-        .effects_through
-        .as_ref()
-        .map_or(0, |(rowid, _)| *rowid);
+    let after = validated_effects_after(conn, cursor).await?;
     let effects = effect_rows(
         conn,
         "SELECT rowid, observation_id, session_id
@@ -307,8 +290,42 @@ async fn discover_pending_effects(
     if page_full {
         return Ok(true);
     }
-    // History-only effects past the last output row need no refresh; move
-    // the cursor over them so the next pass does not read them again.
+    skip_trailing_history_effects(conn, cursor).await?;
+    Ok(false)
+}
+
+/// Returns the rowid discovery resumes after, restarting from the first
+/// effect when the cursor's row no longer names the same observation.
+async fn validated_effects_after(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    cursor: &mut SessionTemporalRefreshDiscoveryCursor,
+) -> SessionStoreResult<i64> {
+    let Some((rowid, observation_id)) = &cursor.effects_through else {
+        return Ok(0);
+    };
+    let rowid = *rowid;
+    let same_row = effect_rows(
+        conn,
+        "SELECT rowid, observation_id, session_id
+         FROM session_temporal_observation_effects WHERE rowid = ?1",
+        params![rowid],
+    )
+    .await?
+    .first()
+    .is_some_and(|(_, current, _)| current == observation_id);
+    if same_row {
+        return Ok(rowid);
+    }
+    cursor.effects_through = None;
+    Ok(0)
+}
+
+/// History-only effects past the last output row need no refresh; moves the
+/// cursor over them so the next pass does not read them again.
+async fn skip_trailing_history_effects(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    cursor: &mut SessionTemporalRefreshDiscoveryCursor,
+) -> SessionStoreResult<()> {
     let last = effect_rows(
         conn,
         "SELECT rowid, observation_id, session_id
@@ -318,16 +335,16 @@ async fn discover_pending_effects(
         (),
     )
     .await?;
+    let through = cursor
+        .effects_through
+        .as_ref()
+        .map_or(0, |(rowid, _)| *rowid);
     if let Some((rowid, observation_id, _)) = last.into_iter().next()
-        && rowid
-            > cursor
-                .effects_through
-                .as_ref()
-                .map_or(0, |(through, _)| *through)
+        && rowid > through
     {
         cursor.effects_through = Some((rowid, observation_id));
     }
-    Ok(false)
+    Ok(())
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
