@@ -35,6 +35,7 @@ use std::collections::BTreeSet;
 use std::ops::{Deref, Range};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::thread::ThreadId;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use regex_automata::meta::{Cache, Regex};
@@ -159,11 +160,12 @@ struct RuleSetCompilation {
 /// A regex with an internal cache pool keeps one cache per thread that ever
 /// searched it, for the life of the process. Across a ~200-regex catalogue
 /// that is tens of MB per scanning thread, held after the scan that grew it.
-/// Here a scan or a [`CredentialScanBatchV1`] holds the ruleset, and scans
-/// reuse idle caches while any holder remains. When the last holder lets go,
-/// one set stays warm for sequential single-scan callers, which would
-/// otherwise rebuild every lazy DFA per record; a batch's sets grew with its
-/// whole corpus, so the end of a batch frees them all.
+/// Here each scan takes an idle set and returns it, so single-scan callers
+/// keep one warm set per concurrent scan instead of one per thread; scanning
+/// each record from cold caches would rebuild every lazy DFA per record. A
+/// [`CredentialScanBatchV1`] marks bulk work, whose sets grow with its whole
+/// corpus: once the batch and every scan still running have ended, all idle
+/// sets are freed.
 #[derive(Default)]
 struct SearchCachePool {
     holders: usize,
@@ -172,9 +174,14 @@ struct SearchCachePool {
     idle: Vec<SearchCaches>,
 }
 
-/// One cache per regex slot, created on the slot's first search.
+/// One cache per regex slot, created on the slot's first search, and the
+/// thread that last scanned with them: a thread that takes back its own set
+/// finds its lazy DFA tables still in that core's cache.
 #[derive(Default)]
-struct SearchCaches(Vec<Option<Cache>>);
+struct SearchCaches {
+    slots: Vec<Option<Cache>>,
+    last_thread: Option<ThreadId>,
+}
 
 impl RuleSetCompilation {
     fn pool(&self) -> std::sync::MutexGuard<'_, SearchCachePool> {
@@ -193,13 +200,10 @@ impl RuleSetCompilation {
             pool.idle.extend(caches);
             pool.holders = pool.holders.saturating_sub(1);
             pool.drain_when_idle |= batch_ended;
-            if pool.holders > 0 {
-                Vec::new()
-            } else if std::mem::take(&mut pool.drain_when_idle) {
+            if pool.holders == 0 && std::mem::take(&mut pool.drain_when_idle) {
                 std::mem::take(&mut pool.idle)
             } else {
-                let warm = pool.idle.pop();
-                std::mem::replace(&mut pool.idle, warm.into_iter().collect())
+                Vec::new()
             }
         };
         drop(freed);
@@ -214,9 +218,21 @@ struct CredentialScan<'a> {
 
 impl<'a> CredentialScan<'a> {
     fn new(compilation: &'a RuleSetCompilation) -> Self {
+        let thread = std::thread::current().id();
+        let mut pool = compilation.hold();
+        let own = pool
+            .idle
+            .iter()
+            .rposition(|caches| caches.last_thread == Some(thread));
+        let mut caches = match own {
+            Some(index) => pool.idle.swap_remove(index),
+            None => pool.idle.pop().unwrap_or_default(),
+        };
+        drop(pool);
+        caches.last_thread = Some(thread);
         Self {
             compilation,
-            caches: compilation.hold().idle.pop().unwrap_or_default(),
+            caches,
         }
     }
 
@@ -227,7 +243,7 @@ impl<'a> CredentialScan<'a> {
             return None;
         }
         let compiled = regex.get()?;
-        let slots = &mut self.caches.0;
+        let slots = &mut self.caches.slots;
         if slots.len() <= regex.slot {
             slots.resize_with(regex.slot + 1, || None);
         }

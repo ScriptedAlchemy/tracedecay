@@ -79,7 +79,7 @@ fn scan_concurrently(texts: &[String]) {
 }
 
 #[test]
-fn scans_leave_one_warm_cache_set_and_a_batch_leaves_none() {
+fn caches_follow_concurrent_scans_and_a_batch_frees_what_it_grew() {
     let texts = corpus();
     let cold = LIVE.load(Ordering::Relaxed);
     scan_all(&texts);
@@ -87,12 +87,17 @@ fn scans_leave_one_warm_cache_set_and_a_batch_leaves_none() {
     // Compiling the rules these texts reach, plus one warm cache set.
     let first_scan = settled - cold;
 
-    scan_concurrently(&texts);
-    let after_scans = LIVE.load(Ordering::Relaxed) - settled;
+    // One scan at a time, each on a thread that never scanned before.
+    for _ in 0..SCANNERS {
+        std::thread::scope(|scope| {
+            scope.spawn(|| scan_all(&texts));
+        });
+    }
+    let after_threads = LIVE.load(Ordering::Relaxed) - settled;
     assert!(
-        after_scans * 4 < first_scan,
-        "{SCANNERS} concurrent scanners left {after_scans} bytes live beyond the \
-         {first_scan} bytes one scanner needed"
+        after_threads * 4 < first_scan,
+        "{SCANNERS} threads scanning one at a time left {after_threads} bytes live beyond \
+         the {first_scan} bytes the first scan needed"
     );
 
     let batch = code_source_scan_batch();
