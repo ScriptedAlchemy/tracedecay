@@ -1,12 +1,10 @@
 //! A host drain's read cost follows the work it admits, not the store size.
 //!
 //! Every project-scope drain also converges the session Git evidence past its
-//! durable frontier. That pass used to aggregate every session over the whole
-//! message index before filtering to the frontier, so on a long-lived profile
-//! each hook-driven drain re-read the session store: the operator daemon's
-//! SQLite threads read terabytes from `sessions.db` in hours. This measures
-//! the process's own read bytes around one single-message capture and drain,
-//! on the same store before and after it grows eightfold.
+//! durable frontier, so a pass that visits every session or message re-reads
+//! the whole session store on each hook-driven drain. This measures the
+//! process's own read bytes around one single-message capture and drain, on
+//! the same store before and after it grows eightfold.
 
 #![cfg(target_os = "linux")]
 
@@ -35,8 +33,8 @@ use tracedecay_sessions::observation::{
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 
 const PROVIDER: &str = "codex";
-const MESSAGES_PER_SESSION: u64 = 40;
-const BASE_SESSIONS: u64 = 40;
+const MESSAGES_PER_SESSION: u64 = 5;
+const BASE_SESSIONS: u64 = 100;
 const GROWN_SESSIONS: u64 = 8 * BASE_SESSIONS;
 const SEED_TIMESTAMP: i64 = 1_780_000_000;
 const DRAIN_WINDOW: usize = 4_096;
@@ -78,6 +76,13 @@ fn message_requests(
     )
     .unwrap();
     let project_path = project.to_string_lossy().into_owned();
+    // Hosts title a session with its opening prompt, so real session rows
+    // carry kilobytes of text.
+    let title = format!(
+        "{} opening prompt {}",
+        cursor.session_id.as_str(),
+        "context ".repeat(500)
+    );
     (0..count)
         .map(|_| {
             let ordinal = cursor.next_ordinal;
@@ -97,6 +102,7 @@ fn message_requests(
             let session_id = cursor.session_id.clone();
             let envelope_record = record.clone();
             let envelope_project = project_path.clone();
+            let envelope_title = title.clone();
             let message_timestamp = timestamp + i64::try_from(ordinal).unwrap();
             let parsed =
                 parse_normalized_observation_record_v1(&encoded, range, ordering, move |native| {
@@ -111,7 +117,7 @@ fn message_requests(
                                 project_path: Some(envelope_project.clone()),
                                 location_path: Some(envelope_project.clone()),
                                 transcript_path: None,
-                                title: None,
+                                title: Some(envelope_title.clone()),
                                 started_at: None,
                                 ended_at: None,
                                 source: Some("codex_rollout".to_owned()),
@@ -209,9 +215,9 @@ async fn seed_sessions(
             message_requests(project, scope, &mut cursor, MESSAGES_PER_SESSION, timestamp),
         )
         .await;
+        drain(facade, scope).await;
         first.get_or_insert(cursor);
     }
-    drain(facade, scope).await;
     first.unwrap()
 }
 
@@ -256,6 +262,19 @@ async fn single_message_drain_reads_do_not_scale_with_the_session_store() {
     let project = tmp.path().join("drain-read-cost");
     std::fs::create_dir_all(&project).unwrap();
     run_git(&project, &["init", "-b", "main"]);
+    run_git(
+        &project,
+        &[
+            "-c",
+            "user.name=TraceDecay",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    );
     let project_id = ProjectId::new("project.drain-read-cost").unwrap();
     assert!(
         tracedecay_runtime_core::storage::write_repository_identity_marker(
