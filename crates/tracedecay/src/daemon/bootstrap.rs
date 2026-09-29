@@ -470,9 +470,9 @@ fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::Shutd
     );
     for outcome in &receipt.outcomes {
         let status = match outcome.status {
-            tracedecay_store_runtime::ShutdownTaskStatus::Clean => continue,
-            tracedecay_store_runtime::ShutdownTaskStatus::Failed(_) => "failed",
-            tracedecay_store_runtime::ShutdownTaskStatus::TimedOut => "timed_out",
+            tracedecay_store_runtime::ShutdownStatus::Clean => continue,
+            tracedecay_store_runtime::ShutdownStatus::Failed(_) => "failed",
+            tracedecay_store_runtime::ShutdownStatus::TimedOut => "timed_out",
         };
         log_daemon_event(
             "daemon_shutdown",

@@ -30,6 +30,7 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 
 pub(super) const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
 
+#[cfg(target_os = "linux")]
 fn refresh_in_quiesced_window(
     runner: ServiceRunner,
     spec: &DaemonServiceSpec,

@@ -525,7 +525,7 @@ fn git_reads_parse_the_existing_mcp_shapes_into_catalog_owned_requests() {
 
 #[test]
 fn git_mutation_surface_rejects_caller_minted_native_authority() {
-    assert!(
+    assert_eq!(
         parse_application_surface_request(
             ApplicationSurfaceOperation::GitHunks,
             serde_json::json!({
@@ -534,9 +534,11 @@ fn git_mutation_surface_rejects_caller_minted_native_authority() {
                 "snapshot_digest": format!("sha256:{}", "a".repeat(64)),
             }),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "application surface request does not match its reviewed schema: unknown field `preview_id`"
     );
-    assert!(
+    assert_eq!(
         parse_application_surface_request(
             ApplicationSurfaceOperation::GitPreview,
             serde_json::json!({
@@ -546,9 +548,11 @@ fn git_mutation_surface_rejects_caller_minted_native_authority() {
                 "commit_intent": null,
             }),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "application surface request does not match its reviewed schema: unknown field `repository_snapshot`, expected one of `operation`, `preview_input_id`, `selected_hunk_digests`, `commit_intent`"
     );
-    assert!(
+    assert_eq!(
         parse_application_surface_request(
             ApplicationSurfaceOperation::GitApply,
             serde_json::json!({
@@ -556,7 +560,9 @@ fn git_mutation_surface_rejects_caller_minted_native_authority() {
                 "idempotency_key": "idempotency.caller",
             }),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "application surface request does not match its reviewed schema: unknown field `preview`, expected one of `preview_id`, `preview_digest`, `idempotency_key`"
     );
 }
 
@@ -2034,9 +2040,11 @@ fn diagnostics_public_name_adapts_the_shipped_flat_request() {
         serde_json::to_value(edge_request.expect("adapted canonical request")).unwrap(),
         serde_json::to_value(canonical_request).unwrap()
     );
-    assert!(
+    assert_eq!(
         adapt_application_tool_request("tracedecay_diagnostics", json!({"scope": "package"}))
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+        "application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics"
     );
 
     let page = PageRequest::new(25, Some(OpaqueCursor::new("opaque-http").expect("cursor")))

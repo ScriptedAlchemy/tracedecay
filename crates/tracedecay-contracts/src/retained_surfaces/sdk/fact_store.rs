@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::{FactEventId, FactId};
 
 use super::{
-    FactCategoryV1, FactMetadataV1, FactReadOptionsV1, FactSearchCursorV1, MemoryScopeV1,
-    RetainedProjectSelectorV1,
+    FactCategoryV1, FactMetadataV1, FactReadOptionsV1, MemoryScopeV1, RetainedProjectSelectorV1,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -47,8 +46,9 @@ pub struct FactStoreSearchRequestV1 {
     pub query: String,
     #[serde(flatten)]
     pub options: FactReadOptionsV1,
+    /// The previous page's `next_after`, valid only with the same parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<FactSearchCursorV1>,
+    pub after: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -57,8 +57,9 @@ pub struct FactStoreProbeRequestV1 {
     pub entity: String,
     #[serde(flatten)]
     pub options: FactReadOptionsV1,
+    /// The previous page's `next_after`, valid only with the same parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<FactSearchCursorV1>,
+    pub after: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -67,8 +68,9 @@ pub struct FactStoreRelatedRequestV1 {
     pub entity: String,
     #[serde(flatten)]
     pub options: FactReadOptionsV1,
+    /// The previous page's `next_after`, valid only with the same parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<FactSearchCursorV1>,
+    pub after: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -78,8 +80,9 @@ pub struct FactStoreReasonRequestV1 {
     pub entities: Vec<String>,
     #[serde(flatten)]
     pub options: FactReadOptionsV1,
+    /// The previous page's `next_after`, valid only with the same parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<FactSearchCursorV1>,
+    pub after: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -166,8 +169,9 @@ pub struct FactStoreSupersedeRequestV1 {
 pub struct FactStoreListRequestV1 {
     #[serde(flatten)]
     pub options: FactReadOptionsV1,
+    /// The previous page's `next_after`, valid only with the same parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after_fact_id: Option<FactId>,
+    pub after: Option<String>,
 }
 
 #[cfg(test)]

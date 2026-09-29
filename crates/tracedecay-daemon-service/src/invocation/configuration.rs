@@ -49,6 +49,23 @@ pub(super) async fn execute_configuration(
     let actor = AuthorizedActor {
         actor_id: registered.actor.clone(),
     };
+    let audit_query = match &request {
+        ConfigurationWireRequestV1::Audit(audit) => {
+            match ConfigurationAuditQuery::from_request(audit.cursor.as_deref(), audit.limit) {
+                Ok(Ok(query)) => Some(query),
+                Ok(Err(mismatch)) => {
+                    return application_problem(
+                        wire_request_id,
+                        ApplicationProblem::cursor_refused(&mismatch),
+                    );
+                }
+                Err(error) => {
+                    return application_problem(wire_request_id, configuration_problem(error));
+                }
+            }
+        }
+        _ => None,
+    };
     let client = registered.runtime.client();
     let result: Result<ApplicationOutcome<serde_json::Value>, ConfigurationError> = async {
         match (surface_operation, request) {
@@ -84,16 +101,12 @@ pub(super) async fn execute_configuration(
             ),
             (
                 ApplicationSurfaceOperation::ConfigurationAudit,
-                ConfigurationWireRequestV1::Audit(request),
+                ConfigurationWireRequestV1::Audit(_),
             ) => configuration_evidence(
                 serde_json::to_value(
-                    Box::pin(client.audit(
-                        actor,
-                        ConfigurationAuditQuery {
-                            after_event_id: request.after_event_id,
-                            limit: request.limit,
-                        },
-                    ))
+                    Box::pin(
+                        client.audit(actor, audit_query.ok_or(ConfigurationError::Unavailable)?),
+                    )
                     .await?,
                 )
                 .map_err(|_| ConfigurationError::Unavailable)?,

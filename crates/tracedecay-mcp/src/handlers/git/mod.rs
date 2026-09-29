@@ -173,10 +173,10 @@ mod tests {
                 json!({"base_ref": "main", "head_ref": "HEAD"}),
             )
             .await;
-            assert!(
-                result.is_err(),
-                "terminal graph failure must not become partial success: {detail}"
-            );
+            let Err(error) = result else {
+                panic!("terminal graph failure must not become partial success: {detail}");
+            };
+            assert_eq!(error.to_string(), detail);
         }
     }
 }

@@ -21,7 +21,7 @@ use super::{
     CodeIndexMountedScopeV1, CodeIndexSchedulerRegistryV1, CodeIndexServingScopeV1,
     MountedCodeIndexWorktreeV1, PendingWakeClaimV1, ReadyProbeServingPartsV1,
     dashboard_code_graph_serving, dashboard_freshness_identity, dashboard_terminal_status,
-    dashboard_text_freshness_identity, unique_mounted_for_scope,
+    dashboard_text_freshness_identity, project_graph_publication_phase, unique_mounted_for_scope,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -425,6 +425,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         0 => None,
                         micros => Some(micros),
                     };
+                    project_graph_publication_phase(&mut progress, &code_graph_serving);
                     return tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
                         code_graph_serving,
@@ -511,6 +512,7 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 dashboard_freshness_identity(latest.as_ref())
             };
+            project_graph_publication_phase(&mut progress, &code_graph_serving);
             tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
                 code_graph_serving,

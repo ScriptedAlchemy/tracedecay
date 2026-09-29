@@ -401,8 +401,6 @@ impl TryFrom<&str> for ObservationCoverageReason {
     }
 }
 
-pub type NonDurableFrameReason = ObservationCoverageReason;
-
 /// Fixed-size opaque fingerprint of corrupt or legacy ledger text.
 ///
 /// The error boundary may retain this fingerprint to correlate repeated bad

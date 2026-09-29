@@ -320,10 +320,12 @@ gated unless the host explicitly forwards messages. The
 not stock Hermes API. Treat `compression.*` as built-in compressor config; only
 `compression.enabled` gates auto-compaction globally.
 
-Kiro setup registers the profile-wide `tracedecay` MCP server through
-`kiro-cli`. It does not create steering files, custom agents, default-agent
-settings, hooks, or workspace MCP registrations. See
-[Kiro integration](KIRO-INTEGRATION.md) for the exact lifecycle.
+Kiro setup registers the profile-wide `tracedecay` MCP server by editing
+Kiro's documented `~/.kiro/settings/mcp.json`; it never runs `kiro-cli`, so
+it works whether or not `kiro-cli` is installed or signed in. It does not
+create steering files, custom agents, default-agent settings, hooks, or
+workspace MCP registrations. See [Kiro integration](KIRO-INTEGRATION.md) for
+the exact lifecycle.
 
 The install is idempotent, safe to run again after upgrading tracedecay. You'll also be offered the option to set up an optional global git post-commit hint hook (more on that below).
 
@@ -647,13 +649,15 @@ authorized daemon operations.
 ### Hosts that are not installed
 
 A host TraceDecay tracks or finds leftover config for, but whose CLI is not on
-`PATH` (or, for Kiro, whose `kiro-cli` is not logged in), is reported as
-skipped with its reason and nothing else:
+`PATH`, is reported as skipped with its reason and nothing else:
 
 ```text
-Kiro integration
-  - kiro: skipped, not signed in (host CLI `kiro-cli` is not signed in; run `kiro-cli login` to use it)
+Factory Droid integration
+  - droid: skipped, not installed (host CLI `droid` is unavailable for Factory Droid MCP registry lifecycle; install it or add it to PATH and retry)
 ```
+
+Hosts TraceDecay configures through their documented config files (Kiro,
+Cline, Devin, Zed, and others) need no host CLI and no host sign-in.
 
 A skipped host never counts as an issue, warning, or pending operator step, in
 `doctor`, `install`, `update-plugin`, `reinstall`, or `update`. Only defects in
@@ -685,7 +689,7 @@ Start the daemon and re-run Doctor to read the findings.
 
 | Exit | `doctor` | `install`, `update-plugin`, `reinstall`, `update` |
 |------|----------|---------------------------------------------------|
-| `0`  | no issue found; warnings and skipped hosts may be printed | every host completed, or was skipped as not applicable, `not installed`, or `not signed in` |
+| `0`  | no issue found; warnings and skipped hosts may be printed | every host completed, or was skipped as not applicable or `not installed` |
 | `1`  | an issue was found | a host's lifecycle ran and failed (or, for `update`, the upgrade failed) |
 | `75` | no issue, but an operator step is pending: `daemon_unavailable`, a store the daemon serves reset-required, or a host's interactive activation (Kimi Code's `/plugins install`) | nothing failed, but a host waits on an interactive step (Kimi Code's `/plugins install`) |
 

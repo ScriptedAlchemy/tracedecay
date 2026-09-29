@@ -92,13 +92,17 @@ fn tool(home: &Path, cwd: &Path, name: &str, args: &Value) -> (bool, Value) {
 }
 
 fn hub_node_id(home: &Path, project: &Path) -> String {
+    node_id(home, project, "hub")
+}
+
+fn node_id(home: &Path, project: &Path, name: &str) -> String {
     let started = Instant::now();
     loop {
         let run = run_tool(
             home,
             project,
             "find_exact_symbol",
-            &json!({"name": "hub", "format": "json"}),
+            &json!({"name": name, "format": "json"}),
         );
         // Until the first graph publishes, the lookup refuses with an empty stdout.
         if run.success
@@ -108,7 +112,7 @@ fn hub_node_id(home: &Path, project: &Path) -> String {
         }
         assert!(
             started.elapsed() < INDEX_READY_TIMEOUT,
-            "hub never indexed:\n{}\n{}",
+            "{name} never indexed:\n{}\n{}",
             run.stdout,
             run.stderr
         );
@@ -211,7 +215,7 @@ fn a_cursor_presented_with_changed_parameters_is_refused_naming_the_parameter() 
     assert!(!changed.success, "{refusal}");
     assert_eq!(refusal["problem"]["kind"], "invalid_request", "{refusal}");
     assert_eq!(
-        refusal["problem"]["code"], "callable_code.cursor_parameter_changed",
+        refusal["problem"]["code"], "cursor.parameter_changed",
         "{refusal}"
     );
     assert_eq!(
@@ -340,5 +344,232 @@ fn a_cursor_presented_where_it_cannot_be_served_is_typed() {
             .iter()
             .all(|name| !page_names(&second).contains(name)),
         "page two repeated page one: {first} / {second}"
+    );
+}
+
+/// `caller_01` .. `caller_25` each call both `target_a` and `target_b`: two
+/// nodes with the same number of callers, three pages each.
+fn shared_callers_source() -> String {
+    let callers: String = (1..=LEAF_COUNT)
+        .map(|caller| {
+            format!("pub fn caller_{caller:02}() {{\n    target_a();\n    target_b();\n}}\n")
+        })
+        .collect();
+    format!("pub fn target_a() {{}}\npub fn target_b() {{}}\n{callers}")
+}
+
+fn refusal_of(name: &str, run: &ToolRun) -> Value {
+    let body = body_of(name, run);
+    assert!(!run.success, "{name} accepted the cursor: {body}");
+    body["problem"].clone()
+}
+
+#[test]
+fn a_callers_cursor_pages_only_the_node_and_operation_it_was_minted_for() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    committed_git_project(&project, &shared_callers_source());
+    initialize_tracedecay_cli_project(&home, &project);
+    let target_a = node_id(&home, &project, "target_a");
+    let target_b = node_id(&home, &project, "target_b");
+    let callers = |node: &str, cursor: Option<&str>| callees_args(node, cursor);
+
+    let (ok, first) = tool(
+        &home,
+        &project,
+        "tracedecay_callers",
+        &callers(&target_a, None),
+    );
+    assert!(ok, "{first}");
+    assert_eq!(first["outcome"]["value"]["payload"]["total"], 25, "{first}");
+    let cursor = next_cursor(&first).expect("first page continues");
+
+    // `target_b` has as many callers, so an unbound cursor would serve its
+    // callers 11..20 as page two of `target_a`.
+    let other_node = run_tool(
+        &home,
+        &project,
+        "tracedecay_callers",
+        &callers(&target_b, Some(&cursor)),
+    );
+    let refusal = refusal_of("tracedecay_callers", &other_node);
+    assert_eq!(refusal["kind"], "invalid_request", "{refusal}");
+    assert_eq!(refusal["code"], "cursor.parameter_changed", "{refusal}");
+    assert_eq!(
+        refusal["message"],
+        "The cursor was issued for a request with a different `node_id`. Repeat the request \
+         with the parameters that returned the cursor, or restart without it.",
+        "{refusal}"
+    );
+    assert_eq!(
+        refusal["legal_actions"],
+        json!(["correct_request", "restart_without_cursor"]),
+        "{refusal}"
+    );
+
+    let deeper = run_tool(
+        &home,
+        &project,
+        "tracedecay_callers",
+        &json!({"node_id": target_a, "maximum_depth": 2, "meta": {
+            "projection": "evidence", "order": "source_position", "cursor": cursor,
+        }}),
+    );
+    assert_eq!(
+        refusal_of("tracedecay_callers", &deeper)["message"],
+        "The cursor was issued for a request with a different `maximum_depth`. Repeat the \
+         request with the parameters that returned the cursor, or restart without it."
+    );
+
+    let other_operation = run_tool(
+        &home,
+        &project,
+        "tracedecay_type_hierarchy",
+        &callers(&target_a, Some(&cursor)),
+    );
+    let refusal = refusal_of("tracedecay_type_hierarchy", &other_operation);
+    assert_eq!(refusal["code"], "cursor.invalid", "{refusal}");
+    assert_eq!(
+        refusal["message"], "The cursor was not issued by this operation. Restart without it.",
+        "{refusal}"
+    );
+
+    let (ok, second) = tool(
+        &home,
+        &project,
+        "tracedecay_callers",
+        &callers(&target_a, Some(&cursor)),
+    );
+    assert!(ok, "{second}");
+    let first_names = page_names(&first);
+    let second_names = page_names(&second);
+    assert_eq!((first_names.len(), second_names.len()), (10, 10));
+    assert!(
+        second_names.iter().all(|name| !first_names.contains(name)),
+        "page two repeated page one: {first_names:?} / {second_names:?}"
+    );
+    assert!(
+        first_names
+            .iter()
+            .chain(&second_names)
+            .all(|name| name.starts_with("caller_")),
+        "{first_names:?} / {second_names:?}"
+    );
+}
+
+fn search_args(query: &str, cursor: Option<&str>) -> Value {
+    let mut args = json!({"query": query, "limit": 2, "format": "json"});
+    if let Some(cursor) = cursor {
+        args["cursor"] = json!(cursor);
+    }
+    args
+}
+
+fn search_names(body: &Value) -> Vec<String> {
+    body["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search page has no results: {body}"))
+        .iter()
+        .map(|row| row["display"]["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_search_cursor_replayed_with_another_query_or_malformed_is_refused() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    // One ledger function per file, so the per-file diversity cap keeps all
+    // of them in the ranked set a page walks.
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    for name in ["ledger_open", "ledger_close", "ledger_post", "ledger_void"] {
+        std::fs::write(
+            project.join(format!("src/{name}.rs")),
+            format!("pub fn {name}() {{}}\n"),
+        )
+        .unwrap();
+    }
+    committed_git_project(&project, "pub fn unrelated() {}\n");
+    initialize_tracedecay_cli_project(&home, &project);
+    node_id(&home, &project, "ledger_open");
+
+    let started = Instant::now();
+    let (first, cursor) = loop {
+        let (ok, body) = tool(
+            &home,
+            &project,
+            "tracedecay_search",
+            &search_args("ledger", None),
+        );
+        if ok && let Some(cursor) = body["next_cursor"].as_str() {
+            break (body.clone(), cursor.to_owned());
+        }
+        assert!(
+            started.elapsed() < INDEX_READY_TIMEOUT,
+            "search never paged: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    };
+
+    let changed_query = run_tool(
+        &home,
+        &project,
+        "tracedecay_search",
+        &search_args("ledger_open", Some(&cursor)),
+    );
+    let refusal = refusal_of("tracedecay_search", &changed_query);
+    assert_eq!(refusal["kind"], "invalid_request", "{refusal}");
+    assert_eq!(refusal["code"], "cursor.parameter_changed", "{refusal}");
+    assert_eq!(
+        refusal["message"],
+        "The cursor was issued for a request with a different `query`. Repeat the request \
+         with the parameters that returned the cursor, or restart without it.",
+        "{refusal}"
+    );
+    assert_eq!(
+        refusal["legal_actions"],
+        json!(["correct_request", "restart_without_cursor"]),
+        "{refusal}"
+    );
+
+    for malformed in ["not-a-cursor", ""] {
+        let run = run_tool(
+            &home,
+            &project,
+            "tracedecay_search",
+            &search_args("ledger", Some(malformed)),
+        );
+        let refusal = refusal_of("tracedecay_search", &run);
+        assert_eq!(
+            refusal["kind"], "invalid_request",
+            "{malformed:?}: {refusal}"
+        );
+        assert_eq!(
+            refusal["code"], "cursor.invalid",
+            "{malformed:?}: {refusal}"
+        );
+        assert_eq!(
+            refusal["message"], "The cursor was not issued by this operation. Restart without it.",
+            "{malformed:?}: {refusal}"
+        );
+    }
+
+    let (ok, second) = tool(
+        &home,
+        &project,
+        "tracedecay_search",
+        &search_args("ledger", Some(&cursor)),
+    );
+    assert!(ok, "{second}");
+    let (first_names, second_names) = (search_names(&first), search_names(&second));
+    assert_eq!((first_names.len(), second_names.len()), (2, 2));
+    assert!(
+        second_names
+            .iter()
+            .all(|name| name.starts_with("ledger_") && !first_names.contains(name)),
+        "page two repeated page one: {first_names:?} / {second_names:?}"
     );
 }

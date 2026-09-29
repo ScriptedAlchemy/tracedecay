@@ -860,11 +860,20 @@ mod tests {
         let profile = temp.path().join("profile");
         let endpoint = test_endpoint(&profile);
         let authority = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        authority.ensure_current().unwrap();
         let mut stale = authority.record().clone();
         stale.auth_token = "0".repeat(64);
         write_record(&authority.record_path, &stale).unwrap();
 
-        assert!(authority.ensure_current().is_err());
+        let error = authority.ensure_current().unwrap_err().to_string();
+        assert!(
+            error.contains(&format!(
+                "daemon authority epoch {} for profile '{}' is no longer current",
+                authority.record().epoch,
+                authority.record().profile_root.display()
+            )),
+            "{error}"
+        );
     }
 
     #[cfg(unix)]
@@ -886,8 +895,15 @@ mod tests {
             &DaemonEndpoint::Unix(alias.join("daemon.sock")),
             "test",
         );
-        assert!(second.is_err());
+        let error = second.unwrap_err().to_string();
+        assert!(error.contains("is already held"), "{error}");
         drop(first);
+        DaemonAuthority::acquire(
+            &alias,
+            &DaemonEndpoint::Unix(alias.join("daemon.sock")),
+            "test",
+        )
+        .unwrap();
     }
 
     #[cfg(unix)]

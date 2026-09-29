@@ -93,6 +93,7 @@ pub use service::{
     socket_path_or_default, start_service, stop_service, unavailable_daemon_socket_advice,
     uninstall_service, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,
+    with_unavailable_daemon_advice,
 };
 
 /// The daemon client identity of `profile`.

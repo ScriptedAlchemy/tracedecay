@@ -885,7 +885,10 @@ async fn analytics_import_cursor_failure_rolls_back_events() {
         .is_err()
     );
     assert_eq!(row_count(db, "analytics_events").await, 0);
-    assert_eq!(db.get_parse_offset("hook_analytics:fixture").await, None);
+    assert!(matches!(
+        db.get_parse_offset("hook_analytics:fixture").await,
+        Ok(None)
+    ));
 }
 
 #[tokio::test]
@@ -932,10 +935,10 @@ async fn analytics_import_cursor_conflict_rolls_back_events() {
 
     assert!(error.contains("parse offset conflict"), "{error}");
     assert_eq!(row_count(db, "analytics_events").await, 0);
-    assert_eq!(
+    assert!(matches!(
         db.get_parse_offset("hook_analytics:fixture").await,
-        Some(claimed)
-    );
+        Ok(Some(offset)) if offset == claimed
+    ));
 }
 
 #[tokio::test]
@@ -983,8 +986,14 @@ async fn parse_offset_pair_conflict_rolls_back_both_authorities() {
         Err(TranscriptPersistenceError::PairConflict { path, .. })
             if path == "pair:second"
     ));
-    assert_eq!(db.get_parse_offset("pair:first").await, Some(first));
-    assert_eq!(db.get_parse_offset("pair:second").await, Some(second));
+    assert!(matches!(
+        db.get_parse_offset("pair:first").await,
+        Ok(Some(offset)) if offset == first
+    ));
+    assert!(matches!(
+        db.get_parse_offset("pair:second").await,
+        Ok(Some(offset)) if offset == second
+    ));
 }
 
 #[tokio::test]
@@ -1000,7 +1009,57 @@ async fn parse_offset_pair_rejects_one_key_without_writing() {
         .await;
 
     assert!(result.is_err());
-    assert_eq!(db.get_parse_offset("pair:same").await, None);
+    assert!(matches!(db.get_parse_offset("pair:same").await, Ok(None)));
+}
+
+#[tokio::test]
+async fn session_lookup_reports_a_broken_store_instead_of_absence() {
+    let harness = RegisteredGlobalDbHarness::open("session-lookup-broken-store").await;
+    let db = &harness.registered;
+    let session = tracedecay_sessions::runtime::SessionRecord {
+        provider: "codex".to_owned(),
+        session_id: "healthy-session".to_owned(),
+        project_key: "/project".to_owned(),
+        project_path: "/project".to_owned(),
+        title: None,
+        started_at: None,
+        ended_at: None,
+        transcript_path: Some("/project/session.jsonl".to_owned()),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    assert!(db.upsert_session(&session).await);
+    let loaded = db
+        .get_session("codex", "healthy-session")
+        .await
+        .expect("healthy store returns the session")
+        .expect("healthy session row");
+    assert_eq!(loaded.provider, "codex");
+    assert_eq!(loaded.session_id, "healthy-session");
+
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch("DROP TABLE sessions")
+        .await
+        .expect("drop the live sessions table");
+    transaction.commit().await.unwrap();
+
+    let error = db
+        .get_session("codex", "healthy-session")
+        .await
+        .expect_err("a broken store must not look like a missing session");
+    let TranscriptPersistenceError::Storage { operation, source } = &error else {
+        panic!("expected a storage error, got {error}");
+    };
+    assert_eq!(*operation, "load transcript session");
+    let message = source.to_string();
+    assert!(
+        message.contains("no such table"),
+        "sqlite failure must stay visible: {message}"
+    );
 }
 
 #[tokio::test]

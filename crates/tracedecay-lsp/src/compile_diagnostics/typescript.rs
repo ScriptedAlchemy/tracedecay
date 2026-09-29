@@ -236,12 +236,19 @@ mod tests {
     fn parse_returns_none_for_blank_lines() {
         assert!(parse_tsc_line("").is_none());
         assert!(parse_tsc_line("   ").is_none());
+        let d = parse_tsc_line("a.ts(1,2): warning TS6133: unused.").expect("diagnostic line");
+        assert_eq!((d.file.as_str(), d.line_start, d.column), ("a.ts", 1, 2));
     }
 
     #[test]
     fn parse_returns_none_for_summary_line() {
         // tsc summary lines like "Found 3 errors."
         assert!(parse_tsc_line("Found 3 errors.").is_none());
+        let d = parse_tsc_line("a.ts(3,1): error TS1005: ';' expected.").expect("diagnostic line");
+        assert_eq!(
+            (d.code.as_str(), d.message.as_str()),
+            ("TS1005", "';' expected.")
+        );
     }
 
     #[test]

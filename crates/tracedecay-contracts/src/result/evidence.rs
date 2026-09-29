@@ -3,7 +3,7 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, FactId, ManifestDigest, RetrievalAnchorId, TemporalModeV1,
+    CodeGenerationId, ComponentVersion, ManifestDigest, RetrievalAnchorId, TemporalModeV1,
     UtcMicros,
 };
 use tracedecay_tool_catalog::{RetrieverId, SortContractId};
@@ -11,7 +11,6 @@ use tracedecay_tool_catalog::{RetrieverId, SortContractId};
 use crate::context::{CapabilityGrantId, DisclosureClass, RequestContext, ResolvedScope};
 use crate::error::ApplicationContractError;
 use crate::identity::application_identifier;
-use crate::memory::FactSearchCursorV1;
 
 use super::{CancellationObservation, OperationBudgetUsage, OperationReceipt, ResultContractRef};
 
@@ -25,16 +24,12 @@ application_identifier!(
     OpaqueCursor => ("opaque cursor", 4_096),
 );
 
-/// Exact continuation authority for the enclosing evidence page.
-///
-/// General retrieval keeps its authenticated opaque cursor, while retained
-/// fact operations carry their canonical structural ordering cursor directly.
+/// Exact continuation authority for the enclosing evidence page: an opaque
+/// cursor bound to the operation and request that minted it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PageCursor {
     Opaque { cursor: OpaqueCursor },
-    FactSearch { cursor: FactSearchCursorV1 },
-    FactListAfter { fact_id: FactId },
 }
 
 impl PageCursor {
@@ -42,7 +37,6 @@ impl PageCursor {
     pub const fn as_opaque(&self) -> Option<&OpaqueCursor> {
         match self {
             Self::Opaque { cursor } => Some(cursor),
-            Self::FactSearch { .. } | Self::FactListAfter { .. } => None,
         }
     }
 }

@@ -378,6 +378,9 @@ mod tests {
 
     use super::{SourceEditFileAuthority, read_source_edit_candidate};
 
+    const UNSAFE_PATH: &str =
+        "config error: source edit path is not a regular file beneath the authorized worktree";
+
     /// Absence is not a refusal: a candidate that does not exist yet is a
     /// normal state for a plan that creates files.
     #[test]
@@ -428,16 +431,25 @@ mod tests {
         let project = tempdir().unwrap();
         fs::create_dir_all(project.path().join("src/lib.rs")).unwrap();
 
-        assert!(read_source_edit_candidate(project.path(), Path::new("src/lib.rs")).is_err());
+        let error =
+            read_source_edit_candidate(project.path(), Path::new("src/lib.rs")).unwrap_err();
+        assert_eq!(error.to_string(), UNSAFE_PATH);
     }
 
     #[test]
     fn refuses_paths_that_escape_the_worktree() {
         let project = tempdir().unwrap();
 
-        assert!(read_source_edit_candidate(project.path(), Path::new("../escape.rs")).is_err());
-        assert!(read_source_edit_candidate(project.path(), Path::new("")).is_err());
-        assert!(SourceEditFileAuthority::open(project.path(), Path::new("../escape.rs")).is_err());
+        for relative in ["../escape.rs", ""] {
+            let error =
+                read_source_edit_candidate(project.path(), Path::new(relative)).unwrap_err();
+            assert_eq!(error.to_string(), UNSAFE_PATH, "{relative:?}");
+        }
+        let Err(error) = SourceEditFileAuthority::open(project.path(), Path::new("../escape.rs"))
+        else {
+            panic!("an escaping path must not open");
+        };
+        assert_eq!(error.to_string(), UNSAFE_PATH);
     }
 
     #[test]

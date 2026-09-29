@@ -3,7 +3,7 @@
 //!
 //! List is an identity-ordered page of current facts. Retired facts (removed
 //! or superseded) leave the page; category and trust filters drop non-matches;
-//! `after_fact_id` resumes after the previous page's last id. Malformed
+//! `after` resumes from the previous page's bound `next_after`. Malformed
 //! selectors fail at decode; out-of-range bounds fail as an invalid-request
 //! problem. Generated ids and timestamps are not pinned.
 
@@ -126,7 +126,7 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
         json!({"kind": "project", "project_id": project_id})
     );
     assert_eq!(empty["facts"], json!([]));
-    assert_eq!(empty["next_after_fact_id"], Value::Null);
+    assert_eq!(empty["next_after"], Value::Null);
 
     add(
         &fixture,
@@ -169,7 +169,7 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
         listed["owner"],
         json!({"kind": "project", "project_id": project_id})
     );
-    assert_eq!(listed["next_after_fact_id"], Value::Null);
+    assert_eq!(listed["next_after"], Value::Null);
     assert_eq!(listed["facts"].as_array().expect("facts").len(), 3);
     assert_identity_order(&listed);
     let facts = by_content(&listed);
@@ -205,7 +205,7 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
     );
 
     let decision = list(&fixture, json!({"category": "decision"})).await;
-    assert_eq!(decision["next_after_fact_id"], Value::Null);
+    assert_eq!(decision["next_after"], Value::Null);
     let decision_facts = by_content(&decision);
     assert_eq!(
         decision_facts.keys().copied().collect::<Vec<_>>(),
@@ -218,7 +218,7 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
     );
 
     let trusted = list(&fixture, json!({"min_trust": 0.4})).await;
-    assert_eq!(trusted["next_after_fact_id"], Value::Null);
+    assert_eq!(trusted["next_after"], Value::Null);
     let trusted_facts = by_content(&trusted);
     // `by_content` orders by the stored text. Uppercase "Project" sorts before "the".
     assert_eq!(
@@ -236,15 +236,16 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
 
     let unmatched = list(&fixture, json!({"category": "code_area"})).await;
     assert_eq!(unmatched["facts"], json!([]));
-    assert_eq!(unmatched["next_after_fact_id"], Value::Null);
+    assert_eq!(unmatched["next_after"], Value::Null);
 
     let mut after = Value::Null;
     let mut pages: Vec<String> = Vec::new();
     let mut cursors = Vec::new();
+    let mut continuations = Vec::new();
     for _ in 0..3 {
         let mut arguments = json!({"limit": 1, "min_trust": 0.0});
         if !after.is_null() {
-            arguments["after_fact_id"] = after.clone();
+            arguments["after"] = after.clone();
         }
         let page = list(&fixture, arguments).await;
         assert_eq!(page["facts"].as_array().expect("page facts").len(), 1);
@@ -257,13 +258,15 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
             .expect("page content")
             .to_owned();
         if pages.len() < 2 {
-            assert_eq!(page["next_after_fact_id"], fact_id);
+            let continuation = page["next_after"].as_str().expect("opaque continuation");
+            assert!(continuation.starts_with("bc1."), "{page}");
+            continuations.push(continuation.to_owned());
         } else {
-            assert_eq!(page["next_after_fact_id"], Value::Null);
+            assert_eq!(page["next_after"], Value::Null);
         }
         cursors.push(fact_id);
         pages.push(content);
-        after = page["next_after_fact_id"].clone();
+        after = page["next_after"].clone();
     }
     assert!(
         cursors[0] < cursors[1] && cursors[1] < cursors[2],
@@ -275,13 +278,51 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
         paged,
         vec![PROJECT_CONTENT, LOW_TRUST_CONTENT, TOOL_CONTENT]
     );
-    let exhausted = list(
-        &fixture,
-        json!({"limit": 1, "min_trust": 0.0, "after_fact_id": cursors[2]}),
+    let server = fact_store_server(&fixture);
+    for (arguments, code, message) in [
+        (
+            json!({"limit": 1, "min_trust": 0.5, "after": continuations[0]}),
+            "cursor.parameter_changed",
+            "The cursor was issued for a request with a different `min_trust`. Repeat the \
+             request with the parameters that returned the cursor, or restart without it.",
+        ),
+        (
+            json!({"limit": 2, "min_trust": 0.0, "after": continuations[0]}),
+            "cursor.parameter_changed",
+            "The cursor was issued for a request with a different `limit`. Repeat the \
+             request with the parameters that returned the cursor, or restart without it.",
+        ),
+        (
+            json!({"limit": 1, "min_trust": 0.0, "after": "bc1.00"}),
+            "cursor.invalid",
+            "The cursor was not issued by this operation. Restart without it.",
+        ),
+    ] {
+        let refused =
+            handle_real_server_tool_call_raw(server, "tracedecay_fact_store_list", arguments).await;
+        assert_cursor_refused(&refused, code, message);
+    }
+    let foreign = handle_real_server_tool_call_raw(
+        server,
+        "tracedecay_fact_store_search",
+        json!({"query": "List proof", "limit": 1, "min_trust": 0.0, "after": continuations[0]}),
     )
     .await;
-    assert_eq!(exhausted["facts"], json!([]));
-    assert_eq!(exhausted["next_after_fact_id"], Value::Null);
+    assert_cursor_refused(
+        &foreign,
+        "cursor.invalid",
+        "The cursor was not issued by this operation. Restart without it.",
+    );
+    let replayed = list(
+        &fixture,
+        json!({"limit": 1, "min_trust": 0.0, "after": continuations[0]}),
+    )
+    .await;
+    assert_eq!(
+        replayed["facts"][0]["fact"]["fact_id"], cursors[1],
+        "{replayed}"
+    );
+    assert_eq!(replayed["next_after"], continuations[1], "{replayed}");
 
     let successor = add(
         &fixture,
@@ -383,7 +424,7 @@ async fn fact_store_list_user_scope_lists_only_profile_facts() {
 
     let user_list = list(&fixture, json!({"memory_scope": "user"})).await;
     assert_eq!(user_list["owner"], json!({"kind": "profile"}));
-    assert_eq!(user_list["next_after_fact_id"], Value::Null);
+    assert_eq!(user_list["next_after"], Value::Null);
     let user_facts = by_content(&user_list);
     assert_eq!(
         user_facts.keys().copied().collect::<Vec<_>>(),
@@ -402,6 +443,25 @@ async fn fact_store_list_user_scope_lists_only_profile_facts() {
     assert_eq!(user_facts[USER_CONTENT]["entities"], json!([]));
 
     close_test_graph(fixture).await;
+}
+
+/// The one typed refusal of a continuation presented to the wrong request.
+pub(super) fn assert_cursor_refused(response: &Value, code: &str, message: &str) {
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    let text = extract_real_server_text(&response["result"]);
+    let envelope: Value = serde_json::from_str(text).expect("problem envelope");
+    let problem = &envelope["problem"];
+    assert_eq!(problem["kind"], "invalid_request", "{envelope}");
+    assert_eq!(problem["code"], code, "{envelope}");
+    assert_eq!(problem["message"], message, "{envelope}");
+    assert_eq!(problem["retry"], "never", "{envelope}");
+    assert_eq!(problem["retryable"], false, "{envelope}");
+    assert_eq!(
+        problem["legal_actions"],
+        json!(["correct_request", "restart_without_cursor"]),
+        "{envelope}"
+    );
 }
 
 fn assert_invalid_request_problem(response: &Value) {
@@ -480,7 +540,7 @@ async fn fact_store_list_rejects_malformed_selectors_and_out_of_range_limits() {
 
     let still_empty = list(&fixture, json!({})).await;
     assert_eq!(still_empty["facts"], json!([]));
-    assert_eq!(still_empty["next_after_fact_id"], Value::Null);
+    assert_eq!(still_empty["next_after"], Value::Null);
 
     close_test_graph(fixture).await;
 }

@@ -161,8 +161,9 @@ async fn runtime_fixture() -> RuntimeFixture {
         false,
     )
     .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
-        .expect("daemon client");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake.clone())
+            .expect("daemon client");
     let mounted = admitted_mcp_invocation(
         &client,
         ApplicationSurfaceOperation::ConfigurationObservedState,
@@ -229,8 +230,9 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
         false,
     )
     .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
-        .expect("daemon client");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake.clone())
+            .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -334,8 +336,9 @@ async fn git_runtime_fixture() -> RuntimeFixture {
         false,
     )
     .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
-        .expect("daemon client");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake.clone())
+            .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -3011,8 +3014,9 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         false,
     )
     .expect("cross-scope daemon handshake");
-    let other_client = tracedecay_daemon_identity::invocation_client_for_current(other_handshake)
-        .expect("cross-scope daemon client");
+    let other_client =
+        tracedecay::daemon::invocation_client_for_current(fixture.profile(), other_handshake)
+            .expect("cross-scope daemon client");
     let (deadline, cancellation) = lsp_control();
     let mut cross_scope = DaemonLspSessionClient::open(
         other_client,

@@ -357,9 +357,8 @@ pub trait AgentIntegration {
 
     /// Require the host itself on this machine: the one presence check
     /// every lifecycle and Doctor apply before touching a host. A host whose
-    /// own CLI is not on `PATH` fails with `HostCliUnavailable`, and one whose
-    /// CLI refuses until the operator signs in with `HostCliNotSignedIn`;
-    /// both classify through `TraceDecayError::host_absence` as an
+    /// own CLI is not on `PATH` fails with `HostCliUnavailable`, which
+    /// classifies through `TraceDecayError::host_absence` as an
     /// informational skip. Hosts TraceDecay configures without a host CLI
     /// need none, and only their files can show they are here.
     fn require_host(&self, _home: &Path) -> Result<HostPresence> {
@@ -815,7 +814,7 @@ pub enum DoctorCheckLevelV1 {
     Issue,
     Warning,
     PendingOperatorAction,
-    /// A host that is not installed or not signed in.
+    /// A host that is not installed.
     Skipped,
     Info,
 }
@@ -836,7 +835,7 @@ impl DoctorCounters {
     pub fn pending(&mut self, msg: &str) {
         self.report(DoctorCheckLevelV1::PendingOperatorAction, msg);
     }
-    /// A host that is not installed or not signed in; counted nowhere.
+    /// A host that is not installed; counted nowhere.
     pub fn skipped(&mut self, msg: &str) {
         self.report(DoctorCheckLevelV1::Skipped, msg);
     }

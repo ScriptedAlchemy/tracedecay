@@ -338,35 +338,38 @@ mod unsafe_pattern_detection_tests {
     fn detects_unsafe_block_inside_safe_fn() {
         // An `unsafe { }` block living inside an otherwise-safe function, the
         // exact shape the audit fixture plants.
-        assert!(
+        assert_eq!(
             line_matches_unsafe_kind(
                 "    unsafe { *ptr as usize }",
                 UnsafePatternKindV1::UnsafeBlock
-            )
-            .is_some()
+            ),
+            Some(4)
         );
-        assert!(contains_unsafe_block_start("    unsafe { *ptr as usize }").is_some());
+        assert_eq!(
+            contains_unsafe_block_start("    unsafe { *ptr as usize }"),
+            Some(4)
+        );
     }
 
     #[test]
     fn detects_unsafe_fn_impl_and_trait() {
-        assert!(
+        assert_eq!(
             line_matches_unsafe_kind(
                 "pub unsafe fn raw(&self) {",
                 UnsafePatternKindV1::UnsafeBlock
-            )
-            .is_some()
+            ),
+            Some(4)
         );
-        assert!(
+        assert_eq!(
             line_matches_unsafe_kind(
                 "unsafe impl Send for Foo {}",
                 UnsafePatternKindV1::UnsafeBlock
-            )
-            .is_some()
+            ),
+            Some(0)
         );
-        assert!(
-            line_matches_unsafe_kind("unsafe trait Zeroable {}", UnsafePatternKindV1::UnsafeBlock)
-                .is_some()
+        assert_eq!(
+            line_matches_unsafe_kind("unsafe trait Zeroable {}", UnsafePatternKindV1::UnsafeBlock),
+            Some(0)
         );
     }
 
@@ -395,6 +398,10 @@ mod unsafe_pattern_detection_tests {
         // A substring of a longer identifier must not trip the word-boundary check.
         assert!(contains_unsafe_block_start("let unsafely = 1;").is_none());
         assert!(contains_unsafe_block_start("let make_unsafe_thing = 2;").is_none());
+        assert_eq!(
+            contains_unsafe_block_start("let unsafely = unsafe { 1 };"),
+            Some(15)
+        );
     }
 
     /// The reported offset is what attributes a site to a declaration, so it

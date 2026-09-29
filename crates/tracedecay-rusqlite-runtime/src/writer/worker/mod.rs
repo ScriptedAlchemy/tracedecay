@@ -462,11 +462,7 @@ impl Worker {
         let _ = self.started.send(Err(error));
     }
 
-    fn run_loop(
-        mut self,
-        mut checkpoint: WriterCheckpointController<RusqliteCheckpointDriver>,
-        runtime: Runtime,
-    ) {
+    fn run_loop(mut self, mut checkpoint: WriterCheckpointController, runtime: Runtime) {
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
         let mut exact_sql_queue = VecDeque::new();
@@ -820,10 +816,7 @@ impl Worker {
         }
     }
 
-    fn run_scheduled_checkpoint(
-        &self,
-        checkpoint: &mut WriterCheckpointController<RusqliteCheckpointDriver>,
-    ) {
+    fn run_scheduled_checkpoint(&self, checkpoint: &mut WriterCheckpointController) {
         crate::hotpath_observe::record_scheduled_checkpoint_dispatch();
         let snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
         match hotpath::measure_block!("rusqlite.writer.checkpoint", {
@@ -845,7 +838,7 @@ impl Worker {
 
     fn run_requested_checkpoint(
         &self,
-        checkpoint: &mut WriterCheckpointController<RusqliteCheckpointDriver>,
+        checkpoint: &mut WriterCheckpointController,
         command: CheckpointCommand,
     ) {
         if let Err(error) = command.verify(RuntimeWriteAuthorityStage::Dequeued) {

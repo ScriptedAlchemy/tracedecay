@@ -789,21 +789,36 @@ mod tests {
             );
         }
         // A preview reached under any operation but preflight proves nothing.
+        let eligible = projection_result(
+            NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(
+                MechanicalIntegrationModeV1::FastForward,
+            ),
+        );
         assert!(
             work_conflict_envelope(
                 &identity,
                 "project.scope",
                 "native_integration_status",
-                &projection_result(
-                    NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(
-                        MechanicalIntegrationModeV1::FastForward,
-                    ),
-                ),
+                &eligible,
                 None,
             )
             .expect("wrong operation")
             .is_none()
         );
+        let (envelope, event_kind) = work_conflict_envelope(
+            &identity,
+            "project.scope",
+            PREDICTION_OPERATION,
+            &eligible,
+            None,
+        )
+        .expect("preflight prediction")
+        .expect("the same preview under preflight adjudicates");
+        assert_eq!(event_kind, PREDICTION_EVENT_KIND);
+        let ObservabilityPayloadV1::WorkConflictPrediction(payload) = &envelope.payload else {
+            panic!("wrong payload family");
+        };
+        assert_eq!(payload.prediction, ConflictPredictionV1::NoConflict);
         // Refused applies never reach a receipt; the unavailable result
         // truthfully adjudicates nothing.
         assert!(
@@ -871,47 +886,44 @@ mod tests {
             UtcMicros(20),
         );
         // A receipt without its durable preview cannot name a prediction.
-        assert!(
-            work_conflict_envelope(
-                &identity,
-                "project.scope",
-                OUTCOME_OPERATION,
-                &receipt,
-                None
-            )
-            .is_err()
-        );
+        let error = work_conflict_envelope(
+            &identity,
+            "project.scope",
+            OUTCOME_OPERATION,
+            &receipt,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error, "work_conflict_preview_binding");
         // A preview that does not match the receipt identity is foreign
         // evidence, not a linkable prediction.
         let mut foreign = eligible_preview();
         foreign.preview_id =
             NativeIntegrationPreviewId::new("preview.work-conflict.foreign").unwrap();
         let foreign = foreign.seal().unwrap();
-        assert!(
-            work_conflict_envelope(
-                &identity,
-                "project.scope",
-                OUTCOME_OPERATION,
-                &receipt,
-                Some(&foreign),
-            )
-            .is_err()
-        );
+        let error = work_conflict_envelope(
+            &identity,
+            "project.scope",
+            OUTCOME_OPERATION,
+            &receipt,
+            Some(&foreign),
+        )
+        .unwrap_err();
+        assert_eq!(error, "work_conflict_preview_binding");
         // A receipt completing before its preview existed is inconsistent.
-        assert!(
-            work_conflict_envelope(
-                &identity,
-                "project.scope",
-                OUTCOME_OPERATION,
-                &receipt_result(
-                    &preview,
-                    NativeIntegrationTerminalOutcomeV1::Committed,
-                    UtcMicros(11),
-                ),
-                Some(&preview),
-            )
-            .is_err()
-        );
+        let error = work_conflict_envelope(
+            &identity,
+            "project.scope",
+            OUTCOME_OPERATION,
+            &receipt_result(
+                &preview,
+                NativeIntegrationTerminalOutcomeV1::Committed,
+                UtcMicros(11),
+            ),
+            Some(&preview),
+        )
+        .unwrap_err();
+        assert_eq!(error, "work_conflict_outcome_horizon");
     }
 
     #[test]

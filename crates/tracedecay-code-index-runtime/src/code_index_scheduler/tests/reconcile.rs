@@ -4189,12 +4189,12 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
         .is_retryable_activation(),
         "cancellation mid-publication is typed and must resume from the journaled replay"
     );
+    let deadline = super::super::CodeIndexSchedulerErrorV1::GraphProjection(
+        CodeGraphProjectionError::DeadlineExceeded,
+    );
     assert!(
-        super::super::CodeIndexSchedulerErrorV1::GraphProjection(
-            CodeGraphProjectionError::DeadlineExceeded
-        )
-        .is_retryable_activation(),
-        "a deadline mid-publication is typed and must resume from the journaled replay"
+        !deadline.is_retryable_activation() && deadline.is_graph_activation_refusal(),
+        "a spent publication budget is a typed refusal: a retry replays the identical build"
     );
     assert!(
         !super::super::CodeIndexSchedulerErrorV1::GraphProjection(
@@ -9030,9 +9030,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         .to_string();
     let projection = DiagnosticsStoreLspFeedbackProjection::new(
         Arc::new(
-            tracedecay_application::feedback::diagnostics::DatabaseDiagnosticStore::new(
-                database.clone(),
-            ),
+            tracedecay_application::diagnostics_store::DiagnosticsStore::new(database.clone()),
         ),
         Arc::new(FixedDocument(source.to_owned())),
     );

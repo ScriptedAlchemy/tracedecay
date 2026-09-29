@@ -309,6 +309,8 @@ export function codeIndexPhaseLabel(phase: CodeIndexBuildProgressV1['phase']): s
       return 'index build';
     case 'verification':
       return 'verification';
+    case 'graph_publication':
+      return 'graph publication';
     case 'ready':
       return 'ready';
   }

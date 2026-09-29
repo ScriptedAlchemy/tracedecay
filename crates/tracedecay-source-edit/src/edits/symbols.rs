@@ -342,15 +342,18 @@ mod tests {
 
     #[test]
     fn narrowing_refuses_multiple_declarations() {
-        assert!(
-            narrow_symbol_for_edit(
-                "src/a.rs::Widget",
-                vec![
-                    symbol(NodeKind::Struct, "Widget"),
-                    symbol(NodeKind::Struct, "Widget"),
-                ],
-            )
-            .is_err()
+        let error = narrow_symbol_for_edit(
+            "src/a.rs::Widget",
+            vec![
+                symbol(NodeKind::Struct, "Widget"),
+                symbol(NodeKind::Struct, "Widget"),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: symbol 'src/a.rs::Widget' is ambiguous (2 matches); pass an exact \
+             stored qualified name"
         );
     }
 
