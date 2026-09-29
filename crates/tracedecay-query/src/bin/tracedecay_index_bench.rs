@@ -91,10 +91,14 @@ use tracedecay_query::retrieval::lexical::{
     MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
     VerifiedCodeLexicalArtifactV1,
 };
+use tracedecay_query::retrieval::ports::{
+    TEXT_ARTIFACT_BASE_BATCH_BYTES_V1, TEXT_ARTIFACT_BASE_BATCH_PAGES_V1,
+    TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+};
 
 /// Bumped whenever the workload shape changes, so a profile comparison
 /// across a shape change is visibly not comparable.
-const WORKLOAD_REVISION: &str = "index-bench.v1";
+const WORKLOAD_REVISION: &str = "index-bench.v2";
 const CORPUS_ENV: &str = "TRACEDECAY_INDEX_BENCH_CORPUS";
 const REPLICAS_ENV: &str = "TRACEDECAY_INDEX_BENCH_REPLICAS";
 
@@ -103,22 +107,14 @@ const REPLICAS_ENV: &str = "TRACEDECAY_INDEX_BENCH_REPLICAS";
 /// directory rather than clustering in whichever one sorts first.
 const EDIT_STRIDE: usize = 17;
 
-/// Sealed-source paging bounds. Page granularity stays small so the corpus
-/// yields many pages (the batch-stage span needs repetitions to be readable)
-/// and the retained window stays far below the 4 GB ceiling the profiling job
-/// budgets on any runner.
-const MAX_PAGE_CHUNKS: usize = 64;
-const MAX_PAGE_BYTES: usize = 512 * 1024;
-/// Offered transaction width, equal to the scheduler's own unscaled batch
-/// limits (`TEXT_ARTIFACT_BASE_BATCH_PAGES_V1`,
-/// `TEXT_ARTIFACT_BASE_BATCH_BYTES_V1`). Transaction width decides how often
-/// the artifact pays a rollback-journal commit, so a narrower window would
-/// profile a commit frequency no daemon produces. The builder's memory ledger
-/// narrows this offer to the admissible prefix, exactly as it does for the
-/// scheduler. The scheduler scales these with host memory; a benchmark must
-/// not, or head and base measure different workloads on different runners.
-const BATCH_MAX_PAGES: usize = 64;
-const BATCH_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+/// Sealed-source paging bounds and the offered transaction width are the
+/// daemon's own (`TEXT_ARTIFACT_PAGE_*_V1`, the unscaled
+/// `TEXT_ARTIFACT_BASE_BATCH_*_V1`). A narrower page refuses real clone bodies
+/// the daemon admits, and a narrower window would profile a commit frequency
+/// no daemon produces. The builder's memory ledger narrows the offered window
+/// to the admissible prefix, exactly as it does for the scheduler. The
+/// scheduler scales the batch with host memory; a benchmark must not, or head
+/// and base measure different workloads on different runners.
 const FINALIZATION_WORK_BUDGET: usize = 4_096;
 
 const CLEAN_SEALED_AT: i64 = 1_700_000_000_000_000;
@@ -564,10 +560,10 @@ fn run(options: &Options) -> Result<String, String> {
         &sealed,
         &control,
         SealedDrainBounds {
-            batch_pages: BATCH_MAX_PAGES,
-            batch_retained_bytes: BATCH_MAX_RETAINED_BYTES,
-            page_chunks: MAX_PAGE_CHUNKS,
-            page_bytes: MAX_PAGE_BYTES,
+            batch_pages: TEXT_ARTIFACT_BASE_BATCH_PAGES_V1,
+            batch_retained_bytes: TEXT_ARTIFACT_BASE_BATCH_BYTES_V1,
+            page_chunks: TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+            page_bytes: TEXT_ARTIFACT_PAGE_BYTES_V1,
         },
     )?;
     let drain_wall = drain_started.elapsed();
@@ -771,7 +767,7 @@ fn ingest_artifact(
     // charge exceeds the batch budget, and the builder correctly refuses them.
     let mut offered = 0usize;
     while offered < pages.len() {
-        let window = &pages[offered..pages.len().min(offered + BATCH_MAX_PAGES)];
+        let window = &pages[offered..pages.len().min(offered + TEXT_ARTIFACT_BASE_BATCH_PAGES_V1)];
         let prepared = builder
             .prepare_admissible_page_prefix(window, control)
             .map_err(|error| format!("prepare lexical artifact batch: {error}"))?;
