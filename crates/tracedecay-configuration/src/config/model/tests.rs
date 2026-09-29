@@ -67,7 +67,6 @@ mod retention_config_tests {
         let nested: RetentionConfig =
             serde_json::from_str(r#"{"session_lcm":{},"observation":{}}"#).unwrap();
         assert_eq!(nested, RetentionConfig::default());
-        assert!(nested.observation.reclaim_superseded_cursor_advances);
     }
 
     #[test]

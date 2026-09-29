@@ -5,9 +5,15 @@ use super::*;
 // tests want the standard two-argument `Result` for their `Result<_, String>`
 // signatures, so shadow it back.
 use std::result::Result;
+use tracedecay_domain::FactOwnerV1;
+use tracedecay_store::{
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, RetrievalAnchorDispositionRecordV1,
+    RetrievalAnchorDispositionStore,
+};
 
-const DAY: i64 = 24 * 60 * 60;
-const NOW: i64 = 1_900_000_000;
+/// Disposition `effective_at` and the retention clock are [`UtcMicros`].
+const DAY: i64 = 24 * 60 * 60 * 1_000_000;
+const NOW: i64 = 1_900_000_000 * 1_000_000;
 const OWNER: &str = "{\"owner\":\"o1\"}";
 const GEN: &str = "projection.gen.v1";
 const OTHER_GEN: &str = "projection.gen.v2";
@@ -251,7 +257,7 @@ async fn later_runs_release_dispositions_appended_or_aged_since_the_last_run() -
             None,
             &released_config(),
             RetentionMode::Apply,
-            NOW + 25 * DAY,
+            UtcMicros(NOW + 25 * DAY),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -265,6 +271,89 @@ async fn later_runs_release_dispositions_appended_or_aged_since_the_last_run() -
     ));
     let settled = run_apply(&conn, None, &released_config()).await?;
     assert_eq!(settled.anchors_released.eligible, 0);
+    Ok(())
+}
+
+/// Dispositions written through the production anchor authority record
+/// `effective_at` in microseconds. A tick at the real clock with the default
+/// 30-day windows releases the evidence whose deletion took effect 40 days ago
+/// and keeps the one deleted 5 days ago.
+#[tokio::test]
+async fn production_dispositions_past_the_window_are_released_and_newer_ones_kept()
+-> Result<(), String> {
+    let directory = tempfile::TempDir::new().map_err(|error| error.to_string())?;
+    let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .map_err(|error| error.to_string())?;
+    let seeded = crate::tests::harness::seed_projected_messages(&runtime, 0..2).await;
+    let database = runtime
+        .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+        .ok_or("registered profile database")?;
+    let now = tracedecay_contracts::clock::now_micros();
+    for ((_, anchor), age_days) in seeded.iter().zip([40, 5]) {
+        let record = RetrievalAnchorDispositionRecordV1::new(
+            format!("retention-test:{}", anchor.anchor_id().as_str()),
+            anchor.anchor_id().clone(),
+            FactOwnerV1::from(anchor.owner().clone()),
+            AnchorDispositionStateV1::Deleted,
+            None,
+            AnchorDispositionReasonClassV1::Retention,
+            UtcMicros(now.0 - age_days * DAY),
+        )
+        .map_err(|error| error.to_string())?;
+        database
+            .runtime_database()
+            .append_disposition(record)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
+    let report = database
+        .run_observation_retention(
+            None,
+            &ObservationRetentionConfig::default(),
+            RetentionMode::Apply,
+            now,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        (
+            report.anchors_released.acted,
+            report.observations_released.acted
+        ),
+        (1, 1)
+    );
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut released = Vec::new();
+    for (observation, anchor) in &seeded {
+        let mut rows = snapshot
+            .query(
+                "SELECT
+                    (SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1),
+                    (SELECT observation_json FROM observations WHERE observation_id = ?2)",
+                params![
+                    anchor.anchor_id().as_str(),
+                    observation.observation_id().as_str()
+                ],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("evidence row")?;
+        released.push((
+            is_released(&row.get::<String>(0).map_err(|error| error.to_string())?),
+            is_released(&row.get::<String>(1).map_err(|error| error.to_string())?),
+        ));
+    }
+    assert_eq!(released, [(true, true), (false, false)]);
     Ok(())
 }
 
@@ -288,7 +377,7 @@ async fn run_apply(
     config: &ObservationRetentionConfig,
 ) -> Result<ObservationRetentionReport, String> {
     conn.database()
-        .run_observation_retention(generation, config, RetentionMode::Apply, NOW)
+        .run_observation_retention(generation, config, RetentionMode::Apply, UtcMicros(NOW))
         .await
         .map_err(|error| error.to_string())
 }
@@ -478,7 +567,12 @@ async fn dry_run_mutates_nothing() -> Result<(), String> {
 
     let report = conn
         .database()
-        .run_observation_retention(None, &released_config(), RetentionMode::DryRun, NOW)
+        .run_observation_retention(
+            None,
+            &released_config(),
+            RetentionMode::DryRun,
+            UtcMicros(NOW),
+        )
         .await
         .map_err(|error| error.to_string())?;
 
@@ -486,7 +580,7 @@ async fn dry_run_mutates_nothing() -> Result<(), String> {
     assert_eq!(report.anchors_released.acted, 0, "dry run acts on nothing");
     assert_eq!(
         report.anchors_released.oldest_eligible_at,
-        Some(NOW - 90 * DAY),
+        Some(UtcMicros(NOW - 90 * DAY)),
         "backlog age comes from the governing disposition"
     );
     assert!(report.bytes_reclaimed() > 4096, "dry run still measures");
@@ -528,7 +622,7 @@ async fn released_observations_are_counted_once_each() -> Result<(), String> {
     assert_eq!(report.observations_released.acted, 2);
     assert_eq!(
         report.observations_released.oldest_eligible_at,
-        Some(NOW - 90 * DAY)
+        Some(UtcMicros(NOW - 90 * DAY))
     );
     assert!(is_released(
         &fetch_str(

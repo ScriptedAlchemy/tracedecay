@@ -23,9 +23,8 @@ pub use pending_delete::{
 };
 pub(crate) use placeholder_scan::{
     PlaceholderScanScope, PlaceholderTextRow, all_placeholder_like_patterns,
-    any_placeholder_text_row, bind_placeholder_like_patterns, count_placeholder_text_rows,
-    gc_prefix_like_patterns, gc_prefix_ref_like_patterns, live_prefix_like_patterns,
-    live_prefix_ref_like_patterns, placeholder_text_like_sql, placeholder_text_rows_by_store_id,
+    any_placeholder_text_row, count_placeholder_text_rows, gc_prefix_like_patterns,
+    gc_prefix_ref_like_patterns, live_prefix_like_patterns, placeholder_text_rows_by_store_id,
     scan_placeholder_text_rows, scan_placeholder_text_rows_between,
 };
 
