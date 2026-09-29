@@ -1517,10 +1517,24 @@ mod tests {
 
         assert!(checkpointed_database_has_any_rows(&path, &["empty", "durable"]).unwrap());
         assert!(!checkpointed_database_has_any_rows(&path, &["empty"]).unwrap());
-        assert!(checkpointed_database_has_any_rows(&path, &["bad-name"]).is_err());
+        let rejected = checkpointed_database_has_any_rows(&path, &["bad-name"]).unwrap_err();
+        assert_eq!(rejected.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            rejected.to_string(),
+            "invalid SQLite table identifier 'bad-name'"
+        );
 
-        fs::write(with_suffix(&path, "-wal"), b"live").unwrap();
-        assert!(checkpointed_database_has_any_rows(&path, &["durable"]).is_err());
+        let sidecar = with_suffix(&path, "-wal");
+        fs::write(&sidecar, b"live").unwrap();
+        let live = checkpointed_database_has_any_rows(&path, &["durable"]).unwrap_err();
+        assert_eq!(live.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            live.to_string(),
+            format!(
+                "checkpointed SQLite inspection refused live sidecar '{}'",
+                sidecar.display()
+            )
+        );
     }
 
     /// A snapshot owner removes its own `read-*` directory without the

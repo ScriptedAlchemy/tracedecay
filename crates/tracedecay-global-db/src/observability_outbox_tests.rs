@@ -677,7 +677,10 @@ async fn owner_fact_storage_failure_rolls_back_the_entire_transaction() {
         })
         .await
         .expect_err("storage failure aborts the batch");
-    assert!(error.contains("test owner storage failure"), "{error}");
+    assert_eq!(
+        error,
+        "failed to settle observability outbox events: SQLite execute failed: test owner storage failure"
+    );
     for emission in &emissions {
         assert!(
             harness

@@ -1750,11 +1750,22 @@ mod tests {
 
     #[test]
     fn canonical_projection_skips_boundary_only_records() {
-        let envelope = envelope(vec![CanonicalObservationFactV1::Boundary {
+        let message = envelope(vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::User,
+            content: json!({"text": "kept"}),
+            model: None,
+            timestamp: Some(7),
+        }]);
+        let fields = canonical_message_fields(&message).unwrap().unwrap();
+        assert_eq!(fields.role, "user");
+        assert_eq!(fields.text, "kept");
+        assert_eq!(fields.kind, "message");
+        assert_eq!(fields.timestamp, Some(7));
+
+        let boundary = envelope(vec![CanonicalObservationFactV1::Boundary {
             boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
         }]);
-
-        assert!(canonical_message_fields(&envelope).unwrap().is_none());
+        assert!(canonical_message_fields(&boundary).unwrap().is_none());
     }
 
     #[test]

@@ -305,7 +305,14 @@ async fn direct_audit_target_never_persists_sensitive_setting_values() {
         .unwrap()
         .get::<Vec<u8>>(0)
         .unwrap();
-    assert!(!String::from_utf8_lossy(&target).contains(secret_path));
+    let sealed: serde_json::Value = serde_json::from_slice(&target).unwrap();
+    assert_eq!(sealed["schema_version"], 1);
+    assert_eq!(
+        sealed["target"]["setting_keys"],
+        serde_json::json!(["index.exclude.v1"])
+    );
+    assert!(sealed["target"].get("value").is_none());
+    assert!(!sealed.to_string().contains(secret_path));
     assert!(rows.next().await.unwrap().is_none());
 }
 

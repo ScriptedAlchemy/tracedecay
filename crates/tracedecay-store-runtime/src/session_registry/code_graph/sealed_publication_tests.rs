@@ -1223,7 +1223,8 @@ async fn graph_reads_during_engine_warm_up_are_typed_pending_and_warmed_reads_su
     let is_warming = |outcome: &Result<_, CodeGraphProjectionError>| {
         matches!(
             outcome,
-            Err(CodeGraphProjectionError::Unavailable(detail)) if detail.contains("warming")
+            Err(CodeGraphProjectionError::Unavailable(detail))
+                if detail == "code graph engine is warming in the background"
         )
     };
     let started = Instant::now();
