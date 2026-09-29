@@ -387,8 +387,7 @@ impl TraceDecay {
         )
         .await?
         .into_parts();
-        let (configuration_runtime, _) =
-            ProjectConfigurationRuntime::open(opened, &open_options.resolved_profile_root()?)?;
+        let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
         let configuration_runtime = Arc::new(configuration_runtime);
         storage::write_store_manifest(&store_layout)?;
 
@@ -626,8 +625,7 @@ impl TraceDecay {
         )
         .await?
         .into_parts();
-        let (configuration_runtime, _) =
-            ProjectConfigurationRuntime::open(opened, &open_options.resolved_profile_root()?)?;
+        let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let ts = Self {
             db,
@@ -821,8 +819,7 @@ impl TraceDecay {
         )
         .await?
         .into_parts();
-        let (configuration_runtime, _) =
-            ProjectConfigurationRuntime::open(opened, &open_options.resolved_profile_root()?)?;
+        let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
         let configuration_runtime = Arc::new(configuration_runtime);
         Ok(Self {
             db,

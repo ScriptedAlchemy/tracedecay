@@ -253,6 +253,7 @@ fn spawn_dashboard_server_with_runner(
             let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
                 cg.clone(),
                 host_runtime.profile(),
+                Some(host_runtime.profile_sessions_database()),
                 authority,
                 project_graphs,
                 endpoint,

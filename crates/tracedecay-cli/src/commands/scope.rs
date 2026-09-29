@@ -22,11 +22,10 @@ use tracedecay_contracts::retrieval::{
 
 use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
 
-/// A CLI command's resolved project scope: the registered profile/project
-/// identities and canonical root used by the daemon application boundary.
+/// A CLI command's resolved project scope: the registered project identity
+/// and canonical root used by the daemon application boundary.
 #[derive(Debug)]
 pub(crate) struct ResolvedCliScope {
-    pub(crate) profile_id: tracedecay_domain::configuration::UserProfileId,
     pub(crate) project_id: tracedecay_domain::ProjectId,
     pub(crate) project_path: PathBuf,
 }
@@ -53,12 +52,8 @@ fn scope_from_registry_context(
     requested: &Path,
     context: &AdminCliRegistryContextV1,
 ) -> tracedecay_domain::errors::Result<ResolvedCliScope> {
-    let (profile_id, project) = match context {
-        AdminCliRegistryContextV1::Ok {
-            profile_id,
-            project,
-            ..
-        } => (profile_id, project),
+    let project = match context {
+        AdminCliRegistryContextV1::Ok { project, .. } => project,
         AdminCliRegistryContextV1::NotFound { .. } => {
             return Err(config_error(format!(
                 "no registered TraceDecay project at exact root '{}'; run `tracedecay init` there (no fallback project is substituted)",
@@ -72,13 +67,6 @@ fn scope_from_registry_context(
             )));
         }
     };
-    let profile_id = tracedecay_domain::configuration::UserProfileId::new(profile_id.as_str())
-        .map_err(|error| {
-            config_error(format!(
-                "registry profile id for '{}' is not canonical: {error}",
-                requested.display()
-            ))
-        })?;
     let canonical = canonicalize_absolute_root(
         &PathBuf::from(&project.canonical_root),
         "registered project root",
@@ -118,7 +106,6 @@ fn scope_from_registry_context(
         ))
     })?;
     Ok(ResolvedCliScope {
-        profile_id,
         project_id,
         project_path,
     })
@@ -218,8 +205,6 @@ mod tests {
 
         assert_eq!(first.project_path, root);
         assert_eq!(second.project_path, root);
-        assert_eq!(first.profile_id.as_str(), "profile.cli-scope-test");
-        assert_eq!(second.profile_id.as_str(), "profile.cli-scope-test");
     }
 
     #[test]
@@ -290,7 +275,6 @@ mod tests {
 
         assert_eq!(resolved.project_path, linked);
         assert_eq!(resolved.project_id.as_str(), "project.cli-scope-test");
-        assert_eq!(resolved.profile_id.as_str(), "profile.cli-scope-test");
     }
 
     #[test]

@@ -198,6 +198,7 @@ mod work_routing;
 
 pub use clock::now_millis;
 use configuration::*;
+pub use configuration::{ProfileConfigurationAuthorityV1, execute_profile_configuration};
 use feedback::*;
 use git::*;
 use github_stack_signal::execute_github_stack_signal_expand;
