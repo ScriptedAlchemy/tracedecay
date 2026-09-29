@@ -211,7 +211,7 @@ fn dispatch_application_surface_tools_inner<'a>(
             tracedecay_daemon_protocol::adapt_application_tool_request(tool_name, args)
                 .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
         application_surface::handle_application_surface(
-            cg,
+            Some(&cg.store_layout().response_handle_root),
             operation,
             normalized_args,
             options.application_invocation_executor,

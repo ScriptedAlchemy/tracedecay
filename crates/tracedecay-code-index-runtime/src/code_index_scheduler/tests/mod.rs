@@ -1736,7 +1736,7 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
     wait_for_owner(
         registry,
         path,
-        Duration::from_secs(5),
+        SERVING_SEAT_FAILURE_CEILING,
         "fresh complete dashboard freshness",
         || async {
             (registry
@@ -1830,7 +1830,7 @@ async fn wait_for_event_to_ready(
     registry: &CodeIndexSchedulerRegistryV1,
 ) -> super::CodeIndexEventToReadyReceiptV1 {
     let mut receipts = registry.subscribe_cadence_receipts();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(receipt) = receipts.borrow_and_update().latest().cloned() {
                 return receipt;

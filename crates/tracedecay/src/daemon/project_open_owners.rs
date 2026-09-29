@@ -96,15 +96,15 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project-open source edit preview scope denied: {error}"),
             })?;
-    let catalog = tracedecay_contracts::catalog_composition::build_application_catalog_snapshot()
+    let catalog = tracedecay_contracts::catalog_composition::application_catalog_snapshot()
         .map_err(|error| TraceDecayError::Config {
-        message: format!("project-open source edit catalog is unavailable: {error}"),
-    })?;
+            message: format!("project-open source edit catalog is unavailable: {error}"),
+        })?;
     let authorization = ProjectSourceEditAuthorizationV1::new(
         project_root.to_path_buf(),
         scope,
         Arc::clone(graph.configuration_runtime()),
-        Arc::new(catalog),
+        Arc::clone(catalog),
         Arc::new(project_open_source_access_authority().map_err(|error| {
             TraceDecayError::Config {
                 message: format!("project-open source edit access authority is invalid: {error}"),

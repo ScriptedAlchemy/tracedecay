@@ -4,7 +4,10 @@
 use serde_json::json;
 
 use tracedecay_daemon_identity::authority;
-use tracedecay_daemon_protocol::DaemonClientIdentity;
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceRequest, DaemonClientIdentity, adapt_application_tool_request,
+    parse_application_surface_request,
+};
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::tool_errors::structure_tool_problem;
 use tracedecay_mcp::tools::catalog_discovery::{
@@ -14,6 +17,7 @@ use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ToolRegistryMode,
     explore_call_budget, project_catalog_discovery_scope, tool_error_response,
 };
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::*;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
@@ -204,6 +208,38 @@ fn projectless_tool_is_discoverable(tool_name: &str) -> bool {
         tool_name,
         "tracedecay_project_list" | "tracedecay_project_search" | "tracedecay_project_context"
     ) || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
+        || user_setting_configuration_operation(tool_name).is_some()
+}
+
+/// The configuration operations that can name a user setting; every other
+/// configuration operation reads or writes project state.
+fn user_setting_configuration_operation(tool_name: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_tool_name(tool_name).filter(|operation| {
+        matches!(
+            operation,
+            ApplicationSurfaceOperation::ConfigurationGet
+                | ApplicationSurfaceOperation::ConfigurationSet
+                | ApplicationSurfaceOperation::ConfigurationUnset
+                | ApplicationSurfaceOperation::ConfigurationBatch
+        )
+    })
+}
+
+/// Whether a configuration call addresses only user settings, which the
+/// daemon's profile configuration owner answers with or without a project.
+/// `None` when the arguments are not a valid configuration request.
+fn configuration_targets_profile_settings(
+    operation: ApplicationSurfaceOperation,
+    arguments: &serde_json::Value,
+) -> Option<bool> {
+    let normalized =
+        adapt_application_tool_request(operation.mcp_tool_name(), arguments.clone()).ok()?;
+    match parse_application_surface_request(operation, normalized.request).ok()? {
+        ApplicationSurfaceRequest::Configuration(request) => {
+            Some(request.targets_profile_settings())
+        }
+        _ => None,
+    }
 }
 
 /// Projectless `tools/list`: the host-available catalog, reduced to tools the
@@ -305,11 +341,9 @@ async fn projectless_tools_call_response_with_connection(
     // any account or store work.
     let no_arguments = serde_json::Map::new();
     let profile_owner_operation =
-        tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(tool_name).filter(
-            |operation| {
-                operation.is_profile_owner_request(arguments.as_object().unwrap_or(&no_arguments))
-            },
-        );
+        ApplicationSurfaceOperation::from_tool_name(tool_name).filter(|operation| {
+            operation.is_profile_owner_request(arguments.as_object().unwrap_or(&no_arguments))
+        });
     let discoverable =
         profile_owner_operation.is_some() || projectless_tool_is_discoverable(tool_name);
     #[cfg(feature = "hotpath")]
@@ -327,11 +361,41 @@ async fn projectless_tools_call_response_with_connection(
         }
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     }
+    boxed_projectless_phase(dispatch_admitted_projectless_call(
+        id,
+        tool_name,
+        profile_owner_operation,
+        arguments,
+        connection,
+        store_administration,
+    ))
+    .await
+}
+
+/// Dispatch one admitted projectless call to the owner of its tool family.
+async fn dispatch_admitted_projectless_call(
+    id: serde_json::Value,
+    tool_name: &str,
+    profile_owner_operation: Option<ApplicationSurfaceOperation>,
+    arguments: serde_json::Value,
+    connection: &ProjectlessConnectionStateV1,
+    store_administration: &StoreAdministration,
+) -> tracedecay_mcp::JsonRpcResponse {
     // Keep unrelated tool families out of one generated poll frame. Some handlers
     // retain large typed futures, and combining them here can exhaust a Tokio
     // worker stack before the selected handler is polled.
     if let Some(operation) = profile_owner_operation {
         return boxed_projectless_phase(projectless_profile_owner_response(
+            id,
+            operation,
+            arguments,
+            connection,
+            store_administration,
+        ))
+        .await;
+    }
+    if let Some(operation) = user_setting_configuration_operation(tool_name) {
+        return boxed_projectless_phase(projectless_profile_configuration_response(
             id,
             operation,
             arguments,
@@ -377,7 +441,7 @@ fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResp
 /// project, if any, is marked active.
 async fn projectless_profile_owner_response(
     id: serde_json::Value,
-    operation: tracedecay_tool_catalog::ApplicationSurfaceOperation,
+    operation: ApplicationSurfaceOperation,
     arguments: serde_json::Value,
     connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
@@ -402,6 +466,52 @@ async fn projectless_profile_owner_response(
         Err(error) => Err(error),
     };
     match result {
+        Ok(mut result) => {
+            tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+            JsonRpcResponse::success(id, result.value)
+        }
+        Err(error) => tool_error_response(id, tool_name, &error),
+    }
+}
+
+/// A configuration call of user settings goes to the daemon's profile
+/// configuration owner, the route it takes from a project; a project key
+/// needs a project.
+async fn projectless_profile_configuration_response(
+    id: serde_json::Value,
+    operation: ApplicationSurfaceOperation,
+    arguments: serde_json::Value,
+    connection: &ProjectlessConnectionStateV1,
+    store_administration: &StoreAdministration,
+) -> tracedecay_mcp::JsonRpcResponse {
+    let tool_name = operation.mcp_tool_name();
+    if configuration_targets_profile_settings(operation, &arguments) == Some(false) {
+        return requires_project_error(id, tool_name);
+    }
+    let normalized = match adapt_application_tool_request(tool_name, arguments) {
+        Ok(normalized) => normalized,
+        Err(error) => {
+            return tool_error_response(
+                id,
+                tool_name,
+                &TraceDecayError::Config {
+                    message: error.to_string(),
+                },
+            );
+        }
+    };
+    let executor = profile_executor(connection, store_administration);
+    match boxed_projectless_phase(crate::mcp::tools::handle_application_surface(
+        None,
+        operation,
+        normalized,
+        Some(&executor),
+        tracedecay_contracts::InvocationTarget::Profile,
+        None,
+        tracedecay_mcp::RequestControls::default(),
+    ))
+    .await
+    {
         Ok(mut result) => {
             tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
             JsonRpcResponse::success(id, result.value)
@@ -440,9 +550,7 @@ async fn projectless_profile_retained_response(
         }
         Err(error) => return tool_error_response(id, tool_name, &error),
     }
-    let Some(application) =
-        tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(tool_name)
-    else {
+    let Some(application) = ApplicationSurfaceOperation::from_tool_name(tool_name) else {
         return requires_project_error(id, tool_name);
     };
     let executor = profile_executor(connection, store_administration);
@@ -483,8 +591,9 @@ pub(super) fn projectless_tool_call(
 }
 
 /// Whether a first request is served by the projectless dispatcher even when
-/// the handshake names a project: profile-session reads and profile registry
-/// reads never depend on that project's open or warm-up.
+/// the handshake names a project: profile-session reads, profile registry
+/// reads, and user-setting configuration never depend on that project's open
+/// or warm-up.
 pub(super) fn projectless_first_request(request: Option<&JsonRpcRequest>) -> bool {
     let Some(request) = request else {
         return false;
@@ -517,7 +626,9 @@ pub(super) fn projectless_first_request(request: Option<&JsonRpcRequest>) -> boo
                 | Op::SessionRefreshCancel)
         ) if crate::mcp::tools::retained_tool_target(operation, &arguments)
             .is_ok_and(|target| target == tracedecay_contracts::InvocationTarget::Profile)
-    )
+    ) || user_setting_configuration_operation(tool_name).is_some_and(|operation| {
+        configuration_targets_profile_settings(operation, &arguments) == Some(true)
+    })
 }
 
 #[cfg(all(test, unix))]

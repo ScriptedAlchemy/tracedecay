@@ -716,10 +716,10 @@ fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32
     // runs its first line, so the pid comes from the spawn event, not from a
     // file the child may never write.
     let started = StartedCodexProcesses::default();
-    let (err, fake) = tracing::subscriber::with_default(
+    let _capture = tracedecay_runtime_core::logging::set_tracing_capture(
         tracing_subscriber::registry().with(started.clone()),
-        || run_backend_for_behavior(behavior, timeout),
     );
+    let (err, fake) = run_backend_for_behavior(behavior, timeout);
     (err, started.pid_of(&fake.bin))
 }
 

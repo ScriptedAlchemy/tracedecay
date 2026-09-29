@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::local_node_id;
+use crate::common::{declaration_start, local_node_id};
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
 use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use crate::traversal::find_direct_child_by_kind;
@@ -658,9 +658,8 @@ impl TypeScriptExtractor {
         };
         let docstring = Self::extract_jsdoc(state, node);
         let signature = Some(Self::extract_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, &["decorator"]);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -678,7 +677,7 @@ impl TypeScriptExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -709,6 +708,13 @@ impl TypeScriptExtractor {
         }
 
         Self::extract_decorators(state, node, &id);
+        // `@Component({ … })` is called to wrap the declaration.
+        for decorator in node
+            .children(&mut node.walk())
+            .filter(|child| child.kind() == "decorator")
+        {
+            Self::extract_call_sites(state, decorator, &id);
+        }
 
         Self::extract_class_heritage(state, node, &id);
 
@@ -822,9 +828,9 @@ impl TypeScriptExtractor {
         );
         let visibility = Self::extract_ts_accessibility(state, node);
         let text = state.node_text(node);
-        let start_line = node.start_position().row as u32;
+        // Unlike a method's, a field's decorators are its own leading children.
+        let (start_line, start_column) = declaration_start(node, &["decorator"]);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -842,7 +848,7 @@ impl TypeScriptExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -872,8 +878,11 @@ impl TypeScriptExtractor {
             });
         }
 
+        Self::extract_decorators(state, node, &id);
+
         // A field initializer (`onClick = () => this.save()`) runs as part of
-        // construction; the field is the named symbol that owns its calls.
+        // construction, and `@Input()` wraps the field; the field is the
+        // named symbol that owns both calls.
         Self::extract_owned_call_sites(state, node, &id);
     }
 
@@ -951,6 +960,7 @@ impl TypeScriptExtractor {
                             column: parent.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -1319,7 +1329,8 @@ impl TypeScriptExtractor {
     // Helper extraction methods
     // ----------------------------
 
-    /// Extract decorators from a class or method declaration.
+    /// Extract the leading decorators of a class or field declaration. Their
+    /// call sites are left to the caller.
     fn extract_decorators(state: &mut ExtractionState<'_>, node: TsNode<'_>, parent_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -1380,8 +1391,6 @@ impl TypeScriptExtractor {
                         kind: EdgeKind::Annotates,
                         line: Some(start_line),
                     });
-                    // `@Component({ … })` is called to wrap the declaration.
-                    Self::extract_call_sites(state, child, parent_id);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1412,6 +1421,7 @@ impl TypeScriptExtractor {
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
                                     unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -1430,6 +1440,7 @@ impl TypeScriptExtractor {
                                             column: iface.start_position().column as u32,
                                             file_path: state.file_path.clone(),
                                             unmodeled_import: None,
+                                            argument_count: None,
                                         });
                                     }
                                     if !inner.goto_next_sibling() {
@@ -1487,6 +1498,7 @@ impl TypeScriptExtractor {
                         column: site.start_position().column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
                 Self::extract_call_sites(state, child, fn_node_id);
@@ -1693,6 +1705,7 @@ impl TypeScriptExtractor {
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
             } else {
@@ -1834,6 +1847,7 @@ impl TypeScriptExtractor {
             imports: state.imports,
             clone_bodies: Vec::new(),
             schema_evidence: None,
+            callable_arities: Vec::new(),
         }
     }
 }

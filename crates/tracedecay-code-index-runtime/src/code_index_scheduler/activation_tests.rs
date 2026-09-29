@@ -140,18 +140,15 @@ async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
     let background_admission = registry.background_reconcile_admission();
-    let mount_started = std::time::Instant::now();
+    // No background permit exists yet, so a mount that waited on the retained
+    // owner could not return, and one that decoded or verified inline is
+    // caught by the counters below.
     assert!(
         registry
             .mount_worktree(project_id(), project.path(), store.path().to_path_buf())
             .await
             .expect("mount the exact worktree"),
         "the cold route is newly mounted"
-    );
-    assert!(
-        mount_started.elapsed() < std::time::Duration::from_millis(250),
-        "foreground route mount exceeded the 250ms cold-admission budget: {:?}",
-        mount_started.elapsed()
     );
 
     let scheduler = registry

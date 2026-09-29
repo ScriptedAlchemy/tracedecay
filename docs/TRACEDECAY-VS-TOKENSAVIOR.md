@@ -173,13 +173,12 @@ without spinning up an MCP client:
 
 ```bash
 tracedecay tool search handle_body
-tracedecay tool body --symbol handle_body
 tracedecay tool find_exact_symbol --name extract_lines   # resolve a node_id
+tracedecay tool source_body --node-id <node_id>
 tracedecay tool impact --node-id <node_id> --max-depth 3
 tracedecay tool callers --node-id <node_id>
 tracedecay tool files --pattern '**/*.rs'
 tracedecay tool affected --args '{"files":["src/cli.rs"]}'
-tracedecay bench       # built-in retrieval benchmark
 ```
 
 Graph-traversal tools such as `impact` and `callers` take a `node_id`, not a
@@ -189,13 +188,6 @@ There are no per-tool top-level subcommands (`tracedecay query`,
 `tracedecay files`, `tracedecay affected` and friends do not exist); run
 `tracedecay tool` for the list and `tracedecay tool <name> --help` for one
 tool's parameters.
-
-### 1.10 Reproducible benchmark harness
-
-`tracedecay bench` ships with a default TOML query set
-(`benchmark_data/queries/default.toml`) and emits a colored table or JSON of
-retrieval-savings ratios for the current project. token-savior's benchmarks
-are external (`Mibayy/tsbench`) and require a synthetic project.
 
 ---
 
