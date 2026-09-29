@@ -129,6 +129,19 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     // stopped, so restart replay remains the acceptance path under test.
     drop(broker);
     drop(user_db);
+    // A restart follows the first daemon's store shutdown: its detached
+    // session-runtime workers still write the profile database until joined.
+    first_admin
+        .prepare_memory_graph_reconciliation_shutdown()
+        .await
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+    first_admin
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .unwrap();
     drop(first_admin);
     std::fs::remove_file(&automation_root).unwrap();
 

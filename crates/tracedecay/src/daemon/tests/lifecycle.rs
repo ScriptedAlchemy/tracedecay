@@ -655,6 +655,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
     let socket = temp.path().join("daemon.sock");
     let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let (client_done, client_done_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         super::super::reject_saturated_daemon_client(
@@ -666,6 +667,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
             },
         )
         .await;
+        accept_liveness_probes_until(&listener, client_done_rx).await;
     });
 
     let error = tokio::time::timeout(
@@ -687,6 +689,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
         message.contains("daemon client capacity reached"),
         "expected a matching saturation response, got: {message}"
     );
+    client_done.send(()).expect("fake daemon awaits the client");
     server.await.expect("saturation server task");
 }
 
@@ -1022,6 +1025,7 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
     let authority = seed_socket_authority(&socket);
     let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let (client_done, client_done_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         let (reader, mut writer) = stream.into_split();
@@ -1054,6 +1058,7 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
             .await
             .expect("write response");
         writer.write_all(b"\n").await.expect("write newline");
+        accept_liveness_probes_until(&listener, client_done_rx).await;
     });
 
     let result = tokio::time::timeout(
@@ -1071,6 +1076,7 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
     .expect("healthy long-running request timed out")
     .expect("healthy long-running request must complete");
     assert_eq!(result["status"], json!("ok"));
+    client_done.send(()).expect("fake daemon awaits the client");
     server.await.expect("fake daemon task");
 }
 
@@ -1082,6 +1088,7 @@ async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
     let authority = seed_socket_authority(&socket);
     let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let (client_done, client_done_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         let (reader, mut writer) = stream.into_split();
@@ -1115,6 +1122,7 @@ async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
             .write_all(&response[split..])
             .await
             .expect("write response suffix");
+        accept_liveness_probes_until(&listener, client_done_rx).await;
     });
 
     let result = tokio::time::timeout(
@@ -1132,7 +1140,23 @@ async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
     .expect("split-frame response timed out")
     .expect("split-frame response must reassemble across liveness polls");
     assert_eq!(result["status"], json!("split-across-poll"));
+    client_done.send(()).expect("fake daemon awaits the client");
     server.await.expect("fake daemon task");
+}
+
+/// A live daemon keeps accepting after it answers, so the client's liveness
+/// probes keep connecting until the client has read the whole response.
+#[cfg(unix)]
+async fn accept_liveness_probes_until(
+    listener: &tokio::net::UnixListener,
+    mut client_done: tokio::sync::oneshot::Receiver<()>,
+) {
+    loop {
+        tokio::select! {
+            _ = &mut client_done => return,
+            probe = listener.accept() => drop(probe.expect("accept liveness probe")),
+        }
+    }
 }
 
 #[cfg(unix)]

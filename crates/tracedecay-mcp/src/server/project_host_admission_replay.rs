@@ -109,26 +109,27 @@ impl ProjectHostAdmissionReplayWorker {
 
     #[cfg(any(test, feature = "test-transport"))]
     #[hotpath::skip]
-    pub async fn wait_idle(&self, timeout: Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
+    pub async fn wait_idle(&self) {
         loop {
+            // `notify_waiters` stores no permit, so both waits are armed before
+            // the state is read; an idle transition in between still wakes us.
+            let idle = self.idle.notified();
+            let cancelled = self.cancel_notify.notified();
+            tokio::pin!(idle, cancelled);
+            idle.as_mut().enable();
+            cancelled.as_mut().enable();
             if self.cancel.load(Ordering::Acquire) {
-                return true;
+                return;
             }
             if !self.busy.load(Ordering::Acquire)
                 && !self.dirty.load(Ordering::Acquire)
                 && !self.broker.has_pending_replay().await
             {
-                return true;
-            }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return false;
+                return;
             }
             tokio::select! {
-                () = self.idle.notified() => {}
-                () = self.cancel_notify.notified() => return true,
-                () = tokio::time::sleep(remaining) => return false,
+                () = idle => {}
+                () = cancelled => return,
             }
         }
     }

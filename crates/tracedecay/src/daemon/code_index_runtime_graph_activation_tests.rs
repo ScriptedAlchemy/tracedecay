@@ -828,6 +828,13 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     drop(seeded_graph);
     drop(retained);
     drop(latest);
+    // The daemon's terminal order: the publication's staging sweep holds the
+    // project graph store until it is joined, and a restart opened beside it
+    // cannot take the store's write lock.
+    graph_runtime
+        .shutdown_terminal_tasks()
+        .await
+        .expect("join graph terminal tasks before restart");
     graph_runtime
         .shutdown_memory_graph_reconciliation_tasks()
         .await

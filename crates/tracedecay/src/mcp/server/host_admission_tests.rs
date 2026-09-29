@@ -1286,12 +1286,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
             | HostAdmissionStatus::Committed
             | HostAdmissionStatus::ExactDuplicate
     ));
-    assert!(
-        server
-            .wait_project_host_admission_replay_idle(Duration::from_secs(5))
-            .await,
-        "owned project replay worker should settle the retained admission"
-    );
+    server.wait_project_host_admission_replay_idle().await;
     assert_eq!(broker.pending_count().await, 0);
     server.shutdown().await;
 }
@@ -1585,12 +1580,7 @@ async fn owned_project_replay_worker_continues_past_one_bounded_batch() {
     )
     .await;
 
-    assert!(
-        server
-            .wait_project_host_admission_replay_idle(Duration::from_secs(5))
-            .await,
-        "owned worker must drain a 65-record startup backlog across bounded passes"
-    );
+    server.wait_project_host_admission_replay_idle().await;
     assert_eq!(broker.pending_count().await, 0);
     assert!(
         server.project_host_admission_replay_pass_count().await >= 2,
