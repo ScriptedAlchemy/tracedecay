@@ -1,17 +1,47 @@
-//! Pooled canonical serialization scratch is counted while threads hold it
-//! and gone once each holder releases it.
+//! A thread's pooled canonical serialization buffers stay allocated between
+//! calls until the thread releases them.
 //!
-//! The count is process-wide, so this is its own binary with a single test:
-//! no other test may serialize while it measures.
+//! Live bytes are counted by this binary's global allocator, process-wide, so
+//! it holds a single test: no other test may allocate while it measures.
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use serde::Serialize;
-use tracedecay_domain::research::{
-    canonical_sha256, pooled_canonical_scratch_bytes, release_thread_canonical_scratch,
-};
+use tracedecay_domain::research::{canonical_sha256, release_thread_canonical_scratch};
 
-const DIGEST_SINK_BYTES: u64 = 64 * 1024;
+struct CountingAllocator;
+
+static LIVE: AtomicIsize = AtomicIsize::new(0);
+
+fn signed(bytes: usize) -> isize {
+    isize::try_from(bytes).expect("allocation size")
+}
+
+// SAFETY: every call forwards to `System` with the caller's layout and only
+// adjusts a counter.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        LIVE.fetch_add(signed(layout.size()), Ordering::SeqCst);
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        LIVE.fetch_sub(signed(layout.size()), Ordering::SeqCst);
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        LIVE.fetch_add(signed(size) - signed(layout.size()), Ordering::SeqCst);
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+const DIGEST_SINK_BYTES: isize = 64 * 1024;
 
 #[derive(Serialize)]
 struct Row {
@@ -30,30 +60,21 @@ fn digest_a_row() {
 }
 
 #[test]
-fn each_thread_releases_only_its_own_pooled_scratch() {
-    assert_eq!(pooled_canonical_scratch_bytes(), 0);
+fn a_digesting_thread_keeps_its_scratch_until_it_releases_it() {
+    digest_a_row();
+    release_thread_canonical_scratch();
+    let released = LIVE.load(Ordering::SeqCst);
 
     digest_a_row();
-    let one_thread = pooled_canonical_scratch_bytes();
+    let pooled = LIVE.load(Ordering::SeqCst) - released;
     assert!(
-        one_thread > DIGEST_SINK_BYTES,
-        "a digesting thread keeps its digest sink and object buffers: {one_thread}"
+        pooled > DIGEST_SINK_BYTES,
+        "a digesting thread keeps its digest sink and object buffers: {pooled}"
     );
 
-    let (both, after_other_released) = std::thread::spawn(|| {
-        digest_a_row();
-        let both = pooled_canonical_scratch_bytes();
-        release_thread_canonical_scratch();
-        (both, pooled_canonical_scratch_bytes())
-    })
-    .join()
-    .expect("second digesting thread");
-    assert_eq!(both, 2 * one_thread);
-    assert_eq!(after_other_released, one_thread);
-
     release_thread_canonical_scratch();
-    assert_eq!(pooled_canonical_scratch_bytes(), 0);
+    assert_eq!(LIVE.load(Ordering::SeqCst), released);
 
     digest_a_row();
-    assert_eq!(pooled_canonical_scratch_bytes(), one_thread);
+    assert_eq!(LIVE.load(Ordering::SeqCst) - released, pooled);
 }

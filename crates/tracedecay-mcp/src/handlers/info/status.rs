@@ -22,13 +22,11 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::Result;
-use tracedecay_domain::research::pooled_canonical_scratch_bytes;
 use tracedecay_global_db::{GlobalDbGitCorrelationStore, RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::resident_memory::{
-    PROCESS_RUNTIME_ALLOWANCE_BYTES_V1, RESIDENT_OWNER_SHED_ORDER_V1,
-    ResidentMemoryPressureStateV1, ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnersV1,
-    process_resident_memory_pressure_v1, process_resident_owners_v1,
-    sampled_memory_pressure_some_avg10_v1,
+    RESIDENT_OWNER_SHED_ORDER_V1, ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
+    ResidentOwnerKindV1, ResidentOwnersV1, process_resident_memory_pressure_v1,
+    process_resident_owners_v1, sampled_memory_pressure_some_avg10_v1,
 };
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
@@ -213,7 +211,6 @@ fn project_memory_value(project_id: &ProjectId) -> StatusMemoryV1 {
         sampled_memory_pressure_some_avg10_v1(),
         std::time::Instant::now(),
         project_id,
-        pooled_canonical_scratch_bytes(),
     )
 }
 
@@ -223,7 +220,6 @@ fn memory_value(
     psi_some_avg10: Option<f64>,
     now: std::time::Instant,
     project_id: &ProjectId,
-    canonical_scratch_bytes: u64,
 ) -> StatusMemoryV1 {
     let (status, resident_bytes) = match pressure.state() {
         ResidentMemoryPressureStateV1::Unobserved => (StatusMemoryPressureV1::Unobserved, None),
@@ -274,8 +270,6 @@ fn memory_value(
         retained_bytes: report.measured_bytes,
         unmeasured_owners: report.unmeasured_owners,
         owners,
-        canonical_scratch_bytes,
-        runtime_allowance_bytes: PROCESS_RUNTIME_ALLOWANCE_BYTES_V1,
     }
 }
 
@@ -1057,8 +1051,8 @@ mod tests {
     fn status_memory_reports_the_projects_own_owners_and_daemon_totals() {
         use std::sync::Arc;
         use tracedecay_runtime_core::resident_memory::{
-            PROCESS_RUNTIME_ALLOWANCE_BYTES_V1, ResidentMemoryPressureV1, ResidentOwnerKindV1,
-            ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1,
+            ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnerScopeV1, ResidentOwnerV1,
+            ResidentOwnersV1,
         };
         let pressure =
             ResidentMemoryPressureV1::new(std::num::NonZeroU64::new(10_000).expect("limit"));
@@ -1093,7 +1087,6 @@ mod tests {
             Some(1.5),
             std::time::Instant::now(),
             &project,
-            2_048,
         );
 
         assert_eq!(
@@ -1122,8 +1115,6 @@ mod tests {
                     "idle_seconds": 0,
                     "protected": true,
                 }],
-                "canonical_scratch_bytes": 2_048,
-                "runtime_allowance_bytes": PROCESS_RUNTIME_ALLOWANCE_BYTES_V1,
             })
         );
     }

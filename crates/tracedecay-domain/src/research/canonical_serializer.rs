@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
@@ -27,26 +26,6 @@ const POOLED_ENTRIES_CAPACITY_LIMIT: usize = 4 * 1024;
 /// so a small stack already makes sibling and per-call reuse hit every time.
 const POOLED_BUFFER_LIMIT: usize = 8;
 
-/// Capacity every thread's pooled canonical scratch holds between calls: the
-/// object buffers below and the digest sink buffer one layer down.
-static POOLED_SCRATCH_BYTES: AtomicU64 = AtomicU64::new(0);
-
-pub(super) fn pool_scratch_bytes(bytes: usize) {
-    POOLED_SCRATCH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-
-pub(super) fn unpool_scratch_bytes(bytes: usize) {
-    POOLED_SCRATCH_BYTES.fetch_sub(bytes as u64, Ordering::Relaxed);
-}
-
-pub(super) fn pooled_scratch_bytes() -> u64 {
-    POOLED_SCRATCH_BYTES.load(Ordering::Relaxed)
-}
-
-fn object_buffer_bytes((values, entries): (&String, &ObjectEntries)) -> usize {
-    values.capacity() + entries.capacity() * size_of::<(Cow<'static, str>, Range<usize>)>()
-}
-
 /// Reusable `ObjectWriter` buffers for one serialization thread.
 ///
 /// Every canonical JSON object buffers its rendered entries so keys can be
@@ -62,11 +41,7 @@ pub(super) struct ObjectBufferPool {
 
 impl ObjectBufferPool {
     fn acquire(&mut self) -> (String, ObjectEntries) {
-        let Some((values, entries)) = self.buffers.pop() else {
-            return Default::default();
-        };
-        unpool_scratch_bytes(object_buffer_bytes((&values, &entries)));
-        (values, entries)
+        self.buffers.pop().unwrap_or_default()
     }
 
     fn release(&mut self, mut values: String, mut entries: ObjectEntries) {
@@ -78,16 +53,7 @@ impl ObjectBufferPool {
         }
         values.clear();
         entries.clear();
-        pool_scratch_bytes(object_buffer_bytes((&values, &entries)));
         self.buffers.push((values, entries));
-    }
-}
-
-impl Drop for ObjectBufferPool {
-    fn drop(&mut self) {
-        for (values, entries) in &self.buffers {
-            unpool_scratch_bytes(object_buffer_bytes((values, entries)));
-        }
     }
 }
 
