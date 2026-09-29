@@ -175,8 +175,13 @@ pub async fn ensure_daemon_connection_live(
 /// Reads the next daemon frame, polling `ensure_live` whenever the read is
 /// still pending.
 ///
-/// The reader stays held across polls. `read_mcp_line` is dropped when the
-/// poll wins `select!`; the accumulator lives on the line reader.
+/// A delivered frame always wins over the probe: the read is polled first,
+/// keeps running while the probe runs, and a failed probe ends the wait only
+/// if the read still blocks after the I/O driver has observed everything the
+/// daemon wrote before it stopped listening.
+///
+/// The reader stays held across polls. `read_mcp_line` is dropped when
+/// another branch wins `select!`; the accumulator lives on the line reader.
 pub async fn poll_daemon_response_line<R, F, Fut>(
     reader: &mut R,
     request_label: &str,
@@ -191,23 +196,44 @@ where
     let mut line_reader = BoundedLineReader::new(reader);
     loop {
         tokio::select! {
-            result = line_reader.read_mcp_line() => {
-                return match result {
-                    Ok(line) => Ok(line),
-                    Err(error) if is_wire_oversized_io_error(&error) => {
-                        Err(TraceDecayError::Config {
-                            message: format!(
-                                "daemon {request_label} response exceeded wire message bound ({WIRE_RECORD_TOO_LARGE})"
-                            ),
-                        })
-                    }
-                    Err(error) => Err(error.into()),
-                };
-            }
-            () = tokio::time::sleep(liveness_poll_interval) => {
-                ensure_live().await?;
-            }
+            biased;
+            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            () = tokio::time::sleep(liveness_poll_interval) => {}
         }
+        let probe = ensure_live();
+        tokio::pin!(probe);
+        let probe_failure = tokio::select! {
+            biased;
+            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            probe_result = &mut probe => match probe_result {
+                Ok(()) => continue,
+                Err(error) => error,
+            },
+        };
+        // `yield_now` resumes only after the runtime has polled its I/O
+        // driver, so readiness for bytes written before the probe failed is
+        // visible to the final read below.
+        tokio::task::yield_now().await;
+        tokio::select! {
+            biased;
+            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            () = std::future::ready(()) => return Err(probe_failure),
+        }
+    }
+}
+
+fn response_line(
+    result: std::io::Result<Option<String>>,
+    request_label: &str,
+) -> Result<Option<String>> {
+    match result {
+        Ok(line) => Ok(line),
+        Err(error) if is_wire_oversized_io_error(&error) => Err(TraceDecayError::Config {
+            message: format!(
+                "daemon {request_label} response exceeded wire message bound ({WIRE_RECORD_TOO_LARGE})"
+            ),
+        }),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -366,6 +392,81 @@ mod tests {
         );
         assert!(down.to_string().contains("may be restarting"));
         assert!(saturated.to_string().contains("up but not accepting"));
+    }
+
+    /// The daemon side of one accepted request connection, driven by the
+    /// client's liveness probe so the stop lands exactly while the probe runs.
+    #[cfg(unix)]
+    struct StoppingDaemon {
+        listener: tokio::net::UnixListener,
+        stream: tokio::net::UnixStream,
+    }
+
+    #[cfg(unix)]
+    async fn await_response_while_daemon_stops(
+        reply: Option<&'static [u8]>,
+    ) -> Result<Option<String>> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        let client = tokio::net::UnixStream::connect(&socket)
+            .await
+            .expect("connect");
+        let (stream, _) = listener.accept().await.expect("accept");
+        let daemon = std::cell::RefCell::new(Some(StoppingDaemon { listener, stream }));
+        // The stopped daemon keeps the request connection open, so only the
+        // probe can end a read that still blocks.
+        let held_connection = std::cell::RefCell::new(None);
+        let mut reader = tokio::io::BufReader::new(client);
+        poll_daemon_response_line(&mut reader, "tracedecay_status", Duration::ZERO, || {
+            let stopping = daemon.borrow_mut().take();
+            let socket = socket.clone();
+            let held_connection = &held_connection;
+            async move {
+                if let Some(StoppingDaemon {
+                    listener,
+                    mut stream,
+                }) = stopping
+                {
+                    if let Some(reply) = reply {
+                        stream.write_all(reply).await?;
+                    }
+                    drop(listener);
+                    std::fs::remove_file(&socket)?;
+                    held_connection.replace(Some(stream));
+                }
+                tokio::net::UnixStream::connect(&socket)
+                    .await
+                    .map(drop)
+                    .map_err(TraceDecayError::from)
+            }
+        })
+        .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reply_written_before_the_daemon_stops_listening_wins_over_the_failed_probe() {
+        let answered = await_response_while_daemon_stops(Some(b"{\"jsonrpc\":\"2.0\",\"id\":1}\n"))
+            .await
+            .expect("a delivered reply must not be replaced by the probe failure");
+        assert_eq!(answered.as_deref(), Some("{\"jsonrpc\":\"2.0\",\"id\":1}"));
+
+        let unanswered = await_response_while_daemon_stops(None)
+            .await
+            .expect_err("a read that still blocks must end with the probe failure");
+        assert!(
+            matches!(&unanswered, TraceDecayError::Io(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "unanswered request must surface the probe's connect failure, got: {unanswered:?}"
+        );
+
+        let partial = await_response_while_daemon_stops(Some(b"{\"jsonrpc\":\"2.0\""))
+            .await
+            .expect_err("an incomplete frame still blocks, so the probe failure wins");
+        assert!(
+            matches!(&partial, TraceDecayError::Io(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "partial frame must surface the probe's connect failure, got: {partial:?}"
+        );
     }
 
     #[test]
