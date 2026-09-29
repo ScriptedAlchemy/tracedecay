@@ -546,6 +546,10 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
     )
 }
 
+/// A layered row spill over a parent's sealed graph, or why it has none.
+pub(super) type LayeredRowSpillV1 =
+    Result<Result<GraphLayeredRowSpill, GraphSealedBaseAbsenceV1>, GraphDbError>;
+
 /// A seal's graph rows as its publication seals them: a delta over the
 /// sealed graph of the seal's parent code generation when `layered_spill`
 /// resolves one and the base's inputs admit it, the cold rows otherwise.
@@ -562,12 +566,7 @@ pub(super) fn graph_rows_from_roots(
     generation: &tracedecay_domain::CodeGenerationId,
     projection: GraphProjectionIdentity,
     projector_revision: &GraphProjectorRevision,
-    layered_spill: &dyn Fn(
-        &tracedecay_domain::CodeGenerationId,
-    ) -> Result<
-        Result<GraphLayeredRowSpill, GraphSealedBaseAbsenceV1>,
-        GraphDbError,
-    >,
+    layered_spill: &dyn Fn(&tracedecay_domain::CodeGenerationId) -> LayeredRowSpillV1,
     cold_spill: &dyn Fn() -> Result<GraphGenerationRowSpill, GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError> {
