@@ -159,8 +159,11 @@ async fn registered_authorized_retrieval_returns_only_sanitized_context() {
         .find(|record| record.anchor_id == ranked.anchor_id)
         .expect("registered context retains the ranked occurrence");
     assert_eq!(assembled.grain, RetrievalGrainV1::Occurrence);
-    assert!(items[0].context.rendered.contains(SAFE_PRIVACY_PAYLOAD));
-    assert!(!format!("{outcome:?}").contains(PRIVACY_CANARY));
+    assert_eq!(
+        items[0].context.rendered,
+        r#"{"format":"tracedecay.compact_context.v1","estimator_version":"privacy-words-v1","bundle":{"records":[{"anchor_id":"retrieval.v2.sha256:ecb7ffbc9bcb6fb83fd1369256279abc26b336edb9febf75f14cdfb752696e25","grain":"occurrence","hydration":"available","encoded_bytes":169}],"omissions":[],"continuation_anchors":[],"coverage":{"visible":1,"hidden":0,"unknown":0,"redacted":0},"conflicts":[],"lineage":[],"encoded_bytes":169},"summary_omissions":[],"payloads":[{"anchor_id":"retrieval.v2.sha256:ecb7ffbc9bcb6fb83fd1369256279abc26b336edb9febf75f14cdfb752696e25","encoding":"utf8","data":"The billing pipeline regression is fixed."}]}"#
+    );
+    assert!(!items[0].context.rendered.contains(PRIVACY_CANARY));
 }
 
 #[tokio::test]
@@ -339,6 +342,11 @@ async fn registered_sanitized_temporal_state_is_stable_across_execution_replay()
         first_items[0].context.rendered,
         replay_items[0].context.rendered
     );
+    assert_eq!(
+        first_items[0].context.rendered,
+        r#"{"format":"tracedecay.compact_context.v1","estimator_version":"privacy-words-v1","bundle":{"records":[{"anchor_id":"retrieval.v2.sha256:ecb7ffbc9bcb6fb83fd1369256279abc26b336edb9febf75f14cdfb752696e25","grain":"occurrence","hydration":"available","encoded_bytes":169}],"omissions":[],"continuation_anchors":[],"coverage":{"visible":1,"hidden":0,"unknown":0,"redacted":0},"conflicts":[],"lineage":[],"encoded_bytes":169},"summary_omissions":[],"payloads":[{"anchor_id":"retrieval.v2.sha256:ecb7ffbc9bcb6fb83fd1369256279abc26b336edb9febf75f14cdfb752696e25","encoding":"utf8","data":"The billing pipeline regression is fixed."}]}"#
+    );
+    assert!(!first_items[0].context.rendered.contains(PRIVACY_CANARY));
     assert!(!format!("{first:?}{replay:?}").contains(PRIVACY_CANARY));
 }
 

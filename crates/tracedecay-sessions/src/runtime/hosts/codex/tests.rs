@@ -1002,6 +1002,350 @@ mod goal_event_tests {
         );
     }
 
+    /// The newest in-project day is admitted, and its message text is durable,
+    /// before any older out-of-project day is opened.
+    ///
+    /// Search reads the published projection of those admitted messages. A pass
+    /// that keeps walking older days writes their coverage cursors before that
+    /// projection can run, so the newest day stays invisible until the older
+    /// sweep finishes. The follow-up pass must still open the older day, or
+    /// the yield would retry the same page forever.
+    #[tokio::test]
+    async fn newest_day_messages_are_durable_before_older_days_are_opened() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let marker = "NEWEST_DAY_MARKER cobalt orchard scheduler is ready";
+        let newest = [
+            ("2026", "08", "29", "newest-a"),
+            ("2026", "08", "29", "newest-b"),
+        ];
+        let older = [
+            ("2026", "08", "28", "older-a"),
+            ("2026", "08", "28", "older-b"),
+        ];
+        for (year, month, day, session_id) in newest {
+            write_scoped_rollout(&home, year, month, day, session_id, &project, marker);
+        }
+        for (year, month, day, session_id) in older {
+            write_scoped_rollout(
+                &home,
+                year,
+                month,
+                day,
+                session_id,
+                &other,
+                "OLDER_DAY_MARKER should stay unopened",
+            );
+        }
+
+        let project_id = ProjectId::new("project-newest-before-older").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let run_pass = || {
+            with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
+            )
+        };
+
+        let first = run_pass().await;
+        assert!(first.failures.is_empty(), "{:?}", first.failures);
+        let admitted = session_ids_of(&admission.observations());
+        assert_eq!(
+            admitted,
+            ["newest-a".to_owned(), "newest-b".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(
+            admission.observations().iter().any(|stored| {
+                let envelope: CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.facts().iter().any(|fact| {
+                    matches!(
+                        fact,
+                        CanonicalObservationFactV1::Message { content, .. }
+                            if content.as_str() == Some(marker)
+                    )
+                })
+            }),
+            "the newest day's message text must be durable before older days are opened"
+        );
+        for session_id in ["older-a", "older-b"] {
+            let source =
+                crate::runtime::hosts::codex::codex_observation_source_v2(session_id).unwrap();
+            assert!(
+                admission
+                    .get_source_cursor(&source, &scope)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{session_id} was opened in the pass that admitted the newest day"
+            );
+        }
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Partial)
+        );
+
+        let mut older_opened = false;
+        for _ in 0..3 {
+            let outcome = run_pass().await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+            let source =
+                crate::runtime::hosts::codex::codex_observation_source_v2("older-a").unwrap();
+            if admission
+                .get_source_cursor(&source, &scope)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                older_opened = true;
+                break;
+            }
+        }
+        assert!(
+            older_opened,
+            "deferring the older day must still open it on a later pass"
+        );
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            ["newest-a".to_owned(), "newest-b".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "out-of-project days stay out of the project observation set"
+        );
+    }
+
+    /// An out-of-project rollout inside the day being admitted does not end
+    /// the pass. On a profile that interleaves projects, ending there admits a
+    /// few rollouts per pass and rediscovers the same page each time.
+    #[tokio::test]
+    async fn a_mixed_day_is_admitted_in_one_pass_before_older_days_are_opened() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        for (session_id, cwd) in [
+            ("mixed-a", &project),
+            ("mixed-m", &other),
+            ("mixed-z", &project),
+        ] {
+            write_scoped_rollout(&home, "2026", "08", "29", session_id, cwd, "mixed day");
+        }
+        write_scoped_rollout(&home, "2026", "08", "28", "older-x", &other, "older day");
+
+        let project_id = ProjectId::new("project-mixed-day").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let outcome = with_transcript_source_profile(
+            tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+            ProjectProviderRun {
+                project_root: &project,
+                project_id: &project_id,
+                facade: &admission,
+                scope: &scope,
+                candidate: SessionProvider::Codex,
+                max_new_bytes: u64::MAX,
+                cancellation: &ObservationCancellation::default(),
+                codex_discovery: None,
+            }
+            .run_codex(),
+        )
+        .await;
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            ["mixed-a".to_owned(), "mixed-z".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        let older = crate::runtime::hosts::codex::codex_observation_source_v2("older-x").unwrap();
+        assert!(
+            admission
+                .get_source_cursor(&older, &scope)
+                .await
+                .unwrap()
+                .is_none(),
+            "the older out-of-project day belongs to the next pass"
+        );
+    }
+
+    /// A session that appends to today's rollout between passes must not keep
+    /// the pass yielding at yesterday's out-of-project day. The yield exists
+    /// for a rollout opened this pass; a resumed live tail already has its
+    /// earlier window searchable, so the pass walks on, admits the older
+    /// in-project day, and commits its frontier.
+    #[tokio::test]
+    async fn a_live_tail_does_not_starve_older_in_project_days() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        write_scoped_rollout(&home, "2026", "08", "29", "live", &project, "live day");
+        write_scoped_rollout(&home, "2026", "08", "28", "other-a", &other, "other day");
+        write_scoped_rollout(&home, "2026", "08", "27", "oldest", &project, "oldest day");
+        let live_rollout = home.join(".codex/sessions/2026/08/29/rollout-live.jsonl");
+
+        let project_id = ProjectId::new("project-live-tail").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let run_pass = || {
+            with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
+            )
+        };
+
+        let first = run_pass().await;
+        assert!(first.failures.is_empty(), "{:?}", first.failures);
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            BTreeSet::from(["live".to_owned()]),
+            "the newest day yields before the older out-of-project day is opened"
+        );
+
+        let appends = 3;
+        for ordinal in 0..appends {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&live_rollout)
+                .unwrap();
+            std::io::Write::write_all(
+                &mut file,
+                format!(
+                    "{}\n",
+                    json!({
+                        "timestamp": format!("2026-08-29T12:00:{:02}.000Z", ordinal + 2),
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": format!("live append {ordinal}")}
+                    })
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let outcome = run_pass().await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        }
+
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            BTreeSet::from(["live".to_owned(), "oldest".to_owned()]),
+            "a live tail appending every pass starved the older in-project day"
+        );
+        assert_eq!(
+            admission
+                .observations()
+                .iter()
+                .filter(|stored| {
+                    let envelope: CanonicalObservationEnvelopeV1 =
+                        serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                    envelope.relations().session_id().as_str() == "live"
+                })
+                .count(),
+            2 + appends,
+            "every live append is admitted exactly once"
+        );
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Complete)
+        );
+    }
+
+    fn write_scoped_rollout(
+        home: &std::path::Path,
+        year: &str,
+        month: &str,
+        day: &str,
+        session_id: &str,
+        cwd: &std::path::Path,
+        message: &str,
+    ) {
+        let directory = home
+            .join(".codex/sessions")
+            .join(year)
+            .join(month)
+            .join(day);
+        std::fs::create_dir_all(&directory).unwrap();
+        let lines = [
+            json!({
+                "timestamp": format!("{year}-{month}-{day}T12:00:00.000Z"),
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": cwd}
+            }),
+            json!({
+                "timestamp": format!("{year}-{month}-{day}T12:00:01.000Z"),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": message}
+            }),
+        ];
+        std::fs::write(
+            directory.join(format!("rollout-{session_id}.jsonl")),
+            lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+    }
+
+    fn session_ids_of(observations: &[tracedecay_store::StoredObservation]) -> BTreeSet<String> {
+        observations
+            .iter()
+            .map(|stored| {
+                let envelope: CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.relations().session_id().as_str().to_owned()
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn legacy_current_message_migration_records_receipted_duplicate_coverage() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
@@ -2273,6 +2617,67 @@ mod recent_first_discovery_tests {
             "an over-cap backlog must report truncation so catch-up stays scheduled"
         );
         assert!(pass.report.paths.len() <= bounds.max_files);
+    }
+
+    /// A dated tree whose older days hold more rollouts than one structural
+    /// pass can charge must still surface today's session immediately. Listing
+    /// those older files is not allowed to postpone the newest rollout.
+    #[tokio::test]
+    async fn codex_catch_up_surfaces_the_newest_rollout_before_older_days_are_listed() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        for index in 0..800 {
+            write_dated_rollout(home, ("2026", "06", "01"), &format!("older-{index:04}"));
+        }
+        let newest = write_dated_rollout(home, ("2026", "09", "28"), "project-newest");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::default_walk();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut surfaced = false;
+        for _ in 0..2 {
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => {
+                    panic!("a single catch-up consumer must not wait on its own scan")
+                }
+            };
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+            if pass.report.paths.first() == Some(&newest) {
+                surfaced = true;
+                break;
+            }
+        }
+        assert!(
+            surfaced,
+            "catch-up must surface the newest rollout before it finishes listing older days"
+        );
+        for _ in 0..64 {
+            if frontier.is_complete() {
+                break;
+            }
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => continue,
+            };
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+        }
+        assert!(
+            frontier.is_complete(),
+            "catch-up must finish the rollout sweep after the newest session is visible"
+        );
     }
 
     #[test]

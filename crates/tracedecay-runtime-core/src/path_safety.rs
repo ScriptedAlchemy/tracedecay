@@ -406,6 +406,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("temporary directory");
         let root = temp.path().canonicalize().expect("canonical temp root");
 
+        assert!(same_canonical_path(
+            &root.join("left.db"),
+            &root.join("left.db"),
+        ));
         assert!(!same_canonical_path(
             &root.join("left.db"),
             &root.join("right.db"),

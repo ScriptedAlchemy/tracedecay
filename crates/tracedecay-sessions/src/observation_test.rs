@@ -1,5 +1,3 @@
-use std::fs;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -483,6 +481,10 @@ async fn capture_redacts_before_the_store_and_replays_the_receipt_bound_row() {
         } => sanitized_record,
         other => panic!("capture must persist, got {other:?}"),
     };
+    assert_eq!(
+        sanitized_record.payload().to_string(),
+        r#"{"api_key":"[TraceDecay redacted: sensitive field]","message":{"content":"hello","role":"user"},"type":"user"}"#
+    );
     assert!(!sanitized_record.payload().to_string().contains(secret));
     assert!(matches!(
         outcome,
@@ -506,34 +508,19 @@ async fn capture_redacts_before_the_store_and_replays_the_receipt_bound_row() {
         EvidenceAvailabilityV1::Unavailable
     ));
     let payload = page.observations()[0].observation().payload().to_string();
+    assert_eq!(
+        payload,
+        r#"{"api_key":"[TraceDecay redacted: sensitive field]","message":{"content":"hello","role":"user"},"type":"user"}"#
+    );
     assert!(!payload.contains(secret));
-    assert!(payload.contains("TraceDecay redacted"));
 }
+
+const SANITIZED_REPOSITORY_PAYLOAD: &str = r#"{"api_key":"[TraceDecay redacted: sensitive field]","message":{"content":"repository evidence","role":"user"},"type":"user"}"#;
 
 #[tokio::test]
 async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
-    let repository = TempDir::new().unwrap();
-    let git = |args: &[&str]| {
-        let output = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .args(args)
-        .current_dir(repository.path())
-        .output()
-        .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.name", "TraceDecay Test"]);
-    git(&["config", "user.email", "tracedecay@example.invalid"]);
-    fs::write(repository.path().join("tracked.txt"), "content").unwrap();
-    git(&["add", "--", "tracked.txt"]);
-    git(&["commit", "-q", "-m", "initial"]);
+    let repository = crate::repository_provenance::repository_provenance_test::GitFixture::new();
+    repository.commit("initial");
 
     let application = application();
     let request = request(&json!({
@@ -549,9 +536,17 @@ async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
         [0x5a; 32],
     )));
     let outcome = application.capture_observation(request).await.unwrap();
-    let CaptureObservationOutcome::Persisted { outcome, .. } = outcome else {
+    let CaptureObservationOutcome::Persisted {
+        outcome,
+        sanitized_record,
+        ..
+    } = outcome
+    else {
         panic!("repository observation must persist");
     };
+    let sanitized_payload = sanitized_record.payload().to_string();
+    assert_eq!(sanitized_payload, SANITIZED_REPOSITORY_PAYLOAD);
+    assert!(!sanitized_payload.contains("sk-repository-provenance-secret"));
     let attachment = outcome.receipt().repository_provenance_attachment();
     let EvidenceAvailabilityV1::Known(provenance) = attachment.availability() else {
         panic!("repository provenance must be known");
@@ -566,8 +561,14 @@ async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
             if capture_id == provenance.capture_id()
     ));
     let encoded = serde_json::to_string(attachment).unwrap();
+    let attachment_value: Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        attachment_value["availability"]["value"]["capture"]["evidence"]["remote_identity"],
+        json!({"availability": "missing"})
+    );
     assert!(!encoded.contains(repository.path().to_string_lossy().as_ref()));
     assert!(!encoded.contains("sk-repository-provenance-secret"));
+    assert!(encoded.contains("repository.application-test"));
 }
 
 #[tokio::test]

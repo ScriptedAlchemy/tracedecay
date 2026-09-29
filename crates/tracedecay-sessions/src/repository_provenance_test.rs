@@ -8,12 +8,12 @@ use super::*;
 
 const PRIVACY_DOMAIN_SALT: [u8; 32] = [0x5a; 32];
 
-struct GitFixture {
+pub(crate) struct GitFixture {
     root: TempDir,
 }
 
 impl GitFixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = TempDir::new().unwrap();
         let fixture = Self { root };
         fixture.git(&["init", "-q", "-b", "main"]);
@@ -22,7 +22,7 @@ impl GitFixture {
         fixture
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         self.root.path()
     }
 
@@ -49,7 +49,7 @@ impl GitFixture {
         output
     }
 
-    fn commit(&self, contents: &str) {
+    pub(crate) fn commit(&self, contents: &str) {
         fs::write(self.path().join("tracked.txt"), contents).unwrap();
         self.git(&["add", "--", "tracked.txt"]);
         self.git(&["commit", "-q", "-m", contents]);
@@ -114,10 +114,21 @@ fn identity_capture_keeps_head_ref_and_private_locator_evidence() {
         RepositoryRemoteIdentityV1::Known(_)
     ));
     let encoded = serde_json::to_string(&capture).unwrap();
+    let RepositoryRemoteIdentityV1::Known(digest) = capture.evidence().remote_identity() else {
+        panic!(
+            "remote identity must be a privacy-bound digest, got {:?}",
+            capture.evidence().remote_identity()
+        );
+    };
+    assert_eq!(
+        digest.as_str(),
+        "sha256:50ef140bac90e9de982b2c596522dee50eefb1e05f064392ad62321a96a22f90"
+    );
     assert!(!encoded.contains("alice"));
     assert!(!encoded.contains("top-secret"));
     assert!(!encoded.contains("token=hidden"));
     assert!(!encoded.contains(fixture.path().to_string_lossy().as_ref()));
+    assert!(encoded.contains(digest.as_str()));
 
     fixture.git(&[
         "remote",

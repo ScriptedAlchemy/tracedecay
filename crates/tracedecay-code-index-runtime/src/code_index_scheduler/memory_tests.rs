@@ -431,6 +431,33 @@ async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
     registry.shutdown().await;
 }
 
+fn assert_observed_worker_memory_refusal(
+    failure: &CodeIndexSchedulerErrorV1,
+    observed_bytes: u64,
+    configured_limit: u64,
+) {
+    let CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(admission) = failure else {
+        panic!("expected a worker resident-memory admission failure, got {failure:?}");
+    };
+    assert!(
+        admission.is_observed_over_budget(),
+        "the refusal must name measured pressure, not a full reservation ledger"
+    );
+    let rendered = failure.to_string();
+    assert!(
+        rendered.contains(&observed_bytes.to_string()),
+        "the refusal names observed bytes: {rendered}"
+    );
+    assert!(
+        rendered.contains(&configured_limit.to_string()),
+        "the refusal names configured bytes: {rendered}"
+    );
+    assert!(
+        failure.is_transient_capacity_failure(),
+        "an over-budget refusal is retryable as pressure falls"
+    );
+}
+
 /// Measured RSS, not the reservation ledger, decides worker admission once a
 /// sample says the process is over budget, and the refusal names the observed
 /// and configured bytes so it is never a silent stall.
@@ -485,30 +512,12 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
             .expect("an unobserved process admits on the reservation ceiling alone"),
     );
 
-    measure(pressure.high_watermark_bytes() + 1);
+    let over_high = pressure.high_watermark_bytes() + 1;
+    measure(over_high);
     let failure = scheduler
         .reserve_worker_memory()
         .expect_err("measured RSS over the high watermark refuses new worker admission");
-    let super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(admission) = &failure else {
-        panic!("expected a worker resident-memory admission failure, got {failure:?}");
-    };
-    assert!(
-        admission.is_observed_over_budget(),
-        "the refusal must name measured pressure, not a full reservation ledger"
-    );
-    let rendered = failure.to_string();
-    assert!(
-        rendered.contains(&(pressure.high_watermark_bytes() + 1).to_string()),
-        "the refusal names observed bytes: {rendered}"
-    );
-    assert!(
-        rendered.contains(&limit.get().to_string()),
-        "the refusal names configured bytes: {rendered}"
-    );
-    assert!(
-        failure.is_transient_capacity_failure(),
-        "an over-budget refusal is retryable as pressure falls"
-    );
+    assert_observed_worker_memory_refusal(&failure, over_high, limit.get());
 
     // Hysteresis: between the watermarks the refusal stands rather than flapping.
     let between = u64::midpoint(
@@ -517,10 +526,10 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
     );
     for _ in 0..3 {
         measure(between);
-        assert!(
-            scheduler.reserve_worker_memory().is_err(),
-            "admission must not flap between the watermarks"
-        );
+        let failure = scheduler
+            .reserve_worker_memory()
+            .expect_err("admission must not flap between the watermarks");
+        assert_observed_worker_memory_refusal(&failure, between, limit.get());
     }
 
     measure(pressure.low_watermark_bytes());

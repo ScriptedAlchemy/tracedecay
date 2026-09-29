@@ -794,21 +794,24 @@ mod tests {
             "preview": "{}",
             "handle": "rh_test",
         });
-        let err = reject_truncation_envelope(&envelope, "tracedecay_status").unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("truncated JSON"));
-        assert!(message.contains("20000"));
-        assert!(message.contains("rh_test"));
-        assert!(
-            reject_truncation_envelope(&json!({ "node_count": 1 }), "tracedecay_status").is_ok()
-        );
-        assert!(
+        match reject_truncation_envelope(&envelope, "tracedecay_status") {
+            Err(tracedecay_domain::errors::TraceDecayError::Config { message }) => assert_eq!(
+                message,
+                "daemon tool tracedecay_status returned truncated JSON (20000 chars); recover with tracedecay_retrieve handle=rh_test"
+            ),
+            other => panic!("expected a truncation refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            reject_truncation_envelope(&json!({ "node_count": 1 }), "tracedecay_status"),
+            Ok(())
+        ));
+        assert!(matches!(
             reject_truncation_envelope(
                 &json!({ "truncated": true, "matches": [] }),
                 "tracedecay_status",
-            )
-            .is_ok()
-        );
+            ),
+            Ok(())
+        ));
     }
 
     #[test]

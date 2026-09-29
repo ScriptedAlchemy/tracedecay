@@ -439,6 +439,9 @@ mod tests {
             ],
         );
         assert!(!release_has_current_platform_asset(&r));
+        let expected = asset_name("0.9.9", false);
+        let present = release("v0.9.9", false, &[&expected]);
+        assert!(release_has_current_platform_asset(&present));
     }
 
     #[test]
@@ -456,6 +459,9 @@ mod tests {
         let stable_name = asset_name("0.9.9-beta.1", false);
         let r = release("v0.9.9-beta.1", true, &[&stable_name]);
         assert!(!release_has_current_platform_asset(&r));
+        let beta_name = asset_name("0.9.9-beta.1", true);
+        let accepted = release("v0.9.9-beta.1", true, &[&beta_name]);
+        assert!(release_has_current_platform_asset(&accepted));
     }
 
     #[test]

@@ -1360,6 +1360,24 @@ fn preexisting_empty_graph_file_is_deleted_and_remounted_fresh() {
     let request = registration(identity("profile-a", "project-a"), temp.path());
 
     let database = mount_and_resolve(&registry, request).unwrap();
+    database
+        .apply_unverified(batch(
+            "code",
+            "fresh-generation",
+            "fresh-watermark",
+            vec![GraphMutation::UpsertEntity(entity("fresh"))],
+        ))
+        .unwrap();
+    assert_eq!(
+        database
+            .entity(
+                &GraphNamespace::new("project").unwrap(),
+                &GraphEntityId::new("fresh").unwrap(),
+                Arc::new(NeverCancelled),
+            )
+            .unwrap(),
+        Some(entity("fresh"))
+    );
     drop(database);
 
     let copies: Vec<_> = std::fs::read_dir(temp.path())
@@ -1368,8 +1386,5 @@ fn preexisting_empty_graph_file_is_deleted_and_remounted_fresh() {
         .filter(|name| name.contains(".corrupt-"))
         .collect();
     assert!(copies.is_empty(), "no corrupt copy may be kept: {copies:?}");
-    assert!(
-        std::fs::metadata(graph_path(temp.path())).unwrap().len() > 0,
-        "a fresh store now serves at the canonical path"
-    );
+    assert!(graph_path(temp.path()).is_file());
 }

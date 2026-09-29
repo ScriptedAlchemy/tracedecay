@@ -55,18 +55,17 @@ fn owner_close_releases_the_physical_database_after_durability_uncertainty() {
     let handle = owner.issue_lease().unwrap();
     handle.inner.poisoned.store(true, Ordering::Release);
 
-    assert!(matches!(
+    assert_eq!(
         owner.close(),
-        Err(GraphDbError::DurabilityUncertain { .. })
-    ));
-    assert!(
-        handle
-            .inner
-            .database
-            .read()
-            .expect("database lock remains readable")
-            .is_none(),
-        "owner close must release the physical Grafeo database even after poisoning"
+        Err(GraphDbError::DurabilityUncertain {
+            message: "the handle was poisoned after an observed post-commit persistence failure"
+                .to_owned(),
+        })
+    );
+    assert_eq!(
+        owner.close(),
+        Err(GraphDbError::Closed),
+        "the poisoned close must release the physical database before a second close"
     );
 }
 
@@ -222,12 +221,20 @@ fn grafeo_query_mutations_track_conflicting_marker_writes() {
     first
         .execute("MATCH (n:Marker {marker_key: 'one'}) SET n.value = 1")
         .unwrap();
-    assert!(
-        second
-            .execute("MATCH (n:Marker {marker_key: 'one'}) SET n.value = 2")
-            .is_err(),
-        "the second tracked writer must conflict before changing the marker"
-    );
+    let conflict = second
+        .execute("MATCH (n:Marker {marker_key: 'one'}) SET n.value = 2")
+        .expect_err("the second tracked writer must conflict before changing the marker");
+    match conflict {
+        grafeo_common::utils::error::Error::Transaction(
+            grafeo_common::utils::error::TransactionError::WriteConflict(message),
+        ) => {
+            assert_eq!(
+                message,
+                "GRAFEO-T001: Write conflict: Write-write conflict on entity Node(NodeId(0))"
+            );
+        }
+        other => panic!("expected a write-write conflict, got {other:?}"),
+    }
     first.rollback().unwrap();
     second.rollback().unwrap();
 }

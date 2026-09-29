@@ -1031,7 +1031,12 @@ mod tests {
     fn dropping_discovery_owner_cancels_retained_blocking_clones() {
         let owner = GitHubDiscoveryControlV1::bounded(Instant::now() + Duration::from_secs(15));
         let retained = owner.clone();
+        let live = owner
+            .remaining()
+            .expect("a live discovery control still has a deadline");
+        assert!(live <= Duration::from_secs(15));
+        assert!(live > Duration::from_secs(10));
         drop(owner);
-        assert!(retained.remaining().is_none());
+        assert_eq!(retained.remaining(), None);
     }
 }

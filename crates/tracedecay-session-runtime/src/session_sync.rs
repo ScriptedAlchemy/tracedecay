@@ -15,16 +15,13 @@ use tracedecay_contracts::session_sync::{
 use tracedecay_contracts::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, now_micros,
 };
-use tracedecay_domain::{BrainId, ProjectId, SessionId, UserProfileId, UtcMicros};
+use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 
+use crate::session_temporal_refresh_scheduler::wake::HistoricalAdmissionView;
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
-use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
-use tracedecay_sessions::serving::{
-    SessionProjectionServingState, SessionProjectionServingStatusPort,
-};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
 const COALESCED_JOURNAL_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
@@ -114,6 +111,11 @@ pub enum SessionSyncWorkResult {
         failure_codes: Vec<String>,
     },
     Interrupted(work::SessionSyncInterruption),
+}
+
+struct ImportHistoryObservation {
+    coverage: Vec<SessionSyncSourceCoverageV1>,
+    failure_codes: Vec<String>,
 }
 
 struct SessionSyncTerminalMaterial {
@@ -569,49 +571,36 @@ impl DaemonSessionSyncService {
                 }
             }
             SessionSyncWorkResult::Finished {
-                mut interruption,
+                interruption,
                 committed,
                 stats,
                 coverage,
                 source_frontiers,
-                mut failure_codes,
+                failure_codes,
             } => {
-                let mut interrupted = interruption.is_some();
+                let interrupted = interruption.is_some();
                 let is_import = matches!(
                     request.command(),
                     SessionSyncCommandV1::ImportTranscripts(_)
                 );
-                let mut projection_current = false;
                 let coverage_complete = !coverage.is_empty()
                     && coverage.iter().all(|entry| entry.coverage.is_complete());
-                if !projection_current
-                    && !interrupted
-                    && coverage_complete
-                    && failure_codes.is_empty()
-                    && is_import
-                {
-                    match self
-                        .await_import_projection(&context, &project_sessions, &request)
-                        .await
-                    {
-                        Ok(()) => projection_current = true,
-                        Err(Some(reason)) => {
-                            interruption = Some(reason);
-                            interrupted = true;
-                        }
-                        Err(None) => {
-                            failure_codes
-                                .push("session_temporal_projection_not_current".to_owned());
-                        }
-                    }
-                }
-                let termination = completion_termination(
+                let mut termination = completion_termination(
                     interruption.and_then(work::SessionSyncInterruption::termination),
                     committed,
                     &stats,
                     coverage_complete,
                     failure_codes.is_empty(),
                 );
+                if import_reports_deferred_progress(
+                    is_import,
+                    interrupted,
+                    &failure_codes,
+                    coverage_complete,
+                    &coverage,
+                ) {
+                    termination = OperationTermination::Partial;
+                }
                 if self
                     .persist_terminal(
                         &context,
@@ -628,7 +617,6 @@ impl DaemonSessionSyncService {
                     .is_ok()
                     && committed
                     && !interrupted
-                    && !projection_current
                 {
                     context.project_refresh.wake();
                     context.user_refresh.wake();
@@ -637,158 +625,32 @@ impl DaemonSessionSyncService {
         }
     }
 
-    async fn await_import_history(
+    /// Hands historical catch-up to both refresh workers. The import records
+    /// that hand-off, one deferred unit per store scope, and never waits for
+    /// the pass: only the workers' own serving state can later say it ran.
+    fn schedule_import_history(
         &self,
         context: &SessionSyncProjectContext,
         request: &SessionSyncRequestV1,
-    ) -> Result<
-        crate::session_temporal_refresh_scheduler::history::SessionHistoricalIngestProgress,
-        Option<work::SessionSyncInterruption>,
-    > {
-        let remaining_micros = request
-            .deadline()
-            .expires_at
-            .0
-            .saturating_sub(now_micros().0);
-        let Ok(remaining_micros) = u64::try_from(remaining_micros) else {
-            return Err(Some(work::SessionSyncInterruption::TimedOut));
-        };
-        if remaining_micros == 0 {
-            return Err(Some(work::SessionSyncInterruption::TimedOut));
-        }
-        let timeout = Duration::from_micros(remaining_micros);
-        let history = async {
-            tokio::join!(
-                context
-                    .project_refresh
-                    .wake_history_and_wait_until_idle(timeout),
-                context
-                    .user_refresh
-                    .wake_history_and_wait_until_idle(timeout),
-            )
-        };
-        tokio::pin!(history);
-        let settled = tokio::select! {
-            settled = &mut history => settled,
-            interruption = self.wait_for_interruption(request) => {
-                return Err(Some(interruption));
-            }
-        };
-        // Only the historical frontier is decided here. Projection currency is
-        // `await_import_projection`'s gate, which waits for the projection
-        // workers and then re-checks these same serving states and stores. This
-        // gate does not wait for them, so asserting them here reports
-        // `session_history_not_current` for a history that is current and whose
-        // projection has simply not drained yet, and skips the stage that would
-        // have waited for it.
-        if let (Some(project), Some(user)) = settled {
-            Ok(
-                crate::session_temporal_refresh_scheduler::history::SessionHistoricalIngestProgress {
-                    stats: project.stats.merge(user.stats),
-                    committed: project.committed || user.committed,
-                },
-            )
-        } else {
-            Err(None)
-        }
-    }
-
-    async fn await_import_projection(
-        &self,
-        context: &SessionSyncProjectContext,
-        project_sessions: &RegisteredGlobalDbLeaseV1,
-        request: &SessionSyncRequestV1,
-    ) -> Result<(), Option<work::SessionSyncInterruption>> {
-        let remaining_micros = request
-            .deadline()
-            .expires_at
-            .0
-            .saturating_sub(now_micros().0);
-        let Ok(remaining_micros) = u64::try_from(remaining_micros) else {
-            return Err(Some(work::SessionSyncInterruption::TimedOut));
-        };
-        if remaining_micros == 0 {
-            return Err(Some(work::SessionSyncInterruption::TimedOut));
-        }
-        let timeout = Duration::from_micros(remaining_micros);
-        let projection = async {
-            tokio::join!(
-                context.project_refresh.wake_and_wait_until_idle(timeout),
-                context.user_refresh.wake_and_wait_until_idle(timeout),
-            )
-        };
-        tokio::pin!(projection);
-        let settled = tokio::select! {
-            settled = &mut projection => settled,
-            interruption = self.wait_for_interruption(request) => {
-                return Err(Some(interruption));
-            }
-        };
-        let project = context.project_refresh.status();
-        let user = context.user_refresh.status();
-        if settled.0
-            && settled.1
-            && project.backlog == 0
-            && user.backlog == 0
-            && project.unavailable_reason.is_none()
-            && user.unavailable_reason.is_none()
-            && matches!(
-                context.project_refresh.serving_status().state,
-                SessionProjectionServingState::Current
-            )
-            && matches!(
-                context.user_refresh.serving_status().state,
-                SessionProjectionServingState::Current
-            )
-            && self
-                .projection_store_is_current(project_sessions, request)
-                .await?
-            && self
-                .projection_store_is_current(&context.user_sessions, request)
-                .await?
+    ) -> Result<ImportHistoryObservation, work::SessionSyncInterruption> {
+        if let Some(interruption) =
+            self.observed_interruption(request.cancellation(), request.deadline())
         {
-            Ok(())
-        } else {
-            Err(None)
+            return Err(interruption);
         }
-    }
-
-    async fn projection_store_is_current(
-        &self,
-        database: &RegisteredGlobalDbLeaseV1,
-        request: &SessionSyncRequestV1,
-    ) -> Result<bool, Option<work::SessionSyncInterruption>> {
-        let page_limit =
-            crate::session_temporal_refresh_scheduler::projector::SessionTemporalRefreshPolicy::default()
-                .max_begin_requests_per_pass;
-        let active_scan_slots = page_limit / 2;
-
-        let temporal = SessionTemporalAccess::new(&**database);
-        let mut active_after: Option<SessionId> = None;
-        loop {
-            let page = {
-                let discovery = temporal.pending_session_temporal_refresh_page_result(
-                    page_limit,
-                    active_scan_slots,
-                    active_after.as_ref(),
-                );
-                tokio::pin!(discovery);
-                tokio::select! {
-                    page = &mut discovery => page.map_err(|_| None)?,
-                    interruption = self.wait_for_interruption(request) => {
-                        return Err(Some(interruption));
-                    }
-                }
-            };
-            let (pending, next_active, has_more) = page.into_parts();
-            if !pending.is_empty() {
-                return Ok(false);
-            }
-            if !has_more {
-                return Ok(true);
-            }
-            active_after = next_active;
-        }
+        let mut failure_codes = Vec::new();
+        push_historical_admission_failure(
+            &context.project_refresh.schedule_historical_admission(),
+            &mut failure_codes,
+        );
+        push_historical_admission_failure(
+            &context.user_refresh.schedule_historical_admission(),
+            &mut failure_codes,
+        );
+        Ok(ImportHistoryObservation {
+            coverage: transcript_import_requested_coverage(),
+            failure_codes,
+        })
     }
 
     #[hotpath::skip]
@@ -1096,6 +958,9 @@ pub mod git_topology;
 mod project_lifecycle;
 pub mod work;
 
+#[cfg(test)]
+mod import_admission_tests;
+
 pub use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -1341,6 +1206,41 @@ fn decode_matching_journal(
         return Err("session_sync_idempotency_conflict");
     }
     Ok(journal)
+}
+
+fn import_reports_deferred_progress(
+    is_import: bool,
+    interrupted: bool,
+    failure_codes: &[String],
+    coverage_complete: bool,
+    coverage: &[SessionSyncSourceCoverageV1],
+) -> bool {
+    is_import
+        && !interrupted
+        && failure_codes.is_empty()
+        && !coverage_complete
+        && !coverage.is_empty()
+        && coverage.iter().all(|entry| {
+            matches!(
+                entry.coverage,
+                SessionSyncCoverageV1::Complete | SessionSyncCoverageV1::Partial { .. }
+            )
+        })
+}
+
+fn push_historical_admission_failure(
+    view: &HistoricalAdmissionView,
+    failure_codes: &mut Vec<String>,
+) {
+    match view {
+        HistoricalAdmissionView::Scheduled => {}
+        HistoricalAdmissionView::Blocked { reason_code } => {
+            failure_codes.push(reason_code.clone());
+        }
+        HistoricalAdmissionView::Unavailable => {
+            failure_codes.push("session_history_not_current".to_owned());
+        }
+    }
 }
 
 fn completion_termination(

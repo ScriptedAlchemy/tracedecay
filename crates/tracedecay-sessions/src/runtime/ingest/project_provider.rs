@@ -8,7 +8,7 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use crate::runtime::shared::TranscriptIngestStats;
+use crate::runtime::shared::{ProjectMembership, TranscriptIngestStats};
 use crate::runtime::source::{
     HostCoverageReason, HostProviderCoverage, TranscriptDiscoveryBounds,
     persist_codex_history_frontier, persist_host_provider_coverage, read_codex_history_frontier,
@@ -262,6 +262,17 @@ impl<'a> ProjectProviderRun<'a> {
         let mut remaining = self.max_new_bytes;
         let mut deferred = discovery.is_truncated();
         let mut frontier_committable = true;
+        // Out-of-scope rollouts consume no byte budget, so a newest-first page
+        // would otherwise write a cursor for every older out-of-scope day
+        // before the admitted window is projected into search. Once in-scope
+        // frames persisted from a rollout opened this pass, a day directory
+        // that opens out of scope belongs to the next pass. In-scope days and
+        // mixed days keep the pass going, so a project whose history is all in
+        // scope still commits its frontier. A rollout resumed from its cursor
+        // is a live tail whose earlier window is already searchable; letting
+        // its appends end the pass would replay the same page while the
+        // session stays active and never reach an older in-scope day.
+        let mut persisted_day: Option<&Path> = None;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         for path in &discovery.paths {
             if remaining == 0 {
@@ -270,6 +281,16 @@ impl<'a> ProjectProviderRun<'a> {
                 break;
             }
             if self.cancellation.is_cancelled() {
+                deferred = true;
+                frontier_committable = false;
+                break;
+            }
+            if persisted_day.is_some_and(|day| path.parent() != Some(day))
+                && run_blocking_transcript_section(|| {
+                    codex::codex_rollout_project_membership(path, self.project_root)
+                        == Some(ProjectMembership::NoMatch)
+                })
+            {
                 deferred = true;
                 frontier_committable = false;
                 break;
@@ -285,6 +306,9 @@ impl<'a> ProjectProviderRun<'a> {
             .await
             {
                 Ok(progress) => {
+                    if progress.frames_persisted > 0 && !progress.resumed {
+                        persisted_day = path.parent();
+                    }
                     deferred |= progress.source_deferred || progress.bytes_consumed > remaining;
                     frontier_committable &=
                         !progress.source_deferred && progress.bytes_consumed <= remaining;
