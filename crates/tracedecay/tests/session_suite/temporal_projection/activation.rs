@@ -414,7 +414,6 @@ async fn frontier_digest_fixture(
         ))
         .await
         .unwrap();
-    drop(store);
     drop(observation_store);
     (runtime, path, session_id)
 }
