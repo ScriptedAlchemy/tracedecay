@@ -1167,128 +1167,117 @@ fn credential_assignment_ranges(
     while let Some(matched) = searcher.advance(|input| Ok(prefix.search_with(cache, input))) {
         prefixes.push(matched.span());
     }
-    prefixes
-        .into_iter()
-        .filter_map(|matched| {
-            let prefix_end = matched.end;
-            let limit = prefix_end
-                .saturating_add(MAX_ASSIGNMENT_SCAN_BYTES)
-                .min(text.len());
-            let bytes = text.as_bytes();
-            let value_start = if allows_wrapped_source_value {
-                match source_assignment_value_start(bytes, prefix_end, limit) {
-                    Some(value_start) => value_start,
-                    None => return Some(matched.start..limit),
-                }
-            } else {
-                prefix_end
-            };
-            if bytes
-                .get(value_start)
-                .is_some_and(|byte| matches!(*byte, b'=' | b'>'))
-            {
-                return None;
+    let ranges = prefixes.into_iter().filter_map(|matched| {
+        let prefix_end = matched.end;
+        let limit = prefix_end
+            .saturating_add(MAX_ASSIGNMENT_SCAN_BYTES)
+            .min(text.len());
+        let bytes = text.as_bytes();
+        let value_start = if allows_wrapped_source_value {
+            match source_assignment_value_start(bytes, prefix_end, limit) {
+                Some(value_start) => value_start,
+                None => return Some(matched.start..limit),
             }
-            let line_end = bytes[value_start..limit]
-                .iter()
-                .position(|byte| matches!(*byte, b'\r' | b'\n'))
-                .map_or(limit, |offset| value_start + offset);
+        } else {
+            prefix_end
+        };
+        if bytes
+            .get(value_start)
+            .is_some_and(|byte| matches!(*byte, b'=' | b'>'))
+        {
+            return None;
+        }
+        let line_end = bytes[value_start..limit]
+            .iter()
+            .position(|byte| matches!(*byte, b'\r' | b'\n'))
+            .map_or(limit, |offset| value_start + offset);
 
-            if assignment_uses_colon(&text[matched.range()])
-                && is_obvious_rust_non_secret_value(text, matched.start, value_start, line_end)
-            {
-                return None;
-            }
+        if assignment_uses_colon(&text[matched.range()])
+            && is_obvious_rust_non_secret_value(text, matched.start, value_start, line_end)
+        {
+            return None;
+        }
 
-            if let Some(raw) = rust_raw_string(bytes, value_start, limit) {
-                let mut cursor = raw.content_start;
-                while cursor < limit {
-                    if bytes[cursor] == b'"'
-                        && bytes
-                            .get(cursor + 1..cursor + 1 + raw.hash_count)
-                            .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
-                    {
-                        if cursor.saturating_sub(raw.content_start) < min_len {
-                            return None;
-                        }
-                        return Some(matched.start..cursor + 1 + raw.hash_count);
-                    }
-                    cursor += 1;
-                }
-
-                // A malformed raw string can continue over line breaks. Do not let
-                // an unproved terminator expose its eventual value.
-                return Some(matched.start..limit);
-            }
-
-            let quote = bytes
-                .get(value_start)
-                .copied()
-                .filter(|byte| matches!(byte, b'"' | b'\''));
-            let content_start = value_start + usize::from(quote.is_some());
-            let mut cursor = content_start;
-            let mut closed = false;
-            let mut unsupported_value_syntax = false;
-
-            while cursor < line_end {
-                let byte = bytes[cursor];
-                let escaped = quote.is_some_and(|quote| {
-                    byte == quote
-                        && bytes[content_start..cursor]
-                            .iter()
-                            .rev()
-                            .take_while(|&&previous| previous == b'\\')
-                            .count()
-                            % 2
-                            == 1
-                });
-                if quote.is_some_and(|quote| byte == quote) && !escaped {
-                    closed = true;
-                    break;
-                }
-                if quote.is_none()
-                    && matches!(
-                        byte,
-                        b' ' | b'\t'
-                            | b','
-                            | b';'
-                            | b'}'
-                            | b']'
-                            | b'"'
-                            | b'\''
-                            | b'('
-                            | b'{'
-                            | b'['
-                    )
+        if let Some(raw) = rust_raw_string(bytes, value_start, limit) {
+            let mut cursor = raw.content_start;
+            while cursor < limit {
+                if bytes[cursor] == b'"'
+                    && bytes
+                        .get(cursor + 1..cursor + 1 + raw.hash_count)
+                        .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
                 {
-                    unsupported_value_syntax = matches!(byte, b'"' | b'\'' | b'(' | b'{' | b'[')
-                        || matches!(byte, b' ' | b'\t')
-                            && bytes[cursor..line_end]
-                                .iter()
-                                .find(|next| !matches!(**next, b' ' | b'\t'))
-                                == Some(&b'(');
-                    break;
+                    if cursor.saturating_sub(raw.content_start) < min_len {
+                        return None;
+                    }
+                    return Some(matched.start..cursor + 1 + raw.hash_count);
                 }
                 cursor += 1;
             }
 
-            if unsupported_value_syntax {
-                // Wrapper and constructor forms (for example `Some("secret")`)
-                // are not plain values. Redact the rest of the record line rather
-                // than stopping just before the wrapped secret.
-                return Some(matched.start..line_end);
-            }
+            // A malformed raw string can continue over line breaks. Do not let
+            // an unproved terminator expose its eventual value.
+            return Some(matched.start..limit);
+        }
 
-            while !text.is_char_boundary(cursor) {
-                cursor -= 1;
+        let quote = bytes
+            .get(value_start)
+            .copied()
+            .filter(|byte| matches!(byte, b'"' | b'\''));
+        let content_start = value_start + usize::from(quote.is_some());
+        let mut cursor = content_start;
+        let mut closed = false;
+        let mut unsupported_value_syntax = false;
+
+        while cursor < line_end {
+            let byte = bytes[cursor];
+            let escaped = quote.is_some_and(|quote| {
+                byte == quote
+                    && bytes[content_start..cursor]
+                        .iter()
+                        .rev()
+                        .take_while(|&&previous| previous == b'\\')
+                        .count()
+                        % 2
+                        == 1
+            });
+            if quote.is_some_and(|quote| byte == quote) && !escaped {
+                closed = true;
+                break;
             }
-            if cursor.saturating_sub(content_start) < min_len {
-                return None;
+            if quote.is_none()
+                && matches!(
+                    byte,
+                    b' ' | b'\t' | b',' | b';' | b'}' | b']' | b'"' | b'\'' | b'(' | b'{' | b'['
+                )
+            {
+                unsupported_value_syntax = matches!(byte, b'"' | b'\'' | b'(' | b'{' | b'[')
+                    || matches!(byte, b' ' | b'\t')
+                        && bytes[cursor..line_end]
+                            .iter()
+                            .find(|next| !matches!(**next, b' ' | b'\t'))
+                            == Some(&b'(');
+                break;
             }
-            let end = cursor + usize::from(closed);
-            Some(matched.start..end)
-        })
-        .collect()
+            cursor += 1;
+        }
+
+        if unsupported_value_syntax {
+            // Wrapper and constructor forms (for example `Some("secret")`)
+            // are not plain values. Redact the rest of the record line rather
+            // than stopping just before the wrapped secret.
+            return Some(matched.start..line_end);
+        }
+
+        while !text.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        if cursor.saturating_sub(content_start) < min_len {
+            return None;
+        }
+        let end = cursor + usize::from(closed);
+        Some(matched.start..end)
+    });
+    ranges.collect()
 }
 
 /// A bare `key: value` prefix also appears in Rust field and parameter syntax.
