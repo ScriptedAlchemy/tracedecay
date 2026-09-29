@@ -266,6 +266,29 @@ fn mcp_initialize_and_list_tools(home: &Path, project: &Path) -> (Value, Value) 
     (response(1), response(2))
 }
 
+/// The outcome kind a code-read primitive answered, or the problem it
+/// refused with.
+fn code_read_outcome(home: &Path, project: &Path, tool: &str, args: &Value) -> Value {
+    let envelope = super::typed_envelope(&super::tool_call(home, project, tool, args));
+    if envelope["problem"].is_object() {
+        return json!({ "problem": envelope["problem"]["kind"] });
+    }
+    envelope["outcome"]["outcome"].clone()
+}
+
+fn probe_symbol_id(home: &Path, project: &Path) -> String {
+    let found = super::typed_envelope(&super::tool_call(
+        home,
+        project,
+        "tracedecay_find_exact_symbol",
+        &json!({ "name": "probe", "format": "json" }),
+    ));
+    found["matches"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("find_exact_symbol did not resolve `probe`: {found}"))
+        .to_owned()
+}
+
 fn session_status(home: &Path, project: &Path, storage_scope: &str) -> Value {
     super::tool_call(
         home,
@@ -328,6 +351,27 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
     }
 
     wait_for_code_index_hit(&home_path, &project_path, "probe");
+    let probe_id = probe_symbol_id(&home_path, &project_path);
+    assert_eq!(
+        code_read_outcome(
+            &home_path,
+            &project_path,
+            "tracedecay_callers",
+            &json!({ "node_id": probe_id, "format": "json" }),
+        ),
+        json!("evidence"),
+        "callers must serve over stale session stores"
+    );
+    assert_eq!(
+        code_read_outcome(
+            &home_path,
+            &project_path,
+            "tracedecay_file_dependents",
+            &json!({ "file": "src/lib.rs", "format": "json" }),
+        ),
+        json!("evidence"),
+        "file dependents must serve over stale session stores"
+    );
     let expected_stale = vec![
         json!({
             "store": "profile sessions",
