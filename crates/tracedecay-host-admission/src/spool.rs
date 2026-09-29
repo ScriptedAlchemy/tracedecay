@@ -69,6 +69,10 @@ const QUARANTINE_FILE: &str = "quarantine.bin";
 /// logical pending byte count. Keeps ack paths metadata-only until a batch is
 /// worthwhile, while still amortizing rewrites to linear in live bytes.
 const COMPACT_WASTE_MULTIPLIER: u64 = 2;
+/// Retained waste must also reach this fraction of the spool bound, so a
+/// spool that drains after every event rewrites once per many events instead
+/// of paying a metadata publish and a rewrite on each drain.
+const COMPACT_MIN_WASTE_DIVISOR: u64 = 16;
 #[cfg(test)]
 static FAIL_TERMINAL_MOVE_AT: Mutex<Option<(PathBuf, TerminalMoveFailure)>> = Mutex::new(None);
 
@@ -315,6 +319,13 @@ impl HostAdmissionSpool {
         if self.meta.next_seq == 0 || self.meta.next_seq == u64::MAX {
             return vec![Err(SpoolError::MetadataCorrupted); items.len()];
         }
+        // Acknowledged bytes are reclaimed here, amortized across many
+        // batches, so no commit waits on a rewrite.
+        if self.should_compact_retained_prefix()
+            && let Err(error) = self.compact_pending()
+        {
+            return vec![Err(error); items.len()];
+        }
         let mut batch = PlannedBatch::new(self.meta.next_seq);
         let planned = items
             .iter()
@@ -536,10 +547,10 @@ impl HostAdmissionSpool {
     /// commit is durable.
     ///
     /// The watermark advances in memory and becomes durable with the next
-    /// metadata publish: an append intent or
-    /// [`Self::publish_acknowledgements`]. A crash before then replays the
-    /// acknowledged records once more, which canonical capture resolves as
-    /// exact duplicates; an acknowledgement is repeated, never lost.
+    /// metadata publish, normally the next batch's append intent. A crash
+    /// before then replays the acknowledged records once more, which
+    /// canonical capture resolves as exact duplicates; an acknowledgement is
+    /// repeated, never lost.
     pub(crate) fn ack_through(&mut self, through: u64) -> Result<usize, SpoolError> {
         self.ensure_mutations_allowed()?;
         if through <= self.meta.committed_through {
@@ -572,9 +583,7 @@ impl HostAdmissionSpool {
 
     /// Durably publish the in-memory watermark, then reclaim acknowledged
     /// physical bytes once the retained prefix is worth rewriting.
-    ///
-    /// A failed compaction keeps the published watermark and stays pending
-    /// for the next publish.
+    #[cfg(test)]
     pub(crate) fn publish_acknowledgements(&mut self) -> Result<(), SpoolError> {
         self.ensure_mutations_allowed()?;
         self.publish_meta()?;
@@ -582,12 +591,6 @@ impl HostAdmissionSpool {
             self.compact_pending()?;
         }
         Ok(())
-    }
-
-    /// Whether metadata or retained bytes await
-    /// [`Self::publish_acknowledgements`].
-    pub(crate) fn acknowledgements_unpublished(&self) -> bool {
-        self.meta_unpublished || self.should_compact_retained_prefix()
     }
 
     fn publish_meta(&mut self) -> Result<(), SpoolError> {
@@ -602,11 +605,10 @@ impl HostAdmissionSpool {
         if !self.cleanup_pending {
             return false;
         }
-        if self.pending.is_empty() {
-            return true;
-        }
         let pending = self.pending_bytes as u64;
-        self.physical_len > pending.saturating_mul(COMPACT_WASTE_MULTIPLIER)
+        let waste = self.physical_len.saturating_sub(pending);
+        waste >= self.bounds.max_spool_bytes as u64 / COMPACT_MIN_WASTE_DIVISOR
+            && self.physical_len > pending.saturating_mul(COMPACT_WASTE_MULTIPLIER)
     }
 
     fn source_usage_release(&mut self, source: &str, framed_len: usize) {

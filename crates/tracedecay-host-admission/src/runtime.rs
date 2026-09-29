@@ -109,15 +109,11 @@ impl HostAdmissionRuntime {
             .unwrap_or(Err(HostAdmissionOutcome::spool_corrupted()))
     }
 
-    /// Durably publish acknowledgements made since the last metadata publish.
+    #[cfg(test)]
     pub(crate) fn publish_acknowledgements(&mut self) -> Result<(), HostAdmissionOutcome> {
-        if !self.spool.acknowledgements_unpublished() {
-            return Ok(());
-        }
-        hotpath::measure_block!("usecases.admission.publish_acknowledgements", {
-            self.spool.publish_acknowledgements()
-        })
-        .map_err(|error| error.to_outcome())
+        self.spool
+            .publish_acknowledgements()
+            .map_err(|error| error.to_outcome())
     }
 
     /// Lease one fair durable record without deleting it from the spool.

@@ -88,39 +88,39 @@ async fn every_acknowledged_concurrent_admission_survives_a_crash() {
     assert_eq!(recovered, acknowledged);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_committed_admission_is_published_without_the_committer_waiting() {
-    let spool = tempfile::tempdir().unwrap();
-    let broker = open_broker(spool.path());
-    let admitted = broker.admit("source", b"event").await.unwrap();
-    let barrier = Duration::from_millis(300);
-    let slow_disk = sync_latency::inject(spool.path(), barrier);
-
+async fn commit_leased(broker: &HostAdmissionBroker) -> u64 {
     let replay = broker.begin_replay().await.unwrap();
     let leased = replay.lease_next().await.unwrap().unwrap();
-    assert_eq!(leased.seq, admitted.seq);
-    let started = std::time::Instant::now();
     assert_eq!(replay.commit(leased.seq).await.unwrap(), 1);
-    assert!(
-        started.elapsed() < barrier,
-        "commit waited {:?} on a durability barrier",
-        started.elapsed()
-    );
-    drop(replay);
+    leased.seq
+}
 
-    // Once the queued publish holds the spool, this read waits behind it.
-    while broker
-        .acknowledgement_publish_queued
-        .load(Ordering::Acquire)
-    {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(broker.pending_replay_count().await.unwrap(), 0);
-    // Watermark publish (file and directory) and the empty-spool truncate.
-    assert_eq!(slow_disk.syncs(), 3);
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_waits_on_no_barrier_and_the_next_batch_publishes_its_watermark() {
+    let spool = tempfile::tempdir().unwrap();
+    let broker = open_broker(spool.path());
+    let first = broker.admit("source", b"first").await.unwrap();
+    let barriers = sync_latency::inject(spool.path(), Duration::ZERO);
+    assert_eq!(commit_leased(&broker).await, first.seq);
+    assert_eq!(barriers.syncs(), 0);
+    // The daemon dies before any later publish: the commit replays once more.
     drop(broker);
 
-    let (_, report) = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default()).unwrap();
-    assert_eq!(report.committed_through, admitted.seq);
-    assert_eq!(report.pending_records, 0);
+    let broker = open_broker(spool.path());
+    assert_eq!(broker.pending_replay_count().await.unwrap(), 1);
+    assert_eq!(commit_leased(&broker).await, first.seq);
+    let second = broker.admit("source", b"second").await.unwrap();
+    // The second batch's intent publish and frame sync carry the watermark.
+    assert_eq!(barriers.syncs(), 3);
+    drop(broker);
+
+    let (mut runtime, report) =
+        HostAdmissionRuntime::open(spool.path(), SpoolBounds::default()).unwrap();
+    assert_eq!(report.committed_through, first.seq);
+    let leased = runtime.try_lease_next().unwrap().unwrap();
+    assert_eq!(
+        (leased.seq, leased.payload),
+        (second.seq, b"second".to_vec())
+    );
+    assert_eq!(runtime.try_lease_next().unwrap(), None);
 }
