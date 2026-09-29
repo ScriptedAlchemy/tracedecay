@@ -398,6 +398,15 @@ struct RegisteredSchemaAdmissionClassification {
     workflow_admission: WorkflowSchemaAdmission,
 }
 
+/// A store's admission verdict. A store whose other authorities admit but
+/// whose LCM, workflow, or git correlation shape this binary refuses is
+/// admitted untouched for those other authorities: it is never installed or
+/// converged, and its session features refuse until the store is reset.
+enum RegisteredSchemaAdmission {
+    Admissible(RegisteredSchemaAdmissionClassification),
+    SessionAuthorityRefused(RefusedAuthorityV1),
+}
+
 /// Read-only classification of every schema authority's admission state,
 /// shared by initialization admission and existing-store attach. Each
 /// authority surfaces its own typed reset state; nothing here mutates the
@@ -412,58 +421,47 @@ struct RegisteredSchemaAdmissionClassification {
 #[hotpath::measure(future = true, label = "global_db.schema.query.classify")]
 async fn classify_registered_schema_admission(
     connection: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmissionClassification> {
+) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmission> {
     Box::pin(classify_registered_schema_authorities(connection)).await
 }
 
 async fn classify_registered_schema_authorities(
     connection: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmissionClassification> {
-    // The LCM authority classifies profile content first: a legacy or
-    // version-skewed session store must surface its own ProfileResetRequired
-    // state instead of being masked by the coarser workflow/configuration
+) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmission> {
+    // The LCM authority classifies profile content first. Whenever a later
+    // authority also fails, the earliest session refusal is the store's hard
+    // verdict: a legacy or version-skewed session store surfaces its own
+    // reset identity instead of being masked by the coarser configuration
     // schema resets, which would also flag a store those features were simply
     // never installed in.
-    tracedecay_lcm::schema::require_admissible_lcm_schema(connection)
-        .await
-        .map_err(|error| match error {
-            tracedecay_lcm::LcmError::ProfileResetRequired {
-                found_version,
-                required_version,
-            } => tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
-                component: "LCM",
-                found_version,
-                required_version,
-            },
-            error => global_db_operation_error("classify LCM schema admission", error),
-        })?;
+    let refused_lcm = lcm_schema_refusal(connection).await?;
+    let surface = |refused: Option<RefusedAuthorityV1>| {
+        move |error| refused.map_or(error, RefusedAuthorityV1::error)
+    };
     let configuration_fresh = configuration::fresh_configuration_store_evidence(connection)
         .await
-        .map_err(|error| match error {
-            configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
-            }
-            configuration::ConfigurationSchemaError::Storage(error) => {
-                global_db_operation_error("inspect configuration schema freshness", error)
-            }
-        })?;
+        .map_err(configuration_schema_error(
+            "inspect configuration schema freshness",
+        ))
+        .map_err(surface(refused_lcm))?;
     let temporal_admission = session_temporal_schema::require_admissible_session_temporal_schema(
         connection,
         configuration_fresh.as_ref(),
     )
-    .await?;
-    let workflow_admission = inspect_workflow_schema_for_admission(connection).await?;
-    require_admissible_git_correlation_schema(connection).await?;
+    .await
+    .map_err(surface(refused_lcm))?;
+    let workflow_admission = inspect_workflow_schema_for_admission(connection)
+        .await
+        .map_err(surface(refused_lcm))?;
+    let refused = refused_lcm.or(workflow_admission.err());
+    let refused_git_correlation = git_correlation_schema_refusal(connection)
+        .await
+        .map_err(surface(refused))?;
+    let refused = refused.or(refused_git_correlation);
     configuration::admit_configuration_schema(connection, configuration_fresh.as_ref())
         .await
-        .map_err(|error| match error {
-            configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
-            }
-            configuration::ConfigurationSchemaError::Storage(error) => {
-                global_db_operation_error("admit configuration schema", error)
-            }
-        })?;
+        .map_err(configuration_schema_error("admit configuration schema"))
+        .map_err(surface(refused))?;
     // An existing catalog whose remote-deletion tombstone table drifted from the
     // contract cannot be trusted to gate replay or admission, so admission fails
     // closed with the tip's typed reset authority rather than silently
@@ -471,37 +469,80 @@ async fn classify_registered_schema_authorities(
     if configuration_fresh.is_none()
         && let Err(error) = validate_remote_deletion_schema_contract(connection).await
     {
-        return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
-            "remote deletion tombstones",
-            error.to_string(),
+        return Err(surface(refused)(
+            tracedecay_domain::errors::TraceDecayError::reset_required(
+                "remote deletion tombstones",
+                error.to_string(),
+            ),
         ));
     }
-    Ok(RegisteredSchemaAdmissionClassification {
-        configuration_fresh,
-        temporal_admission,
-        workflow_admission,
+    Ok(match (refused, workflow_admission) {
+        (None, Ok(workflow_admission)) => {
+            RegisteredSchemaAdmission::Admissible(RegisteredSchemaAdmissionClassification {
+                configuration_fresh,
+                temporal_admission,
+                workflow_admission,
+            })
+        }
+        (Some(refused), _) | (None, Err(refused)) => {
+            RegisteredSchemaAdmission::SessionAuthorityRefused(refused)
+        }
     })
+}
+
+fn configuration_schema_error(
+    operation: &'static str,
+) -> impl Fn(configuration::ConfigurationSchemaError) -> tracedecay_domain::errors::TraceDecayError
+{
+    move |error| match error {
+        configuration::ConfigurationSchemaError::ResetRequired { reason } => {
+            tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
+        }
+        configuration::ConfigurationSchemaError::Storage(error) => {
+            global_db_operation_error(operation, error)
+        }
+    }
+}
+
+async fn lcm_schema_refusal(
+    connection: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
+    match tracedecay_lcm::schema::require_admissible_lcm_schema(connection).await {
+        Ok(_) => Ok(None),
+        Err(tracedecay_lcm::LcmError::ProfileResetRequired {
+            found_version,
+            required_version,
+        }) => Ok(Some(RefusedAuthorityV1::Version {
+            component: "LCM",
+            found_version,
+            required_version,
+        })),
+        Err(error) => Err(global_db_operation_error(
+            "classify LCM schema admission",
+            error,
+        )),
+    }
 }
 
 /// Git evidence is stored as per-session rows since schema version 6. A store
 /// recorded at any other version holds a shape nothing converts, so it keeps
 /// its data untouched behind the typed, versioned reset.
-async fn require_admissible_git_correlation_schema(
+async fn git_correlation_schema_refusal(
     connection: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
     let recorded = recorded_git_correlation_schema_version(connection)
         .await
         .map_err(|error| global_db_operation_error("inspect git correlation schema", error))?;
-    match recorded {
-        Some(found) if found != GIT_CORRELATION_SCHEMA_VERSION => Err(
-            tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
+    Ok(match recorded {
+        Some(found) if found != GIT_CORRELATION_SCHEMA_VERSION => {
+            Some(RefusedAuthorityV1::Version {
                 component: "git correlation",
                 found_version: Some(found),
                 required_version: GIT_CORRELATION_SCHEMA_VERSION,
-            },
-        ),
-        _ => Ok(()),
-    }
+            })
+        }
+        _ => None,
+    })
 }
 
 /// Authority named by the typed reset an existing store receives when the
@@ -542,7 +583,12 @@ pub async fn ensure_registered_schema_for_admission(
         configuration_fresh,
         temporal_admission,
         workflow_admission,
-    } = classify_registered_schema_admission(installation).await?;
+    } = match classify_registered_schema_admission(installation).await? {
+        RegisteredSchemaAdmission::Admissible(classification) => classification,
+        RegisteredSchemaAdmission::SessionAuthorityRefused(refused) => {
+            return Err(refused.error());
+        }
+    };
     let is_fresh = configuration_fresh.is_some();
     let force_exhaustive = !authority_invariant_triggers_intact(installation).await?;
     let transaction = installation
@@ -693,14 +739,9 @@ async fn install_registered_schema_stage_sequence(
     let is_fresh = configuration_fresh.is_some();
     configuration::ensure_configuration_schema(transaction, configuration_fresh)
         .await
-        .map_err(|error| match error {
-            configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                tracedecay_domain::errors::TraceDecayError::reset_required("configuration", reason)
-            }
-            configuration::ConfigurationSchemaError::Storage(error) => {
-                global_db_operation_error("initialize configuration schema", error)
-            }
-        })?;
+        .map_err(configuration_schema_error(
+            "initialize configuration schema",
+        ))?;
     ensure_authority_audit_checkpoint_schema(transaction).await?;
     if force_exhaustive && !is_fresh {
         // Persist the requirement before later schema work repairs the
@@ -1002,18 +1043,25 @@ pub async fn converge_attached_registered_schema(
 /// initialization. The returned convergence plan carries the LCM status-index
 /// work for lifecycle-owned daemon maintenance; short-lived callers run that
 /// same work synchronously through [`converge_attached_registered_schema`].
-/// A store whose observation rows this binary refuses is still admitted for
-/// its other authorities and returns that refused authority beside the plan.
+/// A store whose LCM, workflow, or git correlation shape this binary refuses
+/// is admitted untouched for its other authorities; one whose observation
+/// rows it refuses is installed without them. Either returns the refused
+/// authority instead of a plan.
 #[hotpath::measure(future = true, label = "global_db.schema.persist.attach")]
 pub(crate) async fn ensure_attached_registered_schema(
     database: &Database,
-) -> tracedecay_domain::errors::Result<(RegisteredSchemaConvergence, Option<RefusedAuthorityV1>)> {
+) -> tracedecay_domain::errors::Result<RegisteredSchemaAttachmentV1> {
     let read_connection = database.read_connection();
     let RegisteredSchemaAdmissionClassification {
         configuration_fresh,
         temporal_admission,
         workflow_admission,
-    } = classify_registered_schema_admission(&read_connection).await?;
+    } = match classify_registered_schema_admission(&read_connection).await? {
+        RegisteredSchemaAdmission::Admissible(classification) => classification,
+        RegisteredSchemaAdmission::SessionAuthorityRefused(refused) => {
+            return Ok(RegisteredSchemaAttachmentV1::SessionsRefused(refused));
+        }
+    };
     let force_exhaustive = !authority_invariant_triggers_intact(&read_connection).await?;
     let transaction = database
         .begin_bulk_write_transaction("install attached registered global database schema")
@@ -1041,14 +1089,24 @@ pub(crate) async fn ensure_attached_registered_schema(
         transaction.commit().await?;
     }
     validate_admitted_authority_schema(&read_connection, configuration_fresh.is_some()).await?;
-    Ok((
-        RegisteredSchemaConvergence {
+    Ok(match refused_authority {
+        Some(refused) => RegisteredSchemaAttachmentV1::SessionsRefused(refused),
+        None => RegisteredSchemaAttachmentV1::Admitted(RegisteredSchemaConvergence {
             force_exhaustive,
             is_fresh: configuration_fresh.is_some(),
             lcm_status_performance_indexes: true,
-        },
-        refused_authority,
-    ))
+        }),
+    })
+}
+
+/// An attached store's admission outcome.
+pub(crate) enum RegisteredSchemaAttachmentV1 {
+    /// Every authority admits; the plan completes historical convergence.
+    Admitted(RegisteredSchemaConvergence),
+    /// The store serves its other authorities and refuses every session
+    /// feature until it is reset. It is never converged: its reset deletes
+    /// it.
+    SessionsRefused(RefusedAuthorityV1),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1059,7 +1117,7 @@ enum WorkflowSchemaAdmission {
 
 async fn inspect_workflow_schema_for_admission(
     conn: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<WorkflowSchemaAdmission> {
+) -> tracedecay_domain::errors::Result<Result<WorkflowSchemaAdmission, RefusedAuthorityV1>> {
     let mut rows = conn
         .query(
             "SELECT type, name, sql FROM sqlite_master
@@ -1088,7 +1146,7 @@ async fn inspect_workflow_schema_for_admission(
         ));
     }
     if tables.is_empty() {
-        return Ok(WorkflowSchemaAdmission::Create);
+        return Ok(Ok(WorkflowSchemaAdmission::Create));
     }
 
     let actual_workflow_tables = tables
@@ -1106,9 +1164,9 @@ async fn inspect_workflow_schema_for_admission(
         .map(|contract| (contract.name, Some(contract.sql)))
         .collect::<Vec<_>>();
     if actual_workflow_tables != expected_workflow_tables {
-        return Err(workflow_schema_reset_required(
+        return Ok(Err(workflow_schema_refusal(
             "workflow tables are absent, incomplete, or not exact",
-        ));
+        )));
     }
 
     let mut schema = conn
@@ -1124,9 +1182,9 @@ async fn inspect_workflow_schema_for_admission(
         .await
         .map_err(|error| global_db_operation_error("read workflow schema identity", error))?
     else {
-        return Err(workflow_schema_reset_required(
+        return Ok(Err(workflow_schema_refusal(
             "workflow schema identity is missing",
-        ));
+        )));
     };
     let singleton = identity
         .get::<i64>(0)
@@ -1147,9 +1205,9 @@ async fn inspect_workflow_schema_for_admission(
         || definition_digest != WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
         || extra_identity
     {
-        return Err(workflow_schema_reset_required(
+        return Ok(Err(workflow_schema_refusal(
             "workflow schema identity does not match the final contract",
-        ));
+        )));
     }
 
     for table in WORKFLOW_TABLE_CONTRACTS_V1 {
@@ -1189,17 +1247,20 @@ async fn inspect_workflow_schema_for_admission(
                         && actual.3 == expected.primary_key
                 });
         if !exact {
-            return Err(workflow_schema_reset_required(
+            return Ok(Err(workflow_schema_refusal(
                 "workflow table columns do not match the final contract",
-            ));
+            )));
         }
     }
 
-    Ok(WorkflowSchemaAdmission::Complete)
+    Ok(Ok(WorkflowSchemaAdmission::Complete))
 }
 
-fn workflow_schema_reset_required(reason: &str) -> tracedecay_domain::errors::TraceDecayError {
-    tracedecay_domain::errors::TraceDecayError::reset_required("workflow", reason)
+fn workflow_schema_refusal(reason: &'static str) -> RefusedAuthorityV1 {
+    RefusedAuthorityV1::Shape {
+        authority: "workflow",
+        reason,
+    }
 }
 
 pub async fn validate_observation_authority_connection(

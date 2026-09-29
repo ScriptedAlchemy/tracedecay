@@ -1,18 +1,19 @@
-//! Session stores whose observation rows predate the unified observation
-//! identity are refused as typed reset states without taking code
-//! intelligence down with them, and their scoped reset deletes exactly those
-//! stores.
+//! Session stores whose persisted shape this binary refuses are held as typed
+//! reset states without taking code intelligence down with them, and their
+//! scoped reset deletes exactly those stores.
 //!
 //! A physically spawned `tracedecay daemon run` first writes a real profile
-//! and project session store. Both are then given the shape a released binary
-//! left behind: observation rows written before the unified identity, with no
-//! unified-identity marker. Over that profile the project must still open, the
-//! MCP host must initialize and list tools, code search must answer, session
-//! reads must return the typed `reset_required` refusal naming
-//! `tracedecay wipe --stale --yes`, and `tracedecay doctor` must name that
-//! command instead of `tracedecay install`. The scoped reset then deletes both
-//! session stores and nothing else, and the restarted daemon serves sessions
-//! from empty stores.
+//! and project session store. Stores are then given a shape a released binary
+//! left behind: observation rows written before the unified identity, an LCM
+//! schema version, a git correlation schema version, or a workflow schema
+//! identity other than the one this binary writes. Over that profile the
+//! project must still open, the MCP host must initialize and list tools, code
+//! search and callers must answer, session reads against a refused store must
+//! return the typed `reset_required` refusal naming
+//! `tracedecay wipe --stale --yes`, and `tracedecay doctor` must count it as a
+//! pending operator action naming that command. The scoped reset then deletes
+//! exactly the refused stores, every other profile file stays byte-identical,
+//! and the restarted daemon serves sessions from empty stores.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -116,8 +117,13 @@ fn file_digests(root: &Path) -> BTreeMap<PathBuf, String> {
     digests
 }
 
-/// Whether `relative` belongs to one of the two refused session stores.
-fn is_session_store_member(relative: &Path, project_store: &Path) -> bool {
+/// Whether `relative` belongs to the project session store, or to the profile
+/// session store when `with_profile_store`.
+fn is_session_store_member(
+    relative: &Path,
+    project_store: &Path,
+    with_profile_store: bool,
+) -> bool {
     let name = relative.to_string_lossy();
     let in_project_sessions = relative.starts_with(project_store)
         && relative
@@ -129,8 +135,9 @@ fn is_session_store_member(relative: &Path, project_store: &Path) -> bool {
                 first.starts_with("sessions.") || first == ".sessions.db.host-admission"
             });
     in_project_sessions
-        || name.starts_with("user-sessions.")
-        || name.starts_with(".user-sessions.db.host-admission")
+        || (with_profile_store
+            && (name.starts_with("user-sessions.")
+                || name.starts_with(".user-sessions.db.host-admission")))
 }
 
 fn status(home: &Path, project: &Path) -> Value {
@@ -298,8 +305,39 @@ fn session_status(home: &Path, project: &Path, storage_scope: &str) -> Value {
     )
 }
 
-#[test]
-fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
+/// Rewrites exactly one recorded shape row of a stopped session store.
+fn execute_once(db_path: &Path, sql: &str) {
+    let connection = rusqlite::Connection::open(db_path).expect("open the session store");
+    assert_eq!(
+        connection.execute(sql, []).expect("age the session store"),
+        1,
+        "`{sql}` rewrites exactly one recorded shape row of {}",
+        db_path.display()
+    );
+}
+
+/// One way a released binary's session store differs from the shape this
+/// binary writes, and the exact census entry the daemon reports for it.
+struct SessionStoreRefusal {
+    /// Gives one stopped session store the released shape.
+    age: fn(&Path),
+    /// Also ages the profile session store, not only the project's.
+    ages_profile_store: bool,
+    authority: &'static str,
+    found_version: Value,
+    required_version: Value,
+    reason: &'static str,
+    /// A session tool reading the refused store.
+    session_tool: &'static str,
+    session_tool_args: fn() -> Value,
+}
+
+/// Ages the session stores `refusal` names on a stopped daemon, then proves
+/// code intelligence and MCP serve over them, session reads against them
+/// refuse typed while every admissible session store keeps serving, doctor
+/// counts each as a pending operator action, and `wipe --stale` deletes
+/// exactly those stores and leaves every other profile file byte-identical.
+fn refused_session_stores_serve_code_until_their_scoped_reset(refusal: &SessionStoreRefusal) {
     let home = tempfile::TempDir::new().expect("isolated home");
     let home_path = canonical_existing_path(home.path());
     let project = tempfile::TempDir::new().expect("project");
@@ -307,9 +345,17 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
     let profile_root = home_path.join(".tracedecay");
     let project_id = tracedecay_runtime_core::storage::default_profile_project_id(&project_path);
     let project_store = PathBuf::from("projects").join(&project_id);
+    let mut aged = vec![("project", format!("project sessions {project_id}"))];
+    if refusal.ages_profile_store {
+        aged.insert(0, ("user", "profile sessions".to_owned()));
+    }
+    let admissible_scopes: Vec<&str> = ["project", "user"]
+        .into_iter()
+        .filter(|scope| aged.iter().all(|(aged_scope, _)| aged_scope != scope))
+        .collect();
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
-    super::initialize_project(&home_path, &project_path, "stale-sessions-store-reset");
+    super::initialize_project(&home_path, &project_path, "refused-session-stores");
     wait_for_code_index_hit(&home_path, &project_path, "probe");
     for scope in ["project", "user"] {
         let served = session_status(&home_path, &project_path, scope);
@@ -322,16 +368,17 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
         .kill_and_wait()
         .expect("stop the daemon that wrote the profile");
 
-    seed_pre_unified_observation_rows(&profile_root.join("user-sessions.db"));
-    seed_pre_unified_observation_rows(&profile_root.join(&project_store).join("sessions.db"));
+    (refusal.age)(&profile_root.join(&project_store).join("sessions.db"));
+    if refusal.ages_profile_store {
+        (refusal.age)(&profile_root.join("user-sessions.db"));
+    }
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
-
     let (initialize, tools) = mcp_initialize_and_list_tools(&home_path, &project_path);
     assert_eq!(
         initialize.get("error"),
         None,
-        "MCP initialize must serve over stale session stores: {initialize}"
+        "MCP initialize must serve over refused session stores: {initialize}"
     );
     let tool_names: Vec<&str> = tools["result"]["tools"]
         .as_array()
@@ -360,7 +407,7 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
             &json!({ "node_id": probe_id, "format": "json" }),
         ),
         json!("evidence"),
-        "callers must serve over stale session stores"
+        "callers must serve over refused session stores"
     );
     assert_eq!(
         code_read_outcome(
@@ -370,27 +417,22 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
             &json!({ "file": "src/lib.rs", "format": "json" }),
         ),
         json!("evidence"),
-        "file dependents must serve over stale session stores"
+        "file dependents must serve over refused session stores"
     );
-    let expected_stale = vec![
-        json!({
-            "store": "profile sessions",
-            "authority": "observations",
-            "found_version": null,
-            "required_version": null,
-            "reason": OBSERVATIONS_RESET_REASON,
-            "remedy": STALE_STORE_RESET,
-        }),
-        json!({
-            "store": format!("project sessions {project_id}"),
-            "authority": "observations",
-            "found_version": null,
-            "required_version": null,
-            "reason": OBSERVATIONS_RESET_REASON,
-            "remedy": STALE_STORE_RESET,
-        }),
-    ];
-    wait_for_reset_required_stores(&home_path, &project_path, &expected_stale);
+    let expected_census: Vec<Value> = aged
+        .iter()
+        .map(|(_, store)| {
+            json!({
+                "store": store,
+                "authority": refusal.authority,
+                "found_version": refusal.found_version,
+                "required_version": refusal.required_version,
+                "reason": refusal.reason,
+                "remedy": STALE_STORE_RESET,
+            })
+        })
+        .collect();
+    wait_for_reset_required_stores(&home_path, &project_path, &expected_census);
     let project_open = find_key(&status(&home_path, &project_path), "project_open");
     assert!(
         project_open
@@ -399,21 +441,47 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
         "project open must not stall on a session-store verdict: {project_open:?}"
     );
 
-    for scope in ["project", "user"] {
+    for (scope, _) in &aged {
         let refused = super::cli_problem_envelope(
             &session_status(&home_path, &project_path, scope),
-            &format!("{scope} session read over a stale store"),
+            &format!("{scope} session read over a refused store"),
         );
         super::assert_reset_required(&refused, &format!("{scope} session read"));
         assert_eq!(
-            refused["problem"]["detail"]["authority"], "observations",
-            "{scope} session read names the refused authority: {refused}"
-        );
-        assert_eq!(
-            refused["problem"]["detail"]["remedy"], STALE_STORE_RESET,
-            "{scope} session read names the scoped reset: {refused}"
+            (
+                &refused["problem"]["detail"]["authority"],
+                &refused["problem"]["detail"]["remedy"]
+            ),
+            (&json!(refusal.authority), &json!(STALE_STORE_RESET)),
+            "{scope} session read names the refused authority and the scoped reset: {refused}"
         );
     }
+    for scope in &admissible_scopes {
+        let served = session_status(&home_path, &project_path, scope);
+        assert!(
+            find_key(&served, "problem").is_none_or(|problem| problem.is_null()),
+            "the admissible {scope} session store keeps serving: {served}"
+        );
+    }
+    let session_tool_problem = || {
+        find_key(
+            &super::tool_call(
+                &home_path,
+                &project_path,
+                refusal.session_tool,
+                &(refusal.session_tool_args)(),
+            ),
+            "problem",
+        )
+        .filter(|problem| !problem.is_null())
+        .map(|problem| problem["kind"].clone())
+    };
+    assert_eq!(
+        session_tool_problem(),
+        Some(json!("reset_required")),
+        "{} must refuse typed over the refused store",
+        refusal.session_tool
+    );
 
     let doctor = tracedecay_command_with_home(&home_path)
         .arg("doctor")
@@ -426,13 +494,11 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
         String::from_utf8_lossy(&doctor.stdout),
         String::from_utf8_lossy(&doctor.stderr)
     );
-    for store in [
-        "profile sessions".to_owned(),
-        format!("project sessions {project_id}"),
-    ] {
+    for (_, store) in &aged {
         let line = format!(
-            "Store {store} requires reset ({OBSERVATIONS_RESET_REASON}). Pending operator \
-             action: run `{STALE_STORE_RESET}`"
+            "Store {store} requires reset ({}). Pending operator action: run \
+             `{STALE_STORE_RESET}`",
+            refusal.reason
         );
         assert!(
             doctor_text.contains(&line),
@@ -441,11 +507,11 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
     }
     assert!(
         doctor_text.contains("pending operator action(s)") && doctor_text.contains("no issues."),
-        "stale session stores are pending operator actions, not issues:\n{doctor_text}"
+        "refused session stores are pending operator actions, not issues:\n{doctor_text}"
     );
     assert!(
         !doctor_text.contains("to fix most issues"),
-        "doctor must not send a stale session store to `tracedecay install`:\n{doctor_text}"
+        "doctor must not send a refused session store to `tracedecay install`:\n{doctor_text}"
     );
     assert!(
         !doctor_text.contains("Stalled"),
@@ -462,15 +528,17 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
         "the scoped reset failed:\n{reset_output}"
     );
     let after_reset = file_digests(&profile_root);
-    let (stale_members, kept): (BTreeMap<_, _>, BTreeMap<_, _>) = before_reset
-        .into_iter()
-        .partition(|(relative, _)| is_session_store_member(relative, &project_store));
+    let (refused_members, kept): (BTreeMap<_, _>, BTreeMap<_, _>) =
+        before_reset.into_iter().partition(|(relative, _)| {
+            is_session_store_member(relative, &project_store, refusal.ages_profile_store)
+        });
     assert!(
-        stale_members.contains_key(Path::new("user-sessions.db"))
-            && stale_members.contains_key(&project_store.join("sessions.db")),
-        "both refused stores existed before the reset: {stale_members:#?}"
+        refused_members.contains_key(&project_store.join("sessions.db"))
+            && (refused_members.contains_key(Path::new("user-sessions.db"))
+                || kept.contains_key(Path::new("user-sessions.db"))),
+        "every session store existed before the reset: {refused_members:#?}"
     );
-    for relative in stale_members.keys() {
+    for relative in refused_members.keys() {
         assert!(
             !after_reset.contains_key(relative),
             "the scoped reset left refused store member {} behind",
@@ -490,15 +558,16 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
         Vec::<PathBuf>::new(),
         "the scoped reset touched files outside the refused stores:\n{reset_output}"
     );
-    for store in [
-        "profile sessions".to_owned(),
-        format!("project sessions {project_id}"),
-    ] {
+    for (_, store) in &aged {
         assert!(
             reset_output.contains(&format!("reset {store}")),
             "the scoped reset did not report resetting {store}:\n{reset_output}"
         );
     }
+    assert!(
+        refusal.ages_profile_store || !reset_output.contains("reset profile sessions"),
+        "the scoped reset must leave the admissible profile session store:\n{reset_output}"
+    );
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     wait_for_code_index_hit(&home_path, &project_path, "probe");
@@ -510,10 +579,91 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
         );
     }
     assert_eq!(
+        session_tool_problem(),
+        None,
+        "{} must serve after the scoped reset",
+        refusal.session_tool
+    );
+    assert_eq!(
         reset_required_stores(&home_path, &project_path),
         Vec::<Value>::new(),
         "no store stays refused after the scoped reset"
     );
 
     let _ = daemon.kill_and_wait();
+}
+
+#[test]
+fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
+    refused_session_stores_serve_code_until_their_scoped_reset(&SessionStoreRefusal {
+        age: seed_pre_unified_observation_rows,
+        ages_profile_store: true,
+        authority: "observations",
+        found_version: Value::Null,
+        required_version: Value::Null,
+        reason: OBSERVATIONS_RESET_REASON,
+        session_tool: "tracedecay_lcm_grep",
+        session_tool_args: || json!({ "query": "probe", "format": "json" }),
+    });
+}
+
+#[test]
+fn project_session_store_at_another_lcm_schema_version_refuses_sessions_only() {
+    refused_session_stores_serve_code_until_their_scoped_reset(&SessionStoreRefusal {
+        age: |db| {
+            execute_once(
+                db,
+                "UPDATE session_schema_migrations SET version = 12 WHERE name = 'lcm'",
+            );
+        },
+        ages_profile_store: false,
+        authority: "LCM",
+        found_version: json!(12),
+        required_version: json!(13),
+        reason: "LCM profile schema 12 is incompatible with required schema 13; reset the profile",
+        session_tool: "tracedecay_lcm_grep",
+        session_tool_args: || json!({ "query": "probe", "format": "json" }),
+    });
+}
+
+#[test]
+fn project_session_store_at_another_git_correlation_version_refuses_sessions_only() {
+    refused_session_stores_serve_code_until_their_scoped_reset(&SessionStoreRefusal {
+        age: |db| {
+            execute_once(
+                db,
+                "UPDATE session_schema_migrations SET version = 5 WHERE name = 'git_correlation'",
+            );
+        },
+        ages_profile_store: false,
+        authority: "git correlation",
+        found_version: json!(5),
+        required_version: json!(6),
+        reason: "git correlation profile schema 5 is incompatible with required schema 6; reset \
+                 the profile",
+        session_tool: "tracedecay_sessions_for",
+        session_tool_args: || json!({ "git_ref": "branch", "value": "main", "format": "json" }),
+    });
+}
+
+#[test]
+fn project_session_store_with_another_workflow_schema_identity_refuses_sessions_only() {
+    refused_session_stores_serve_code_until_their_scoped_reset(&SessionStoreRefusal {
+        // A workflow schema written from another table contract.
+        age: |db| {
+            execute_once(
+                db,
+                "UPDATE workflow_schema SET definition_digest = \
+                 'sha256:0000000000000000000000000000000000000000000000000000000000000000'",
+            );
+        },
+        ages_profile_store: false,
+        authority: "workflow",
+        found_version: Value::Null,
+        required_version: Value::Null,
+        reason: "workflow persisted shape requires reset: workflow schema identity does not \
+                 match the final contract",
+        session_tool: "tracedecay_workflow_list_definitions",
+        session_tool_args: || json!({}),
+    });
 }
