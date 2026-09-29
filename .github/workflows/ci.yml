@@ -43,10 +43,15 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Draft PRs run cheap gates. Ready PRs and pushes run the ordinary Linux
-  # lane; dispatch can additionally request OS, host and profiling work.
+  # Drafts run cheap gates. Enabled, trusted PRs use the Hauler pool; other
+  # PRs and pushes retain native jobs. Dispatch can request additional lanes.
   scope-gate:
     name: Scope gate
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -58,6 +63,24 @@ jobs:
       windows-partitions: ${{ steps.windows-partitions.outputs.matrix }}
       macos-groups: ${{ steps.macos-groups.outputs.matrix }}
     steps:
+      - name: Route eligible PR checks through Hauler
+        id: route
+        if: >-
+          github.event_name == 'pull_request' &&
+          !github.event.pull_request.draft &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          vars.HAULER_CI_ENABLED == 'true'
+        continue-on-error: true
+        uses: ScriptedAlchemy/cargo-hauler@7c2539a21d688cb50344d89c6d6cb97610801671
+        with:
+          mode: route
+          token: ${{ github.token }}
+          recipe: .github/hauler-ci.json
+          admission-workflow: ci.yml
+
+      - name: Hauler route / ${{ steps.route.outputs.decision || 'native' }} / ${{ steps.route.outputs.policy || 'unavailable' }}
+        run: ':'
+
       - name: Decide what this run may spend
         id: decide
         env:
@@ -66,9 +89,16 @@ jobs:
           RUN_OS: ${{ inputs.run_os || false }}
           RUN_HOSTS: ${{ inputs.run_hosts || false }}
           RUN_PERF: ${{ inputs.run_perf || false }}
+          HAULER_DECISION: ${{ steps.route.outputs.decision }}
+          HAULER_ROUTE_OUTCOME: ${{ steps.route.outcome }}
         run: |
           heavy=true
           if [[ $EVENT == pull_request && $DRAFT == true ]]; then
+            heavy=false
+          fi
+          # Only the validated Action receipt transfers ownership. Missing or
+          # failed routing keeps the native jobs, even if enqueue arrives later.
+          if [[ $EVENT == pull_request && $HAULER_ROUTE_OUTCOME == success && $HAULER_DECISION == delegated ]]; then
             heavy=false
           fi
           os=false
@@ -96,6 +126,7 @@ jobs:
             .github/linux-test-partitions.json
             scripts
           sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - name: Derive the Linux test matrix
         id: linux-groups
@@ -442,9 +473,6 @@ jobs:
     name: Test Linux ${{ matrix.group }}
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    permissions:
-      contents: read
-      checks: read
     concurrency:
       group: ci-linux-${{ matrix.group }}
       cancel-in-progress: false
@@ -455,23 +483,6 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.scope-gate.outputs.linux-groups) }}
     steps:
-      - name: Reuse an exact completed warm Linux check
-        id: warm
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          MERGE_SHA: ${{ github.sha }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          result=""
-          if [[ "$EVENT" == pull_request ]] && data=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=Warm%20Linux%20snapshot&per_page=100"); then
-            result=$(jq -r --arg head "$HEAD_SHA" --arg prefix "merge:$MERGE_SHA:v2:" \
-              '[.check_runs[]? | select(.name == "Warm Linux snapshot" and .head_sha == $head and .status == "completed" and ((.external_id // "") | startswith($prefix)))] | sort_by(.completed_at) | last | .conclusion // ""' <<< "$data" 2>/dev/null || true)
-          fi
-          case "$result" in success|failure) ;; *) result="" ;; esac
-          echo "result=$result" >> "$GITHUB_OUTPUT"
-          [[ -z "$result" ]] || echo "Reusing completed warm Linux result: $result"
-
       # Full history: the search-quality workload fixture pins a
       # `source_repository_commit`, and `validate_source_bindings` resolves that
       # object out of this checkout to prove the checked-in corpus really is the
@@ -479,7 +490,6 @@ jobs:
       # so every candidate_output/report test fails with "resolve fixture source
       # commit: An object with id ... could not be found".
       - uses: actions/checkout@v7
-        if: steps.warm.outputs.result == ''
         with:
           fetch-depth: 0
 
@@ -492,45 +502,36 @@ jobs:
       # routes the language and only the spawn fails. The test would then
       # measure a missing component instead of the negotiation contract.
       - name: Select the repository toolchain
-        if: steps.warm.outputs.result == ''
         run: |
           rustup show active-toolchain
           rustup which rust-analyzer
 
       - uses: ./.github/actions/setup-linux-mold
-        if: steps.warm.outputs.result == ''
 
       - uses: actions/setup-node@v4
-        if: steps.warm.outputs.result == ''
         with:
           node-version: 22
 
       - uses: ./.github/actions/setup-pnpm
-        if: steps.warm.outputs.result == ''
 
       - uses: actions/setup-python@v6
-        if: steps.warm.outputs.result == ''
         with:
           python-version: "3.12"
 
       - name: Install ast-grep
-        if: steps.warm.outputs.result == ''
         uses: ./.github/actions/install-ast-grep
         with:
           version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install Cargo Hauler
-        if: steps.warm.outputs.result == ''
         run: |
           echo "CARGO_HAULER_STATE_DIR=$RUNNER_TEMP/hauler" >> "$GITHUB_ENV"
           npm install --global cargo-hauler@0.9.14
 
       - name: Install cargo-nextest
-        if: steps.warm.outputs.result == ''
         uses: taiki-e/install-action@nextest
 
       - name: Cache Rust build outputs
-        if: steps.warm.outputs.result == ''
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-test-full-Linux-${{ runner.arch }}
@@ -541,34 +542,28 @@ jobs:
       # the manifest is consumed here, and a gap found here fails the lane
       # rather than passing it with a target nobody ran.
       - name: Check the partitions cover every test target
-        if: steps.warm.outputs.result == ''
         run: |
           python3 scripts/test-linux-test-partitions.py
           python3 scripts/linux-test-partitions.py check
 
       - name: Run the group's partitions through Hauler
-        if: steps.warm.outputs.result == ''
         env:
           GROUP: ${{ matrix.group }}
         run: python3 scripts/linux-test-partitions.py run-linux-group "$GROUP"
 
       - name: Stop the worker's Hauler daemon
-        if: always() && steps.warm.outputs.result == ''
+        if: always()
         run: hauler daemon stop
 
       # `linux-test` folds the partition reports back into one report.
       - name: Upload Linux partition reports and timings
-        if: always() && steps.warm.outputs.result == ''
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nextest-junit-Linux-${{ matrix.group }}
           path: target/nextest/linux/
           if-no-files-found: ignore
           retention-days: 1
-
-      - name: Preserve a failed warm Linux verdict
-        if: steps.warm.outputs.result == 'failure'
-        run: exit 1
 
   # The controlled-workload hotpath parity gate: `tracedecay-search-eval`'s
   # `emit_controlled_workload_reports` example, built once with the hotpath
@@ -666,32 +661,13 @@ jobs:
     name: Test Linux
     if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
     needs: [linux-test-partition, hotpath-parity, scope-gate]
-    permissions:
-      contents: read
-      checks: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Find the exact warm Linux verdict
-        id: warm
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          MERGE_SHA: ${{ github.sha }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          result=""
-          if [[ "$EVENT" == pull_request ]] && data=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=Warm%20Linux%20snapshot&per_page=100"); then
-            result=$(jq -r --arg head "$HEAD_SHA" --arg prefix "merge:$MERGE_SHA:v2:" \
-              '[.check_runs[]? | select(.name == "Warm Linux snapshot" and .head_sha == $head and .status == "completed" and ((.external_id // "") | startswith($prefix)))] | sort_by(.completed_at) | last | .conclusion // ""' <<< "$data" 2>/dev/null || true)
-          fi
-          case "$result" in success|failure) ;; *) result="" ;; esac
-          echo "result=$result" >> "$GITHUB_OUTPUT"
-
       # Each partition's junit.xml keeps its name under its partition's
       # directory; the partition artifacts themselves expire after a day.
       - name: Merge the partition reports into the Linux nextest report
-        if: ${{ needs.linux-test-partition.result != 'skipped' && steps.warm.outputs.result == '' }}
+        if: ${{ needs.linux-test-partition.result != 'skipped' }}
         uses: actions/upload-artifact/merge@v4
         with:
           name: nextest-junit-Linux
