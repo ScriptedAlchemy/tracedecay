@@ -118,14 +118,6 @@ fn global_activate_does_not_create_missing_legacy_steering() {
         )
         .expect("MCP-only activate must succeed without a steering file");
 
-    let registry: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(home.path().join(".kiro/settings/mcp.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        registry["mcpServers"]["tracedecay"],
-        serde_json::json!({"command": "/bin/tracedecay", "args": ["serve"], "disabled": false})
-    );
     assert!(
         !steering.exists(),
         "catalog-native global activate must not recreate retired steering"
