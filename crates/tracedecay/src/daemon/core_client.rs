@@ -539,14 +539,19 @@ fn daemon_tool_call_error(error: JsonRpcError) -> TraceDecayError {
 /// the publication-window mounting refusal.
 ///
 /// A project-scoped owner that registers behind the core publication answers
-/// `application.runtime.mounting` while it is still mounting. The daemon
-/// renders that record under the tool result's `problem` member. An admitted
-/// terminal, and every other completed problem (a retained authority that is
-/// unavailable, a saturated owner, an observed diagnostic), is the answer:
-/// its `after_delay` directive is for the caller, not a transport loop.
+/// `application.runtime.mounting` while it is still mounting. A project
+/// connection renders that record under the tool result's `problem` member;
+/// the projectless route, which `tracedecay serve` relays to hosts verbatim,
+/// renders it as MCP `structuredContent.problem`. An admitted terminal, and
+/// every other completed problem (a retained authority that is unavailable, a
+/// saturated owner, an observed diagnostic), is the answer: its `after_delay`
+/// directive is for the caller, not a transport loop.
 fn tool_result_retry_after_delay(result: &serde_json::Value) -> Option<Duration> {
+    let problem = result
+        .get("problem")
+        .or_else(|| result.pointer("/structuredContent/problem"))?;
     let record: tracedecay_contracts::ApplicationProblemRecord =
-        serde_json::from_value(result.get("problem")?.clone()).ok()?;
+        serde_json::from_value(problem.clone()).ok()?;
     record.owner_mount_resend_delay()
 }
 
@@ -813,6 +818,12 @@ pub fn is_truncation_envelope(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tracedecay_contracts::{
+        ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef,
+        SafeDiagnostic,
+    };
+    use tracedecay_mcp::tool_errors::structure_tool_problem;
+    use tracedecay_tool_catalog::SchemaId;
 
     use super::super::{
         JsonRpcError, PROJECT_SERVER_CAPACITY_REASON_CODE,
@@ -873,6 +884,46 @@ mod tests {
             .is_some(),
             "a revoked response is re-sent, not returned"
         );
+    }
+
+    /// A problem tool result as the daemon's projectless `tools/call` route
+    /// answers it: the canonical record, moved into MCP structured content.
+    fn projectless_problem_result(problem: ApplicationProblem) -> serde_json::Value {
+        let envelope = ApplicationProblemEnvelope::new(
+            ResultContractRef::new(
+                SchemaId::new("schema.application.retained.message-search.result")
+                    .expect("schema id"),
+                1,
+            )
+            .expect("result contract"),
+            RequestId::new("request.mcp.projectless-mounting").expect("request id"),
+            problem,
+        )
+        .expect("problem envelope");
+        let mut result = json!({
+            "content": [{ "type": "text", "text": "problem" }],
+            "isError": true,
+            "problem": serde_json::to_value(envelope.problem.as_ref()).expect("problem record"),
+        });
+        structure_tool_problem(&mut result);
+        result
+    }
+
+    #[test]
+    fn projectless_mounting_refusal_is_re_sent_after_its_delay() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mounting = projectless_problem_result(ApplicationProblem::runtime_mounting());
+        assert_eq!(mounting.get("problem"), None);
+        assert_eq!(
+            super::project_open_retry_wait(&Ok(mounting), deadline),
+            Some(std::time::Duration::from_millis(250))
+        );
+
+        let answer = projectless_problem_result(ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.retained.authority-unavailable".to_owned(),
+            message: "no retained runtime is registered for this scope".to_owned(),
+        }));
+        assert_eq!(super::project_open_retry_wait(&Ok(answer), deadline), None);
     }
 
     #[test]
