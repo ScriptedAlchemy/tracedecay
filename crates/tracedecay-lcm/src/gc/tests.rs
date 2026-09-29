@@ -1653,20 +1653,18 @@ fn committed_delete_retry_succeeds_after_same_id_content_restore() -> Result<(),
 // ---------------------------------------------------------------------------
 // SQL batching regression coverage.
 //
-// These tests measure *work*: how many round trips a GC path issues, how many
-// rows those round trips visit, and which rows survive. Nothing here inspects
+// These tests measure *work*: how many round trips a GC path issues and which
+// rows survive. Nothing here inspects
 // statement text, so a query rewrite that preserves the work a pass does keeps
 // the gate green, while a regression back to per-row SQL breaks it. Elapsed
 // time is never asserted: a set-sized workload costing a fixed number of round
 // trips is a property of the access pattern, not of the machine.
 // ---------------------------------------------------------------------------
 
-/// Counts the work forwarded through it: one tick per round trip, plus the rows
-/// each query actually returned. It never retains statement text.
+/// Counts the round trips forwarded through it. It never retains statement text.
 #[derive(Default)]
 struct WorkCounter {
     round_trips: std::cell::Cell<usize>,
-    rows_visited: std::cell::Cell<usize>,
 }
 
 impl WorkCounter {
@@ -1674,18 +1672,9 @@ impl WorkCounter {
         self.round_trips.get()
     }
 
-    fn rows_visited(&self) -> usize {
-        self.rows_visited.get()
-    }
-
     fn tick(&self) {
         self.round_trips
             .set(self.round_trips.get().saturating_add(1));
-    }
-
-    fn add_rows(&self, rows: usize) {
-        self.rows_visited
-            .set(self.rows_visited.get().saturating_add(rows));
     }
 }
 
@@ -1704,28 +1693,8 @@ impl<E: QueryExecutor + ?Sized> QueryExecutor for CountingExecutor<'_, E> {
     where
         P: tracedecay_runtime_core::db::engine::IntoParams,
     {
-        use tracedecay_runtime_core::db::engine::{Row, Rows, Value};
-
         self.counter.tick();
-        let mut rows = self.inner.query(sql, params).await?;
-        // Drain and replay so the row count is measured, not estimated. The
-        // replayed `Rows` is indistinguishable to the caller: same column
-        // names, same values, same order.
-        let columns = (0..rows.column_count())
-            .map(|index| rows.column_name(index).unwrap_or_default().to_string())
-            .collect::<Vec<_>>();
-        let mut replay = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let mut values = Vec::new();
-            let mut column = 0_i32;
-            while let Ok(value) = row.get::<Value>(column) {
-                values.push(value);
-                column += 1;
-            }
-            replay.push(Row::from_values(values));
-        }
-        self.counter.add_rows(replay.len());
-        Ok(Rows::from_parts(columns, replay))
+        self.inner.query(sql, params).await
     }
 }
 
