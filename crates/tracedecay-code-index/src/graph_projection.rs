@@ -52,7 +52,8 @@ pub use self::interactive::{
     CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
 };
 pub use self::layered::{
-    CodeGraphLayeredBuildV1, CodeGraphLayeredReportV1, build_layered_code_graph_rows,
+    CodeGraphLayeredBuildV1, CodeGraphLayeredDeclineV1, CodeGraphLayeredReportV1,
+    build_layered_code_graph_rows,
 };
 use self::schema::{
     SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, record_property,

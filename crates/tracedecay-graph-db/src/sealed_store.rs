@@ -69,8 +69,8 @@ use crate::schema::{
     relation_type_for_kind,
 };
 use crate::sealed_layer::{
-    GraphLayeredRowSpill, GraphSealedBaseV1, LayeredGraphGeneration, LayeredReads,
-    SealedBaseReceiptV1, SealedLayer,
+    GraphLayeredRowSpill, GraphSealedBaseAbsenceV1, GraphSealedBaseV1, LayeredGraphGeneration,
+    LayeredReads, SealedBaseReceiptV1, SealedLayer,
 };
 use crate::state::{
     EndpointIdentityCache, latest_projection, load_relation_by_locator_cached,
@@ -432,7 +432,9 @@ impl SealedGenerationStore {
 
     /// The cold base a refresh of this generation layers over: this store
     /// itself when it is a spilled cold build, or its own base when layered.
-    fn sealed_base(&self) -> Result<Option<GraphSealedBaseV1>, GraphDbError> {
+    fn sealed_base(
+        &self,
+    ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
         if let Some(layer) = &self.layer {
             let receipt = &layer.base_receipt;
             return GraphSealedBaseV1::new(
@@ -445,10 +447,10 @@ impl SealedGenerationStore {
                 crate::sealed_layer::layered_attachment(&self.directory),
                 Arc::clone(&layer.base),
             )
-            .map(Some);
+            .map(Ok);
         }
         let Some(row_sum) = self.row_sum else {
-            return Ok(None);
+            return Ok(Err(GraphSealedBaseAbsenceV1::NoRowSum));
         };
         GraphSealedBaseV1::new(
             self.identity.clone(),
@@ -460,7 +462,7 @@ impl SealedGenerationStore {
             crate::sealed_layer::flat_attachment(&self.directory),
             Arc::clone(&self.database),
         )
-        .map(Some)
+        .map(Ok)
     }
 
     /// Best-effort teardown used only when the generation is quarantined or
@@ -1342,12 +1344,22 @@ impl GraphDb {
         &self,
         locator: &GenerationLocator,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<Option<GraphSealedBaseV1>, GraphDbError> {
+    ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
         if let Some(store) = self.sealed_generation_reader(locator) {
             return store.sealed_base();
         }
+        self.sealed_base_from_disk(locator, check)
+    }
+
+    /// A proven sealed artifact of `locator` on disk as a layered base,
+    /// re-proved against the digest its receipt and check record.
+    fn sealed_base_from_disk(
+        &self,
+        locator: &GenerationLocator,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
         if sealed_store_disabled() {
-            return Ok(None);
+            return Ok(Err(GraphSealedBaseAbsenceV1::SealedStoreUnavailable));
         }
         let Some(database_path) = self
             .inner
@@ -1355,20 +1367,22 @@ impl GraphDb {
             .as_ref()
             .and_then(|reopen| reopen.config.path.clone())
         else {
-            return Ok(None);
+            return Ok(Err(GraphSealedBaseAbsenceV1::SealedStoreUnavailable));
         };
         let physical_namespace = locator.physical_namespace()?;
         let directory =
             sealed_generation_directory(&sealed_store_root(&database_path), &physical_namespace);
         let Some(receipt) = load_sealed_store_receipt(&directory)? else {
-            return Ok(None);
+            return Ok(Err(GraphSealedBaseAbsenceV1::NoArtifact));
         };
         if receipt.version != SEALED_STORE_RECEIPT_VERSION
             || receipt.graph_format != GraphFormatVersion::current().get()
             || receipt.physical_namespace != physical_namespace.as_str()
-            || !sealed_store_check_matches(&directory, &receipt.recovered_digest)?
         {
-            return Ok(None);
+            return Ok(Err(GraphSealedBaseAbsenceV1::SupersededArtifact));
+        }
+        if !sealed_store_check_matches(&directory, &receipt.recovered_digest)? {
+            return Ok(Err(GraphSealedBaseAbsenceV1::UnprovenArtifact));
         }
         let projection = &locator.projection;
         let (container, attachment, digest, counts, row_sum, identity) = match &receipt.base {
@@ -1382,7 +1396,7 @@ impl GraphDb {
             ),
             None => {
                 let Some(row_sum) = receipt.row_sum.as_deref() else {
-                    return Ok(None);
+                    return Ok(Err(GraphSealedBaseAbsenceV1::NoRowSum));
                 };
                 (
                     directory.join(SEALED_STORE_DATABASE_FILE),
@@ -1426,7 +1440,7 @@ impl GraphDb {
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         if recovered_digest_from_row_sum(&identity, row_sum, check)? != expected {
             let _ = database.close();
-            return Ok(None);
+            return Ok(Err(GraphSealedBaseAbsenceV1::RowSumMismatch));
         }
         if let Err(error) = sealed_copy_proof(&database, &identity, &expected, check) {
             let _ = database.close();
@@ -1436,7 +1450,7 @@ impl GraphDb {
         GraphSealedBaseV1::new(
             identity, digest, counts.0, counts.1, row_sum, container, attachment, database,
         )
-        .map(Some)
+        .map(Ok)
     }
 
     /// A row spill for a delta of `projection` over `base`, pinning the
@@ -1699,13 +1713,12 @@ fn build_or_open_sealed_store(
     let physical_namespace = identity.physical_namespace()?;
     let root = sealed_store_root(database_path);
     let directory = sealed_generation_directory(&root, &physical_namespace);
-    let layered = match rows {
-        SealedRowSource::Layered(layered) => Some(layered),
-        _ => None,
-    };
     // A layered build's base is the proven generation it replaces in this
     // process, so its reopen proves the delta and trusts the base it names.
-    let trusted_base = layered.map(LayeredGraphGeneration::base_receipt);
+    let trusted_base = match rows {
+        SealedRowSource::Layered(layered) => Some(layered.base_receipt()),
+        _ => None,
+    };
     // Idempotent replay: an artifact from an earlier seal of this exact
     // generation is adopted if its receipt binds the same digest. Adoption
     // never enumerates `source`'s rows, so it yields no staging proof.
@@ -1733,52 +1746,8 @@ fn build_or_open_sealed_store(
     remove_sealed_directory(&staging);
     std::fs::create_dir_all(&staging)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
-    let (row_sum, attachment) = match rows {
-        SealedRowSource::Spilled(spilled) => (Some(spilled.row_sum()), spilled.attachment()),
-        SealedRowSource::Layered(layered) => (Some(layered.row_sum()), None),
-        SealedRowSource::Manifest(manifest) => (Some(manifest.row_sum(check)?), None),
-        SealedRowSource::Staging(_) => (None, None),
-    };
-    let container_rows = match rows {
-        SealedRowSource::Layered(layered) => SealedRowSource::Spilled(layered.delta()),
-        rows => rows,
-    };
-    let built = build_sealed_container(container_rows, identity, &staging, check)
-        .and_then(|counts| {
-            if let Some(layered) = layered {
-                layered.install_base_files(&staging)?;
-                return Ok(layered.row_counts());
-            }
-            if let Some(attachment) = &attachment {
-                std::fs::hard_link(
-                    attachment,
-                    staging.join(crate::sealed_layer::GENERATION_ATTACHMENT_FILE),
-                )
-                .map_err(|error| sealed_store_io_failure("attachment link failed", error))?;
-            }
-            Ok(counts)
-        })
-        .inspect_err(|_| remove_sealed_directory(&staging));
-    let (entities, relations) = built?;
-    let receipt = SealedStoreReceiptV1 {
-        version: SEALED_STORE_RECEIPT_VERSION,
-        form: if layered.is_some() {
-            SEALED_STORE_FORM_LAYERED
-        } else {
-            SEALED_STORE_FORM_COMPACT
-        }
-        .to_owned(),
-        namespace: identity.projection.namespace.as_str().to_owned(),
-        projection: identity.projection.projection.as_str().to_owned(),
-        generation: identity.generation.as_str().to_owned(),
-        physical_namespace: physical_namespace.as_str().to_owned(),
-        recovered_digest: expected.as_str().to_owned(),
-        entities,
-        relations,
-        graph_format: GraphFormatVersion::current().get(),
-        row_sum: row_sum.map(GraphRowDigestSum::to_hex),
-        base: trusted_base.clone(),
-    };
+    let receipt = stage_sealed_artifact(rows, identity, expected, &staging, check)
+        .inspect_err(|_| remove_sealed_directory(&staging))?;
     let encoded = serde_json::to_vec_pretty(&receipt)
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt encode: {error}")))?;
     std::fs::write(staging.join(SEALED_STORE_RECEIPT_FILE), encoded)
@@ -1821,6 +1790,60 @@ fn build_or_open_sealed_store(
             Err(error)
         }
     }
+}
+
+/// Builds the artifact directory `staging` holds for `rows`: the container,
+/// a layered store's base links and hidden rows or a flat store's producer
+/// attachment, and the receipt that binds them, unwritten.
+fn stage_sealed_artifact(
+    rows: SealedRowSource<'_>,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    staging: &Path,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<SealedStoreReceiptV1, GraphDbError> {
+    let (row_sum, attachment, layered) = match rows {
+        SealedRowSource::Spilled(spilled) => (Some(spilled.row_sum()), spilled.attachment(), None),
+        SealedRowSource::Layered(layered) => (Some(layered.row_sum()), None, Some(layered)),
+        SealedRowSource::Manifest(manifest) => (Some(manifest.row_sum(check)?), None, None),
+        SealedRowSource::Staging(_) => (None, None, None),
+    };
+    let container_rows = match rows {
+        SealedRowSource::Layered(layered) => SealedRowSource::Spilled(layered.delta()),
+        rows => rows,
+    };
+    let (mut entities, mut relations) =
+        build_sealed_container(container_rows, identity, staging, check)?;
+    if let Some(layered) = layered {
+        layered.install_base_files(staging)?;
+        (entities, relations) = layered.row_counts();
+    }
+    if let Some(attachment) = &attachment {
+        std::fs::hard_link(
+            attachment,
+            staging.join(crate::sealed_layer::GENERATION_ATTACHMENT_FILE),
+        )
+        .map_err(|error| sealed_store_io_failure("attachment link failed", error))?;
+    }
+    Ok(SealedStoreReceiptV1 {
+        version: SEALED_STORE_RECEIPT_VERSION,
+        form: if layered.is_some() {
+            SEALED_STORE_FORM_LAYERED
+        } else {
+            SEALED_STORE_FORM_COMPACT
+        }
+        .to_owned(),
+        namespace: identity.projection.namespace.as_str().to_owned(),
+        projection: identity.projection.projection.as_str().to_owned(),
+        generation: identity.generation.as_str().to_owned(),
+        physical_namespace: identity.physical_namespace()?.as_str().to_owned(),
+        recovered_digest: expected.as_str().to_owned(),
+        entities,
+        relations,
+        graph_format: GraphFormatVersion::current().get(),
+        row_sum: row_sum.map(GraphRowDigestSum::to_hex),
+        base: layered.map(LayeredGraphGeneration::base_receipt),
+    })
 }
 
 /// Streams the generation's verified rows into a compact store and writes it
@@ -2359,36 +2382,8 @@ fn open_sealed_store_checked(
         .as_deref()
         .map(GraphRowDigestSum::from_hex)
         .transpose()?;
-    // A layered container holds only the delta, so it proves against the
-    // digest of the delta's rows, which the receipt's sums derive and the
-    // head's digest binds.
-    let container_expected = match (&receipt.base, receipt.form.as_str()) {
-        (None, SEALED_STORE_FORM_COMPACT) => expected.clone(),
-        (Some(base), SEALED_STORE_FORM_LAYERED) => {
-            let row_sum = row_sum.ok_or_else(|| {
-                GraphDbError::unavailable("layered sealed receipt records no row sum")
-            })?;
-            if recovered_digest_from_row_sum(identity, row_sum, check)? != *expected {
-                return Err(GraphDbError::unavailable(
-                    "layered sealed receipt row sum does not digest to its verified head",
-                ));
-            }
-            if trusted_base.is_some_and(|trusted| trusted != base) {
-                return Err(GraphDbError::unavailable(
-                    "layered sealed receipt names a different base",
-                ));
-            }
-            let mut delta = row_sum;
-            delta.merge(GraphRowDigestSum::from_hex(&base.hidden_row_sum)?);
-            delta.subtract(GraphRowDigestSum::from_hex(&base.row_sum)?)?;
-            recovered_digest_from_row_sum(identity, delta, check)?
-        }
-        _ => {
-            return Err(GraphDbError::unavailable(
-                "sealed generation receipt names an unknown form",
-            ));
-        }
-    };
+    let container_expected =
+        container_proof_digest(&receipt, row_sum, identity, expected, trusted_base, check)?;
     // Lazily: installing a sealed reader must not retain a whole in-memory
     // graph. grafeo's store is heap resident, so an eager open here kept the
     // artifact's entire block log in RAM for every generation this process
@@ -2473,6 +2468,44 @@ fn open_sealed_store_checked(
         },
         layer,
     })))
+}
+
+/// The digest the artifact's own container proves against: the head's for a
+/// flat store; for a layered store, the digest of its delta rows, derived
+/// from the receipt's row sums after the head's digest binds them.
+fn container_proof_digest(
+    receipt: &SealedStoreReceiptV1,
+    row_sum: Option<GraphRowDigestSum>,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    trusted_base: Option<&SealedBaseReceiptV1>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+    match (&receipt.base, receipt.form.as_str()) {
+        (None, SEALED_STORE_FORM_COMPACT) => Ok(expected.clone()),
+        (Some(base), SEALED_STORE_FORM_LAYERED) => {
+            let row_sum = row_sum.ok_or_else(|| {
+                GraphDbError::unavailable("layered sealed receipt records no row sum")
+            })?;
+            if recovered_digest_from_row_sum(identity, row_sum, check)? != *expected {
+                return Err(GraphDbError::unavailable(
+                    "layered sealed receipt row sum does not digest to its verified head",
+                ));
+            }
+            if trusted_base.is_some_and(|trusted| trusted != base) {
+                return Err(GraphDbError::unavailable(
+                    "layered sealed receipt names a different base",
+                ));
+            }
+            let mut delta = row_sum;
+            delta.merge(GraphRowDigestSum::from_hex(&base.hidden_row_sum)?);
+            delta.subtract(GraphRowDigestSum::from_hex(&base.row_sum)?)?;
+            recovered_digest_from_row_sum(identity, delta, check)
+        }
+        _ => Err(GraphDbError::unavailable(
+            "sealed generation receipt names an unknown form",
+        )),
+    }
 }
 
 /// Opens a layered store's hard-linked base and, unless this process already

@@ -1278,16 +1278,16 @@ impl GraphDbRegistry {
     }
 
     /// The sealed cold base a refresh replacing `generation` may layer over:
-    /// `None` unless that generation has a proven sealed store, installed or
-    /// on disk, that records its row sum, directly or as a layered store's
-    /// base.
+    /// that generation's proven sealed store, installed or on disk, when it
+    /// records its row sum, or a layered store's base; otherwise why not.
     pub fn sealed_generation_base(
         &self,
         registration: GraphDbRegistration,
         projection: GraphProjectionIdentity,
         generation: crate::GraphGenerationId,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<Option<crate::GraphSealedBaseV1>, GraphDbError> {
+    ) -> Result<Result<crate::GraphSealedBaseV1, crate::GraphSealedBaseAbsenceV1>, GraphDbError>
+    {
         let operation = self.registered_operation(registration)?;
         operation.database().sealed_generation_base(
             &crate::lease::GenerationLocator::new(projection, generation),

@@ -13,6 +13,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use tracedecay_domain::{CanonicalRelationEdgeV1, SymbolOccurrenceId};
+
+use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use tracedecay_graph_db::{
     GraphDbError, GraphEntityId, GraphLayeredRowSpill, GraphProjectionIdentity,
     GraphProjectorRevision, GraphRelationId, LayeredGraphGeneration,
@@ -50,6 +52,17 @@ pub struct CodeGraphLayeredReportV1 {
     pub delta_rows: (usize, usize),
 }
 
+/// Why a refresh declined to layer over its base; it seals cold instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodeGraphLayeredDeclineV1 {
+    /// The base was sealed without resolution inputs.
+    NoBaseInputs,
+    /// The base's inputs were recorded for another projector or revision.
+    BaseInputsRevision,
+    /// Files changed since the base exceed the share a delta may carry.
+    ChangedFileShare { changed: usize, files: usize },
+}
+
 /// A layered graph generation and how it was built.
 pub struct CodeGraphLayeredBuildV1 {
     pub generation: LayeredGraphGeneration,
@@ -58,7 +71,7 @@ pub struct CodeGraphLayeredBuildV1 {
 
 /// Builds a sealed code generation's graph as a delta over `spill`'s base.
 ///
-/// `Ok(None)` when the base carries no resolution inputs this projector can
+/// A decline when the base carries no resolution inputs this projector can
 /// read, or the refresh changed too much of it to stay a delta; a cold build
 /// answers both.
 #[hotpath::measure(label = "code_index.graph.build_layered_rows")]
@@ -69,7 +82,7 @@ pub fn build_layered_code_graph_rows(
     projector_revision: &GraphProjectorRevision,
     mut spill: GraphLayeredRowSpill,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Option<CodeGraphLayeredBuildV1>, SealedCodeGraphRowsError> {
+) -> Result<Result<CodeGraphLayeredBuildV1, CodeGraphLayeredDeclineV1>, SealedCodeGraphRowsError> {
     check()?;
     if projection_identity.projection != projection()? {
         return Err(CodeGraphProjectionError::Contract(
@@ -82,7 +95,7 @@ pub fn build_layered_code_graph_rows(
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
     let Some(inputs) = spill.base_attachment() else {
-        return Ok(None);
+        return Ok(Err(CodeGraphLayeredDeclineV1::NoBaseInputs));
     };
     let Some(resolution) = source.resolve_layered_code_graph(
         read_segment,
@@ -91,7 +104,7 @@ pub fn build_layered_code_graph_rows(
         check,
     )?
     else {
-        return Ok(None);
+        return Ok(Err(CodeGraphLayeredDeclineV1::BaseInputsRevision));
     };
     if code_graph_generation_id(&resolution.base_generation, projector_revision)?
         != *spill.base().generation()
@@ -108,7 +121,10 @@ pub fn build_layered_code_graph_rows(
     let changed_files = resolution.reextracted_files.max(resolution.removed.len());
     let child_files = resolution.added.len() + resolution.unchanged.len();
     if changed_files.saturating_mul(LAYERED_MAX_CHANGED_FILE_SHARE_DENOMINATOR) > child_files {
-        return Ok(None);
+        return Ok(Err(CodeGraphLayeredDeclineV1::ChangedFileShare {
+            changed: changed_files,
+            files: child_files,
+        }));
     }
     let report = hotpath::measure_block!(
         "code_index.graph.build_layered_rows.emit",
@@ -137,8 +153,34 @@ pub fn build_layered_code_graph_rows(
         hotpath::gauge!("code_index.graph.layered.delta_relations").inc(report.delta_rows.1 as u64);
         hotpath::gauge!("code_index.graph.layered.files_reused").inc(report.reused_files as u64);
     }
-    Ok(Some(CodeGraphLayeredBuildV1 { generation, report }))
+    Ok(Ok(CodeGraphLayeredBuildV1 { generation, report }))
 }
+
+/// Emits the child's rows into `spill` through its row context.
+struct DeltaEmitter<'a> {
+    context: CodeGraphRowContext<'a>,
+    check: &'a dyn Fn() -> Result<(), GraphDbError>,
+}
+
+impl DeltaEmitter<'_> {
+    fn emit(
+        &self,
+        spill: &mut GraphLayeredRowSpill,
+        batch: CodeGraphRowBatch<'_>,
+        with_relations: bool,
+    ) -> Result<(), SealedCodeGraphRowsError> {
+        let rows = emit_code_graph_rows(&self.context, &batch, self.check)?;
+        let relations = if with_relations {
+            rows.relations
+        } else {
+            Vec::new()
+        };
+        spill.push_batch(rows.entities, relations, self.check)?;
+        Ok(())
+    }
+}
+
+type UnresolvedBySource<'a> = BTreeMap<&'a SymbolOccurrenceId, Vec<CodeIndexUnresolvedReferenceV1>>;
 
 fn emit_delta(
     projection_identity: &GraphProjectionIdentity,
@@ -157,32 +199,21 @@ fn emit_delta(
         .iter()
         .map(|file| (&file.file_occurrence_id, file))
         .collect::<BTreeMap<_, _>>();
-    let context = CodeGraphRowContext {
-        projection: projection_identity,
-        generation,
-        files: Some(&files),
-        bound: &resolution.bound,
-        unresolved_by_source: &unresolved_by_source,
-    };
-    let no_bindings = BTreeMap::new();
-    let emit = |spill: &mut GraphLayeredRowSpill,
-                batch: CodeGraphRowBatch<'_>,
-                with_relations: bool|
-     -> Result<(), SealedCodeGraphRowsError> {
-        let rows = emit_code_graph_rows(&context, &batch, check)?;
-        let relations = if with_relations {
-            rows.relations
-        } else {
-            Vec::new()
-        };
-        spill.push_batch(rows.entities, relations, check)?;
-        Ok(())
+    let emitter = DeltaEmitter {
+        context: CodeGraphRowContext {
+            projection: projection_identity,
+            generation,
+            files: Some(&files),
+            bound: &resolution.bound,
+            unresolved_by_source: &unresolved_by_source,
+        },
+        check,
     };
 
     // Files the base does not hold: every row they own.
     for batch in &resolution.added {
         check()?;
-        emit(
+        emitter.emit(
             spill,
             CodeGraphRowBatch {
                 files: &batch.files,
@@ -201,18 +232,72 @@ fn emit_delta(
         let (entities, relations) = removed_file_rows(removed)?;
         spill.hide(entities, relations);
     }
-    // Unchanged files: only where whole-generation resolution moved.
-    let mut retention_gained = Vec::new();
-    let mut retention_lost = Vec::new();
+    let (mut retention_gained, mut retention_lost) = emit_unchanged_moves(
+        &emitter,
+        spill,
+        resolution,
+        &unresolved_by_source,
+        &base_unresolved_by_source,
+    )?;
+    // Cross-file edges resolution derives anew, keyed by the relation each
+    // projects to, a digest of the whole edge.
+    let cross = retained_by_relation(&resolution.cross_file_edges, &resolution.bound)?;
+    let base_cross =
+        retained_by_relation(&resolution.base_cross_file_edges, &resolution.base_bound)?;
+    for (identity, edge) in &cross {
+        if !base_cross.contains_key(identity) {
+            retention_gained.push((*edge).clone());
+        }
+    }
+    retention_lost.extend(
+        base_cross
+            .keys()
+            .filter(|identity| !cross.contains_key(*identity))
+            .cloned(),
+    );
+    let no_bindings = BTreeMap::new();
+    emitter.emit(
+        spill,
+        CodeGraphRowBatch {
+            files: &[],
+            imports: &[],
+            chunks: &[],
+            symbols: &[],
+            edges: &retention_gained,
+            bindings: Some(&no_bindings),
+        },
+        true,
+    )?;
+    spill.hide(Vec::new(), retention_lost);
+    diff_placeholders(spill, resolution, &unresolved_by_source, check)?;
+    reseal_generation_marker(spill, generation, check)?;
+    Ok(CodeGraphLayeredReportV1 {
+        reextracted_files: resolution.reextracted_files,
+        reused_files: resolution.unchanged.len(),
+        removed_files: resolution.removed.len(),
+        delta_rows: (0, 0),
+    })
+}
+
+/// Unchanged files differ only where whole-generation resolution moved:
+/// symbols whose disclosed unresolved calls changed are re-emitted, and
+/// edges whose source gained or lost its binding are returned to retain or
+/// hide.
+fn emit_unchanged_moves(
+    emitter: &DeltaEmitter<'_>,
+    spill: &mut GraphLayeredRowSpill,
+    resolution: &CodeGraphLayeredResolutionV1<'_>,
+    unresolved_by_source: &UnresolvedBySource<'_>,
+    base_unresolved_by_source: &UnresolvedBySource<'_>,
+) -> Result<(Vec<CanonicalRelationEdgeV1>, Vec<GraphRelationId>), SealedCodeGraphRowsError> {
+    let mut gained = Vec::new();
+    let mut lost = Vec::new();
     for batch in &resolution.unchanged {
-        check()?;
-        let occurrences = batch
+        (emitter.check)()?;
+        let moved = batch
             .bindings
             .keys()
             .chain(batch.symbols.iter().map(|symbol| &symbol.occurrence))
-            .collect::<BTreeSet<_>>();
-        let moved = occurrences
-            .into_iter()
             .filter(|occurrence| {
                 unresolved_by_source.get(occurrence) != base_unresolved_by_source.get(occurrence)
             })
@@ -230,7 +315,7 @@ fn emit_delta(
                 .filter(|(occurrence, _)| moved.contains(occurrence))
                 .map(|(occurrence, binding)| (occurrence.clone(), binding.clone()))
                 .collect::<BTreeMap<_, _>>();
-            emit(
+            emitter.emit(
                 spill,
                 CodeGraphRowBatch {
                     files: &[],
@@ -248,71 +333,43 @@ fn emit_delta(
                 resolution.base_bound.contains(&edge.from_occurrence),
                 resolution.bound.contains(&edge.from_occurrence),
             ) {
-                (false, true) => retention_gained.push(edge.clone()),
-                (true, false) => retention_lost.push(edge_relation_id(edge)?),
+                (false, true) => gained.push(edge.clone()),
+                (true, false) => lost.push(edge_relation_id(edge)?),
                 _ => {}
             }
         }
     }
-    // Cross-file edges resolution derives anew, keyed by the relation each
-    // projects to, a digest of the whole edge.
-    let cross = retained_by_relation(&resolution.cross_file_edges, &resolution.bound)?;
-    let base_cross =
-        retained_by_relation(&resolution.base_cross_file_edges, &resolution.base_bound)?;
-    for (identity, edge) in &cross {
-        if !base_cross.contains_key(identity) {
-            retention_gained.push((*edge).clone());
-        }
-    }
-    retention_lost.extend(
-        base_cross
-            .keys()
-            .filter(|identity| !cross.contains_key(*identity))
-            .cloned(),
-    );
-    emit(
-        spill,
-        CodeGraphRowBatch {
-            files: &[],
-            imports: &[],
-            chunks: &[],
-            symbols: &[],
-            edges: &retention_gained,
-            bindings: Some(&no_bindings),
-        },
-        true,
-    )?;
-    spill.hide(Vec::new(), retention_lost);
-    // Edge targets no file binds: placeholder entities on either side.
-    let placeholders = |edges: &mut dyn Iterator<Item = &CanonicalRelationEdgeV1>,
-                        bound: &HashSet<SymbolOccurrenceId>| {
-        edges
-            .filter(|edge| {
-                bound.contains(&edge.from_occurrence) && !bound.contains(&edge.to_occurrence)
-            })
-            .map(|edge| edge.to_occurrence.clone())
-            .collect::<BTreeSet<_>>()
-    };
+    Ok((gained, lost))
+}
+
+/// Edge targets no file binds are placeholder entities; emits the ones only
+/// the child has and hides the ones only the base had.
+fn diff_placeholders(
+    spill: &mut GraphLayeredRowSpill,
+    resolution: &CodeGraphLayeredResolutionV1<'_>,
+    unresolved_by_source: &UnresolvedBySource<'_>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), SealedCodeGraphRowsError> {
     let unchanged_edges = || {
         resolution
             .unchanged
             .iter()
             .flat_map(|batch| batch.edges.iter())
     };
-    let child_placeholders = placeholders(
-        &mut unchanged_edges()
+    let child = placeholders(
+        unchanged_edges()
             .chain(resolution.added.iter().flat_map(|batch| batch.edges.iter()))
             .chain(&resolution.cross_file_edges),
         &resolution.bound,
     );
-    let base_placeholders = placeholders(
-        &mut unchanged_edges()
+    let base = placeholders(
+        unchanged_edges()
             .chain(resolution.removed.iter().flat_map(|file| file.edges.iter()))
             .chain(&resolution.base_cross_file_edges),
         &resolution.base_bound,
     );
     let mut appeared = Vec::new();
-    for occurrence in child_placeholders.difference(&base_placeholders) {
+    for occurrence in child.difference(&base) {
         check()?;
         appeared.push(symbol_entity(
             symbol_entity_id(occurrence)?,
@@ -329,17 +386,36 @@ fn emit_delta(
     }
     spill.push_batch(appeared, Vec::new(), check)?;
     spill.hide(
-        base_placeholders
-            .difference(&child_placeholders)
+        base.difference(&child)
             .map(symbol_entity_id)
             .collect::<Result<Vec<_>, _>>()?,
         Vec::new(),
     );
-    // The generation marker counts every entity, itself included.
-    let marker = GraphEntityId::new(CURRENT_GENERATION_ENTITY)?;
-    spill.hide([marker], Vec::new());
-    let entities = spill.entity_count(check)?;
-    let projection_node_count = entities.checked_add(1).ok_or_else(|| {
+    Ok(())
+}
+
+/// The targets of retained edges that `bound` does not bind.
+fn placeholders<'e>(
+    edges: impl Iterator<Item = &'e CanonicalRelationEdgeV1>,
+    bound: &HashSet<SymbolOccurrenceId>,
+) -> BTreeSet<SymbolOccurrenceId> {
+    edges
+        .filter(|edge| {
+            bound.contains(&edge.from_occurrence) && !bound.contains(&edge.to_occurrence)
+        })
+        .map(|edge| edge.to_occurrence.clone())
+        .collect()
+}
+
+/// Replaces the generation marker, which counts every entity, itself
+/// included.
+fn reseal_generation_marker(
+    spill: &mut GraphLayeredRowSpill,
+    generation: &tracedecay_domain::CodeGenerationId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), SealedCodeGraphRowsError> {
+    spill.hide([GraphEntityId::new(CURRENT_GENERATION_ENTITY)?], Vec::new());
+    let projection_node_count = spill.entity_count(check)?.checked_add(1).ok_or_else(|| {
         CodeGraphProjectionError::Contract("code graph projection node count overflowed".to_owned())
     })?;
     spill.push_batch(
@@ -350,12 +426,7 @@ fn emit_delta(
         Vec::new(),
         check,
     )?;
-    Ok(CodeGraphLayeredReportV1 {
-        reextracted_files: resolution.reextracted_files,
-        reused_files: resolution.unchanged.len(),
-        removed_files: resolution.removed.len(),
-        delta_rows: (0, 0),
-    })
+    Ok(())
 }
 
 /// The edges a generation retains, those whose source it binds, by the

@@ -509,7 +509,7 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
     let (source, base_generation, _, base_binding) = fixture.seal();
     let (_scope, registry, database) = fixture.open_profile("profile", 45).await;
     let base_runtime = source
-        .retain(&registry, &database, &base_generation, base_binding)
+        .retain(&registry, &database, &base_generation, base_binding.clone())
         .await
         .expect("retain the base graph runtime");
     let base = base_runtime
@@ -522,6 +522,21 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
     let base_container = file_identity(&base_directory.join("generation.grafeo"));
     #[cfg(not(unix))]
     let _ = base_directory;
+
+    // A daemon restart between the base and the refresh: the base serves
+    // straight from its sealed artifact, never installed in the new graph
+    // registry, and must still be the refresh's base.
+    drop(base);
+    drop(base_runtime);
+    drop((registry, database, _scope));
+    let (_scope, registry, database) = fixture.open_profile("profile", 45).await;
+    let base_runtime = source
+        .retain(&registry, &database, &base_generation, base_binding.clone())
+        .await
+        .expect("retain the base graph runtime after a restart");
+    let base = base_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("recover the base graph after a restart");
 
     // A three-file edit.
     edit_three_files(&project_root);

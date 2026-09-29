@@ -21,8 +21,8 @@ use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, sha256_hex_suff
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphGenerationRowSpill,
     GraphGenerationRows, GraphLayeredRowSpill, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphProjectorRevision, SealedCodeGenerationReplay,
-    SealedGraphStateDigest, SpilledGraphGeneration,
+    GraphProjectionIdentity, GraphProjectorRevision, GraphSealedBaseAbsenceV1,
+    SealedCodeGenerationReplay, SealedGraphStateDigest, SpilledGraphGeneration,
 };
 use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1;
 use tracedecay_store::{GraphProjectionIdentityV1, StoreShardIdV1};
@@ -564,7 +564,10 @@ pub(super) fn graph_rows_from_roots(
     projector_revision: &GraphProjectorRevision,
     layered_spill: &dyn Fn(
         &tracedecay_domain::CodeGenerationId,
-    ) -> Result<Option<GraphLayeredRowSpill>, GraphDbError>,
+    ) -> Result<
+        Result<GraphLayeredRowSpill, GraphSealedBaseAbsenceV1>,
+        GraphDbError,
+    >,
     cold_spill: &dyn Fn() -> Result<GraphGenerationRowSpill, GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError> {
@@ -591,7 +594,7 @@ pub(super) fn graph_rows_from_roots(
     let segment_roots = [segments_root];
     if let Some(parent) = source.manifest().parent_generation.clone() {
         let layered = layered_spill(&parent).and_then(|spill| match spill {
-            Some(spill) => with_verified_segments(
+            Ok(spill) => with_verified_segments(
                 &sealed_state_digest,
                 &segment_roots,
                 check,
@@ -605,12 +608,19 @@ pub(super) fn graph_rows_from_roots(
                         check,
                     )
                 },
-            ),
-            None => Ok(None),
+            )
+            .map(|built| built.map_err(|decline| format!("{decline:?}"))),
+            Err(absence) => Ok(Err(format!("{absence:?}"))),
         });
         match layered {
-            Ok(Some(built)) => return Ok((built.generation.into(), Some(built.report))),
-            Ok(None) => {}
+            Ok(Ok(built)) => return Ok((built.generation.into(), Some(built.report))),
+            Ok(Err(reason)) => tracing::info!(
+                event = "code_graph_layered_refresh_declined",
+                generation = %generation,
+                parent = %parent,
+                reason = %reason,
+                "the refresh seals cold rather than as a delta over its parent's graph"
+            ),
             Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
                 return Err(error);
             }

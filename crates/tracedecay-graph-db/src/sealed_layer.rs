@@ -105,6 +105,24 @@ pub(crate) struct HiddenRowsV1 {
     pub(crate) relations: Vec<GraphRelationId>,
 }
 
+/// Why a generation offers no sealed base for a refresh to layer over; the
+/// refresh then seals cold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphSealedBaseAbsenceV1 {
+    /// Sealed stores are switched off, or the store has no disk.
+    SealedStoreUnavailable,
+    /// No sealed artifact of the generation exists.
+    NoArtifact,
+    /// The artifact was sealed under another receipt or graph format.
+    SupersededArtifact,
+    /// The artifact's post-reopen proof was never recorded.
+    UnprovenArtifact,
+    /// The artifact was sealed from staging rows and records no row sum.
+    NoRowSum,
+    /// The recorded row sum does not digest to the recorded head.
+    RowSumMismatch,
+}
+
 /// A sealed cold generation a refresh may layer over, resolved from the
 /// generation a publication replaces.
 #[derive(Clone)]
@@ -380,6 +398,48 @@ impl GraphLayeredRowSpill {
                 "a layered generation names a projection its base does not serve",
             ));
         }
+        self.copy_base_endpoints(check)?;
+        let Self {
+            spill,
+            base,
+            hidden_entities,
+            hidden_relations,
+        } = self;
+        let delta = spill.finish(identity.clone(), check)?;
+        let shadowed =
+            shadowed_base_rows(&base, &hidden_entities, &hidden_relations, &delta, check)?;
+        let (delta_entity_count, delta_relation_count) = delta.row_counts();
+        let mut row_sum = base.inner.row_sum;
+        row_sum.subtract(shadowed.sum)?;
+        row_sum.merge(delta.row_sum());
+        let expected_recovered_digest = recovered_digest_from_row_sum(&identity, row_sum, check)?;
+        #[cfg(feature = "hotpath")]
+        {
+            hotpath::gauge!("graph_db.sealed_layer.delta_entities").inc(delta_entity_count as u64);
+            hotpath::gauge!("graph_db.sealed_layer.delta_relations")
+                .inc(delta_relation_count as u64);
+            hotpath::gauge!("graph_db.sealed_layer.hidden_rows")
+                .inc((shadowed.hidden.entities.len() + shadowed.hidden.relations.len()) as u64);
+        }
+        Ok(LayeredGraphGeneration {
+            identity,
+            delta,
+            base,
+            hidden: shadowed.hidden,
+            hidden_sum: shadowed.sum,
+            entity_count: shadowed.base_entities + delta_entity_count,
+            relation_count: shadowed.base_relations + delta_relation_count,
+            row_sum,
+            expected_recovered_digest,
+        })
+    }
+
+    /// Pushes the base's copy of every endpoint the delta's relations reach
+    /// but the delta does not carry. A hidden or absent endpoint refuses.
+    fn copy_base_endpoints(
+        &mut self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(), GraphDbError> {
         let mut stubs = Vec::new();
         for endpoint in self.spill.missing_endpoints() {
             check()?;
@@ -396,92 +456,89 @@ impl GraphLayeredRowSpill {
         }
         #[cfg(feature = "hotpath")]
         hotpath::gauge!("graph_db.sealed_layer.endpoint_stubs").inc(stubs.len() as u64);
-        self.spill.push_batch(stubs, Vec::new(), check)?;
-        let delta = self.spill.finish(identity.clone(), check)?;
-
-        let mut hidden_sum = GraphRowDigestSum::default();
-        let mut hidden = HiddenRowsV1::default();
-        let (mut entities, mut relations) = self.base.row_counts();
-        let delta_entities = delta.entity_identities();
-        for id in delta_entities
-            .iter()
-            .chain(self.hidden_entities.iter())
-            .collect::<BTreeSet<_>>()
-        {
-            check()?;
-            if let Some(row) = self.base.entity(id)? {
-                hidden_sum.add_row("entity", &canonical(&row)?)?;
-                entities = entities
-                    .checked_sub(1)
-                    .ok_or_else(|| GraphDbError::Corrupt {
-                        message: "a layered generation hides more entities than its base holds"
-                            .to_owned(),
-                    })?;
-            }
-            if self.hidden_entities.contains(id) && delta_entities.binary_search(id).is_err() {
-                hidden.entities.push(id.clone());
-            }
-        }
-        // A removed entity leaves the generation only with every base
-        // relation it anchors, or the layered reads would reach a row that
-        // no longer exists.
-        for id in &hidden.entities {
-            check()?;
-            for incident in self.base.incident_relations(id)? {
-                if !self.hidden_relations.contains(&incident) {
-                    return Err(GraphDbError::Corrupt {
-                        message: format!(
-                            "layered generation removes entity `{id}` but keeps its base relation `{incident}`"
-                        ),
-                    });
-                }
-            }
-        }
-        let delta_relations = delta.relation_identities()?;
-        for id in delta_relations
-            .iter()
-            .chain(self.hidden_relations.iter())
-            .collect::<BTreeSet<_>>()
-        {
-            check()?;
-            if let Some(row) = self.base.relation(id)? {
-                hidden_sum.add_row("relation", &canonical(&row)?)?;
-                relations = relations
-                    .checked_sub(1)
-                    .ok_or_else(|| GraphDbError::Corrupt {
-                        message: "a layered generation hides more relations than its base holds"
-                            .to_owned(),
-                    })?;
-            }
-            if self.hidden_relations.contains(id) && delta_relations.binary_search(id).is_err() {
-                hidden.relations.push(id.clone());
-            }
-        }
-        let (delta_entity_count, delta_relation_count) = delta.row_counts();
-        let mut row_sum = self.base.inner.row_sum;
-        row_sum.subtract(hidden_sum)?;
-        row_sum.merge(delta.row_sum());
-        let expected_recovered_digest = recovered_digest_from_row_sum(&identity, row_sum, check)?;
-        #[cfg(feature = "hotpath")]
-        {
-            hotpath::gauge!("graph_db.sealed_layer.delta_entities").inc(delta_entity_count as u64);
-            hotpath::gauge!("graph_db.sealed_layer.delta_relations")
-                .inc(delta_relation_count as u64);
-            hotpath::gauge!("graph_db.sealed_layer.hidden_rows")
-                .inc((hidden.entities.len() + hidden.relations.len()) as u64);
-        }
-        Ok(LayeredGraphGeneration {
-            identity,
-            delta,
-            base: self.base,
-            hidden,
-            hidden_sum,
-            entity_count: entities + delta_entity_count,
-            relation_count: relations + delta_relation_count,
-            row_sum,
-            expected_recovered_digest,
-        })
+        self.spill.push_batch(stubs, Vec::new(), check)
     }
+}
+
+/// The base rows the finished `delta` shadows or the layer hides: their
+/// row sum, the identities left hidden, and the base rows that stay.
+fn shadowed_base_rows(
+    base: &GraphSealedBaseV1,
+    hidden_entities: &BTreeSet<GraphEntityId>,
+    hidden_relations: &BTreeSet<GraphRelationId>,
+    delta: &SpilledGraphGeneration,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<ShadowedBaseRows, GraphDbError> {
+    let over_count = || GraphDbError::Corrupt {
+        message: "a layered generation hides more rows than its base holds".to_owned(),
+    };
+    let mut shadowed = ShadowedBaseRows {
+        sum: GraphRowDigestSum::default(),
+        hidden: HiddenRowsV1::default(),
+        base_entities: base.inner.entities,
+        base_relations: base.inner.relations,
+    };
+    let delta_entities = delta.entity_identities();
+    for id in delta_entities
+        .iter()
+        .chain(hidden_entities.iter())
+        .collect::<BTreeSet<_>>()
+    {
+        check()?;
+        if let Some(row) = base.entity(id)? {
+            shadowed.sum.add_row("entity", &canonical(&row)?)?;
+            shadowed.base_entities = shadowed
+                .base_entities
+                .checked_sub(1)
+                .ok_or_else(over_count)?;
+        }
+        if hidden_entities.contains(id) && delta_entities.binary_search(id).is_err() {
+            shadowed.hidden.entities.push(id.clone());
+        }
+    }
+    // A removed entity leaves the generation only with every base
+    // relation it anchors, or the layered reads would reach a row that
+    // no longer exists.
+    for id in &shadowed.hidden.entities {
+        check()?;
+        for incident in base.incident_relations(id)? {
+            if !hidden_relations.contains(&incident) {
+                return Err(GraphDbError::Corrupt {
+                    message: format!(
+                        "layered generation removes entity `{id}` but keeps its base relation `{incident}`"
+                    ),
+                });
+            }
+        }
+    }
+    let delta_relations = delta.relation_identities()?;
+    for id in delta_relations
+        .iter()
+        .chain(hidden_relations.iter())
+        .collect::<BTreeSet<_>>()
+    {
+        check()?;
+        if let Some(row) = base.relation(id)? {
+            shadowed.sum.add_row("relation", &canonical(&row)?)?;
+            shadowed.base_relations = shadowed
+                .base_relations
+                .checked_sub(1)
+                .ok_or_else(over_count)?;
+        }
+        if hidden_relations.contains(id) && delta_relations.binary_search(id).is_err() {
+            shadowed.hidden.relations.push(id.clone());
+        }
+    }
+    Ok(shadowed)
+}
+
+/// What a delta takes away from its base.
+struct ShadowedBaseRows {
+    sum: GraphRowDigestSum,
+    hidden: HiddenRowsV1,
+    /// Base rows that still serve.
+    base_entities: usize,
+    base_relations: usize,
 }
 
 /// A layered generation's rows, ready to seal over its base.

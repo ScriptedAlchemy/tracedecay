@@ -1946,11 +1946,11 @@ impl RetainedCodeGraphRuntimeV1 {
                     parent,
                     &check,
                 )? {
-                    Some(base) => self
+                    Ok(base) => self
                         .graph_registry
                         .layered_row_spill(registration(), projection.clone(), base)
-                        .map(Some),
-                    None => Ok(None),
+                        .map(Ok),
+                    Err(absence) => Ok(Err(absence)),
                 }
             };
             let cold_spill = || {

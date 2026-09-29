@@ -18,7 +18,8 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, ManifestDigest, SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, ManifestDigest,
+    SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
 };
 
 use crate::chunks::CodeIndexUnresolvedReferenceV1;
@@ -105,6 +106,24 @@ impl CodeGraphBaseInputsWriterV1 {
         file: CodeGraphBaseFileV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         self.line(&CodeGraphBaseInputsLineV1::File(Box::new(file)))
+    }
+
+    /// Records every snapshot file sealed without a segment.
+    pub(super) fn unsegmented_files(
+        &mut self,
+        snapshot: &SanitizedCodeSnapshotV1,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        for file in &snapshot.files {
+            if file.disposition != SnapshotFileDispositionV1::Present {
+                self.file(CodeGraphBaseFileV1 {
+                    file_occurrence_id: file.file_occurrence_id.clone(),
+                    segment_digest: None,
+                    page: None,
+                    bindings: BTreeMap::new(),
+                })?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn finish(

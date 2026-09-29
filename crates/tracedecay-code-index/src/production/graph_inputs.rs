@@ -110,16 +110,7 @@ impl SealedGenerationFileWindowsV1 {
             },
         )?;
         if let Some(inputs) = inputs.as_mut() {
-            for file in &self.snapshot().files {
-                if file.disposition != SnapshotFileDispositionV1::Present {
-                    inputs.file(CodeGraphBaseFileV1 {
-                        file_occurrence_id: file.file_occurrence_id.clone(),
-                        segment_digest: None,
-                        page: None,
-                        bindings: BTreeMap::new(),
-                    })?;
-                }
-            }
+            inputs.unsegmented_files(self.snapshot())?;
         }
         bound.extend(
             files
@@ -127,29 +118,7 @@ impl SealedGenerationFileWindowsV1 {
                 .flat_map(|file| file.artifacts.symbols.iter())
                 .map(|symbol| symbol.occurrence.clone()),
         );
-        check()?;
-        let cross_file_edges = resolve_cross_file_references(&files)?;
-        check()?;
-        let import_unresolved = unresolved_import_calls(&files);
-        let references = files
-            .iter()
-            .flat_map(|file| {
-                file.artifacts
-                    .unresolved_references
-                    .iter()
-                    .map(|reference| (file.authority.logical_path.as_str(), reference))
-            })
-            .collect::<Vec<_>>();
-        let unresolved_calls = unresolved_call_limitations(
-            &references,
-            files
-                .iter()
-                .flat_map(|file| file.artifacts.edges.iter())
-                .chain(&cross_file_edges),
-            import_unresolved,
-            check,
-        )?;
-        drop(references);
+        let (cross_file_edges, unresolved_calls) = resolve_files(&files, check)?;
         if let Some(inputs) = inputs {
             inputs.finish(cross_file_edges.clone(), unresolved_calls.clone())?;
         }
@@ -275,54 +244,12 @@ impl SealedGenerationFileWindowsV1 {
             return Ok(None);
         };
         check()?;
-        let files_by_occurrence = self
-            .snapshot()
-            .files
-            .iter()
-            .map(|file| (&file.file_occurrence_id, file))
-            .collect::<BTreeMap<_, _>>();
-        let mut base_bound = HashSet::new();
-        for file in base.files.values() {
-            base_bound.extend(file.bindings.keys().cloned());
-            if let Some(page) = &file.page {
-                base_bound.extend(
-                    page.artifacts
-                        .symbols
-                        .iter()
-                        .map(|symbol| symbol.occurrence.clone()),
-                );
-            }
-        }
-        let mut decoded = BTreeMap::new();
-        {
-            let base_files = &base.files;
-            let reusable = |occurrence: &FileOccurrenceId,
-                            digest: &tracedecay_domain::ManifestDigest| {
-                base_files.get(occurrence).is_some_and(|file| {
-                    file.page.is_some() && file.segment_digest.as_ref() == Some(digest)
-                })
-            };
-            self.for_each_file_window(
-                read_segment,
-                |occurrence, digest| !reusable(occurrence, digest),
-                |window| {
-                    check()?;
-                    for (snapshot_file, _, page) in window {
-                        let file_bindings = code_graph_symbol_bindings(
-                            Some(&files_by_occurrence),
-                            self.generation_id(),
-                            &page.artifacts.chunks.chunks,
-                            check,
-                        )?;
-                        decoded.insert(
-                            snapshot_file.file_occurrence_id.clone(),
-                            (reduced_page(page), file_bindings),
-                        );
-                    }
-                    Ok::<(), SealedCodeGraphRowsError>(())
-                },
-            )?;
-        }
+        let base_bound = bound_symbols(base.files.values().filter_map(|file| {
+            file.page
+                .as_ref()
+                .map(|page| (&file.bindings, page.artifacts.symbols.as_slice()))
+        }));
+        let mut decoded = self.decode_files_base_lacks(read_segment, &base.files, check)?;
         let reextracted_files = decoded.len();
         #[cfg(feature = "hotpath")]
         hotpath::gauge!("code_index.graph.layered.files_reextracted").inc(reextracted_files as u64);
@@ -332,100 +259,48 @@ impl SealedGenerationFileWindowsV1 {
         for entry in self.segmented_files() {
             check()?;
             let (snapshot_file, digest) = entry?;
-            let occurrence = &snapshot_file.file_occurrence_id;
-            let (page, bindings, reused) = match decoded.remove(occurrence) {
+            let (page, bindings, reused) = match decoded.remove(&snapshot_file.file_occurrence_id) {
                 Some((page, bindings)) => (page, bindings, false),
                 None => {
-                    let base_file = base
-                        .files
-                        .remove(occurrence)
-                        .filter(|file| file.segment_digest.as_ref() == Some(digest))
-                        .ok_or_else(|| {
-                            CodeIndexProductionErrorV1::Contract(
-                                "a refresh lost the base inputs it chose to reuse".to_owned(),
-                            )
-                        })?;
-                    let page = base_file.page.ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "reused base inputs carry no page".to_owned(),
-                        )
-                    })?;
-                    (page, base_file.bindings, true)
+                    let (page, bindings) = take_base_inputs(
+                        &mut base.files,
+                        &snapshot_file.file_occurrence_id,
+                        digest,
+                    )?;
+                    (page, bindings, true)
                 }
             };
             files.push(resolution_file(page)?);
             placed.push((snapshot_file, bindings, reused));
         }
-        let mut unsegmented_added = Vec::new();
-        for file in &self.snapshot().files {
-            if file.disposition == SnapshotFileDispositionV1::Present {
-                continue;
-            }
-            let unchanged = base
-                .files
-                .get(&file.file_occurrence_id)
-                .is_some_and(|base_file| base_file.segment_digest.is_none());
-            if unchanged {
-                base.files.remove(&file.file_occurrence_id);
-            } else {
-                unsegmented_added.push(file);
-            }
-        }
+        let unsegmented_added = self
+            .snapshot()
+            .files
+            .iter()
+            .filter(|file| file.disposition != SnapshotFileDispositionV1::Present)
+            .filter(|file| {
+                let unchanged = base
+                    .files
+                    .get(&file.file_occurrence_id)
+                    .is_some_and(|base_file| base_file.segment_digest.is_none());
+                if unchanged {
+                    base.files.remove(&file.file_occurrence_id);
+                }
+                !unchanged
+            })
+            .collect::<Vec<_>>();
         let removed = base
             .files
             .into_values()
-            .map(|file| {
-                let (imports, symbols, edges) = match file.page {
-                    Some(page) => (
-                        page.artifacts.imports,
-                        page.artifacts.symbols,
-                        page.artifacts.edges,
-                    ),
-                    None => (Vec::new(), Vec::new(), Vec::new()),
-                };
-                CodeGraphRemovedFileV1 {
-                    file_occurrence_id: file.file_occurrence_id,
-                    imports,
-                    symbols,
-                    edges,
-                    bindings: file.bindings,
-                }
-            })
+            .map(CodeGraphRemovedFileV1::from)
             .collect::<Vec<_>>();
-
-        let mut bound = HashSet::new();
-        for (_, bindings, _) in &placed {
-            bound.extend(bindings.keys().cloned());
-        }
-        bound.extend(
-            files
+        let bound = bound_symbols(
+            placed
                 .iter()
-                .flat_map(|file| file.artifacts.symbols.iter())
-                .map(|symbol| symbol.occurrence.clone()),
+                .zip(&files)
+                .map(|((_, bindings, _), file)| (bindings, file.artifacts.symbols.as_slice())),
         );
-        check()?;
-        let cross_file_edges = resolve_cross_file_references(&files)?;
-        check()?;
-        let import_unresolved = unresolved_import_calls(&files);
-        let references = files
-            .iter()
-            .flat_map(|file| {
-                file.artifacts
-                    .unresolved_references
-                    .iter()
-                    .map(|reference| (file.authority.logical_path.as_str(), reference))
-            })
-            .collect::<Vec<_>>();
-        let unresolved_calls = unresolved_call_limitations(
-            &references,
-            files
-                .iter()
-                .flat_map(|file| file.artifacts.edges.iter())
-                .chain(&cross_file_edges),
-            import_unresolved,
-            check,
-        )?;
-        drop(references);
+        let (cross_file_edges, unresolved_calls) = resolve_files(&files, check)?;
 
         let mut added = Vec::new();
         let mut unchanged = Vec::new();
@@ -470,6 +345,148 @@ impl SealedGenerationFileWindowsV1 {
             base_generation: base.generation,
         }))
     }
+
+    /// Decodes every segment whose inputs `base_files` does not record under
+    /// the same segment digest, reduced to its resolution inputs.
+    fn decode_files_base_lacks(
+        &self,
+        read_segment: &mut SealedGenerationSegmentReaderV1<'_>,
+        base_files: &BTreeMap<FileOccurrenceId, CodeGraphBaseFileV1>,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<BTreeMap<FileOccurrenceId, FileResolutionInputsV1>, SealedCodeGraphRowsError> {
+        let files_by_occurrence = self
+            .snapshot()
+            .files
+            .iter()
+            .map(|file| (&file.file_occurrence_id, file))
+            .collect::<BTreeMap<_, _>>();
+        let mut decoded = BTreeMap::new();
+        self.for_each_file_window(
+            read_segment,
+            |occurrence, digest| {
+                !base_files.get(occurrence).is_some_and(|file| {
+                    file.page.is_some() && file.segment_digest.as_ref() == Some(digest)
+                })
+            },
+            |window| {
+                check()?;
+                for (snapshot_file, _, page) in window {
+                    let file_bindings = code_graph_symbol_bindings(
+                        Some(&files_by_occurrence),
+                        self.generation_id(),
+                        &page.artifacts.chunks.chunks,
+                        check,
+                    )?;
+                    decoded.insert(
+                        snapshot_file.file_occurrence_id.clone(),
+                        (reduced_page(page), file_bindings),
+                    );
+                }
+                Ok::<(), SealedCodeGraphRowsError>(())
+            },
+        )?;
+        Ok(decoded)
+    }
+}
+
+/// One file's resolution inputs: its reduced page and its symbol bindings.
+type FileResolutionInputsV1 = (
+    PersistedFileGenerationArtifactsV1,
+    BTreeMap<SymbolOccurrenceId, CodeGraphSymbolBindingV1>,
+);
+
+/// Every symbol occurrence the files bind through a chunk or describe.
+fn bound_symbols<'b>(
+    files: impl Iterator<
+        Item = (
+            &'b BTreeMap<SymbolOccurrenceId, CodeGraphSymbolBindingV1>,
+            &'b [Arc<LineageSymbolRecordV1>],
+        ),
+    >,
+) -> HashSet<SymbolOccurrenceId> {
+    let mut bound = HashSet::new();
+    for (bindings, symbols) in files {
+        bound.extend(bindings.keys().cloned());
+        bound.extend(symbols.iter().map(|symbol| symbol.occurrence.clone()));
+    }
+    bound
+}
+
+/// The base's recorded inputs for a file the refresh reuses unchanged.
+fn take_base_inputs(
+    base_files: &mut BTreeMap<FileOccurrenceId, CodeGraphBaseFileV1>,
+    occurrence: &FileOccurrenceId,
+    digest: &tracedecay_domain::ManifestDigest,
+) -> Result<FileResolutionInputsV1, CodeIndexProductionErrorV1> {
+    let file = base_files
+        .remove(occurrence)
+        .filter(|file| file.segment_digest.as_ref() == Some(digest))
+        .ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "a refresh lost the base inputs it chose to reuse".to_owned(),
+            )
+        })?;
+    let page = file.page.ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract("reused base inputs carry no page".to_owned())
+    })?;
+    Ok((page, file.bindings))
+}
+
+impl From<CodeGraphBaseFileV1> for CodeGraphRemovedFileV1 {
+    fn from(file: CodeGraphBaseFileV1) -> Self {
+        let (imports, symbols, edges) = match file.page {
+            Some(page) => (
+                page.artifacts.imports,
+                page.artifacts.symbols,
+                page.artifacts.edges,
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new()),
+        };
+        Self {
+            file_occurrence_id: file.file_occurrence_id,
+            imports,
+            symbols,
+            edges,
+            bindings: file.bindings,
+        }
+    }
+}
+
+/// Whole-generation resolution over every file's inputs: the cross-file
+/// edges and the call limitations each source symbol discloses.
+fn resolve_files(
+    files: &[Arc<FileGenerationArtifactsV1>],
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<
+    (
+        Vec<CanonicalRelationEdgeV1>,
+        Vec<CodeIndexUnresolvedReferenceV1>,
+    ),
+    SealedCodeGraphRowsError,
+> {
+    check()?;
+    let cross_file_edges = resolve_cross_file_references(files)?;
+    check()?;
+    let import_unresolved = unresolved_import_calls(files);
+    let references = files
+        .iter()
+        .flat_map(|file| {
+            file.artifacts
+                .unresolved_references
+                .iter()
+                .map(|reference| (file.authority.logical_path.as_str(), reference))
+        })
+        .collect::<Vec<_>>();
+    let unresolved_calls = unresolved_call_limitations(
+        &references,
+        files
+            .iter()
+            .flat_map(|file| file.artifacts.edges.iter())
+            .chain(&cross_file_edges),
+        import_unresolved,
+        check,
+    )?;
+    Ok((cross_file_edges, unresolved_calls))
 }
 
 /// A file page reduced to the fields cross-file resolution reads. Its

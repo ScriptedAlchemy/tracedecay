@@ -96,7 +96,9 @@ pub use registry::{
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphServingEnginePin, GraphSnapshot};
 pub use schema::graph_stable_identity;
-pub use sealed_layer::{GraphLayeredRowSpill, GraphSealedBaseV1, LayeredGraphGeneration};
+pub use sealed_layer::{
+    GraphLayeredRowSpill, GraphSealedBaseAbsenceV1, GraphSealedBaseV1, LayeredGraphGeneration,
+};
 pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 
 /// What hydration decoded on **this thread** since the last take.
