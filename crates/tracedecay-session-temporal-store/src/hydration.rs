@@ -432,7 +432,7 @@ pub(super) async fn session_message_from_hydrated_bytes(
                   AND message.message_id = occurrence.message_id
                   AND message.session_id = occurrence.session_id
                  WHERE occurrence.session_id = ?1
-                   AND occurrence.generation = ?2
+                   AND +occurrence.generation <= ?2
                    AND occurrence.retrieval_anchor_id = ?3
                    AND source.project_key = ?4
                    AND source.provider = ?5
@@ -462,7 +462,7 @@ pub(super) async fn session_message_from_hydrated_bytes(
                  FROM session_occurrences AS occurrence
                  JOIN session_temporal_generations AS generation
                    ON generation.session_id = occurrence.session_id
-                  AND generation.generation = occurrence.generation
+                  AND +occurrence.generation <= generation.generation
                   AND generation.state = 'active'
                  JOIN sessions AS source
                    ON source.session_id = occurrence.session_id
@@ -868,7 +868,7 @@ async fn resolve_occurrence(
                         occurrence.sanitized_content_bytes
                  FROM session_occurrences occurrence
                  WHERE occurrence.session_id = ?1
-                   AND occurrence.generation = ?2
+                   AND +occurrence.generation <= ?2
                    AND occurrence.retrieval_anchor_id = ?3
                  ORDER BY occurrence.occurrence_id
                  LIMIT 2",
@@ -894,7 +894,7 @@ async fn resolve_occurrence(
                  FROM session_occurrences occurrence
                  JOIN session_temporal_generations generation
                    ON generation.session_id = occurrence.session_id
-                  AND generation.generation = occurrence.generation
+                  AND +occurrence.generation <= generation.generation
                   AND generation.state = 'active'
                  JOIN sessions authority_session
                    ON authority_session.session_id = occurrence.session_id
@@ -1157,7 +1157,7 @@ async fn summary_has_provider_evidence(
                    ON source_occurrence.retrieval_anchor_id =
                       CAST(retained.value AS TEXT)
                   AND source_occurrence.session_id = ?2
-                  AND source_occurrence.generation = ?3
+                  AND +source_occurrence.generation <= ?3
                  WHERE source_occurrence.source_provider = ?4
                  LIMIT 1
              )",
@@ -1535,11 +1535,12 @@ mod tests {
                 &writer,
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    source_provider, projection_output_ordinal, retrieval_anchor_id,
-                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    source_sequence, source_provider, projection_output_ordinal,
+                    retrieval_anchor_id, message_id, copied_from_anchor_ids_json,
+                    role, knowledge_at, valid_time_json, evidence_json,
                     sanitized_content_digest, sanitized_content_bytes, index_text
                  ) VALUES (
-                    ?1, 1, 'occurrence-1', ?2, ?3, 0, ?4, ?5,
+                    ?1, 1, 'occurrence-1', ?2, 1, ?3, 0, ?4, ?5, '[]',
                     'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?6, ?7, ?8
                  )",
                 params![
@@ -1651,12 +1652,13 @@ mod tests {
                 &writer,
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    source_provider, projection_output_ordinal, retrieval_anchor_id,
-                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    source_sequence, source_provider, projection_output_ordinal,
+                    retrieval_anchor_id, message_id, copied_from_anchor_ids_json,
+                    role, knowledge_at, valid_time_json, evidence_json,
                     sanitized_content_digest, sanitized_content_bytes, index_text
                  ) VALUES (
-                    'session-2', 1, 'occurrence-1', ?1, ?2, 0, ?3, 'message-1',
-                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?4, ?5, ?6
+                    'session-2', 1, 'occurrence-1', ?1, 1, ?2, 0, ?3, 'message-1',
+                    '[]', 'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?4, ?5, ?6
                  )",
                 params![
                     observation.observation_id().as_str(),
@@ -1826,12 +1828,13 @@ mod tests {
                 &writer,
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    source_provider, projection_output_ordinal, retrieval_anchor_id,
-                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    source_sequence, source_provider, projection_output_ordinal,
+                    retrieval_anchor_id, message_id, copied_from_anchor_ids_json,
+                    role, knowledge_at, valid_time_json, evidence_json,
                     sanitized_content_digest, sanitized_content_bytes, index_text
                  ) VALUES (
-                    'session-1', 1, 'occurrence-1', ?1, ?2, 0, ?3, 'message-1',
-                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}',
+                    'session-1', 1, 'occurrence-1', ?1, 1, ?2, 0, ?3, 'message-1',
+                    '[]', 'assistant', 1, '{\"kind\":\"unknown\"}', '{}',
                     ?4, ?5, 'non-empty occurrence payload'
                  )",
                 {

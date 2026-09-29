@@ -21,12 +21,12 @@ use tracedecay_temporal_query::execution::ExecutionControl;
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
     ProjectionProgressBaseline, digest_bytes,
-    persist_session_temporal_projection_batch_in_transaction,
-    session_temporal_projection_record_count, validate_final_projection_receipt,
+    persist_session_temporal_projection_batch_in_transaction, validate_final_projection_receipt,
 };
 use super::query::{
-    decode_generation_i64, encode_watermarks, frontier_i64, generation_i64, now_micros,
-    read_generation, storage, storage_message,
+    decode_generation_i64, discard_candidate_rows, encode_watermarks, frontier_i64, generation_i64,
+    now_micros, read_generation, require_no_open_candidate, retire_superseded_versions, storage,
+    storage_message,
 };
 use super::rebuild::{
     checkpoint_relation_rebuild_control, rebuild_candidate_session_relations,
@@ -36,7 +36,6 @@ use crate::handle::{
     SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
     SessionTemporalWriteTxn,
 };
-use crate::sql::GENERATION_COPY_STATEMENTS;
 
 const BEGIN_REFRESH: &str = "begin or join session refresh";
 const PERSIST_REFRESH: &str = "persist session refresh progress";
@@ -204,6 +203,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 context: "session refresh busy",
             });
         }
+        require_no_open_candidate(&transaction, request.session_id(), None, BEGIN_REFRESH).await?;
 
         let provisioned_cursor_key =
             ensure_active_session_cursor_key_in_transaction(&transaction).await?;
@@ -347,11 +347,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         SessionTemporalProjectionBatchReceiptV1,
     )> {
         validate_progress_batch_identity(&progress, &batch)?;
-        // The generation copy used to share the batch transaction. A deadline
-        // drop rolled the whole copy back, so the next pass recopied the same
-        // rows and never recorded progress. Each page commits on its own.
-        self.seed_active_projection_committed(&batch, &execution_control)
-            .await?;
         let authoritative_validation_time = now_micros(PERSIST_REFRESH)?;
         let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
@@ -439,81 +434,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .map_err(|error| storage(PERSIST_REFRESH, error))?
         });
         Ok((progress, receipt))
-    }
-
-    /// Copy the active generation into the candidate in committed pages.
-    ///
-    /// A single `INSERT … SELECT` of `session_occurrences` includes every
-    /// message body. That statement outlives the refresh apply deadline, the
-    /// deadline drops the transaction, and the copy starts over. Pages of
-    /// [`SEED_COPY_PAGE_ROWS`] commit, so the next pass continues after the
-    /// last durable rowid.
-    async fn seed_active_projection_committed(
-        &self,
-        batch: &SessionTemporalProjectionBatchV1,
-        control: &ExecutionControl,
-    ) -> SessionStoreResult<()> {
-        checkpoint_relation_rebuild_control(control)?;
-        if batch.batch_ordinal() != 0
-            || batch.watermarks().active_generation() == batch.generation()
-        {
-            return Ok(());
-        }
-        let session_id = batch.session_id().as_str();
-        let candidate = generation_i64(batch.generation(), PERSIST_REFRESH)?;
-        let active = generation_i64(batch.watermarks().active_generation(), PERSIST_REFRESH)?;
-        for statement in GENERATION_COPY_STATEMENTS {
-            let table = generation_copy_source_table(statement).ok_or_else(|| {
-                storage_message(
-                    PERSIST_REFRESH,
-                    "generation copy statement has no source table",
-                )
-            })?;
-            let insert_sql = generation_copy_page_insert_sql(statement);
-            let page_end_sql = generation_copy_page_end_sql(table);
-            let resume_sql = generation_copy_resume_sql(table);
-            let snapshot = self
-                .read_snapshot()
-                .await
-                .map_err(|error| storage(PERSIST_REFRESH, error))?;
-            let Some(next_source_rowid) =
-                copy_page_end_rowid(&snapshot, &resume_sql, session_id, active, candidate).await?
-            else {
-                continue;
-            };
-            // `rowid > after` must include the first uncopied source row.
-            let mut after_rowid = next_source_rowid.saturating_sub(1);
-            loop {
-                checkpoint_relation_rebuild_control(control)?;
-                let snapshot = self
-                    .read_snapshot()
-                    .await
-                    .map_err(|error| storage(PERSIST_REFRESH, error))?;
-                let page_end =
-                    copy_page_end_rowid(&snapshot, &page_end_sql, session_id, active, after_rowid)
-                        .await?;
-                let Some(page_end) = page_end else {
-                    break;
-                };
-                let transaction = self
-                    .begin_write_transaction()
-                    .await
-                    .map_err(|error| storage(PERSIST_REFRESH, error))?;
-                transaction
-                    .execute(
-                        &insert_sql,
-                        params![session_id, candidate, active, after_rowid, page_end],
-                    )
-                    .await
-                    .map_err(|error| storage(PERSIST_REFRESH, error))?;
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|error| storage(PERSIST_REFRESH, error))?;
-                after_rowid = page_end;
-            }
-        }
-        Ok(())
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.persist.refresh_progress")]
@@ -1600,14 +1520,11 @@ async fn validate_next_progress(
             });
         }
     } else {
-        let copy_count =
-            projection_receipt_copy_count(conn, progress.session_id(), generation, batch_ordinal)
-                .await?;
-        let materialized_records = session_temporal_projection_record_count(
+        let materialized_records = projection_receipt_committed_items(
             conn,
             progress.session_id(),
             generation,
-            copy_count,
+            batch_ordinal,
         )
         .await?;
         if batch_ordinal != 0 || progress.committed_records() != materialized_records {
@@ -1619,7 +1536,9 @@ async fn validate_next_progress(
     Ok(())
 }
 
-async fn projection_receipt_copy_count(
+/// Records the batch receipt accounts for: its base generation's final
+/// records plus every batch item through `batch_ordinal`.
+async fn projection_receipt_committed_items(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
     generation: SessionProjectionGenerationV1,
@@ -1627,7 +1546,7 @@ async fn projection_receipt_copy_count(
 ) -> SessionStoreResult<u64> {
     let mut rows = conn
         .query(
-            "SELECT committed_copy_count
+            "SELECT committed_item_count
              FROM session_temporal_projection_receipts
              WHERE session_id = ?1 AND generation = ?2 AND batch_ordinal = ?3",
             params![
@@ -1645,7 +1564,7 @@ async fn projection_receipt_copy_count(
         .ok_or_else(|| {
             storage_message(
                 PERSIST_REFRESH,
-                "refresh projection copy receipt is unavailable",
+                "refresh projection batch receipt is unavailable",
             )
         })?
         .get::<i64>(0)
@@ -1964,14 +1883,26 @@ async fn activate_bound_generation(
         .await
         .map_err(|error| storage(COMPLETE_REFRESH, error))?;
     }
-    conn.execute(
-        "UPDATE session_temporal_generations
-         SET state = 'superseded', completed_at = ?3
-         WHERE session_id = ?1 AND generation <> ?2 AND state = 'active'",
-        params![session_id.as_str(), generation, terminal_at.0],
-    )
-    .await
-    .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+    let superseded = conn
+        .execute(
+            "UPDATE session_temporal_generations
+             SET state = 'superseded', completed_at = ?3
+             WHERE session_id = ?1 AND generation = ?4 AND state = 'active'",
+            params![
+                session_id.as_str(),
+                generation,
+                terminal_at.0,
+                generation_i64(binding.watermarks.active_generation(), COMPLETE_REFRESH)?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+    if superseded != 1 {
+        return Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh candidate base generation is no longer active",
+        });
+    }
+    retire_superseded_versions(conn, session_id, binding.generation, COMPLETE_REFRESH).await?;
     let changed = conn
         .execute(
             "UPDATE session_temporal_generations
@@ -2016,7 +1947,7 @@ async fn terminate_candidate(
             context: "refresh candidate termination",
         });
     }
-    Ok(())
+    discard_candidate_rows(conn, session_id, generation, operation).await
 }
 
 async fn finish_operation(
@@ -2421,88 +2352,6 @@ fn decode_refresh_state(
             "refresh operation state is invalid",
         )),
     }
-}
-
-/// Rows copied per committed generation-seed page. One occurrence page carries
-/// message bodies; 32 stays under the refresh apply deadline that a whole
-/// generation copy was missing. ponytail: fixed page, not a measured byte
-/// budget. Upgrade path is to split a page whose bytes still miss the deadline.
-const SEED_COPY_PAGE_ROWS: i64 = 32;
-
-fn generation_copy_source_table(statement: &str) -> Option<&'static str> {
-    const TABLES: &[&str] = &[
-        "session_derived_evidence_members",
-        "session_assertion_supersession",
-        "session_derived_evidence",
-        "session_current_entities",
-        "session_turn_members",
-        "session_occurrences",
-        "session_assertions",
-        "session_threads",
-        "session_agents",
-        "session_turns",
-    ];
-    TABLES
-        .iter()
-        .copied()
-        .find(|table| statement.contains(&format!("FROM {table} ")))
-        .or_else(|| {
-            TABLES
-                .iter()
-                .copied()
-                .find(|table| statement.contains(&format!("FROM {table}\n")))
-        })
-}
-
-fn generation_copy_page_insert_sql(statement: &str) -> String {
-    let insert = statement.replacen("INSERT INTO", "INSERT OR IGNORE INTO", 1);
-    format!("{insert} AND rowid > ?4 AND rowid <= ?5")
-}
-
-fn generation_copy_resume_sql(table: &str) -> String {
-    format!(
-        "SELECT rowid FROM {table}
-         WHERE session_id = ?1 AND generation = ?2
-         ORDER BY rowid
-         LIMIT 1
-         OFFSET (
-             SELECT COUNT(*) FROM {table}
-             WHERE session_id = ?1 AND generation = ?3
-         )"
-    )
-}
-
-fn generation_copy_page_end_sql(table: &str) -> String {
-    format!(
-        "SELECT MAX(rowid) FROM (
-            SELECT rowid FROM {table}
-            WHERE session_id = ?1 AND generation = ?2 AND rowid > ?3
-            ORDER BY rowid
-            LIMIT {SEED_COPY_PAGE_ROWS}
-        )"
-    )
-}
-
-async fn copy_page_end_rowid(
-    conn: &impl crate::handle::SessionTemporalQuery,
-    sql: &str,
-    session_id: &str,
-    source_generation: i64,
-    after_rowid: i64,
-) -> SessionStoreResult<Option<i64>> {
-    let mut rows = conn
-        .query(sql, params![session_id, source_generation, after_rowid])
-        .await
-        .map_err(|error| storage(PERSIST_REFRESH, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_REFRESH, error))?
-    else {
-        return Ok(None);
-    };
-    row.get::<Option<i64>>(0)
-        .map_err(|error| storage(PERSIST_REFRESH, error))
 }
 
 #[cfg(test)]

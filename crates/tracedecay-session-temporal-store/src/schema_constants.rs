@@ -4,8 +4,12 @@
 /// of `index_text`, and full-text search indexes only `index_text`. Version 6
 /// makes `session_summary_nodes` the one summary authority: the LCM summary
 /// columns are real columns here, `session_summary_sources` carries the
-/// lineage, and the summary FTS indexes `summary_text` alone.
-pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 6;
+/// lineage, and the summary FTS indexes `summary_text` alone. Version 7
+/// shares projection rows across generations: a refresh adds rows under its
+/// own generation instead of copying the session, occurrences carry the
+/// relation facts they derive from, and derived evidence is keyed by its
+/// first member so a live run extends in place.
+pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 7;
 
 pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     (
@@ -239,6 +243,7 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "generation",
             "occurrence_id",
             "source_observation_id",
+            "source_sequence",
             "source_provider",
             "projection_output_ordinal",
             "retrieval_anchor_id",
@@ -248,6 +253,10 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "turn_grouping_json",
             "message_id",
             "agent_id",
+            "parent_message_id",
+            "parent_agent_id",
+            "parent_session_id",
+            "copied_from_anchor_ids_json",
             "role",
             "knowledge_at",
             "valid_time_json",
@@ -309,10 +318,10 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "session_id",
             "generation",
             "evidence_kind",
+            "first_occurrence_id",
             "evidence_id",
             "retrieval_anchor_id",
             "thread_id",
-            "first_occurrence_id",
             "last_occurrence_id",
             "algorithm_version",
             "configuration_digest",
@@ -327,7 +336,7 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "session_id",
             "generation",
             "evidence_kind",
-            "evidence_id",
+            "first_occurrence_id",
             "ordinal",
             "occurrence_id",
             "member_role",

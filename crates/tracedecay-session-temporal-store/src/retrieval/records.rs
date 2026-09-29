@@ -223,7 +223,7 @@ pub(super) fn build_record_query_with_relations(
              SELECT MIN(source.ordinal), source.session_id, source.generation,
                     source.occurrence_id, MAX(source.group_anchor_id)
              FROM (
-                 SELECT c.ordinal, o.session_id, o.generation, o.occurrence_id,
+                 SELECT c.ordinal, o.session_id, c.generation, o.occurrence_id,
                         NULL AS group_anchor_id
                  FROM candidate AS c
                  JOIN session_occurrences AS o
@@ -234,18 +234,17 @@ pub(super) fn build_record_query_with_relations(
                  -- A span or burst is a container: ranking needs where it starts
                  -- and ends, never a census of what sits between. Its interior
                  -- members reach the record read through their own candidates.
-                 SELECT c.ordinal, o.session_id, o.generation, o.occurrence_id,
+                 SELECT c.ordinal, o.session_id, c.generation, o.occurrence_id,
                         c.anchor_id
                  FROM candidate AS c
                  JOIN session_derived_evidence AS derived
                    ON derived.session_id = c.session_id
-                  AND derived.generation = c.generation
+                  AND +derived.generation <= c.generation
                   AND derived.retrieval_anchor_id = c.anchor_id
                   AND derived.evidence_kind = c.derived_kind
                   AND derived.evidence_id = c.retriever_record_id
                  JOIN session_occurrences AS o
                    ON o.session_id = derived.session_id
-                  AND o.generation = derived.generation
                   AND o.occurrence_id IN (
                       derived.first_occurrence_id, derived.last_occurrence_id
                   )
@@ -265,7 +264,7 @@ pub(super) fn build_record_query_with_relations(
              FROM occurrence_candidate AS oc
              JOIN session_occurrences AS o
                ON o.session_id = oc.session_id
-              AND o.generation = oc.generation
+              AND +o.generation <= oc.generation
               AND o.occurrence_id = oc.occurrence_id
              {occurrence_generation_join}
              {occurrence_join}
@@ -297,7 +296,7 @@ pub(super) fn build_record_query_with_relations(
                    SELECT 1
                    FROM session_occurrences AS assertion_source
                    WHERE assertion_source.session_id = a.session_id
-                     AND assertion_source.generation = a.generation
+                     AND +assertion_source.generation <= c.generation
                      AND assertion_source.retrieval_anchor_id =
                          json_extract(a.evidence_json, '$.source_anchor_id')
                      AND assertion_source.source_provider = ?{provider_param}
@@ -487,13 +486,13 @@ pub(super) fn build_record_query_with_relations(
               AND source_summary.session_id = n.session_id
              LEFT JOIN session_occurrences AS source_occurrence
                ON source_occurrence.session_id = n.session_id
-              AND source_occurrence.generation = {summary_generation}
+              AND +source_occurrence.generation <= {summary_generation}
               AND source_occurrence.retrieval_anchor_id = ss.source_anchor_id
               AND source_occurrence.occurrence_id = (
                   SELECT historical_source.occurrence_id
                   FROM session_occurrences AS historical_source
                   WHERE historical_source.session_id = n.session_id
-                    AND historical_source.generation = {summary_generation}
+                    AND +historical_source.generation <= {summary_generation}
                     AND historical_source.retrieval_anchor_id = ss.source_anchor_id
                     AND historical_source.knowledge_at <= json_extract(
                         n.source_horizon_json, '$.knowledge_through'
@@ -588,7 +587,7 @@ fn retained_summary_provider_predicate(provider_param: usize, summary_generation
                      ON summary_source_occurrence.retrieval_anchor_id =
                         retained.anchor_id
                     AND summary_source_occurrence.session_id = n.session_id
-                    AND summary_source_occurrence.generation = {summary_generation}
+                    AND +summary_source_occurrence.generation <= {summary_generation}
                    WHERE summary_source_occurrence.source_provider = ?{provider_param}
                      AND retained.ordinal = c.ordinal
                      AND retained.session_id = n.session_id
@@ -728,17 +727,17 @@ impl RecordScopeSql {
             TemporalRetrievalScope::Session(_) => Self {
                 occurrence_condition: format!(
                     "AND o.session_id = ?{scope_param}
-                     AND o.generation = ?{generation_param}"
+                     AND +o.generation <= ?{generation_param}"
                 ),
                 occurrence_generation_join: String::new(),
                 assertion_condition: format!(
                     "AND a.session_id = ?{scope_param}
-                     AND a.generation = ?{generation_param}"
+                     AND +a.generation <= ?{generation_param}"
                 ),
                 assertion_generation_join: String::new(),
                 target_condition: format!(
                     "AND target.session_id = ?{scope_param}
-                     AND target.generation = ?{generation_param}"
+                     AND +target.generation <= ?{generation_param}"
                 ),
                 target_generation_join: String::new(),
                 summary_condition: format!("AND n.session_id = ?{scope_param}"),
@@ -751,13 +750,13 @@ impl RecordScopeSql {
             },
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot => Self {
                 occurrence_condition:
-                    "AND o.session_id = c.session_id AND o.generation = c.generation".to_string(),
+                    "AND o.session_id = c.session_id AND +o.generation <= c.generation".to_string(),
                 occurrence_generation_join: String::new(),
                 assertion_condition:
-                    "AND a.session_id = c.session_id AND a.generation = c.generation".to_string(),
+                    "AND a.session_id = c.session_id AND +a.generation <= c.generation".to_string(),
                 assertion_generation_join: String::new(),
                 target_condition:
-                    "AND target.session_id = c.session_id AND target.generation = c.generation"
+                    "AND target.session_id = c.session_id AND +target.generation <= c.generation"
                         .to_string(),
                 target_generation_join: String::new(),
                 summary_condition: "AND n.session_id = c.session_id".to_string(),
@@ -777,7 +776,7 @@ impl RecordModeSql {
             TemporalModeV1::Current => Self {
                 occurrence_join: "JOIN session_current_entities AS occurrence_current
                     ON occurrence_current.session_id = o.session_id
-                   AND occurrence_current.generation = o.generation
+                   AND +occurrence_current.generation <= oc.generation
                    AND occurrence_current.entity_kind = 'occurrence_anchor'
                    AND occurrence_current.entity_id = o.retrieval_anchor_id
                    AND occurrence_current.current_occurrence_id = o.occurrence_id"
@@ -787,7 +786,7 @@ impl RecordModeSql {
                 assertion_predicate: "1 = 1".to_string(),
                 copy_join: "JOIN session_current_entities AS copy_current
                     ON copy_current.session_id = target.session_id
-                   AND copy_current.generation = target.generation
+                   AND +copy_current.generation <= c.generation
                    AND copy_current.entity_kind = 'occurrence_anchor'
                    AND copy_current.entity_id = target.retrieval_anchor_id
                    AND copy_current.current_occurrence_id = target.occurrence_id"

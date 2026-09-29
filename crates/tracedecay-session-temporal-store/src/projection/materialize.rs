@@ -32,7 +32,6 @@ const PARENT_RESOLVER_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
 pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
     conn: &impl crate::handle::SessionTemporalQuery,
     recovery: &SessionRefreshRecoveryV1,
-    baseline_copy_count: u64,
 ) -> SessionStoreResult<Option<(SessionRefreshProgressV1, SessionTemporalProjectionBatchV1)>> {
     let (
         batch_ordinal,
@@ -42,13 +41,16 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
         previous_updated_at,
     ) = match recovery.restart_state() {
         SessionRefreshRestartStateV1::BeginProjection => {
-            let baseline_records = session_temporal_projection_record_count(
-                conn,
-                recovery.session_id(),
-                recovery.frozen_watermarks().active_generation(),
-                baseline_copy_count,
+            let baseline_records = u64::try_from(
+                base_projection_coverage(
+                    conn,
+                    recovery.session_id(),
+                    generation_i64(recovery.candidate_generation(), MATERIALIZE_REFRESH)?,
+                )
+                .await?
+                .record_count(),
             )
-            .await?;
+            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
             (
                 0,
                 recovery.source_frontier(),
@@ -338,7 +340,11 @@ pub(super) async fn materialize_effect_occurrences(
                 .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
         work.envelope_parses = work.envelope_parses.saturating_add(1);
         for output in outputs {
-            occurrences.push(canonical_occurrence(conn, observation, &envelope, output).await?);
+            occurrences.push(
+                canonical_occurrence(conn, observation, &envelope, output)
+                    .await?
+                    .0,
+            );
         }
     }
     Ok((occurrences, work))
@@ -657,13 +663,11 @@ async fn candidate_parent_message_resolver(
                     (
                         SELECT occurrence.occurrence_id
                         FROM session_occurrences AS occurrence
-                        JOIN session_temporal_observation_effects AS effect
-                          ON effect.observation_id = occurrence.source_observation_id
-                         AND effect.session_id = occurrence.session_id
+                             INDEXED BY idx_session_occurrences_message
                         WHERE occurrence.session_id = ?1
-                          AND occurrence.generation = ?2
                           AND occurrence.message_id = requested.value
-                        ORDER BY effect.observation_sequence,
+                          AND +occurrence.generation <= ?2
+                        ORDER BY occurrence.source_sequence,
                                  occurrence.projection_output_ordinal,
                                  occurrence.occurrence_id
                         LIMIT 1
@@ -702,9 +706,12 @@ async fn candidate_parent_message_resolver(
 }
 
 #[hotpath::measure(future = true, label = "session_temporal.projection.parent_resolver")]
+/// Resolves the canonical outputs of the session's effects in
+/// `(after_frontier, source_frontier]`.
 pub async fn canonical_parent_message_resolver(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &str,
+    after_frontier: u64,
     source_frontier: u64,
     operation: &'static str,
     control: Option<&ExecutionControl>,
@@ -712,7 +719,7 @@ pub async fn canonical_parent_message_resolver(
 ) -> SessionStoreResult<ParentMessageResolver> {
     let mut resolver = ParentMessageResolver::default();
     let frontier = frontier_i64(source_frontier, operation)?;
-    let mut after_sequence = 0_i64;
+    let mut after_sequence = frontier_i64(after_frontier, operation)?;
     loop {
         if let Some(control) = control {
             checkpoint_relation_rebuild_control(control)?;
@@ -873,6 +880,10 @@ impl ParentMessageResolver {
 
     pub(crate) fn canonical_outputs(&self) -> &[(String, Option<String>)] {
         &self.canonical_outputs
+    }
+
+    pub(crate) fn message_ids(&self) -> impl Iterator<Item = &str> {
+        self.occurrences.keys().map(String::as_str)
     }
 }
 

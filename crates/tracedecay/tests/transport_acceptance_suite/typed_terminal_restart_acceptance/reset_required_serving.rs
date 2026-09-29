@@ -190,3 +190,82 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
 
     let _ = daemon.kill_and_wait();
 }
+
+/// Stamps the profile session store with the session-temporal schema version
+/// the previous release wrote: version 6 copied every projection row into
+/// each refresh generation.
+fn stamp_profile_sessions_temporal_version(home: &Path, version: i64) {
+    let db_path = home.join(".tracedecay/user-sessions.db");
+    let stamped = rusqlite::Connection::open(&db_path)
+        .expect("open the profile session store")
+        .execute(
+            "UPDATE session_temporal_schema_migrations SET version = ?1
+             WHERE name = 'session-temporal'",
+            [version],
+        )
+        .expect("stamp the released session temporal schema version");
+    assert_eq!(
+        stamped, 1,
+        "the store records exactly one session temporal schema row"
+    );
+}
+
+#[test]
+fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = canonical_existing_path(home.path());
+    let project = tempfile::TempDir::new().expect("project");
+    let project_path = canonical_existing_path(project.path());
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    super::initialize_project(&home_path, &project_path, "session-temporal-reset");
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that wrote the profile");
+
+    stamp_profile_sessions_temporal_version(&home_path, 6);
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    let reason = "session temporal persisted shape requires reset: persisted schema version 6 \
+                  does not match final version 7";
+    assert_eq!(
+        status_reset_required_stores(&home_path, &project_path),
+        json!([{
+            "store": "profile sessions",
+            "authority": "session temporal",
+            "found_version": null,
+            "required_version": null,
+            "reason": reason,
+            "remedy": "tracedecay wipe --stale --yes",
+        }])
+    );
+    let refused = super::cli_problem_envelope(
+        &profile_session_read(&home_path, &project_path),
+        "profile session read over a copying session temporal store",
+    );
+    super::assert_reset_required(
+        &refused,
+        "profile session read over a copying session temporal store",
+    );
+
+    let (reset_status, reset_output) =
+        super::run_scoped_reset(&home_path, &project_path, &mut daemon, || {});
+    assert!(
+        reset_status.success(),
+        "tracedecay wipe --stale --yes failed:\n{reset_output}"
+    );
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    let served = profile_session_read(&home_path, &project_path);
+    assert!(
+        find_key(&served, "problem").is_none_or(|problem| problem.is_null()),
+        "the profile session read must serve after the named reset: {served}"
+    );
+    super::initialize_project(&home_path, &project_path, "session-temporal-reset");
+    assert_eq!(
+        status_reset_required_stores(&home_path, &project_path),
+        json!([]),
+        "the reset store serves again"
+    );
+
+    let _ = daemon.kill_and_wait();
+}

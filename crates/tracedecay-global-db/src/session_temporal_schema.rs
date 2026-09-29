@@ -322,6 +322,16 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_session_temporal_observation_effects_session
         ON session_temporal_observation_effects(session_id, observation_sequence);
 
+    -- Generation-shared projection tables. A row's `generation` is the
+    -- generation that introduced it; generation G reads every row with
+    -- `generation <= G`. A candidate extends the active generation by adding
+    -- rows under its own number, so the settled prefix is never copied, and a
+    -- terminated candidate deletes every row it introduced. Occurrences, turn
+    -- members, assertions, and supersession edges are append-only and keyed
+    -- without `generation`. Turns, threads, agents, current entities, and
+    -- derived evidence and members are versioned: their keys end in
+    -- `generation`, and activation deletes the version a candidate
+    -- superseded. Every table carries an introduced-row index.
     CREATE TABLE IF NOT EXISTS session_turns (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
@@ -329,10 +339,12 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
         grouping_provenance TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY(session_id, generation, turn_id),
+        PRIMARY KEY(session_id, turn_id, generation),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
+    CREATE INDEX IF NOT EXISTS idx_session_turns_introduced
+        ON session_turns(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_threads (
         session_id TEXT NOT NULL,
@@ -340,10 +352,12 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         thread_id TEXT NOT NULL,
         grouping_provenance TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY(session_id, generation, thread_id),
+        PRIMARY KEY(session_id, thread_id, generation),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
+    CREATE INDEX IF NOT EXISTS idx_session_threads_introduced
+        ON session_threads(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_agents (
         session_id TEXT NOT NULL,
@@ -351,16 +365,23 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         agent_id TEXT NOT NULL,
         agent_json TEXT NOT NULL CHECK(json_valid(agent_json)),
         created_at INTEGER NOT NULL,
-        PRIMARY KEY(session_id, generation, agent_id),
+        PRIMARY KEY(session_id, agent_id, generation),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
+    CREATE INDEX IF NOT EXISTS idx_session_agents_introduced
+        ON session_agents(session_id, generation);
 
+    -- `source_sequence` is the owning observation's effect sequence (the
+    -- derived-evidence order). The parent and copied-from columns carry the
+    -- relation facts of the canonical observation and anchor, so relations
+    -- derive from occurrence rows instead of rereading their JSON.
     CREATE TABLE IF NOT EXISTS session_occurrences (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         occurrence_id TEXT NOT NULL,
         source_observation_id TEXT NOT NULL,
+        source_sequence INTEGER NOT NULL CHECK(source_sequence > 0),
         source_provider TEXT NOT NULL CHECK(
             source_provider <> ''
             AND length(source_provider) <= 512
@@ -374,6 +395,13 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         turn_grouping_json TEXT CHECK(turn_grouping_json IS NULL OR json_valid(turn_grouping_json)),
         message_id TEXT,
         agent_id TEXT,
+        parent_message_id TEXT,
+        parent_agent_id TEXT,
+        parent_session_id TEXT,
+        copied_from_anchor_ids_json TEXT NOT NULL CHECK(
+            json_valid(copied_from_anchor_ids_json)
+            AND json_type(copied_from_anchor_ids_json) = 'array'
+        ),
         role TEXT NOT NULL,
         knowledge_at INTEGER NOT NULL,
         valid_time_json TEXT NOT NULL CHECK(
@@ -398,36 +426,36 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         sanitized_content_bytes INTEGER NOT NULL CHECK(sanitized_content_bytes >= 0),
         snippet_text TEXT NOT NULL GENERATED ALWAYS AS (index_text) VIRTUAL,
         index_text TEXT NOT NULL,
-        PRIMARY KEY(session_id, generation, occurrence_id),
+        PRIMARY KEY(session_id, occurrence_id),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE,
         FOREIGN KEY(source_observation_id) REFERENCES observations(observation_id),
-        FOREIGN KEY(retrieval_anchor_id) REFERENCES retrieval_anchors(anchor_id),
-        FOREIGN KEY(session_id, generation, thread_id)
-            REFERENCES session_threads(session_id, generation, thread_id),
-        FOREIGN KEY(session_id, generation, turn_id)
-            REFERENCES session_turns(session_id, generation, turn_id),
-        FOREIGN KEY(session_id, generation, agent_id)
-            REFERENCES session_agents(session_id, generation, agent_id)
+        FOREIGN KEY(retrieval_anchor_id) REFERENCES retrieval_anchors(anchor_id)
     );
+    CREATE INDEX IF NOT EXISTS idx_session_occurrences_introduced
+        ON session_occurrences(session_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_generation_order
-        ON session_occurrences(session_id, generation, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, knowledge_at, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_root_generation_order
         ON session_occurrences(knowledge_at, session_id, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_session_time
         ON session_occurrences(session_id, knowledge_at);
+    CREATE INDEX IF NOT EXISTS idx_session_occurrences_source_order
+        ON session_occurrences(
+            session_id, source_sequence, projection_output_ordinal, occurrence_id, generation
+        );
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_anchor_order
         ON session_occurrences(
-            session_id, generation, retrieval_anchor_id, knowledge_at, occurrence_id
+            session_id, retrieval_anchor_id, knowledge_at, occurrence_id, generation
         );
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_message
-        ON session_occurrences(session_id, generation, message_id, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, message_id, knowledge_at, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_thread
-        ON session_occurrences(session_id, generation, thread_id, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, thread_id, knowledge_at, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_turn
-        ON session_occurrences(session_id, generation, turn_id, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, turn_id, knowledge_at, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_agent
-        ON session_occurrences(session_id, generation, agent_id, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, agent_id, knowledge_at, occurrence_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_turn_members (
         session_id TEXT NOT NULL,
@@ -435,14 +463,14 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         turn_id TEXT NOT NULL,
         occurrence_id TEXT NOT NULL,
         ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
-        PRIMARY KEY(session_id, generation, turn_id, occurrence_id),
-        FOREIGN KEY(session_id, generation, turn_id)
-            REFERENCES session_turns(session_id, generation, turn_id) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id) ON DELETE CASCADE
+        PRIMARY KEY(session_id, turn_id, occurrence_id),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_session_turn_members_occurrence
-        ON session_turn_members(session_id, generation, occurrence_id);
+        ON session_turn_members(session_id, occurrence_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_turn_members_introduced
+        ON session_turn_members(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_assertions (
         session_id TEXT NOT NULL,
@@ -469,7 +497,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
             )
         ),
         evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
-        PRIMARY KEY(session_id, generation, assertion_id),
+        PRIMARY KEY(session_id, assertion_id),
         CHECK(subject_anchor_id <> object_anchor_id),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE,
@@ -477,15 +505,17 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         FOREIGN KEY(object_anchor_id) REFERENCES retrieval_anchors(anchor_id)
     );
     CREATE INDEX IF NOT EXISTS idx_session_assertions_subject
-        ON session_assertions(session_id, generation, subject_anchor_id);
+        ON session_assertions(session_id, subject_anchor_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_assertions_object_order
         ON session_assertions(
-            session_id, generation, object_anchor_id, knowledge_at, assertion_id
+            session_id, object_anchor_id, knowledge_at, assertion_id, generation
         );
     CREATE INDEX IF NOT EXISTS idx_session_assertions_kind_order
-        ON session_assertions(session_id, generation, assertion_kind, knowledge_at, assertion_id);
+        ON session_assertions(session_id, assertion_kind, knowledge_at, assertion_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_assertions_generation_order
-        ON session_assertions(session_id, generation, knowledge_at, assertion_id);
+        ON session_assertions(session_id, knowledge_at, assertion_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_assertions_introduced
+        ON session_assertions(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_assertion_supersession (
         session_id TEXT NOT NULL,
@@ -493,17 +523,15 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         superseded_assertion_id TEXT NOT NULL,
         superseding_assertion_id TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY(
-            session_id, generation, superseded_assertion_id, superseding_assertion_id
-        ),
+        PRIMARY KEY(session_id, superseded_assertion_id, superseding_assertion_id),
         CHECK(superseded_assertion_id <> superseding_assertion_id),
-        FOREIGN KEY(session_id, generation, superseded_assertion_id)
-            REFERENCES session_assertions(session_id, generation, assertion_id) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, superseding_assertion_id)
-            REFERENCES session_assertions(session_id, generation, assertion_id) ON DELETE CASCADE
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_session_assertion_supersession_successor
-        ON session_assertion_supersession(session_id, generation, superseding_assertion_id);
+        ON session_assertion_supersession(session_id, superseding_assertion_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_assertion_supersession_introduced
+        ON session_assertion_supersession(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_current_entities (
         session_id TEXT NOT NULL,
@@ -513,7 +541,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         current_assertion_id TEXT,
         current_occurrence_id TEXT,
         coverage_json TEXT NOT NULL CHECK(json_valid(coverage_json)),
-        PRIMARY KEY(session_id, generation, entity_kind, entity_id),
+        PRIMARY KEY(session_id, entity_kind, entity_id, generation),
         CHECK(entity_kind IN ('assertion_anchor', 'occurrence_anchor')),
         CHECK((current_assertion_id IS NULL) <> (current_occurrence_id IS NULL)),
         CHECK(
@@ -521,74 +549,71 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
             OR (entity_kind = 'occurrence_anchor' AND current_occurrence_id IS NOT NULL)
         ),
         FOREIGN KEY(session_id, generation)
-            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, current_assertion_id)
-            REFERENCES session_assertions(session_id, generation, assertion_id),
-        FOREIGN KEY(session_id, generation, current_occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_session_current_entities_assertion
-        ON session_current_entities(session_id, generation, current_assertion_id);
+        ON session_current_entities(session_id, current_assertion_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_current_entities_occurrence
-        ON session_current_entities(session_id, generation, current_occurrence_id);
+        ON session_current_entities(session_id, current_occurrence_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_current_entities_introduced
+        ON session_current_entities(session_id, generation);
 
+    -- A span or burst keeps its identity key (kind, first member) while a
+    -- live run extends it; each extension is a new version with a new
+    -- `evidence_id`, and members are keyed by that stable key so an
+    -- extension appends members instead of rewriting them.
     CREATE TABLE IF NOT EXISTS session_derived_evidence (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         evidence_kind TEXT NOT NULL CHECK(evidence_kind IN ('span', 'burst')),
+        first_occurrence_id TEXT NOT NULL,
         evidence_id TEXT NOT NULL,
         retrieval_anchor_id TEXT NOT NULL,
         thread_id TEXT,
-        first_occurrence_id TEXT NOT NULL,
         last_occurrence_id TEXT NOT NULL,
         algorithm_version TEXT NOT NULL,
         configuration_digest TEXT NOT NULL,
         member_count INTEGER NOT NULL CHECK(member_count > 0),
         member_digest TEXT NOT NULL,
         evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
-        PRIMARY KEY(session_id, generation, evidence_kind, evidence_id),
+        PRIMARY KEY(session_id, evidence_kind, first_occurrence_id, generation),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE,
-        FOREIGN KEY(retrieval_anchor_id) REFERENCES retrieval_anchors(anchor_id),
-        FOREIGN KEY(session_id, generation, first_occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id),
-        FOREIGN KEY(session_id, generation, last_occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id)
+        FOREIGN KEY(retrieval_anchor_id) REFERENCES retrieval_anchors(anchor_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_scope_order
-        ON session_derived_evidence(
-            session_id, generation, evidence_kind, first_occurrence_id, evidence_id
-        );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_identity
+        ON session_derived_evidence(session_id, evidence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_anchor
         ON session_derived_evidence(
-            session_id, generation, retrieval_anchor_id, evidence_kind, evidence_id
+            session_id, retrieval_anchor_id, evidence_kind, evidence_id, generation
         );
     CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_thread_order
         ON session_derived_evidence(
-            session_id, generation, thread_id, evidence_kind, first_occurrence_id, evidence_id
+            session_id, thread_id, evidence_kind, first_occurrence_id, generation
         );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_tail
+        ON session_derived_evidence(session_id, evidence_kind, last_occurrence_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_introduced
+        ON session_derived_evidence(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_derived_evidence_members (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         evidence_kind TEXT NOT NULL CHECK(evidence_kind IN ('span', 'burst')),
-        evidence_id TEXT NOT NULL,
+        first_occurrence_id TEXT NOT NULL,
         ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
         occurrence_id TEXT NOT NULL,
         member_role TEXT NOT NULL CHECK(member_role IN ('member', 'first', 'last')),
-        PRIMARY KEY(session_id, generation, evidence_kind, evidence_id, ordinal),
-        UNIQUE(session_id, generation, evidence_kind, evidence_id, occurrence_id),
-        FOREIGN KEY(session_id, generation, evidence_kind, evidence_id)
-            REFERENCES session_derived_evidence(
-                session_id, generation, evidence_kind, evidence_id
-            ) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id)
+        PRIMARY KEY(session_id, evidence_kind, first_occurrence_id, ordinal, generation),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_members_occurrence
         ON session_derived_evidence_members(
-            session_id, generation, occurrence_id, evidence_kind, evidence_id, ordinal
+            session_id, occurrence_id, evidence_kind, first_occurrence_id, ordinal, generation
         );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_members_introduced
+        ON session_derived_evidence_members(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_summary_availability (
         session_id TEXT NOT NULL,

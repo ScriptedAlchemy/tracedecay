@@ -734,7 +734,7 @@ async fn anchor_store_id(
          FROM session_occurrences AS occurrence
          JOIN session_temporal_generations AS generation
            ON generation.session_id = occurrence.session_id
-          AND generation.generation = occurrence.generation
+          AND +occurrence.generation <= generation.generation
           AND generation.state = 'active'
          JOIN lcm_raw_messages AS raw
            ON raw.message_id = occurrence.message_id

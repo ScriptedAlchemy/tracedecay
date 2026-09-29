@@ -10,12 +10,15 @@ use tracedecay_store::{
 use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::execution::TemporalPortError;
 
-use super::projection::{canonical_parent_message_resolver, validate_final_projection_receipt};
+use super::projection::{
+    base_source_frontier, canonical_parent_message_resolver, validate_final_projection_receipt,
+};
 use super::query::{
     ACTIVATE_OPERATION, BEGIN_OPERATION, encode_watermarks, generation_i64, now_micros,
-    read_generation, require_active_generation, storage, storage_message,
+    read_generation, require_active_generation, require_no_open_candidate,
+    retire_superseded_versions, storage, storage_message,
 };
-use super::relation_projection::reconstruct_session_relation_projection;
+use super::relation_projection::candidate_session_relation_projection;
 use super::relation_receipts::{apply_relation_projection, record_relation_receipt};
 use super::relations::{SessionRelationError, SessionRelationProjection};
 use super::store::execution_control_graph_cancellation;
@@ -75,6 +78,8 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 }
             }
         } else {
+            require_no_open_candidate(&transaction, request.session_id(), None, BEGIN_OPERATION)
+                .await?;
             let recorded_at = now_micros(BEGIN_OPERATION)?;
             transaction
                 .execute(
@@ -196,6 +201,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .await
                 .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
         }
+        retire_superseded_versions(
+            &transaction,
+            request.session_id(),
+            request.generation(),
+            ACTIVATE_OPERATION,
+        )
+        .await?;
         let changed = transaction
             .execute(
                 "UPDATE session_temporal_generations
@@ -252,9 +264,10 @@ pub(super) async fn rebuild_candidate_session_relations(
         .map_err(|error| storage(operation, error))?;
     let reconstruction_cancellation = execution_control_graph_cancellation(control);
     checkpoint_relation_rebuild_control(control)?;
-    let reconstructed = reconstruct_session_relation_projection(
+    let reconstructed = candidate_session_relation_projection(
         &snapshot,
         &scope,
+        &relation_store,
         session_id,
         generation,
         MAX_REBUILD_RELATION_PROJECTION_ITEMS,
@@ -401,6 +414,9 @@ async fn bootstrap_first_active_generation(
     Ok(())
 }
 
+/// Proves the candidate introduced exactly the canonical outputs of the
+/// effects past its base frontier. The base proved its own prefix when it
+/// activated, so only the new effects' observations are read.
 #[hotpath::measure(future = true, label = "session_temporal.projection.validate_frontier")]
 pub(super) async fn validate_candidate_frontier(
     conn: &impl crate::handle::SessionTemporalQuery,
@@ -421,11 +437,19 @@ pub(super) async fn validate_candidate_frontier(
             "native relation projection identity does not match the candidate generation",
         ));
     }
+    let base_frontier = base_source_frontier(
+        conn,
+        &tracedecay_domain::SessionId::new(session_id)
+            .map_err(|error| storage(ACTIVATE_OPERATION, error))?,
+        generation,
+    )
+    .await?;
     let mut expected = BTreeSet::new();
     let mut expected_copies = BTreeSet::new();
     let parent_resolver = canonical_parent_message_resolver(
         conn,
         session_id,
+        base_frontier,
         source_frontier,
         ACTIVATE_OPERATION,
         Some(control),
@@ -442,20 +466,51 @@ pub(super) async fn validate_candidate_frontier(
         }
         expected.insert(occurrence_id.clone());
     }
-    if expected.is_empty() && source_frontier != 0 {
+    if expected.is_empty() && source_frontier != base_frontier {
         return Err(storage_message(
             ACTIVATE_OPERATION,
-            "candidate generation has no canonical message outputs at its frozen frontier",
+            "candidate generation has no canonical message outputs past its base frontier",
         ));
     }
+    let mut settled = conn
+        .query(
+            "SELECT requested.value
+             FROM json_each(?3) AS requested
+             WHERE EXISTS (
+                 SELECT 1 FROM session_occurrences
+                 WHERE session_id = ?1 AND message_id = requested.value AND generation < ?2
+             )
+             LIMIT 1",
+            params![
+                session_id,
+                generation,
+                serde_json::to_string(&parent_resolver.message_ids().collect::<Vec<_>>())
+                    .map_err(|error| storage(ACTIVATE_OPERATION, error))?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+    if let Some(row) = settled
+        .next()
+        .await
+        .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+    {
+        let message_id: String = row
+            .get(0)
+            .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+        return Err(storage_message(
+            ACTIVATE_OPERATION,
+            format!("session-scoped message id {message_id} resolves to more than one occurrence"),
+        ));
+    }
+    drop(settled);
 
     let mut actual = BTreeSet::new();
     let mut rows = conn
         .query(
             "SELECT occurrence_id
-             FROM session_occurrences
-             WHERE session_id = ?1 AND generation = ?2
-             ORDER BY occurrence_id",
+             FROM session_occurrences INDEXED BY idx_session_occurrences_introduced
+             WHERE session_id = ?1 AND generation = ?2",
             params![session_id, generation],
         )
         .await
@@ -489,7 +544,7 @@ pub(super) async fn validate_candidate_frontier(
         .collect::<BTreeSet<_>>();
     // Parent-message copies are mandatory canonical coverage. Additional copy
     // edges are allowed only because batch persistence already validated their
-    // typed retained-evidence proof and the final immutable receipt re-hashed
+    // typed retained-evidence proof and the final immutable receipt hashed
     // the complete edge set before activation.
     if !expected_copies.is_subset(&actual_copies) {
         return Err(storage_message(

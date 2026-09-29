@@ -11,6 +11,10 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::db::engine::{Row, params, params_from_iter};
 use tracedecay_store::{SessionFrozenWatermarksV1, SessionStoreError, SessionStoreResult};
 
+use crate::sql::{
+    SHARED_GENERATION_TABLES, discard_candidate_rows_sql, retire_superseded_versions_sql,
+};
+
 pub(super) const BEGIN_OPERATION: &str = "begin session temporal generation";
 pub(super) const PERSIST_OPERATION: &str = "persist session temporal projection batch";
 pub(super) const ACTIVATE_OPERATION: &str = "activate session temporal generation";
@@ -153,6 +157,81 @@ pub(super) async fn require_active_generation(
             generation: expected,
         }),
     }
+}
+
+/// Refuses a second open candidate: generation `G` reads every row numbered
+/// `<= G`, so only one candidate may add rows above the active generation.
+pub(super) async fn require_no_open_candidate(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    session_id: &SessionId,
+    except: Option<SessionProjectionGenerationV1>,
+    operation: &'static str,
+) -> SessionStoreResult<()> {
+    let except = except
+        .map(|generation| generation_i64(generation, operation))
+        .transpose()?;
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM session_temporal_generations
+             WHERE session_id = ?1 AND state IN ('building', 'ready')
+               AND (?2 IS NULL OR generation <> ?2)
+             LIMIT 1",
+            params![session_id.as_str(), except],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| storage(operation, error))?
+        .is_some()
+    {
+        return Err(SessionStoreError::IdempotencyConflict {
+            context: "session generation candidate busy",
+        });
+    }
+    Ok(())
+}
+
+/// Deletes every row a terminated candidate introduced.
+pub(super) async fn discard_candidate_rows(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    operation: &'static str,
+) -> SessionStoreResult<()> {
+    let generation = generation_i64(generation, operation)?;
+    for table in SHARED_GENERATION_TABLES {
+        conn.execute(
+            &discard_candidate_rows_sql(table),
+            params![session_id.as_str(), generation],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    }
+    Ok(())
+}
+
+/// Deletes the row versions an activating generation superseded.
+pub(super) async fn retire_superseded_versions(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    operation: &'static str,
+) -> SessionStoreResult<()> {
+    let generation = generation_i64(generation, operation)?;
+    for table in SHARED_GENERATION_TABLES
+        .iter()
+        .filter(|table| table.versioned)
+    {
+        conn.execute(
+            &retire_superseded_versions_sql(table),
+            params![session_id.as_str(), generation],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    }
+    Ok(())
 }
 
 pub(super) async fn read_observation(

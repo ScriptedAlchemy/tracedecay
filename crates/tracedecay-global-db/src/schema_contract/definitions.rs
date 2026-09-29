@@ -169,34 +169,6 @@ const SESSION_RELATION_RECEIPTS: Table = table!(
     ]
 );
 
-/// Trailing `session_relation_receipts` columns added by receipt recovery,
-/// in persisted `cid` order.
-pub(crate) const SESSION_RELATION_RECEIPT_RECOVERY_COLUMNS: &[&str] = &[
-    "recovery_state",
-    "recovery_failure_code",
-    "recovery_failure_count",
-    "recovery_next_attempt_at",
-];
-
-/// Index that receipt recovery added alongside its columns.
-pub(super) const SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX: &str =
-    "idx_session_relation_receipts_recovery_due";
-
-/// The exact v4 `session_relation_receipts` shape persisted by installations
-/// that migrated before receipt recovery existed: the final contract without
-/// its trailing recovery columns.
-pub(super) const SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY: Table = Table {
-    name: SESSION_RELATION_RECEIPTS.name,
-    columns: SESSION_RELATION_RECEIPTS
-        .columns
-        .split_at(
-            SESSION_RELATION_RECEIPTS.columns.len()
-                - SESSION_RELATION_RECEIPT_RECOVERY_COLUMNS.len(),
-        )
-        .0,
-    foreign_keys: SESSION_RELATION_RECEIPTS.foreign_keys,
-};
-
 pub(super) const TABLES: &[Table] = &[
     table!(
         "projects",
@@ -1300,8 +1272,8 @@ pub(super) const TABLES: &[Table] = &[
         "session_turns",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("turn_id", "TEXT", true, None, 3),
+            column("generation", "INTEGER", true, None, 3),
+            column("turn_id", "TEXT", true, None, 2),
             column("ordinal", "INTEGER", true, None, 0),
             column("grouping_provenance", "TEXT", true, None, 0),
             column("created_at", "INTEGER", true, None, 0),
@@ -1326,8 +1298,8 @@ pub(super) const TABLES: &[Table] = &[
         "session_threads",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("thread_id", "TEXT", true, None, 3),
+            column("generation", "INTEGER", true, None, 3),
+            column("thread_id", "TEXT", true, None, 2),
             column("grouping_provenance", "TEXT", true, None, 0),
             column("created_at", "INTEGER", true, None, 0),
         ],
@@ -1351,8 +1323,8 @@ pub(super) const TABLES: &[Table] = &[
         "session_agents",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("agent_id", "TEXT", true, None, 3),
+            column("generation", "INTEGER", true, None, 3),
+            column("agent_id", "TEXT", true, None, 2),
             column("agent_json", "TEXT", true, None, 0),
             column("created_at", "INTEGER", true, None, 0),
         ],
@@ -1376,9 +1348,10 @@ pub(super) const TABLES: &[Table] = &[
         "session_occurrences",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("occurrence_id", "TEXT", true, None, 3),
+            column("generation", "INTEGER", true, None, 0),
+            column("occurrence_id", "TEXT", true, None, 2),
             column("source_observation_id", "TEXT", true, None, 0),
+            column("source_sequence", "INTEGER", true, None, 0),
             column("source_provider", "TEXT", true, None, 0),
             column("projection_output_ordinal", "INTEGER", true, None, 0),
             column("retrieval_anchor_id", "TEXT", true, None, 0),
@@ -1388,6 +1361,10 @@ pub(super) const TABLES: &[Table] = &[
             column("turn_grouping_json", "TEXT", false, None, 0),
             column("message_id", "TEXT", false, None, 0),
             column("agent_id", "TEXT", false, None, 0),
+            column("parent_message_id", "TEXT", false, None, 0),
+            column("parent_agent_id", "TEXT", false, None, 0),
+            column("parent_session_id", "TEXT", false, None, 0),
+            column("copied_from_anchor_ids_json", "TEXT", true, None, 0),
             column("role", "TEXT", true, None, 0),
             column("knowledge_at", "INTEGER", true, None, 0),
             column("valid_time_json", "TEXT", true, None, 0),
@@ -1423,50 +1400,30 @@ pub(super) const TABLES: &[Table] = &[
                 "anchor_id",
                 "NO ACTION"
             ),
-            foreign_key("session_id", "session_threads", "session_id", "NO ACTION"),
-            foreign_key_sequence(
-                "generation",
-                "session_threads",
-                "generation",
-                "NO ACTION",
-                1
-            ),
-            foreign_key_sequence("thread_id", "session_threads", "thread_id", "NO ACTION", 2),
-            foreign_key("session_id", "session_turns", "session_id", "NO ACTION"),
-            foreign_key_sequence("generation", "session_turns", "generation", "NO ACTION", 1),
-            foreign_key_sequence("turn_id", "session_turns", "turn_id", "NO ACTION", 2),
-            foreign_key("session_id", "session_agents", "session_id", "NO ACTION"),
-            foreign_key_sequence("generation", "session_agents", "generation", "NO ACTION", 1),
-            foreign_key_sequence("agent_id", "session_agents", "agent_id", "NO ACTION", 2),
         ]
     ),
     table!(
         "session_turn_members",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("turn_id", "TEXT", true, None, 3),
-            column("occurrence_id", "TEXT", true, None, 4),
+            column("generation", "INTEGER", true, None, 0),
+            column("turn_id", "TEXT", true, None, 2),
+            column("occurrence_id", "TEXT", true, None, 3),
             column("ordinal", "INTEGER", true, None, 0),
         ],
         [
-            foreign_key("session_id", "session_turns", "session_id", "CASCADE"),
-            foreign_key_sequence("generation", "session_turns", "generation", "CASCADE", 1),
-            foreign_key_sequence("turn_id", "session_turns", "turn_id", "CASCADE", 2),
-            foreign_key("session_id", "session_occurrences", "session_id", "CASCADE"),
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
             foreign_key_sequence(
                 "generation",
-                "session_occurrences",
+                "session_temporal_generations",
                 "generation",
                 "CASCADE",
                 1
-            ),
-            foreign_key_sequence(
-                "occurrence_id",
-                "session_occurrences",
-                "occurrence_id",
-                "CASCADE",
-                2
             ),
         ]
     ),
@@ -1474,8 +1431,8 @@ pub(super) const TABLES: &[Table] = &[
         "session_assertions",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("assertion_id", "TEXT", true, None, 3),
+            column("generation", "INTEGER", true, None, 0),
+            column("assertion_id", "TEXT", true, None, 2),
             column("assertion_kind", "TEXT", true, None, 0),
             column("subject_anchor_id", "TEXT", true, None, 0),
             column("object_anchor_id", "TEXT", true, None, 0),
@@ -1515,41 +1472,24 @@ pub(super) const TABLES: &[Table] = &[
         "session_assertion_supersession",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("superseded_assertion_id", "TEXT", true, None, 3),
-            column("superseding_assertion_id", "TEXT", true, None, 4),
+            column("generation", "INTEGER", true, None, 0),
+            column("superseded_assertion_id", "TEXT", true, None, 2),
+            column("superseding_assertion_id", "TEXT", true, None, 3),
             column("created_at", "INTEGER", true, None, 0),
         ],
         [
-            foreign_key("session_id", "session_assertions", "session_id", "CASCADE"),
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
             foreign_key_sequence(
                 "generation",
-                "session_assertions",
+                "session_temporal_generations",
                 "generation",
                 "CASCADE",
                 1
-            ),
-            foreign_key_sequence(
-                "superseded_assertion_id",
-                "session_assertions",
-                "assertion_id",
-                "CASCADE",
-                2
-            ),
-            foreign_key("session_id", "session_assertions", "session_id", "CASCADE"),
-            foreign_key_sequence(
-                "generation",
-                "session_assertions",
-                "generation",
-                "CASCADE",
-                1
-            ),
-            foreign_key_sequence(
-                "superseding_assertion_id",
-                "session_assertions",
-                "assertion_id",
-                "CASCADE",
-                2
             ),
         ]
     ),
@@ -1557,9 +1497,9 @@ pub(super) const TABLES: &[Table] = &[
         "session_current_entities",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("entity_kind", "TEXT", true, None, 3),
-            column("entity_id", "TEXT", true, None, 4),
+            column("generation", "INTEGER", true, None, 4),
+            column("entity_kind", "TEXT", true, None, 2),
+            column("entity_id", "TEXT", true, None, 3),
             column("current_assertion_id", "TEXT", false, None, 0),
             column("current_occurrence_id", "TEXT", false, None, 0),
             column("coverage_json", "TEXT", true, None, 0),
@@ -1578,58 +1518,18 @@ pub(super) const TABLES: &[Table] = &[
                 "CASCADE",
                 1
             ),
-            foreign_key(
-                "session_id",
-                "session_assertions",
-                "session_id",
-                "NO ACTION"
-            ),
-            foreign_key_sequence(
-                "generation",
-                "session_assertions",
-                "generation",
-                "NO ACTION",
-                1
-            ),
-            foreign_key_sequence(
-                "current_assertion_id",
-                "session_assertions",
-                "assertion_id",
-                "NO ACTION",
-                2
-            ),
-            foreign_key(
-                "session_id",
-                "session_occurrences",
-                "session_id",
-                "NO ACTION"
-            ),
-            foreign_key_sequence(
-                "generation",
-                "session_occurrences",
-                "generation",
-                "NO ACTION",
-                1
-            ),
-            foreign_key_sequence(
-                "current_occurrence_id",
-                "session_occurrences",
-                "occurrence_id",
-                "NO ACTION",
-                2
-            ),
         ]
     ),
     table!(
         "session_derived_evidence",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("evidence_kind", "TEXT", true, None, 3),
-            column("evidence_id", "TEXT", true, None, 4),
+            column("generation", "INTEGER", true, None, 4),
+            column("evidence_kind", "TEXT", true, None, 2),
+            column("first_occurrence_id", "TEXT", true, None, 3),
+            column("evidence_id", "TEXT", true, None, 0),
             column("retrieval_anchor_id", "TEXT", true, None, 0),
             column("thread_id", "TEXT", false, None, 0),
-            column("first_occurrence_id", "TEXT", true, None, 0),
             column("last_occurrence_id", "TEXT", true, None, 0),
             column("algorithm_version", "TEXT", true, None, 0),
             column("configuration_digest", "TEXT", true, None, 0),
@@ -1657,106 +1557,32 @@ pub(super) const TABLES: &[Table] = &[
                 "anchor_id",
                 "NO ACTION"
             ),
-            foreign_key(
-                "session_id",
-                "session_occurrences",
-                "session_id",
-                "NO ACTION"
-            ),
-            foreign_key_sequence(
-                "generation",
-                "session_occurrences",
-                "generation",
-                "NO ACTION",
-                1
-            ),
-            foreign_key_sequence(
-                "first_occurrence_id",
-                "session_occurrences",
-                "occurrence_id",
-                "NO ACTION",
-                2
-            ),
-            foreign_key(
-                "session_id",
-                "session_occurrences",
-                "session_id",
-                "NO ACTION"
-            ),
-            foreign_key_sequence(
-                "generation",
-                "session_occurrences",
-                "generation",
-                "NO ACTION",
-                1
-            ),
-            foreign_key_sequence(
-                "last_occurrence_id",
-                "session_occurrences",
-                "occurrence_id",
-                "NO ACTION",
-                2
-            ),
         ]
     ),
     table!(
         "session_derived_evidence_members",
         [
             column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("evidence_kind", "TEXT", true, None, 3),
-            column("evidence_id", "TEXT", true, None, 4),
-            column("ordinal", "INTEGER", true, None, 5),
+            column("generation", "INTEGER", true, None, 5),
+            column("evidence_kind", "TEXT", true, None, 2),
+            column("first_occurrence_id", "TEXT", true, None, 3),
+            column("ordinal", "INTEGER", true, None, 4),
             column("occurrence_id", "TEXT", true, None, 0),
             column("member_role", "TEXT", true, None, 0),
         ],
         [
             foreign_key(
                 "session_id",
-                "session_derived_evidence",
+                "session_temporal_generations",
                 "session_id",
                 "CASCADE"
             ),
             foreign_key_sequence(
                 "generation",
-                "session_derived_evidence",
+                "session_temporal_generations",
                 "generation",
                 "CASCADE",
                 1
-            ),
-            foreign_key_sequence(
-                "evidence_kind",
-                "session_derived_evidence",
-                "evidence_kind",
-                "CASCADE",
-                2
-            ),
-            foreign_key_sequence(
-                "evidence_id",
-                "session_derived_evidence",
-                "evidence_id",
-                "CASCADE",
-                3
-            ),
-            foreign_key(
-                "session_id",
-                "session_occurrences",
-                "session_id",
-                "NO ACTION"
-            ),
-            foreign_key_sequence(
-                "generation",
-                "session_occurrences",
-                "generation",
-                "NO ACTION",
-                1
-            ),
-            foreign_key_sequence(
-                "occurrence_id",
-                "session_occurrences",
-                "occurrence_id",
-                "NO ACTION",
-                2
             ),
         ]
     ),
@@ -2208,11 +2034,39 @@ pub(super) const INDEXES: &[Index] = &[
         columns: &["session_id", "observation_sequence"],
     },
     Index {
+        table: "session_turns",
+        name: Some("idx_session_turns_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
+    },
+    Index {
+        table: "session_threads",
+        name: Some("idx_session_threads_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
+    },
+    Index {
+        table: "session_agents",
+        name: Some("idx_session_agents_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
+    },
+    Index {
+        table: "session_occurrences",
+        name: Some("idx_session_occurrences_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
+    },
+    Index {
         table: "session_occurrences",
         name: Some("idx_session_occurrences_generation_order"),
         unique: false,
         origin: "c",
-        columns: &["session_id", "generation", "knowledge_at", "occurrence_id"],
+        columns: &["session_id", "knowledge_at", "occurrence_id", "generation"],
     },
     Index {
         table: "session_occurrences",
@@ -2230,15 +2084,28 @@ pub(super) const INDEXES: &[Index] = &[
     },
     Index {
         table: "session_occurrences",
+        name: Some("idx_session_occurrences_source_order"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "session_id",
+            "source_sequence",
+            "projection_output_ordinal",
+            "occurrence_id",
+            "generation",
+        ],
+    },
+    Index {
+        table: "session_occurrences",
         name: Some("idx_session_occurrences_anchor_order"),
         unique: false,
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "retrieval_anchor_id",
             "knowledge_at",
             "occurrence_id",
+            "generation",
         ],
     },
     Index {
@@ -2248,10 +2115,10 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "message_id",
             "knowledge_at",
             "occurrence_id",
+            "generation",
         ],
     },
     Index {
@@ -2261,10 +2128,10 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "thread_id",
             "knowledge_at",
             "occurrence_id",
+            "generation",
         ],
     },
     Index {
@@ -2274,10 +2141,10 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "turn_id",
             "knowledge_at",
             "occurrence_id",
+            "generation",
         ],
     },
     Index {
@@ -2287,10 +2154,10 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "agent_id",
             "knowledge_at",
             "occurrence_id",
+            "generation",
         ],
     },
     Index {
@@ -2298,14 +2165,21 @@ pub(super) const INDEXES: &[Index] = &[
         name: Some("idx_session_turn_members_occurrence"),
         unique: false,
         origin: "c",
-        columns: &["session_id", "generation", "occurrence_id"],
+        columns: &["session_id", "occurrence_id", "generation"],
+    },
+    Index {
+        table: "session_turn_members",
+        name: Some("idx_session_turn_members_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
     },
     Index {
         table: "session_assertions",
         name: Some("idx_session_assertions_subject"),
         unique: false,
         origin: "c",
-        columns: &["session_id", "generation", "subject_anchor_id"],
+        columns: &["session_id", "subject_anchor_id", "generation"],
     },
     Index {
         table: "session_assertions",
@@ -2314,10 +2188,10 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "object_anchor_id",
             "knowledge_at",
             "assertion_id",
+            "generation",
         ],
     },
     Index {
@@ -2327,10 +2201,10 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "assertion_kind",
             "knowledge_at",
             "assertion_id",
+            "generation",
         ],
     },
     Index {
@@ -2338,41 +2212,56 @@ pub(super) const INDEXES: &[Index] = &[
         name: Some("idx_session_assertions_generation_order"),
         unique: false,
         origin: "c",
-        columns: &["session_id", "generation", "knowledge_at", "assertion_id"],
+        columns: &["session_id", "knowledge_at", "assertion_id", "generation"],
+    },
+    Index {
+        table: "session_assertions",
+        name: Some("idx_session_assertions_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
     },
     Index {
         table: "session_assertion_supersession",
         name: Some("idx_session_assertion_supersession_successor"),
         unique: false,
         origin: "c",
-        columns: &["session_id", "generation", "superseding_assertion_id"],
+        columns: &["session_id", "superseding_assertion_id", "generation"],
+    },
+    Index {
+        table: "session_assertion_supersession",
+        name: Some("idx_session_assertion_supersession_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
     },
     Index {
         table: "session_current_entities",
         name: Some("idx_session_current_entities_assertion"),
         unique: false,
         origin: "c",
-        columns: &["session_id", "generation", "current_assertion_id"],
+        columns: &["session_id", "current_assertion_id", "generation"],
     },
     Index {
         table: "session_current_entities",
         name: Some("idx_session_current_entities_occurrence"),
         unique: false,
         origin: "c",
-        columns: &["session_id", "generation", "current_occurrence_id"],
+        columns: &["session_id", "current_occurrence_id", "generation"],
+    },
+    Index {
+        table: "session_current_entities",
+        name: Some("idx_session_current_entities_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
     },
     Index {
         table: "session_derived_evidence",
-        name: Some("idx_session_derived_evidence_scope_order"),
+        name: Some("idx_session_derived_evidence_identity"),
         unique: false,
         origin: "c",
-        columns: &[
-            "session_id",
-            "generation",
-            "evidence_kind",
-            "first_occurrence_id",
-            "evidence_id",
-        ],
+        columns: &["session_id", "evidence_id", "generation"],
     },
     Index {
         table: "session_derived_evidence",
@@ -2381,10 +2270,10 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "retrieval_anchor_id",
             "evidence_kind",
             "evidence_id",
+            "generation",
         ],
     },
     Index {
@@ -2394,25 +2283,30 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "thread_id",
             "evidence_kind",
             "first_occurrence_id",
-            "evidence_id",
+            "generation",
         ],
     },
     Index {
-        table: "session_derived_evidence_members",
-        name: None,
-        unique: true,
-        origin: "u",
+        table: "session_derived_evidence",
+        name: Some("idx_session_derived_evidence_tail"),
+        unique: false,
+        origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "evidence_kind",
-            "evidence_id",
-            "occurrence_id",
+            "last_occurrence_id",
+            "generation",
         ],
+    },
+    Index {
+        table: "session_derived_evidence",
+        name: Some("idx_session_derived_evidence_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
     },
     Index {
         table: "session_derived_evidence_members",
@@ -2421,12 +2315,19 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &[
             "session_id",
-            "generation",
             "occurrence_id",
             "evidence_kind",
-            "evidence_id",
+            "first_occurrence_id",
             "ordinal",
+            "generation",
         ],
+    },
+    Index {
+        table: "session_derived_evidence_members",
+        name: Some("idx_session_derived_evidence_members_introduced"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation"],
     },
     Index {
         table: "session_summary_availability",

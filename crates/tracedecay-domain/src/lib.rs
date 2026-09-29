@@ -386,11 +386,12 @@ pub use session::{
     ValidCoverageIntervalV1,
 };
 pub use session_derived::{
-    DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1,
-    DerivedEvidenceMemberV1, DerivedEvidenceOccurrenceRefV1, EvidenceSpanIdV1,
-    SESSION_DERIVED_BURST_ALGORITHM_V1, SESSION_DERIVED_SPAN_ALGORITHM_V1,
-    SESSION_DERIVED_SPAN_MAX_MEMBERS_V1, SessionDerivedEvidencePolicyV1,
-    SessionDerivedEvidenceRecordV1, derive_session_evidence_from_occurrences,
+    DerivedEvidenceDeltaV1, DerivedEvidenceIdV1, DerivedEvidenceKindV1,
+    DerivedEvidenceMemberRoleV1, DerivedEvidenceMemberV1, DerivedEvidenceOccurrenceRefV1,
+    DerivedEvidenceTailV1, EvidenceSpanIdV1, SESSION_DERIVED_BURST_ALGORITHM_V1,
+    SESSION_DERIVED_SPAN_ALGORITHM_V1, SESSION_DERIVED_SPAN_MAX_MEMBERS_V1,
+    SessionDerivedEvidencePolicyV1, SessionDerivedEvidenceRecordV1,
+    derive_session_evidence_from_occurrences, extend_session_evidence,
 };
 pub use source_path_policy::{
     GENERATED_DIR_SEGMENTS, IndexPathPatternError, IndexPathPolicyV1, is_generated_dir_segment,
