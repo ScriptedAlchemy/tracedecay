@@ -27,6 +27,7 @@ use tracedecay_daemon_service::{
     DaemonPrimitiveRuntimeRegistrar, DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
     ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1, WorkApplicationInvocationV1,
 };
+use tracedecay_domain::CursorBindingMismatchV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_store_runtime::ShutdownStatus;
 
@@ -512,30 +513,16 @@ impl DaemonInvocationState {
                 DaemonInvocationProblem::InvalidRequest,
             );
         };
-        let continuation_valid = match request.continuation.as_ref() {
-            None => request.page == 0,
-            Some(continuation) => {
-                continuation.validate().is_ok()
-                    && continuation.scope_set_digest() == scope_set.digest()
-                    && continuation.query_digest() == &query_digest
-                    && continuation.order_digest() == &order_digest
-                    && continuation.next_page() == request.page
-                    && continuation.root_generations().len() == scope_set.roots().len()
-                    && continuation.root_cursors().len() == scope_set.roots().len()
-                    && scope_set.roots().iter().all(|root| {
-                        continuation
-                            .root_generation(&root.scope().scope_digest)
-                            .is_some()
-                            && continuation
-                                .root_cursor(&root.scope().scope_digest)
-                                .is_some()
-                    })
-            }
-        };
-        if !continuation_valid {
-            return DaemonInvocationResponse::problem(
+        if let Err(mismatch) = multi_root_continuation_binding(
+            request.continuation.as_ref(),
+            request.page,
+            &scope_set,
+            &query_digest,
+            &order_digest,
+        ) {
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::InvalidRequest,
+                tracedecay_contracts::ApplicationProblem::cursor_refused(&mismatch),
             );
         }
         let database = match store_administration.registered_profile_database().await {
@@ -718,9 +705,9 @@ impl DaemonInvocationState {
             if request.continuation.as_ref().is_some_and(|continuation| {
                 continuation.root_generation(&scope.scope_digest) != Some(&generation_outcome)
             }) {
-                return DaemonInvocationResponse::problem(
+                return DaemonInvocationResponse::application_problem(
                     request_id,
-                    DaemonInvocationProblem::InvalidRequest,
+                    multi_root_continuation_stale(),
                 );
             }
             let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
@@ -903,6 +890,18 @@ impl DaemonInvocationState {
         .execute(query)
         {
             Ok(page) => page,
+            Err(tracedecay_contracts::MultiRootQueryError::CursorRefused(mismatch)) => {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    tracedecay_contracts::ApplicationProblem::cursor_refused(&mismatch),
+                );
+            }
+            Err(tracedecay_contracts::MultiRootQueryError::ContinuationStale) => {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    multi_root_continuation_stale(),
+                );
+            }
             Err(_) => {
                 return DaemonInvocationResponse::problem(
                     request_id,
@@ -1169,6 +1168,58 @@ fn parse_multi_root_operation(
             })
         }
     }
+}
+
+/// Whether `continuation` pages this execute request: the scope set, the
+/// operation, and the page it was minted for.
+fn multi_root_continuation_binding(
+    continuation: Option<&tracedecay_contracts::MultiRootContinuationV1>,
+    page: u64,
+    scope_set: &tracedecay_contracts::AuthorizedScopeSet,
+    query_digest: &tracedecay_domain::ManifestDigest,
+    order_digest: &tracedecay_domain::ManifestDigest,
+) -> std::result::Result<(), CursorBindingMismatchV1> {
+    let changed = |parameter| CursorBindingMismatchV1::ParameterChanged { parameter };
+    let Some(continuation) = continuation else {
+        return if page == 0 {
+            Ok(())
+        } else {
+            Err(changed("page"))
+        };
+    };
+    let covers_every_root = continuation.root_generations().len() == scope_set.roots().len()
+        && continuation.root_cursors().len() == scope_set.roots().len()
+        && scope_set.roots().iter().all(|root| {
+            continuation
+                .root_generation(&root.scope().scope_digest)
+                .is_some()
+                && continuation
+                    .root_cursor(&root.scope().scope_digest)
+                    .is_some()
+        });
+    if continuation.validate().is_err() {
+        Err(CursorBindingMismatchV1::Foreign)
+    } else if continuation.scope_set_digest() != scope_set.digest()
+        || continuation.order_digest() != order_digest
+        || !covers_every_root
+    {
+        Err(changed("scope_set_digest"))
+    } else if continuation.query_digest() != query_digest {
+        Err(changed("operation"))
+    } else if continuation.next_page() != page {
+        Err(changed("page"))
+    } else {
+        Ok(())
+    }
+}
+
+fn multi_root_continuation_stale() -> tracedecay_contracts::ApplicationProblem {
+    tracedecay_contracts::ApplicationProblem::stale(tracedecay_contracts::SafeDiagnostic {
+        code: "multi_root.continuation_stale".to_owned(),
+        message: "A root's generation moved since the continuation was minted; restart \
+                  without it."
+            .to_owned(),
+    })
 }
 
 /// Work evidence reads through the exact/lexical/graph authority mounted for

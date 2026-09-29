@@ -588,7 +588,11 @@ fn declared_stack_request_rejects_a_revision_identity_that_disagrees_with_its_au
     *revision_id =
         BranchStackRevisionId::new("branch-stack-revision.native.other").expect("revision");
 
-    assert!(declared.request.validate().is_err());
+    let error = declared.request.validate().unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "native integration stack edge is inconsistent with the application contract"
+    );
 }
 
 #[test]

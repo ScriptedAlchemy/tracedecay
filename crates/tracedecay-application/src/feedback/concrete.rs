@@ -43,11 +43,13 @@ use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::feedback::{
     FeedbackCycleTerminationV1, FeedbackDedupeKeyV1, FeedbackFindingId, FeedbackFindingV1,
 };
-use tracedecay_domain::{ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ActorId, ComponentVersion, CursorBindingMismatchV1, ManifestDigest, UtcMicros, canonical_sha256,
+};
 use tracedecay_store::DiagnosticStore;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::concrete_evidence::{complete, interruption, unavailable};
+use super::concrete_evidence::{complete, cursor_refused, interruption, unavailable};
 use super::observations::{
     DurableFeedbackObservationQueueAdapterV1, DurableFeedbackObservationSinkV1,
     FeedbackObservationAdapter, FeedbackObservationEmitterV1, FeedbackObservationReadModelV1,
@@ -98,8 +100,6 @@ pub enum FeedbackRuntimeError {
     AccessDenied,
     #[error("feedback runtime store operation failed")]
     Store,
-    #[error("feedback runtime handle operation failed")]
-    Handle,
     #[error("feedback runtime handle store failed")]
     HandleStore(#[source] TraceDecayError),
     #[error("feedback runtime record is corrupt")]
@@ -1213,9 +1213,9 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                     }
                 }
                 let records: Vec<_> = latest.into_iter().collect();
-                let Ok(start) = self.list_start(context.request, request, &records, finished_at)
-                else {
-                    return unavailable(finished_at, domains);
+                let start = match self.list_start(context.request, request, &records, finished_at) {
+                    Ok(start) => start,
+                    Err(mismatch) => return cursor_refused(finished_at, domains, &mismatch),
                 };
                 let end = start
                     .saturating_add(request.page.page_size as usize)
@@ -1493,13 +1493,15 @@ impl ProjectFeedbackStore {
         })
     }
 
+    /// Where a list page starts: the stored continuation's position when the
+    /// presented cursor is a live list continuation minted for this request.
     fn list_start(
         &self,
         context: &RequestContext,
         request: &FeedbackListRequestV1,
         records: &[(FeedbackFindingId, (usize, FeedbackFindingV1))],
         observed_at: UtcMicros,
-    ) -> Result<usize, FeedbackRuntimeError> {
+    ) -> Result<usize, CursorBindingMismatchV1> {
         let Some(cursor) = request.page.cursor.as_ref() else {
             return Ok(0);
         };
@@ -1508,21 +1510,29 @@ impl ProjectFeedbackStore {
             cursor.as_str(),
             observed_at,
         )
-        .map_err(|_| FeedbackRuntimeError::Handle)?;
+        .map_err(|_| CursorBindingMismatchV1::Foreign)?;
         let FeedbackReadRequestV1::List(stored_request) = &stored.request else {
-            return Err(FeedbackRuntimeError::Handle);
+            return Err(CursorBindingMismatchV1::Foreign);
         };
         let Some(after_finding_id) = stored.after_finding_id.as_ref() else {
-            return Err(FeedbackRuntimeError::Handle);
+            return Err(CursorBindingMismatchV1::Foreign);
         };
         if stored.schema_version != REQUEST_HANDLE_SCHEMA_VERSION
             || stored.operation != FeedbackReadOperationV1::List
             || stored.scope_digest != context.scope().scope_digest
-            || stored_request.head_commit_id != request.head_commit_id
-            || stored_request.page.page_size != request.page.page_size
             || observed_at >= stored.expires_at
         {
-            return Err(FeedbackRuntimeError::Handle);
+            return Err(CursorBindingMismatchV1::Foreign);
+        }
+        if stored_request.head_commit_id != request.head_commit_id {
+            return Err(CursorBindingMismatchV1::ParameterChanged {
+                parameter: "head_commit_id",
+            });
+        }
+        if stored_request.page.page_size != request.page.page_size {
+            return Err(CursorBindingMismatchV1::ParameterChanged {
+                parameter: "page_size",
+            });
         }
         Ok(records.partition_point(|(finding_id, _)| finding_id <= after_finding_id))
     }
@@ -2030,6 +2040,8 @@ mod tests {
     };
     use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
+    use tracedecay_contracts::{LegalAction, RetrievalPortOutcome};
+    use tracedecay_domain::CommitId;
     use tracedecay_domain::test_fixtures::id;
 
     fn scope() -> ResolvedScope {
@@ -2158,6 +2170,160 @@ mod tests {
                 Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized)
             ));
         }
+    }
+
+    /// A list continuation pages only the list that minted it: a changed head
+    /// or page size, another read's handle, or an unknown handle is the one
+    /// typed cursor refusal instead of an unavailable page.
+    #[tokio::test]
+    async fn list_refuses_a_continuation_minted_for_another_request() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("feedback-list-cursor.db");
+        crate::register_test_schema_installer();
+        let authority = DatabaseAuthority::acquire_test(&path, "feedback list cursor").unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let store = ProjectFeedbackStore {
+            database,
+            response_handle_root: root.path().join("response-handles"),
+            source_observations: None,
+        };
+        let operation = feedback_surface_operation("feedback_list")
+            .unwrap()
+            .unwrap();
+        let now = now_micros();
+        let expires_at = UtcMicros(now.0 + 60_000_000);
+        let scope = scope();
+        let request = RequestContext::new(
+            id::<ActorId>("actor.feedback-reader.requester"),
+            scope.clone(),
+            CapabilityGrantSnapshot::new(
+                id("grant.feedback-reader.list-cursor"),
+                1,
+                canonical_sha256(&"feedback-reader-list-cursor").unwrap(),
+                id("actor.feedback-reader.issuer"),
+                now,
+                expires_at,
+                scope,
+                [operation.capability_id().clone()].into_iter().collect(),
+                [operation.use_case_id().clone()].into_iter().collect(),
+                DisclosureClass::Evidence,
+            )
+            .unwrap(),
+            RequestId::new("request.feedback-reader.list-cursor").unwrap(),
+            Deadline::new(expires_at).unwrap(),
+            CancellationContext::active("cancel.feedback-reader.list-cursor").unwrap(),
+        )
+        .unwrap();
+        let context = FeedbackReadPortContext {
+            request: &request,
+            operation: &operation,
+        };
+        let list_request =
+            |head: Option<&str>, page_size: u32, cursor: Option<&str>| FeedbackListRequestV1 {
+                head_commit_id: head.map(id::<CommitId>),
+                page: PageRequest::new(
+                    page_size,
+                    cursor.map(|cursor| OpaqueCursor::new(cursor.to_owned()).unwrap()),
+                )
+                .unwrap(),
+            };
+        let (continuation, _) = store
+            .next_list_handle(
+                &request,
+                &list_request(None, 10, None),
+                &id::<FeedbackFindingId>("feedback.finding.fixture"),
+                now,
+            )
+            .unwrap();
+        let get_handle = store_request_handle(
+            &store.response_handle_root,
+            request_record(
+                &request,
+                FeedbackReadRequestV1::Get(FeedbackGetRequestV1 {
+                    finding_id: id("feedback.finding.fixture"),
+                }),
+            ),
+            now,
+        )
+        .unwrap();
+        let refusal = |outcome: RetrievalPortOutcome<FeedbackListResultV1>| {
+            let RetrievalPortOutcome::Refused(_, problem) = outcome else {
+                panic!("the continuation must be refused: {outcome:?}");
+            };
+            assert_eq!(
+                problem.legal_actions(),
+                &[
+                    LegalAction::CorrectRequest,
+                    LegalAction::RestartWithoutCursor
+                ]
+            );
+            let diagnostic = problem.diagnostic().unwrap();
+            (diagnostic.code.clone(), diagnostic.message.clone())
+        };
+        let invalid = (
+            "cursor.invalid".to_owned(),
+            "The cursor was not issued by this operation. Restart without it.".to_owned(),
+        );
+
+        assert_eq!(
+            refusal(
+                store
+                    .list(
+                        &context,
+                        &list_request(
+                            Some("commit.feedback.other-head"),
+                            10,
+                            Some(continuation.as_str())
+                        )
+                    )
+                    .await
+            ),
+            (
+                "cursor.parameter_changed".to_owned(),
+                "The cursor was issued for a request with a different `head_commit_id`. Repeat \
+                 the request with the parameters that returned the cursor, or restart without it."
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            refusal(
+                store
+                    .list(
+                        &context,
+                        &list_request(None, 5, Some(continuation.as_str()))
+                    )
+                    .await
+            ),
+            (
+                "cursor.parameter_changed".to_owned(),
+                "The cursor was issued for a request with a different `page_size`. Repeat the \
+                 request with the parameters that returned the cursor, or restart without it."
+                    .to_owned()
+            )
+        );
+        for foreign in [get_handle.as_str(), "rh_unknown_feedback_list"] {
+            assert_eq!(
+                refusal(
+                    store
+                        .list(&context, &list_request(None, 10, Some(foreign)))
+                        .await
+                ),
+                invalid
+            );
+        }
+        let RetrievalPortOutcome::Completed(replayed) = store
+            .list(
+                &context,
+                &list_request(None, 10, Some(continuation.as_str())),
+            )
+            .await
+        else {
+            panic!("the unchanged continuation must page");
+        };
+        assert_eq!(replayed.payload.unwrap().findings, Vec::new());
     }
 
     #[test]

@@ -17,9 +17,13 @@ use tracedecay_contracts::retrieval::{
     SymbolPrimitiveRecord, SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord,
     TypeHierarchyRequest,
 };
-use tracedecay_contracts::{OpaqueCursor, OperationBudgetUsage, PageRequest, RequestContext};
+use tracedecay_contracts::{
+    OpaqueCursor, OperationBudgetUsage, PageRequest, RequestContext, RetrievalRequestMeta,
+};
 use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId, UtcMicros};
+use tracedecay_domain::{
+    CursorBindingBuilderV1, CursorBindingV1, RelationEdgeKindV1, SymbolOccurrenceId, UtcMicros,
+};
 use tracedecay_graph_db::GraphCancellation;
 
 mod ignored_dependency;
@@ -64,7 +68,7 @@ pub trait SymbolGraphCursorPort: Send + Sync {
     fn claim_page<'a>(
         &'a self,
         context: &'a RequestContext,
-        lane: &'a str,
+        binding: &'a CursorBindingV1,
         cursor: Option<&'a OpaqueCursor>,
         observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim>;
@@ -73,7 +77,7 @@ pub trait SymbolGraphCursorPort: Send + Sync {
     fn finish_page<'a>(
         &'a self,
         context: &'a RequestContext,
-        lane: &'a str,
+        binding: &'a CursorBindingV1,
         claim: &'a SymbolGraphPageClaim,
         next_offset: usize,
         total: usize,
@@ -89,17 +93,17 @@ where
     fn claim_page<'a>(
         &'a self,
         context: &'a RequestContext,
-        lane: &'a str,
+        binding: &'a CursorBindingV1,
         cursor: Option<&'a OpaqueCursor>,
         observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim> {
-        (**self).claim_page(context, lane, cursor, observed_at)
+        (**self).claim_page(context, binding, cursor, observed_at)
     }
 
     fn finish_page<'a>(
         &'a self,
         context: &'a RequestContext,
-        lane: &'a str,
+        binding: &'a CursorBindingV1,
         claim: &'a SymbolGraphPageClaim,
         next_offset: usize,
         total: usize,
@@ -108,7 +112,7 @@ where
     ) -> SymbolGraphCursorFuture<'a, Option<OpaqueCursor>> {
         (**self).finish_page(
             context,
-            lane,
+            binding,
             claim,
             next_offset,
             total,
@@ -139,8 +143,20 @@ where
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(hotpath::future!(
             async move {
+                let binding = match cursor_binding("search", &request.meta, |binding| {
+                    binding
+                        .parameter("query", request.query.as_str())
+                        .parameter("scope", &request.scope)
+                        .parameter(
+                            "lazy_index_ignored_dependencies",
+                            &request.lazy_index_ignored_dependencies,
+                        )
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
                 let claim =
-                    match claim_generation(&self.cursors, context, &request.meta.page, "search")
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
                         .await
                     {
                         Ok(claim) => claim,
@@ -176,7 +192,7 @@ where
                     &graph,
                     &self.cursors,
                     IgnoredDependencyRequest {
-                        lane: "search",
+                        binding: &binding,
                         claim: &claim,
                         normal_results_empty: records.is_empty(),
                         requested: request.lazy_index_ignored_dependencies,
@@ -192,7 +208,7 @@ where
                     &self.cursors,
                     context,
                     &request.meta.page,
-                    "search",
+                    &binding,
                     &claim,
                     &graph,
                     records,
@@ -212,8 +228,20 @@ where
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(hotpath::future!(
             async move {
+                let binding = match cursor_binding("exact", &request.meta, |binding| {
+                    binding
+                        .parameter("name", &request.name)
+                        .parameter("scope", &request.scope)
+                        .parameter(
+                            "lazy_index_ignored_dependencies",
+                            &request.lazy_index_ignored_dependencies,
+                        )
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
                 let claim =
-                    match claim_generation(&self.cursors, context, &request.meta.page, "exact")
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
                         .await
                     {
                         Ok(claim) => claim,
@@ -248,7 +276,7 @@ where
                     &graph,
                     &self.cursors,
                     IgnoredDependencyRequest {
-                        lane: "exact",
+                        binding: &binding,
                         claim: &claim,
                         normal_results_empty: records.is_empty(),
                         requested: request.lazy_index_ignored_dependencies,
@@ -264,7 +292,7 @@ where
                     &self.cursors,
                     context,
                     &request.meta.page,
-                    "exact",
+                    &binding,
                     &claim,
                     &graph,
                     records,
@@ -284,8 +312,18 @@ where
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(hotpath::future!(
             async move {
+                let binding = match cursor_binding("signature", &request.meta, |binding| {
+                    binding
+                        .parameter("returns", &request.returns)
+                        .parameter("params", &request.params)
+                        .parameter("is_async", &request.is_async)
+                        .parameter("scope", &request.scope)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
                 let claim =
-                    match claim_generation(&self.cursors, context, &request.meta.page, "signature")
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
                         .await
                     {
                         Ok(claim) => claim,
@@ -328,7 +366,7 @@ where
                     &self.cursors,
                     context,
                     &request.meta.page,
-                    "signature",
+                    &binding,
                     &claim,
                     &graph,
                     records,
@@ -348,17 +386,21 @@ where
     ) -> SymbolGraphPortFuture<'a, ImplementationRecord> {
         Box::pin(hotpath::future!(
             async move {
-                let claim = match claim_generation(
-                    &self.cursors,
-                    context,
-                    &request.meta.page,
-                    "implementations",
-                )
-                .await
-                {
-                    Ok(claim) => claim,
+                let binding = match cursor_binding("implementations", &request.meta, |binding| {
+                    binding
+                        .parameter("selector", &request.selector)
+                        .parameter("scope", &request.scope)
+                }) {
+                    Ok(binding) => binding,
                     Err(failure) => return failed_with(context, failure),
                 };
+                let claim =
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(failure) => return failed_with(context, failure),
+                    };
                 let graph = match open_graph(&self.code_graph, context).await {
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
@@ -418,7 +460,7 @@ where
                     &self.cursors,
                     context,
                     &request.meta.page,
-                    "implementations",
+                    &binding,
                     &claim,
                     &graph,
                     records,
@@ -439,8 +481,17 @@ where
     ) -> SymbolGraphPortFuture<'a, TypeHierarchyRecord> {
         Box::pin(hotpath::future!(
             async move {
+                let binding = match cursor_binding("hierarchy", &request.meta, |binding| {
+                    binding
+                        .parameter("node_id", &request.node_id)
+                        .parameter("maximum_depth", &request.maximum_depth)
+                        .parameter("scope", &request.scope)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
                 let claim =
-                    match claim_generation(&self.cursors, context, &request.meta.page, "hierarchy")
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
                         .await
                     {
                         Ok(claim) => claim,
@@ -473,7 +524,7 @@ where
                             &self.cursors,
                             context,
                             &request.meta.page,
-                            "hierarchy",
+                            &binding,
                             &claim,
                             &graph,
                             Vec::new(),
@@ -538,7 +589,7 @@ where
                     &self.cursors,
                     context,
                     &request.meta.page,
-                    "hierarchy",
+                    &binding,
                     &claim,
                     &graph,
                     records,
@@ -558,8 +609,14 @@ where
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
         Box::pin(hotpath::future!(
             async move {
+                let binding = match cursor_binding("callers", &request.meta, |binding| {
+                    relation_parameters(binding, request)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
                 let claim =
-                    match claim_generation(&self.cursors, context, &request.meta.page, "callers")
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
                         .await
                     {
                         Ok(claim) => claim,
@@ -614,7 +671,7 @@ where
                     &self.cursors,
                     context,
                     &request.meta.page,
-                    "callers",
+                    &binding,
                     &claim,
                     &graph,
                     records,
@@ -634,8 +691,14 @@ where
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
         Box::pin(hotpath::future!(
             async move {
+                let binding = match cursor_binding("callees", &request.meta, |binding| {
+                    relation_parameters(binding, request)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
                 let claim =
-                    match claim_generation(&self.cursors, context, &request.meta.page, "callees")
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
                         .await
                     {
                         Ok(claim) => claim,
@@ -713,7 +776,7 @@ where
                     &self.cursors,
                     context,
                     &request.meta.page,
-                    "callees",
+                    &binding,
                     &claim,
                     &graph,
                     records,
@@ -733,8 +796,17 @@ where
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(hotpath::future!(
             async move {
+                let binding = match cursor_binding("impact", &request.meta, |binding| {
+                    binding
+                        .parameter("node_id", &request.node_id)
+                        .parameter("maximum_depth", &request.maximum_depth)
+                        .parameter("scope", &request.scope)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
                 let claim =
-                    match claim_generation(&self.cursors, context, &request.meta.page, "impact")
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
                         .await
                     {
                         Ok(claim) => claim,
@@ -773,7 +845,7 @@ where
                     &self.cursors,
                     context,
                     &request.meta.page,
-                    "impact",
+                    &binding,
                     &claim,
                     &graph,
                     records,
@@ -1286,6 +1358,35 @@ fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
                 .any(|window| window.eq_ignore_ascii_case(query.as_bytes())))
 }
 
+/// The binding a symbol-graph cursor is minted for: the lane and every request
+/// field that shapes the lane's result set.
+fn cursor_binding(
+    lane: &'static str,
+    meta: &RetrievalRequestMeta,
+    parameters: impl FnOnce(CursorBindingBuilderV1) -> CursorBindingBuilderV1,
+) -> Result<CursorBindingV1, PrimitiveFailure> {
+    meta.bind_cursor(parameters(CursorBindingV1::builder(lane)))
+        .build()
+        .map_err(|_| {
+            primitive_failure(
+                PrimitiveFailureKind::Unavailable,
+                "application.symbol-graph.cursor-binding",
+                "could not bind the cursor to the request",
+            )
+        })
+}
+
+fn relation_parameters(
+    binding: CursorBindingBuilderV1,
+    request: &GraphRelationRequest,
+) -> CursorBindingBuilderV1 {
+    binding
+        .parameter("node_id", &request.node_id)
+        .parameter("maximum_depth", &request.maximum_depth)
+        .parameter("resolve_trait_dispatch", &request.resolve_trait_dispatch)
+        .parameter("scope", &request.scope)
+}
+
 /// Binds a read to the live graph generation before any row is read, and
 /// resolves the resume offset of an incoming cursor against that same
 /// generation. Claiming first is what makes a mid-read generation change
@@ -1295,12 +1396,12 @@ async fn claim_generation(
     cursors: &dyn SymbolGraphCursorPort,
     context: SymbolGraphPortContext<'_>,
     request: &PageRequest,
-    lane: &str,
+    binding: &CursorBindingV1,
 ) -> Result<SymbolGraphPageClaim, PrimitiveFailure> {
     cursors
         .claim_page(
             context.request,
-            lane,
+            binding,
             request.cursor.as_ref(),
             context.observed_at,
         )
@@ -1312,7 +1413,7 @@ async fn complete_or_failed<T: Send>(
     cursors: &dyn SymbolGraphCursorPort,
     context: SymbolGraphPortContext<'_>,
     request: &PageRequest,
-    lane: &str,
+    binding: &CursorBindingV1,
     claim: &SymbolGraphPageClaim,
     graph: &OpenSymbolGraph,
     items: Vec<T>,
@@ -1323,7 +1424,7 @@ async fn complete_or_failed<T: Send>(
         cursors,
         context,
         request,
-        lane,
+        binding,
         claim,
         graph.freshness,
         items,
@@ -1378,7 +1479,7 @@ async fn paginate<T: Send>(
     cursors: &dyn SymbolGraphCursorPort,
     context: SymbolGraphPortContext<'_>,
     request: &PageRequest,
-    lane: &str,
+    binding: &CursorBindingV1,
     claim: &SymbolGraphPageClaim,
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
     items: Vec<T>,
@@ -1402,7 +1503,7 @@ async fn paginate<T: Send>(
     let next_cursor = cursors
         .finish_page(
             context.request,
-            lane,
+            binding,
             claim,
             end,
             total,

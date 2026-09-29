@@ -927,7 +927,7 @@ pub(super) fn rejected_skill_writer_run(
 
 #[cfg(test)]
 mod routing_decision_tests {
-    use super::no_skill_needed_decision;
+    use super::{NoSkillNeededDecision, SkillRoutingRemedy, no_skill_needed_decision};
     use serde_json::json;
 
     #[test]
@@ -936,15 +936,41 @@ mod routing_decision_tests {
             "skills": [], "outcome": "no_skill_needed",
             "decision": {"reason": "The only request was a one-off arithmetic calculation.", "remedy": "one_off_task"}
         });
-        assert!(no_skill_needed_decision(&output, &[]).unwrap().is_some());
-        assert!(no_skill_needed_decision(&output, &[json!({"action": "archive"})]).is_err());
+        assert_eq!(
+            no_skill_needed_decision(&output, &[]).unwrap(),
+            Some(NoSkillNeededDecision {
+                reason: "The only request was a one-off arithmetic calculation.".to_owned(),
+                remedy: SkillRoutingRemedy::OneOffTask,
+            })
+        );
+        assert_eq!(
+            no_skill_needed_decision(&output, &[json!({"action": "archive"})])
+                .unwrap_err()
+                .to_string(),
+            "config error: no_skill_needed cannot include skill mutations"
+        );
         let mut invalid = output.clone();
         invalid["decision"]["reason"] = json!("  ");
-        assert!(no_skill_needed_decision(&invalid, &[]).is_err());
+        assert_eq!(
+            no_skill_needed_decision(&invalid, &[])
+                .unwrap_err()
+                .to_string(),
+            "config error: no_skill_needed requires an evidenced reason"
+        );
         invalid["decision"]["reason"] = json!("observed");
         invalid["decision"]["remedy"] = json!("create_skill");
-        assert!(no_skill_needed_decision(&invalid, &[]).is_err());
-        assert!(no_skill_needed_decision(&json!({"skills": []}), &[]).is_err());
+        assert_eq!(
+            no_skill_needed_decision(&invalid, &[])
+                .unwrap_err()
+                .to_string(),
+            "json error: unknown variant `create_skill`, expected one of `improve_tool_description`, `improve_hint_routing`, `insufficient_repeated_evidence`, `generic_reasoning`, `one_off_task`, `no_action`"
+        );
+        assert_eq!(
+            no_skill_needed_decision(&json!({"skills": []}), &[])
+                .unwrap_err()
+                .to_string(),
+            "config error: skill writer output requires an explicit outcome"
+        );
     }
 
     #[test]
@@ -962,15 +988,24 @@ mod routing_decision_tests {
             .unwrap()
             .is_none()
         );
-        for remedy in [
-            "improve_tool_description",
-            "improve_hint_routing",
-            "insufficient_repeated_evidence",
-            "generic_reasoning",
-            "one_off_task",
-            "no_action",
+        for (remedy, expected) in [
+            (
+                "improve_tool_description",
+                SkillRoutingRemedy::ImproveToolDescription,
+            ),
+            (
+                "improve_hint_routing",
+                SkillRoutingRemedy::ImproveHintRouting,
+            ),
+            (
+                "insufficient_repeated_evidence",
+                SkillRoutingRemedy::InsufficientRepeatedEvidence,
+            ),
+            ("generic_reasoning", SkillRoutingRemedy::GenericReasoning),
+            ("one_off_task", SkillRoutingRemedy::OneOffTask),
+            ("no_action", SkillRoutingRemedy::NoAction),
         ] {
-            assert!(
+            assert_eq!(
                 no_skill_needed_decision(
                     &json!({
                         "skills": [],
@@ -979,17 +1014,22 @@ mod routing_decision_tests {
                     }),
                     &[],
                 )
-                .unwrap()
-                .is_some(),
+                .unwrap(),
+                Some(NoSkillNeededDecision {
+                    reason: "No reusable skill mutation is warranted.".to_owned(),
+                    remedy: expected,
+                }),
                 "remedy {remedy}"
             );
         }
-        assert!(
+        assert_eq!(
             no_skill_needed_decision(
                 &json!({"skills": [], "outcome": "unsupported", "decision": {}}),
                 &[],
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "config error: unsupported skill writer outcome"
         );
     }
 }

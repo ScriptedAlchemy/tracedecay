@@ -14,34 +14,35 @@ use crate::support::{refusal_problem, test_temp_dir};
 const HEAD_COMMIT: &str = "dbc21220c25f50fce6ac93b6e7859062cd3d3ca8";
 
 const COMPLETE_JSON: &str = "\
-{\"examined\":4,\"limit\":100,\"next_after\":null,\"reason\":null,\"snapshot_count\":4,\"snapshots\":[\
+{\"examined\":4,\"limit\":100,\"next_cursor\":null,\"reason\":null,\"snapshot_count\":4,\"snapshots\":[\
 {\"branch\":\"alpha\",\"source_revision\":\"9a3b18ef93f54c758f7915a168eed23bf555218c\",\"source_tree\":\"a086253f56c28f8ef6f00acf50eed179d41075f7\"},\
 {\"branch\":\"beta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
 {\"branch\":\"main\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
 {\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"complete\"}";
 
 const CLAMPED_JSON: &str = "\
-{\"examined\":4,\"limit\":128,\"next_after\":null,\"reason\":null,\"snapshot_count\":4,\"snapshots\":[\
+{\"examined\":4,\"limit\":128,\"next_cursor\":null,\"reason\":null,\"snapshot_count\":4,\"snapshots\":[\
 {\"branch\":\"alpha\",\"source_revision\":\"9a3b18ef93f54c758f7915a168eed23bf555218c\",\"source_tree\":\"a086253f56c28f8ef6f00acf50eed179d41075f7\"},\
 {\"branch\":\"beta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
 {\"branch\":\"main\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
 {\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"complete\"}";
 
+/// Partial pages, with the opaque `next_cursor` stripped for comparison.
 const FIRST_PAGE_JSON: &str = "\
-{\"examined\":4,\"limit\":1,\"next_after\":\"alpha\",\"reason\":\"reference_limit\",\"snapshot_count\":1,\"snapshots\":[\
+{\"examined\":4,\"limit\":1,\"reason\":\"reference_limit\",\"snapshot_count\":1,\"snapshots\":[\
 {\"branch\":\"alpha\",\"source_revision\":\"9a3b18ef93f54c758f7915a168eed23bf555218c\",\"source_tree\":\"a086253f56c28f8ef6f00acf50eed179d41075f7\"}],\"status\":\"partial\"}";
 
 const SECOND_PAGE_JSON: &str = "\
-{\"examined\":4,\"limit\":1,\"next_after\":\"beta\",\"reason\":\"reference_limit\",\"snapshot_count\":1,\"snapshots\":[\
+{\"examined\":4,\"limit\":1,\"reason\":\"reference_limit\",\"snapshot_count\":1,\"snapshots\":[\
 {\"branch\":\"beta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"partial\"}";
 
-const LAST_PAGE_JSON: &str = "\
-{\"examined\":4,\"limit\":2,\"next_after\":null,\"reason\":null,\"snapshot_count\":2,\"snapshots\":[\
-{\"branch\":\"main\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
-{\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"complete\"}";
+const THIRD_PAGE_JSON: &str = "\
+{\"examined\":4,\"limit\":1,\"reason\":\"reference_limit\",\"snapshot_count\":1,\"snapshots\":[\
+{\"branch\":\"main\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"partial\"}";
 
-const EMPTY_TAIL_JSON: &str = "\
-{\"examined\":4,\"limit\":1,\"next_after\":null,\"reason\":null,\"snapshot_count\":0,\"snapshots\":[],\"status\":\"complete\"}";
+const LAST_PAGE_JSON: &str = "\
+{\"examined\":4,\"limit\":1,\"next_cursor\":null,\"reason\":null,\"snapshot_count\":1,\"snapshots\":[\
+{\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"complete\"}";
 
 const DEFAULT_MARKDOWN: &str = "\
 **examined:** 4
@@ -160,6 +161,29 @@ fn assert_ok_payload(response: &Value, expected: &str) {
     );
 }
 
+/// Asserts a partial page against `expected` and returns its `next_cursor`.
+fn assert_partial_page(response: &Value, expected: &str) -> String {
+    let mut page: Value = serde_json::from_str(payload_text(response)).expect("page JSON");
+    let cursor = page
+        .as_object_mut()
+        .and_then(|page| page.remove("next_cursor"))
+        .and_then(|cursor| cursor.as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("a partial page carries a cursor: {response}"));
+    assert_eq!(page, serde_json::from_str::<Value>(expected).unwrap());
+    assert!(
+        response["result"]["isError"].is_null(),
+        "a partial page is not a semantic error: {response}"
+    );
+    cursor
+}
+
+fn assert_cursor_refused(response: &Value, code: &str, message: &str) {
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "invalid_request", "{response}");
+    assert_eq!(problem["code"], code, "{response}");
+    assert_eq!(problem["message"], message, "{response}");
+}
+
 fn assert_unavailable(response: &Value, expected: &str) {
     assert_eq!(payload_text(response), expected);
     assert_eq!(
@@ -189,34 +213,37 @@ async fn branch_list_reports_exact_local_refs_and_typed_rejections() {
     let json_page = call(json!({"format": "json"})).await;
     assert_ok_payload(&json_page, COMPLETE_JSON);
 
-    let empty_after = call(json!({"format": "json", "after": ""})).await;
-    assert_ok_payload(&empty_after, COMPLETE_JSON);
+    let empty_cursor = call(json!({"format": "json", "cursor": ""})).await;
+    assert_ok_payload(&empty_cursor, COMPLETE_JSON);
 
     let clamped = call(json!({"format": "json", "limit": 200})).await;
     assert_ok_payload(&clamped, CLAMPED_JSON);
 
     let first = call(json!({"format": "json", "limit": 1})).await;
-    assert_ok_payload(&first, FIRST_PAGE_JSON);
+    let first_cursor = assert_partial_page(&first, FIRST_PAGE_JSON);
 
-    let second = call(json!({"format": "json", "limit": 1, "after": "alpha"})).await;
-    assert_ok_payload(&second, SECOND_PAGE_JSON);
+    let resized = call(json!({"format": "json", "limit": 2, "cursor": first_cursor})).await;
+    assert_cursor_refused(
+        &resized,
+        "cursor.parameter_changed",
+        "The cursor was issued for a request with a different `limit`. Repeat the request \
+         with the parameters that returned the cursor, or restart without it.",
+    );
+    for foreign in ["alpha", "bc1.7b7d"] {
+        let refused = call(json!({"format": "json", "limit": 1, "cursor": foreign})).await;
+        assert_cursor_refused(
+            &refused,
+            "cursor.invalid",
+            "The cursor was not issued by this operation. Restart without it.",
+        );
+    }
 
-    let last = call(json!({"format": "json", "limit": 2, "after": "beta"})).await;
+    let second = call(json!({"format": "json", "limit": 1, "cursor": first_cursor})).await;
+    let second_cursor = assert_partial_page(&second, SECOND_PAGE_JSON);
+    let third = call(json!({"format": "json", "limit": 1, "cursor": second_cursor})).await;
+    let third_cursor = assert_partial_page(&third, THIRD_PAGE_JSON);
+    let last = call(json!({"format": "json", "limit": 1, "cursor": third_cursor})).await;
     assert_ok_payload(&last, LAST_PAGE_JSON);
-
-    let tail = call(json!({"format": "json", "limit": 1, "after": "zeta"})).await;
-    assert_ok_payload(&tail, EMPTY_TAIL_JSON);
-    assert_ne!(
-        payload_text(&first),
-        payload_text(&tail),
-        "the page after the last local ref is empty only because the first page was not"
-    );
-
-    let invalid = call(json!({"format": "json", "after": "bad..name"})).await;
-    assert_unavailable(
-        &invalid,
-        "{\"reason\":\"branch_ref_invalid\",\"retryable\":false,\"status\":\"unavailable\"}",
-    );
 
     let zero = call(json!({"limit": 0})).await;
     let problem = refusal_problem(&zero["result"]);

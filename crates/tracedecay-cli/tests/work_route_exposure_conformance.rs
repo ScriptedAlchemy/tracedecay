@@ -461,21 +461,10 @@ impl RouteObservation {
     }
 }
 
-/// A cursor that no live topology generation ever matches, used to prove the
-/// stale-cursor refusal on both mounts. The identity fields are well-formed so
-/// the request decodes and the staleness verdict is the handler's, not serde's.
-fn superseded_cursor_request() -> Value {
-    serde_json::json!({
-        "page_size": 25,
-        "cursor": {
-            "generation": "work-topology/route-exposure-superseded",
-            "start_after": {
-                "task_id": "task.work-surface-conformance",
-                "run_id": "run.work-surface-conformance",
-                "attempt_id": "attempt.work-surface-conformance.1",
-            },
-        },
-    })
+/// A cursor the daemon never minted. It decodes as the opaque cursor string,
+/// so the refusal is the operation's, not serde's.
+fn foreign_cursor_request() -> Value {
+    serde_json::json!({ "page_size": 25, "cursor": "bc1.7b7d" })
 }
 
 fn product_selection() -> Value {
@@ -752,23 +741,26 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         );
     }
 
-    // -- Staleness against an absent topology. -------------------------------
-    // A cursor names the snapshot it was minted under; with no topology in
-    // scope, resuming would fabricate a page, so the answer is the typed stale
-    // refusal that tells the client to restart from the first page.
-    let stale = superseded_cursor_request();
+    // -- A cursor the daemon never minted. ------------------------------------
+    // Resuming from it would page a result set nobody asked for, so both
+    // mounts answer the one typed cursor refusal.
+    let foreign = foreign_cursor_request();
     for (label, (status, body)) in [
         (
-            "daemon work/list-attempts (cursor without topology)",
-            post_envelope(&agent, &daemon_list, &fixture, &stale),
+            "daemon work/list-attempts (foreign cursor)",
+            post_envelope(&agent, &daemon_list, &fixture, &foreign),
         ),
         (
-            "dashboard api/work/list-attempts (cursor without topology)",
-            post_dashboard_envelope(&agent, &dashboard_list, &stale),
+            "dashboard api/work/list-attempts (foreign cursor)",
+            post_dashboard_envelope(&agent, &dashboard_list, &foreign),
         ),
     ] {
         eprintln!("{label} -> {status} {body}");
-        assert_typed_problem(label, status, &body, (409, "stale", true));
+        assert_typed_problem(label, status, &body, (400, "invalid_request", false));
+        assert_eq!(
+            body["value"]["problem"]["code"], "cursor.invalid",
+            "{label}: {body}"
+        );
     }
 
     // -- Denial: an attempt that does not exist is concealed. ----------------

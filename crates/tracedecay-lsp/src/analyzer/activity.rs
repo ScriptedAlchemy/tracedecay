@@ -215,6 +215,17 @@ mod tests {
             documents.is_empty(),
             "adapter without a root marker should not open project documents"
         );
+
+        tokio::fs::write(project_root.join("fake-root"), "").await?;
+        let documents =
+            documents_for_adapter(project_root, &adapter, vec!["src/lib.fake".to_string()]).await?;
+        assert_eq!(
+            documents
+                .iter()
+                .map(|document| (document.relative_path.as_str(), document.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("src/lib.fake", "fake source")]
+        );
         Ok(())
     }
 

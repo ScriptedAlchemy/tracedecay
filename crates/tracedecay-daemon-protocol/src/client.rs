@@ -1264,6 +1264,14 @@ mod tests {
                 error.project_route_context().is_none(),
                 "matching or unknown daemon versions must not invent a skew: {error}"
             );
+            assert!(
+                matches!(
+                    &error,
+                    tracedecay_domain::errors::TraceDecayError::Io(io)
+                        if io.kind() == std::io::ErrorKind::ConnectionReset
+                ),
+                "the transport failure must pass through unchanged: {error:?}"
+            );
         }
     }
 

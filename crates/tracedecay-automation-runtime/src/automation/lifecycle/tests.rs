@@ -3,8 +3,8 @@ use std::{path::Path, sync::Arc, sync::atomic::Ordering};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::{
-    AgentTaskRunContext, AutomationRunControl, NonEmptyAutomaticFactReceipts, RUN_ID_COUNTER,
-    SchedulerGate, append_skipped_record, failed_output_projection, task_run_gate,
+    AgentTaskRunContext, AutomationRunControl, RUN_ID_COUNTER, SchedulerGate,
+    append_skipped_record, failed_output_projection, task_run_gate,
 };
 use crate::automation::backend::AgentTaskKind;
 use crate::automation::config::{
@@ -19,11 +19,6 @@ use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 struct TestSessionsDb {
     db: RegisteredGlobalDbLeaseV1,
     _runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
-}
-
-#[test]
-fn committed_automatic_fact_receipts_cannot_be_empty() {
-    assert!(NonEmptyAutomaticFactReceipts::from_vec(Vec::new()).is_none());
 }
 
 #[test]

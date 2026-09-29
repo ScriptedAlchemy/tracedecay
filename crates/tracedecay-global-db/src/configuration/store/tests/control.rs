@@ -10,7 +10,10 @@ use super::{
     HostAdmissionScope, control_authority, control_authority_with_key, digest,
     direct_project_layer, evidence_for, global_setup, id, protected_plan_for,
 };
-use crate::configuration::contracts::{ConfigurationRollbackRequest, DirectConfigurationMutation};
+use crate::configuration::contracts::{
+    AuthorizedActor, ConfigurationAuditQuery, ConfigurationRollbackRequest,
+    DirectConfigurationMutation,
+};
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::{registry_default_candidate, resolve_configuration};
 use std::collections::BTreeSet;
@@ -21,7 +24,10 @@ use tracedecay_domain::configuration::{
     ScopeControlOperationV1, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
 };
 use tracedecay_domain::research::CapabilityId;
-use tracedecay_domain::{ActorId, LocatorDigest, ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ActorId, CursorBindingMismatchV1, CursorBindingV1, LocatorDigest, ProjectId, UtcMicros,
+    canonical_sha256, encode_bound_cursor,
+};
 use tracedecay_store::configuration::ConfigurationProtectedOperationV1;
 
 #[test]
@@ -503,4 +509,103 @@ async fn protected_operation_survives_adapter_rebuild_populates_projections_and_
         .unwrap();
     assert_ne!(rollback_receipt.result_revision_id, root.revision_id);
     assert_eq!(store.current().await.unwrap().snapshot, root.snapshot);
+}
+
+#[tokio::test]
+async fn configuration_audit_cursor_pages_only_the_request_that_minted_it() {
+    let (_directory, runtime, root) = global_setup().await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    let first = store
+        .commit_direct(
+            &control_authority(
+                ConfigurationMutationOperationV1::DirectMutation,
+                &root.revision_id,
+            ),
+            &DirectConfigurationMutation::Set {
+                layer: direct_project_layer(),
+                key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
+                value: Box::new(ConfigurationValueV1::Boolean(true)),
+            },
+            &root.revision_id,
+        )
+        .await
+        .unwrap();
+    let second = store
+        .commit_direct(
+            &control_authority_with_key(
+                ConfigurationMutationOperationV1::DirectMutation,
+                &first.result_revision_id,
+                Some(id("configuration.idempotency.audit-page-two")),
+            ),
+            &DirectConfigurationMutation::Set {
+                layer: direct_project_layer(),
+                key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
+                value: Box::new(ConfigurationValueV1::Boolean(false)),
+            },
+            &first.result_revision_id,
+        )
+        .await
+        .unwrap();
+    let actor = AuthorizedActor {
+        actor_id: id("actor.configuration.fixture"),
+    };
+    let query = |cursor: Option<&str>, limit| {
+        ConfigurationAuditQuery::from_request(cursor, limit)
+            .unwrap()
+            .unwrap()
+    };
+
+    let everything = store.audit(&actor, &query(None, 100)).await.unwrap();
+    assert_eq!(everything.next_cursor, None);
+    let revisions: Vec<_> = everything
+        .events
+        .iter()
+        .filter_map(|event| event.result_revision_id.clone())
+        .collect();
+    assert!(
+        revisions.contains(&first.result_revision_id),
+        "{revisions:?}"
+    );
+    assert!(
+        revisions.contains(&second.result_revision_id),
+        "{revisions:?}"
+    );
+
+    let first_page = store.audit(&actor, &query(None, 1)).await.unwrap();
+    assert_eq!(first_page.events, everything.events[..1]);
+    let cursor = first_page
+        .next_cursor
+        .expect("a continuation after page one");
+    assert!(cursor.starts_with("bc1."), "{cursor}");
+
+    assert_eq!(
+        ConfigurationAuditQuery::from_request(Some(&cursor), 2).unwrap(),
+        Err(CursorBindingMismatchV1::ParameterChanged { parameter: "limit" })
+    );
+    assert_eq!(
+        ConfigurationAuditQuery::from_request(Some("bc1.00"), 1).unwrap(),
+        Err(CursorBindingMismatchV1::Foreign)
+    );
+    let foreign = encode_bound_cursor(
+        &CursorBindingV1::builder("fact_store_list")
+            .parameter("limit", &1_usize)
+            .build()
+            .unwrap(),
+        &everything.events[0].event_id,
+    )
+    .unwrap();
+    assert_eq!(
+        ConfigurationAuditQuery::from_request(Some(&foreign), 1).unwrap(),
+        Err(CursorBindingMismatchV1::Foreign)
+    );
+
+    let second_page = store.audit(&actor, &query(Some(&cursor), 1)).await.unwrap();
+    assert_eq!(second_page.events, everything.events[1..2]);
+    assert_ne!(
+        second_page.events[0].event_id,
+        first_page.events[0].event_id
+    );
 }

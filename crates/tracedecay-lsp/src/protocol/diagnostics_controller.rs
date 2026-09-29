@@ -980,28 +980,38 @@ mod controller_tests {
         let snapshot = NativeDiagnosticsNotification {
             uri: "file:///root/a.rs".to_owned(),
             version: 1,
-            diagnostics: vec![NativeDiagnostic {
-                range: NativeRange {
-                    start: NativePosition {
-                        line: 0,
-                        character: 0,
+            diagnostics: ["tracedecay-github", "rust-analyzer"]
+                .into_iter()
+                .map(|source| NativeDiagnostic {
+                    range: NativeRange {
+                        start: NativePosition {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: NativePosition {
+                            line: 0,
+                            character: 1,
+                        },
                     },
-                    end: NativePosition {
-                        line: 0,
-                        character: 1,
-                    },
-                },
-                severity: Some(2),
-                code: None,
-                source: "tracedecay-github".to_owned(),
-                message: "projected".to_owned(),
-                data: None,
-            }],
+                    severity: Some(2),
+                    code: None,
+                    source: source.to_owned(),
+                    message: format!("from {source}"),
+                    data: None,
+                })
+                .collect(),
         }
         .into_snapshot()
         .unwrap()
         .1;
 
-        assert!(snapshot.diagnostics.is_empty());
+        assert_eq!(
+            snapshot
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["from rust-analyzer"]
+        );
     }
 }

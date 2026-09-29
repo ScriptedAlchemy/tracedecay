@@ -1,5 +1,6 @@
 use tracedecay_domain::{
-    ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
+    ComponentRevision, CursorBindingMismatchV1, EphemeralSanitizedQueryViewV1, RetrievalRequest,
+    ScoreDomainId,
 };
 use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
 use tracedecay_session_temporal_store::execution::{
@@ -31,6 +32,10 @@ pub enum TaskSessionRetrievalOutcomeV1 {
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
     },
+    /// The presented cursor pages a candidate cohort that no longer exists.
+    CursorStale,
+    /// The presented cursor was minted for another operation or request.
+    CursorRefused(CursorBindingMismatchV1),
     TimedOut,
     Cancelled,
 }
@@ -166,6 +171,8 @@ where
         .with_execution_control(control);
         let execution = AuthorizedTemporalExecutionRequest::new(
             snapshot_request,
+            session_cursor_binding(query)
+                .map_err(|_| SessionExecutionAdmissionFailure::Unavailable)?,
             query.query.clone(),
             query.cursor.clone(),
             query.limit,
@@ -334,8 +341,11 @@ fn map_task_session_execution_error(
         SessionRetrievalOutcome::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
         SessionRetrievalOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
         SessionRetrievalOutcome::ResetRequired => TaskSessionRetrievalOutcomeV1::ResetRequired,
+        SessionRetrievalOutcome::CursorStale => TaskSessionRetrievalOutcomeV1::CursorStale,
+        SessionRetrievalOutcome::CursorRefused(mismatch) => {
+            TaskSessionRetrievalOutcomeV1::CursorRefused(mismatch)
+        }
         SessionRetrievalOutcome::Unavailable
-        | SessionRetrievalOutcome::CursorStale
         | SessionRetrievalOutcome::Complete { .. }
         | SessionRetrievalOutcome::Partial { .. }
         | SessionRetrievalOutcome::CompleteZero { .. }

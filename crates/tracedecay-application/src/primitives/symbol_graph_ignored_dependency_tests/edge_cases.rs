@@ -245,7 +245,7 @@ impl SymbolGraphCursorPort for MismatchedClaimCursor {
     fn claim_page<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _lane: &'a str,
+        _binding: &'a tracedecay_domain::CursorBindingV1,
         _cursor: Option<&'a OpaqueCursor>,
         _observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim> {
@@ -261,7 +261,7 @@ impl SymbolGraphCursorPort for MismatchedClaimCursor {
     fn finish_page<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _lane: &'a str,
+        _binding: &'a tracedecay_domain::CursorBindingV1,
         _claim: &'a SymbolGraphPageClaim,
         _next_offset: usize,
         _total: usize,
@@ -327,7 +327,7 @@ impl SymbolGraphCursorPort for AdvancingFinishCursor {
     fn claim_page<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _lane: &'a str,
+        _binding: &'a tracedecay_domain::CursorBindingV1,
         _cursor: Option<&'a OpaqueCursor>,
         _observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim> {
@@ -343,7 +343,7 @@ impl SymbolGraphCursorPort for AdvancingFinishCursor {
     fn finish_page<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _lane: &'a str,
+        _binding: &'a tracedecay_domain::CursorBindingV1,
         _claim: &'a SymbolGraphPageClaim,
         _next_offset: usize,
         _total: usize,

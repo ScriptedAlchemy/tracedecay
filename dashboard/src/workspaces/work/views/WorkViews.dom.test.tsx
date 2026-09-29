@@ -536,10 +536,7 @@ describe('the execution record', () => {
         workAttemptList(ATTEMPTS, {
           coverage: 'capped',
           remaining: 41,
-          resume: {
-            generation: 'generation-7',
-            start_after: { attempt_id: 'attempt-3', run_id: 'run-1', task_id: 'leaf' },
-          },
+          resume: 'bc1.resume',
           returned: 3,
         }),
         'binding.http.work.list_attempts',
