@@ -308,26 +308,38 @@ impl VerifiedGraphSnapshot {
     /// generation's own store when it has one, and keeps it resident while
     /// the returned pin lives. Blocking and corpus-sized on a cold engine.
     pub fn pin_serving_engine(&self) -> Result<crate::GraphServingEnginePin, GraphDbError> {
-        self.with_head_database(crate::GraphDb::pin_serving_engine)
+        match self.sealed_head() {
+            Some(sealed) => sealed.pin_serving_engine(),
+            None => self.database.pin_serving_engine(),
+        }
     }
 
     /// Whether head reads would be served by an already resident engine, so a
     /// latency-bounded caller can refuse instead of paying a cold open.
     pub fn serving_engine_resident(&self) -> Result<bool, GraphDbError> {
-        self.with_head_database(crate::GraphDb::native_engine_open)
+        match self.sealed_head() {
+            Some(sealed) => sealed.native_engine_open(),
+            None => self.database.native_engine_open(),
+        }
     }
 
     /// Bytes the resident serving engine reports holding, or `None` when no
     /// engine is resident. Never opens one.
     pub fn resident_serving_engine_bytes(&self) -> Result<Option<u64>, GraphDbError> {
-        self.with_head_database(crate::GraphDb::resident_engine_bytes)
+        match self.sealed_head() {
+            Some(sealed) => sealed.resident_engine_bytes(),
+            None => self.database.resident_engine_bytes(),
+        }
     }
 
     /// Release the serving engine if no reader holds it and no pin keeps it,
     /// keeping the registry identity to reopen it. `Ok(false)` leaves it
     /// resident and serving.
     pub fn release_serving_engine_when_idle(&self) -> Result<bool, GraphDbError> {
-        self.with_head_database(crate::GraphDb::hibernate_if_lazy_when_idle)
+        match self.sealed_head() {
+            Some(sealed) => sealed.hibernate_if_lazy_when_idle(),
+            None => self.database.hibernate_if_lazy_when_idle(),
+        }
     }
 
     #[must_use]
@@ -361,6 +373,12 @@ impl VerifiedGraphSnapshot {
             // per-generation store; the digest proved the exact row set, so
             // a miss there is authoritative and never re-read from staging.
             if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
+                if let Some(layered) = sealed.layered_reads() {
+                    return Ok((
+                        GraphReadStore::Sealed,
+                        layered.entity(&reference.identity, cancellation)?,
+                    ));
+                }
                 return Ok((
                     GraphReadStore::Sealed,
                     sealed
@@ -396,6 +414,12 @@ impl VerifiedGraphSnapshot {
             // edge, and full copies of any dependency-generation endpoints,
             // so the endpoint decode below stays inside one store.
             if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
+                if let Some(layered) = sealed.layered_reads() {
+                    return Ok((
+                        GraphReadStore::Sealed,
+                        layered.relation(&reference.identity, cancellation.as_ref())?,
+                    ));
+                }
                 return Ok((
                     GraphReadStore::Sealed,
                     sealed
@@ -431,9 +455,10 @@ impl VerifiedGraphSnapshot {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
         self.with_operation(|| {
-            if self.head.dependency_identities.is_empty()
-                && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
-            {
+            if let Some(sealed) = self.sealed_head() {
+                if let Some(layered) = sealed.layered_reads() {
+                    return layered.read_projection(request);
+                }
                 return sealed.database().read_projection(request);
             }
             self.database.read_projection(request)
@@ -451,9 +476,10 @@ impl VerifiedGraphSnapshot {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
         self.with_operation(|| {
-            if self.head.dependency_identities.is_empty()
-                && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
-            {
+            if let Some(sealed) = self.sealed_head() {
+                if let Some(layered) = sealed.layered_reads() {
+                    return layered.projection_telemetry(request, sealed.row_counts());
+                }
                 return sealed.database().projection_telemetry(request);
             }
             self.database.projection_telemetry(request)
@@ -473,9 +499,10 @@ impl VerifiedGraphSnapshot {
             // reach and the walk runs on the compacted CSR adjacency. A
             // closure that spans generations keeps the staging database,
             // whose native edges cross physical namespaces.
-            if self.head.dependency_identities.is_empty()
-                && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
-            {
+            if let Some(sealed) = self.sealed_head() {
+                if let Some(layered) = sealed.layered_reads() {
+                    return layered.traverse(request);
+                }
                 return sealed.database().traverse_generation(self, request);
             }
             self.database.traverse_generation(self, request)
@@ -497,6 +524,17 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        if let Some(ids) = self.layered_fanout(|reads| {
+            reads.relation_ids(
+                starts,
+                relation_kinds,
+                max_relations,
+                true,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(ids);
+        }
         self.head_fanout(|database, namespace| {
             database.outgoing_relation_ids(
                 &namespace,
@@ -526,6 +564,17 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        if let Some(ids) = self.layered_fanout(|reads| {
+            reads.relation_ids(
+                starts,
+                relation_kinds,
+                max_relations,
+                false,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(ids);
+        }
         self.head_fanout(|database, namespace| {
             database.incoming_relation_ids(
                 &namespace,
@@ -549,6 +598,18 @@ impl VerifiedGraphSnapshot {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        if let Some(ids) = self.layered_fanout(|reads| {
+            reads.relation_ids_page(
+                starts,
+                relation_kinds,
+                after,
+                limit,
+                true,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(ids);
+        }
         self.head_fanout(|database, namespace| {
             database.outgoing_relation_ids_page(
                 &namespace,
@@ -573,6 +634,18 @@ impl VerifiedGraphSnapshot {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        if let Some(ids) = self.layered_fanout(|reads| {
+            reads.relation_ids_page(
+                starts,
+                relation_kinds,
+                after,
+                limit,
+                false,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(ids);
+        }
         self.head_fanout(|database, namespace| {
             database.incoming_relation_ids_page(
                 &namespace,
@@ -600,6 +673,18 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        if let Some(rows) = self.layered_fanout(|reads| {
+            reads.relations(
+                starts,
+                relation_kinds,
+                max_relations,
+                true,
+                crate::sealed_layer::LayeredOverflow::Refuse,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(rows);
+        }
         self.head_fanout(|database, namespace| {
             database.outgoing_relations(
                 &namespace,
@@ -624,6 +709,18 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        if let Some(rows) = self.layered_fanout(|reads| {
+            reads.relations(
+                starts,
+                relation_kinds,
+                max_relations,
+                true,
+                crate::sealed_layer::LayeredOverflow::Truncate,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(rows);
+        }
         self.head_fanout(|database, namespace| {
             database.outgoing_relations_truncated(
                 &namespace,
@@ -646,6 +743,16 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<crate::GraphRelationTarget>>, GraphDbError> {
+        if let Some(targets) = self.layered_fanout(|reads| {
+            reads.relation_targets(
+                starts,
+                relation_kinds,
+                max_relations,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(targets);
+        }
         self.head_fanout(|database, namespace| {
             database.outgoing_relation_targets(
                 &namespace,
@@ -670,6 +777,16 @@ impl VerifiedGraphSnapshot {
             visitor(target);
         };
         let visited = self.with_operation(|| {
+            if let Some(sealed) = self.sealed_head()
+                && let Some(layered) = sealed.layered_reads()
+            {
+                return layered.visit_relation_targets(
+                    start,
+                    relation_kinds,
+                    Arc::clone(&cancellation),
+                    &mut counted,
+                );
+            }
             self.with_head_database(|database| {
                 database.visit_outgoing_relation_targets(
                     &self.head.locator.physical_namespace()?,
@@ -698,6 +815,18 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        if let Some(rows) = self.layered_fanout(|reads| {
+            reads.relations(
+                starts,
+                relation_kinds,
+                max_relations,
+                false,
+                crate::sealed_layer::LayeredOverflow::Refuse,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(rows);
+        }
         self.head_fanout(|database, namespace| {
             database.incoming_relations(
                 &namespace,
@@ -722,6 +851,18 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        if let Some(rows) = self.layered_fanout(|reads| {
+            reads.relations(
+                starts,
+                relation_kinds,
+                max_relations,
+                false,
+                crate::sealed_layer::LayeredOverflow::Truncate,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(rows);
+        }
         self.head_fanout(|database, namespace| {
             database.incoming_relations_truncated(
                 &namespace,
@@ -798,12 +939,39 @@ impl VerifiedGraphSnapshot {
         &self,
         operation: impl FnOnce(&crate::GraphDb) -> Result<T, GraphDbError>,
     ) -> Result<T, GraphDbError> {
-        if self.head.dependency_identities.is_empty()
-            && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
-        {
+        if let Some(sealed) = self.sealed_head() {
             return operation(sealed.database());
         }
         operation(&self.database)
+    }
+
+    /// The sealed store serving a dependency-free head, whose closure is one
+    /// generation.
+    fn sealed_head(&self) -> Option<Arc<crate::sealed_store::SealedGenerationStore>> {
+        if !self.head.dependency_identities.is_empty() {
+            return None;
+        }
+        self.database.sealed_generation_reader(&self.head.locator)
+    }
+
+    /// A head fan-out served by the head's layered store, metered like any
+    /// other; `None` when the head is not layered.
+    fn layered_fanout<T: FanoutRows>(
+        &self,
+        operation: impl FnOnce(&crate::sealed_layer::LayeredReads<'_>) -> Result<T, GraphDbError>,
+    ) -> Result<Option<T>, GraphDbError> {
+        let rows = self.with_operation(|| match self.sealed_head() {
+            Some(sealed) => match sealed.layered_reads() {
+                Some(layered) => operation(&layered).map(Some),
+                None => Ok(None),
+            },
+            None => Ok(None),
+        })?;
+        if let (Some(rows), Some(meter)) = (&rows, &self.meter) {
+            let (count, bytes) = rows.rows_and_bytes();
+            meter.record_fanout(count, bytes);
+        }
+        Ok(rows)
     }
 
     pub(crate) fn namespace_projection_map(

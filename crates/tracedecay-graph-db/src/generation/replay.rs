@@ -149,19 +149,21 @@ pub(crate) fn validate_supplied_rows_binding(
     })?;
     let manifest = match rows {
         GraphGenerationRows::Manifest(manifest) => manifest,
-        // Spilled rows only ever publish a sealed code generation, whose
-        // journal names its replay source rather than a manifest; the
-        // journaled digests were derived from these exact rows at append.
-        GraphGenerationRows::Spilled(spilled) => {
+        // Spilled and layered rows only ever publish a sealed code
+        // generation, whose journal names its replay source rather than a
+        // manifest; the journaled digests were derived from these exact rows
+        // at append.
+        GraphGenerationRows::Spilled(_) | GraphGenerationRows::Layered(_) => {
             return match checked_decode_replay_source(&publication.canonical_replay_source, check)?
             {
                 GraphGenerationReplaySource::SealedCodeGeneration(source) => {
                     validate_sealed_replay(&source)?;
                     validate_publication_identity(
                         publication,
-                        &spilled.identity(),
+                        &rows.identity(),
                         validate_expected_digest
-                            .then(|| spilled.expected_recovered_digest().clone()),
+                            .then(|| rows.expected_recovered_digest(check))
+                            .transpose()?,
                         check,
                     )
                 }

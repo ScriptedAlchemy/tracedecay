@@ -1271,6 +1271,34 @@ impl GraphDbRegistry {
         operation.database().generation_row_spill(projection)
     }
 
+    /// The sealed cold base a refresh replacing `generation` may layer over:
+    /// `None` unless that generation serves from an installed sealed store
+    /// that records its row sum, directly or as a layered store's base.
+    pub fn sealed_generation_base(
+        &self,
+        registration: GraphDbRegistration,
+        projection: GraphProjectionIdentity,
+        generation: crate::GraphGenerationId,
+    ) -> Result<Option<crate::GraphSealedBaseV1>, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        operation
+            .database()
+            .sealed_generation_base(&crate::lease::GenerationLocator::new(
+                projection, generation,
+            ))
+    }
+
+    /// A row spill for a delta over `base`, which it pins until it seals.
+    pub fn layered_row_spill(
+        &self,
+        registration: GraphDbRegistration,
+        projection: GraphProjectionIdentity,
+        base: crate::GraphSealedBaseV1,
+    ) -> Result<crate::GraphLayeredRowSpill, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        operation.database().layered_row_spill(projection, base)
+    }
+
     /// Publishes through an already-issued, registry-validated graph lease.
     ///
     /// The caller retains the exact operation lease through the publication;

@@ -1469,7 +1469,7 @@ fn digest_manifest_chunks_parallel(
                             let mut start = 0usize;
                             for &end in &encoded.frame_ends {
                                 check()?;
-                                write_digest_bytes(writer, &encoded.bytes[start..end])?;
+                                writer.add_row_frame(&[&encoded.bytes[start..end]])?;
                                 start = end;
                             }
                             drop(encoded);
@@ -1519,7 +1519,7 @@ fn digest_manifest_chunk_serial(
         ManifestDigestChunk::Entities(rows) => {
             for entity in rows {
                 check()?;
-                write_canonical_frame(
+                write_canonical_row_frame(
                     writer,
                     canonical,
                     "entity",
@@ -1531,7 +1531,7 @@ fn digest_manifest_chunk_serial(
         ManifestDigestChunk::Relations(rows) => {
             for relation in rows {
                 check()?;
-                write_canonical_frame(
+                write_canonical_row_frame(
                     writer,
                     canonical,
                     "relation",
@@ -1670,7 +1670,7 @@ fn write_generation_identity_frames(
         writer,
         canonical,
         "format",
-        "tracedecay.graph-generation.v1",
+        "tracedecay.graph-generation.v2",
         "recovered generation format",
     )?;
     write_canonical_frame(
@@ -1747,6 +1747,27 @@ fn write_canonical_frame<T: Serialize + ?Sized>(
     write_frame(writer, tag, bytes)
 }
 
+/// One entity or relation row into the order-independent row sum.
+fn write_row_frame(
+    writer: &mut CheckedDigestWriter<'_>,
+    tag: &str,
+    bytes: &[u8],
+) -> Result<(), GraphDbError> {
+    let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
+    writer.add_row_frame(&[&tag_len, tag.as_bytes(), &byte_len, bytes])
+}
+
+fn write_canonical_row_frame<T: Serialize + ?Sized>(
+    writer: &mut CheckedDigestWriter<'_>,
+    canonical: &mut CheckedVecWriter<'_>,
+    tag: &str,
+    value: &T,
+    subject: &str,
+) -> Result<(), GraphDbError> {
+    let bytes = canonical.encode(value, subject)?;
+    write_row_frame(writer, tag, bytes)
+}
+
 fn write_digest_bytes(
     writer: &mut CheckedDigestWriter<'_>,
     bytes: &[u8],
@@ -1759,8 +1780,180 @@ fn write_digest_bytes(
     }
 }
 
+/// The order-independent half of a recovered-generation digest: the count of
+/// row frames and the sum, modulo 2^256, of each frame's SHA-256.
+///
+/// A generation's rows are a set, so their digest is a function of the set
+/// and never of the order or the build that produced it. That is what lets a
+/// layered generation derive its digest from its base's sum, minus the base
+/// rows it hides and plus the rows it adds, without streaming the base, and
+/// still equal the digest a cold build of the same rows records.
+///
+/// ponytail: an additive multiset hash detects corruption and build drift,
+/// not an adversary who chooses rows to collide sums; LtHash is the upgrade
+/// if the digest ever becomes a security boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphRowDigestSum {
+    lanes: [u64; 4],
+    rows: u64,
+}
+
+impl GraphRowDigestSum {
+    fn frame_lanes(parts: &[&[u8]]) -> [u64; 4] {
+        let mut hasher = Sha256::new();
+        for part in parts {
+            hasher.update(part);
+        }
+        let hash = hasher.finalize();
+        let mut lanes = [0_u64; 4];
+        for (lane, bytes) in lanes.iter_mut().zip(hash.chunks_exact(8)) {
+            let mut word = [0_u8; 8];
+            word.copy_from_slice(bytes);
+            *lane = u64::from_be_bytes(word);
+        }
+        lanes
+    }
+
+    fn add_lanes(&mut self, other: [u64; 4]) {
+        let mut carry = false;
+        for (lane, addend) in self.lanes.iter_mut().rev().zip(other.iter().rev()) {
+            let (sum, first) = lane.overflowing_add(*addend);
+            let (sum, second) = sum.overflowing_add(u64::from(carry));
+            *lane = sum;
+            carry = first || second;
+        }
+    }
+
+    fn sub_lanes(&mut self, other: [u64; 4]) {
+        let mut borrow = false;
+        for (lane, subtrahend) in self.lanes.iter_mut().rev().zip(other.iter().rev()) {
+            let (difference, first) = lane.overflowing_sub(*subtrahend);
+            let (difference, second) = difference.overflowing_sub(u64::from(borrow));
+            *lane = difference;
+            borrow = first || second;
+        }
+    }
+
+    fn add_frame(&mut self, parts: &[&[u8]]) {
+        self.add_lanes(Self::frame_lanes(parts));
+        self.rows = self.rows.wrapping_add(1);
+    }
+
+    /// Adds every row `other` holds.
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.add_lanes(other.lanes);
+        self.rows = self.rows.wrapping_add(other.rows);
+    }
+
+    /// Removes every row `other` holds; refused when `other` holds more rows
+    /// than this sum.
+    pub(crate) fn subtract(&mut self, other: Self) -> Result<(), GraphDbError> {
+        self.rows = self
+            .rows
+            .checked_sub(other.rows)
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: "a row digest sum removed more rows than it holds".to_owned(),
+            })?;
+        self.sub_lanes(other.lanes);
+        Ok(())
+    }
+
+    /// Adds the row frame `tag` over `canonical` bytes.
+    pub(crate) fn add_row(&mut self, tag: &str, canonical: &[u8]) -> Result<(), GraphDbError> {
+        let (tag_len, byte_len) = frame_length_headers(tag, canonical)?;
+        self.add_frame(&[&tag_len, tag.as_bytes(), &byte_len, canonical]);
+        Ok(())
+    }
+
+    /// Removes a row frame an earlier [`Self::add_row`] added.
+    #[cfg(test)]
+    pub(crate) fn remove_row(&mut self, tag: &str, canonical: &[u8]) -> Result<(), GraphDbError> {
+        let (tag_len, byte_len) = frame_length_headers(tag, canonical)?;
+        self.sub_lanes(Self::frame_lanes(&[
+            &tag_len,
+            tag.as_bytes(),
+            &byte_len,
+            canonical,
+        ]));
+        self.rows = self
+            .rows
+            .checked_sub(1)
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: "a row digest sum removed more rows than it holds".to_owned(),
+            })?;
+        Ok(())
+    }
+
+    fn to_bytes(self) -> [u8; 40] {
+        let mut bytes = [0_u8; 40];
+        for (slot, lane) in bytes.chunks_exact_mut(8).zip(self.lanes) {
+            slot.copy_from_slice(&lane.to_be_bytes());
+        }
+        bytes[32..].copy_from_slice(&self.rows.to_be_bytes());
+        bytes
+    }
+
+    /// Lowercase hex of the lanes then the row count, the form receipts carry.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        encode_lowercase_hex(&self.to_bytes())
+    }
+
+    pub fn from_hex(value: &str) -> Result<Self, GraphDbError> {
+        let corrupt = || GraphDbError::Corrupt {
+            message: "a recorded row digest sum is not 40 bytes of lowercase hex".to_owned(),
+        };
+        let bytes = hex::decode(value).map_err(|_| corrupt())?;
+        if bytes.len() != 40 || encode_lowercase_hex(&bytes) != value {
+            return Err(corrupt());
+        }
+        let mut sum = Self::default();
+        for (lane, word) in sum.lanes.iter_mut().zip(bytes.chunks_exact(8)) {
+            let mut buffer = [0_u8; 8];
+            buffer.copy_from_slice(word);
+            *lane = u64::from_be_bytes(buffer);
+        }
+        let mut rows = [0_u8; 8];
+        rows.copy_from_slice(&bytes[32..]);
+        sum.rows = u64::from_be_bytes(rows);
+        Ok(sum)
+    }
+}
+
+/// The recovered digest of the generation `identity` names whose rows hash
+/// to `rows`, without a row in hand.
+pub(crate) fn recovered_digest_from_row_sum(
+    identity: &GraphGenerationManifestIdentity,
+    rows: GraphRowDigestSum,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+    let mut digest = Sha256::new();
+    let mut writer = CheckedDigestWriter::new(&mut digest, check);
+    let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    write_generation_identity_frames(
+        &mut writer,
+        &mut canonical,
+        &identity.projection,
+        &identity.generation,
+        &identity.source_generation,
+        &identity.watermark,
+        &identity.dependencies,
+    )?;
+    writer.rows = rows;
+    writer.finish()?;
+    GraphRecoveredGenerationDigestV1::new(format!(
+        "sha256:{}",
+        encode_lowercase_hex(&digest.finalize())
+    ))
+    .map_err(|error| GraphDbError::invalid(error.to_string()))
+}
+
+/// Hashes a generation's identity frames in order and its row frames into
+/// an order-independent [`GraphRowDigestSum`], sealed into the digest as the
+/// final frame by [`Self::finish`].
 struct CheckedDigestWriter<'a> {
     digest: &'a mut Sha256,
+    rows: GraphRowDigestSum,
     bytes_since_check: u64,
     /// Every byte fed to the digest, for the verify byte gauge. Counted here
     /// rather than derived from row counts so the gauge reports the work the
@@ -1774,6 +1967,7 @@ impl<'a> CheckedDigestWriter<'a> {
     fn new(digest: &'a mut Sha256, check: &'a dyn Fn() -> Result<(), GraphDbError>) -> Self {
         Self {
             digest,
+            rows: GraphRowDigestSum::default(),
             bytes_since_check: 0,
             total_bytes: 0,
             check,
@@ -1781,11 +1975,41 @@ impl<'a> CheckedDigestWriter<'a> {
         }
     }
 
+    /// Seals the row sum into the digest as its final frame.
     fn finish(mut self) -> Result<(), GraphDbError> {
         if let Some(error) = self.failure.take() {
             return Err(error);
         }
-        (self.check)()
+        (self.check)()?;
+        let rows = self.rows.to_bytes();
+        let (tag_len, byte_len) = frame_length_headers("rows", &rows)?;
+        self.digest.update(tag_len);
+        self.digest.update(b"rows");
+        self.digest.update(byte_len);
+        self.digest.update(rows);
+        Ok(())
+    }
+
+    /// One whole row frame, `tag_len | tag | byte_len | bytes` split across
+    /// `parts`, into the row sum.
+    fn add_row_frame(&mut self, parts: &[&[u8]]) -> Result<(), GraphDbError> {
+        if let Some(error) = self.failure.take() {
+            return Err(error);
+        }
+        let length = parts.iter().map(|part| part.len() as u64).sum::<u64>();
+        self.bytes_since_check = self.bytes_since_check.saturating_add(length);
+        self.total_bytes = self.total_bytes.saturating_add(length);
+        if self.bytes_since_check >= DIGEST_CHECK_INTERVAL_BYTES {
+            self.bytes_since_check = 0;
+            (self.check)()?;
+        }
+        self.rows.add_frame(parts);
+        Ok(())
+    }
+
+    /// The row sum so far. Read before `finish` consumes the writer.
+    fn row_sum(&self) -> GraphRowDigestSum {
+        self.rows
     }
 
     /// The byte count so far. Read before `finish` consumes the writer.
@@ -1960,7 +2184,7 @@ impl Write for CheckedVecWriter<'_> {
     }
 }
 
-fn checked_canonical_bytes<T: Serialize + ?Sized>(
+pub(crate) fn checked_canonical_bytes<T: Serialize + ?Sized>(
     value: &T,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     subject: &str,
@@ -2059,7 +2283,7 @@ mod checked_vec_writer_tests {
         let allocation_growths = canonical_buffer_allocation_growths();
         assert_eq!(
             digest,
-            "786f46a4a0f263e5c67927f2a196ce95bd7071733478fb94560c5736dce44f9f"
+            "61ebfe7635c49c4fd06518de9ac17ef1be0fadc782ff24f5669f03143d782333"
         );
 
         assert!(
@@ -2252,6 +2476,126 @@ mod checked_vec_writer_tests {
             vec![],
         )
         .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod row_digest_sum_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{
+        GraphGenerationManifest, GraphRowDigestSum, checked_canonical_bytes,
+        recovered_digest_from_row_sum,
+    };
+    use crate::{
+        GraphEntity, GraphEntityId, GraphGenerationId, GraphNamespace, GraphProjectionId,
+        GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphWatermark,
+        SourceGeneration,
+    };
+    use tracedecay_store::runtime::MAX_GRAPH_REPLAY_SOURCE_BYTES_V1;
+
+    fn entity(index: usize, payload: &str) -> GraphEntity {
+        GraphEntity::new(
+            GraphEntityId::new(format!("entity:{index:03}")).unwrap(),
+            BTreeSet::new(),
+            BTreeMap::from([(
+                GraphPropertyName::new("payload").unwrap(),
+                GraphProperty::String(payload.to_owned()),
+            )]),
+        )
+        .unwrap()
+    }
+
+    fn manifest(generation: &str, entities: Vec<GraphEntity>) -> GraphGenerationManifest {
+        GraphGenerationManifest::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("row-sum-probe").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            GraphGenerationId::new(generation).unwrap(),
+            SourceGeneration::new(format!("source-{generation}")).unwrap(),
+            GraphWatermark::new(format!("watermark-{generation}")).unwrap(),
+            vec![],
+            entities,
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn canonical(entity: &GraphEntity) -> Vec<u8> {
+        checked_canonical_bytes(
+            entity,
+            &|| Ok(()),
+            "probe",
+            MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
+        )
+        .unwrap()
+    }
+
+    fn sum_of(entities: &[GraphEntity]) -> GraphRowDigestSum {
+        let mut sum = GraphRowDigestSum::default();
+        for entity in entities {
+            sum.add_row("entity", &canonical(entity)).unwrap();
+        }
+        sum
+    }
+
+    /// A child generation's digest composed from its parent's row sum, minus
+    /// the rows it hides and replaces and plus the rows it adds, equals the
+    /// digest of the child's rows hashed from scratch.
+    #[test]
+    fn a_composed_row_sum_digests_exactly_like_a_cold_manifest() {
+        let parent = (0..40)
+            .map(|index| entity(index, "parent"))
+            .collect::<Vec<_>>();
+        let mut composed = sum_of(&parent);
+        // Entity 3 disappears, entity 7 changes, entity 40 is new.
+        composed
+            .remove_row("entity", &canonical(&parent[3]))
+            .unwrap();
+        composed
+            .remove_row("entity", &canonical(&parent[7]))
+            .unwrap();
+        composed
+            .add_row("entity", &canonical(&entity(7, "child")))
+            .unwrap();
+        composed
+            .add_row("entity", &canonical(&entity(40, "child")))
+            .unwrap();
+
+        let mut child_rows = parent
+            .iter()
+            .filter(|row| !["entity:003", "entity:007"].contains(&row.identity.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        child_rows.push(entity(7, "child"));
+        child_rows.push(entity(40, "child"));
+        // Construction order is irrelevant to a set digest.
+        child_rows.reverse();
+        let cold = manifest("child", child_rows);
+
+        assert_eq!(
+            recovered_digest_from_row_sum(&cold.identity(), composed, &|| Ok(())).unwrap(),
+            cold.expected_recovered_digest(&|| Ok(())).unwrap()
+        );
+        assert_ne!(
+            recovered_digest_from_row_sum(&cold.identity(), sum_of(&parent), &|| Ok(())).unwrap(),
+            cold.expected_recovered_digest(&|| Ok(())).unwrap(),
+            "the parent's rows must not digest as the child's"
+        );
+        assert_eq!(
+            GraphRowDigestSum::from_hex(&composed.to_hex()).unwrap(),
+            composed
+        );
+    }
+
+    #[test]
+    fn removing_a_row_the_sum_never_held_is_refused() {
+        let mut empty = GraphRowDigestSum::default();
+        assert!(matches!(
+            empty.remove_row("entity", &canonical(&entity(0, "absent"))),
+            Err(crate::GraphDbError::Corrupt { .. })
+        ));
     }
 }
 
