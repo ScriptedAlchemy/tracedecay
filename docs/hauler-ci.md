@@ -67,3 +67,13 @@ not make admitted PRs mutually trustworthy.
 Hosted runners and their warm state end with the job. The lane lifetime and
 snapshot limit bound spending, not a guaranteed queue latency. Inspect the
 reported timings before increasing either limit.
+
+## Measure warm reuse
+
+Keep two compatible PR heads open until both finish in the same lane job.
+Compare `durationSeconds` and per-task timings in its `summary.json`; the first
+snapshot includes cold preparation, while the next can reuse build outputs.
+Report all lanes, failures, and infrastructure errors. A merged or superseded
+second PR provides no warm sample. Historical `queueSeconds` includes time
+before admission was enabled, so use newly opened PRs to measure rollout queue
+latency. Compare total runner minutes as well as each PR's time to results.

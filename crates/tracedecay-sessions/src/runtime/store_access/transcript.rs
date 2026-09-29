@@ -288,15 +288,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     #[hotpath::skip]
-    pub async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord> {
-        self.get_session_result(provider, session_id)
-            .await
-            .ok()
-            .flatten()
-    }
-
-    #[hotpath::skip]
-    pub async fn get_session_result(
+    pub async fn get_session(
         &self,
         provider: &str,
         session_id: &str,
@@ -412,7 +404,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         parse_offset_path: &str,
         parse_offset: ParseOffset,
     ) -> bool {
-        let Ok(expected_offset) = self.get_parse_offset_result(parse_offset_path).await else {
+        let Ok(expected_offset) = self.get_parse_offset(parse_offset_path).await else {
             return false;
         };
         self.persist_transcript_batch_result(
@@ -599,12 +591,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     #[hotpath::skip]
-    pub async fn get_parse_offset(&self, path: &str) -> Option<ParseOffset> {
-        self.get_parse_offset_result(path).await.ok().flatten()
-    }
-
-    #[hotpath::skip]
-    pub async fn get_parse_offset_result(
+    pub async fn get_parse_offset(
         &self,
         path: &str,
     ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {

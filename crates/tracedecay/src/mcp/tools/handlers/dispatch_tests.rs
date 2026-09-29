@@ -1834,17 +1834,36 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
     cg.close();
 }
 
+/// One graph read through the owner dispatch, rendered as its MCP result.
+async fn rendered_graph_read(
+    cg: &TraceDecay,
+    tool: &str,
+    args: Value,
+    options: ToolCallRegistryOptions<'_>,
+) -> String {
+    let result = dispatch_on_graph_authority(cg, tool, args, options)
+        .await
+        .unwrap_or_else(|error| panic!("{tool} still answers: {error}"));
+    serde_json::to_string(&result.value).unwrap()
+}
+
 /// Serve-old-while-rebuilding is typed on the wire: when the one verified-
 /// graph open funnel answered from the last complete seated generation, the
 /// dispatch boundary appends the `code_graph_freshness` trailer naming the
 /// serving generation; a proven-current open leaves the response untouched.
+/// A search carries its own freshness verdict, read after it settled, so the
+/// earlier seat reading is not reported beside it.
 #[tokio::test]
 async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     let dir = TempDir::new().unwrap();
     let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("stale-graph-trailer");
     fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "// TODO: probe\npub fn probe() {}\n",
+    )
+    .unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
         profile.data_dir(),
         &project,
@@ -1852,39 +1871,44 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     )
     .await
     .unwrap();
+    let rendered = rendered_graph_read(
+        &cg,
+        "tracedecay_todos",
+        json!({}),
+        verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await;
+    assert!(
+        rendered.contains(
+            "code_graph_freshness: stale, serving the last complete generation \
+             generation.mcp-verified-graph-fixture.1 (sealed 1m ago) while the code index rebuilds"
+        ),
+        "a stale-served response must carry the typed freshness trailer: {rendered}",
+    );
 
-    let stale = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+    let rendered = rendered_graph_read(
         &cg,
         "tracedecay_search",
         json!({ "query": "probe" }),
         verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
     )
-    .await
-    .expect("a stale-served graph read still answers");
-    let rendered = serde_json::to_string(&stale.value).unwrap();
+    .await;
     assert!(
-        rendered.contains("code_graph_freshness: stale"),
-        "a stale-served response must carry the typed freshness trailer: {rendered}",
+        rendered.contains("freshness: "),
+        "a search states its own freshness verdict: {rendered}",
     );
     assert!(
-        rendered.contains("generation.mcp-verified-graph-fixture.1"),
-        "the trailer must name the serving generation: {rendered}",
-    );
-    assert!(
-        rendered.contains("(sealed 1m ago) while the code index rebuilds"),
-        "a rebuild-in-flight serve must state the seat age and the rebuild: {rendered}",
+        !rendered.contains("code_graph_freshness"),
+        "a search must not add a second, contradicting freshness reading: {rendered}",
     );
 
-    let unverified =
-        crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
-            &cg,
-            "tracedecay_search",
-            json!({ "query": "probe" }),
-            verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
-        )
-        .await
-        .expect("an unverified stale serve still answers");
-    let rendered = serde_json::to_string(&unverified.value).unwrap();
+    let rendered = rendered_graph_read(
+        &cg,
+        "tracedecay_todos",
+        json!({}),
+        verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await;
     assert!(
         rendered.contains("source freshness remains unverified"),
         "an unverified route must state what remains unknown: {rendered}",
@@ -1894,15 +1918,13 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
         "an unverified route must not present itself as a rebuild: {rendered}",
     );
 
-    let current = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+    let rendered = rendered_graph_read(
         &cg,
-        "tracedecay_search",
-        json!({ "query": "probe" }),
+        "tracedecay_todos",
+        json!({}),
         verified_graph_options(&cg, ToolCallRegistryOptions::default()),
     )
-    .await
-    .expect("a proven-current graph read answers");
-    let rendered = serde_json::to_string(&current.value).unwrap();
+    .await;
     assert!(
         !rendered.contains("code_graph_freshness"),
         "a proven-current response must not carry a freshness trailer: {rendered}",
