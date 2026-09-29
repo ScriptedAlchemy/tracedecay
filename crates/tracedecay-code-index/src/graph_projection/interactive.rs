@@ -306,7 +306,10 @@ impl CodeGraphInteractiveReader {
         let catalog = self.catalog(cancellation)?;
         Ok(resolve_from_index(
             &catalog,
-            catalog.by_qualified_name.get(qualified_name),
+            catalog
+                .by_qualified_name
+                .get(qualified_name)
+                .map(|ids| &ids[..]),
             kind,
             limit,
         ))
@@ -326,7 +329,10 @@ impl CodeGraphInteractiveReader {
         let catalog = self.catalog(cancellation)?;
         Ok(resolve_from_index(
             &catalog,
-            catalog.by_simple_name.get(&name.to_lowercase()),
+            catalog
+                .by_simple_name
+                .get(&name.to_lowercase())
+                .map(|ids| &ids[..]),
             kind,
             limit,
         ))
@@ -424,7 +430,7 @@ impl CodeGraphInteractiveReader {
         let catalog = self.catalog(cancellation)?;
         Ok(resolve_from_index(
             &catalog,
-            catalog.by_file.get(file),
+            catalog.by_file.get(file).map(|ids| &ids[..]),
             None,
             limit,
         ))
@@ -452,7 +458,7 @@ impl CodeGraphInteractiveReader {
         };
         Ok(resolve_from_index(
             &catalog,
-            catalog.by_file.get(file),
+            catalog.by_file.get(file).map(|ids| &ids[..]),
             None,
             limit,
         ))
@@ -602,10 +608,7 @@ impl CodeGraphInteractiveReader {
         require_positive(max_symbols, "code graph symbol page limit")?;
         let catalog = self.catalog(cancellation)?;
         let range: Box<dyn Iterator<Item = (&SymbolOccurrenceId, &CatalogSymbol)>> = match after {
-            Some(after) => Box::new(catalog.symbols.range::<SymbolOccurrenceId, _>((
-                std::ops::Bound::Excluded(after),
-                std::ops::Bound::Unbounded,
-            ))),
+            Some(after) => Box::new(catalog.symbols.after(after)),
             None => Box::new(catalog.symbols.iter()),
         };
         let mut symbols = Vec::new();
@@ -1009,8 +1012,16 @@ impl CodeGraphInteractiveReader {
             symbols: catalog.symbols.len() as u64,
             semantic_edges: catalog.semantic_edges,
             files: catalog.files.len() as u64,
-            symbols_by_kind: catalog.symbols_by_kind.clone(),
-            files_by_language: catalog.files_by_language.clone(),
+            symbols_by_kind: catalog
+                .symbols_by_kind
+                .iter()
+                .map(|(kind, count)| (kind.clone(), *count))
+                .collect(),
+            files_by_language: catalog
+                .files_by_language
+                .iter()
+                .map(|(language, count)| (language.clone(), *count))
+                .collect(),
             largest_files: catalog
                 .largest_files
                 .iter()
@@ -1607,7 +1618,7 @@ impl CodeGraphInteractiveReader {
 
 fn resolve_from_index(
     catalog: &InteractiveCatalog,
-    occurrences: Option<&Vec<SymbolOccurrenceId>>,
+    occurrences: Option<&[SymbolOccurrenceId]>,
     kind: Option<&str>,
     limit: usize,
 ) -> Vec<CodeGraphSymbolSummaryV1> {

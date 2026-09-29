@@ -134,9 +134,9 @@ directory = ".pnpm/crates/crates-io"
 [source.pnpm-git]
 directory = ".pnpm/crates/git"
 
-[source."git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2"]
+[source."git+https://github.com/ScriptedAlchemy/grafeo.git?rev=9ac25815c2184854a295f3b1c1c3e2706f07b2aa"]
 git = "https://github.com/ScriptedAlchemy/grafeo.git"
-rev = "2027d1093c19d9d631618b9b4d1e575120c12fb2"
+rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa"
 replace-with = "pnpm-git"
 
 [source."git+https://github.com/ScriptedAlchemy/tokensave-large-treesitters?rev=102d0103b6fd093c1e5989cceede1ed9f08fe6a9"]
