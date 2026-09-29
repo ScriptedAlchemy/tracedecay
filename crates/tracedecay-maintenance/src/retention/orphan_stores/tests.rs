@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::collection::{
-    DurableDatabaseInventoryV1, DurableMemoryCheck, check_store_durable_memory,
-    durable_check_scratch_root, durable_database_inventory, open_verified_store,
+    DurableDatabaseInventoryV1, DurableMemoryCheck, FindingStep, check_store_durable_memory,
+    collect_registered_finding, collect_unregistered_finding, durable_check_scratch_root,
+    durable_database_inventory, open_verified_store, unbounded_deadline,
 };
 use super::fence::{capture_store_content_fence, capture_store_directory_fence};
 use super::pages::walk_store_stats;
@@ -696,21 +697,14 @@ fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
     );
 }
 
-/// Build enough no-follow entries that a bounded apply can be interrupted in
-/// the payload-mtime fence itself, after the apply loop has admitted the
-/// finding. The production path must stop with a typed completion rather than
-/// recording `Cancelled` as an ordinary per-store error and claiming success.
 fn seed_payload_fence_work(data_root: &Path) {
-    std::fs::create_dir_all(data_root).unwrap();
-    for bucket_index in 0..32 {
-        std::fs::create_dir_all(data_root.join(format!("bucket-{bucket_index:03}"))).unwrap();
-    }
-    for index in 0..30_000usize {
-        let bucket = data_root.join(format!("bucket-{:03}", index % 32));
-        std::fs::write(bucket.join(format!("payload-{index:05}.bin")), b"x").unwrap();
-    }
+    std::fs::create_dir_all(data_root.join("bucket")).unwrap();
+    std::fs::write(data_root.join("bucket/payload.bin"), b"x").unwrap();
 }
 
+/// A finding whose payload-mtime fence would refuse the store as changed if
+/// the fence walk ran to completion. An interrupted gate can therefore only
+/// report `Interrupted` if the fence itself observed the interruption.
 fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> OrphanStoreFinding {
     let profile_root = data_root
         .parent()
@@ -727,7 +721,7 @@ fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> Or
         expected_store_relpath: expected_store_relpath.to_owned(),
         expected_created_at: 1,
         expected_last_write_at: None,
-        expected_payload_mtime_secs: walk_store_stats(&data_root).newest_mtime_secs,
+        expected_payload_mtime_secs: walk_store_stats(&data_root).newest_mtime_secs - 1,
         expected_data_root_fence: capture_store_directory_fence(&profile_root, &data_root).unwrap(),
         // The mtime fence is the boundary under test; no later phase should be
         // reached when this control is interrupted.

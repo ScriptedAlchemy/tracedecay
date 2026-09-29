@@ -225,7 +225,8 @@ pub(super) fn open_verified_store(
 }
 
 /// Terminal state of one finding within a bounded collection pass.
-enum FindingStep {
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum FindingStep {
     Collected,
     /// The registry authority was retired but the bytes were not fully
     /// removed; the failure names the exact filesystem operation.
@@ -350,7 +351,7 @@ pub(crate) async fn execute_registered_collection_controlled(
     Ok((outcome, retired))
 }
 
-async fn collect_registered_finding(
+pub(super) async fn collect_registered_finding(
     db: &RegisteredGlobalDb,
     finding: &OrphanStoreFinding,
     profile_root: &Path,
@@ -931,7 +932,7 @@ pub(crate) async fn execute_unregistered_collection_controlled(
     Ok(outcome)
 }
 
-async fn collect_unregistered_finding(
+pub(super) async fn collect_unregistered_finding(
     db: &RegisteredGlobalDb,
     finding: &UnregisteredStoreFinding,
     profile_root: &Path,
