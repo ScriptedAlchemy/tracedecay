@@ -124,8 +124,21 @@ fn import_emits_uses_edge() {
         .edges
         .iter()
         .filter(|e| e.kind == EdgeKind::Uses)
+        .map(|e| (e.source.as_str(), e.target.clone()))
         .collect();
-    assert_eq!(uses.len(), 1);
+    let file = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::File)
+        .expect("file node");
+    let module = "Mathlib.Data.Nat.Basic";
+    assert_eq!(
+        uses,
+        [(
+            file.id.as_str(),
+            generate_node_id(module, &NodeKind::File, module, 0)
+        )]
+    );
 }
 
 #[test]
@@ -139,13 +152,27 @@ fn empty_file_produces_only_file_node() {
 fn anonymous_instance_emits_nothing() {
     // `instance : Add Nat where ...` has no name field; we now skip the
     // emit rather than producing an `<anonymous_instance>` Const node.
-    let source = "instance : Add Nat where\n  add := Nat.add\n";
-    let result = extract(source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let consts = names_of(&result, NodeKind::Const);
-    assert!(
-        consts.is_empty(),
-        "anonymous instance should produce no Const node, got: {consts:?}"
+    let kinds_and_names = |source: &str| {
+        let result = extract(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        result
+            .nodes
+            .into_iter()
+            .map(|n| (n.kind, n.name))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        kinds_and_names("instance : Add Nat where\n  add := Nat.add\n"),
+        [(NodeKind::File, "Demo.lean".to_owned())],
+        "anonymous instance should produce no Const node"
+    );
+    assert_eq!(
+        kinds_and_names("instance addNat : Add Nat where\n  add := Nat.add\n"),
+        [
+            (NodeKind::File, "Demo.lean".to_owned()),
+            (NodeKind::Const, "addNat".to_owned())
+        ],
+        "the same instance with a name is a Const"
     );
 }
 

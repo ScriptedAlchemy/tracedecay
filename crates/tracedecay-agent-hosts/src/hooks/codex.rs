@@ -31,12 +31,6 @@ tracedecay_callers/callees or tracedecay_impact for relationships. Use native re
 files. Load a tracedecay skill only when its specific workflow matches the task; use \
 tracedecay_message_search or tracedecay_lcm_expand_query when prior conversation context matters.";
 
-/// Shipped Codex compatibility name for the shared Claude/Codex
-/// `hookSpecificOutput.additionalContext` stdout shape.
-pub fn codex_additional_context_json(event_name: &str, additional_context: &str) -> String {
-    super::additional_context_json(event_name, additional_context)
-}
-
 /// Codex `SessionStart` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.session_start")]
 pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {

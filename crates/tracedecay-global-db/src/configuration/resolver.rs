@@ -224,7 +224,12 @@ mod tests {
                 ConfigurationValueV1::Boolean(true),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "setting user.upload_enabled.v1 cannot be placed in Project { project_id: ProjectId(\"project.fixture\") }"
+        );
 
         let user_layer = ConfigurationLayerV1 {
             layer: ConfigurationLayerIdV1::UserProfile {

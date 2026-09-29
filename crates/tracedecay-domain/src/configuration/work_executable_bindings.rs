@@ -238,25 +238,29 @@ mod tests {
 
     #[test]
     fn executable_binding_requires_absolute_clean_path_and_sorted_capabilities() {
-        assert!(
+        assert_eq!(
             WorkExecutableBindingV1::new(
                 reference("codex", '1'),
                 PathBuf::from("bin/codex"),
                 vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
                 Vec::new(),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "work executable canonical path is not canonical"
         );
-        assert!(
+        assert_eq!(
             WorkExecutableBindingV1::new(
                 reference("codex", '1'),
                 absolute("opt").join("..").join("bin").join("codex"),
                 vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
                 Vec::new(),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "work executable canonical path is not canonical"
         );
-        assert!(
+        assert_eq!(
             WorkExecutableBindingV1::new(
                 reference("codex", '1'),
                 absolute("codex"),
@@ -266,7 +270,9 @@ mod tests {
                 ],
                 Vec::new(),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "work executable capabilities is not canonical"
         );
     }
 
@@ -287,12 +293,17 @@ mod tests {
         )
         .unwrap();
 
-        assert!(validate_work_executable_bindings(&[first, second]).is_err());
+        assert_eq!(
+            validate_work_executable_bindings(&[first, second])
+                .unwrap_err()
+                .to_string(),
+            "work executable binding order is not canonical"
+        );
     }
 
     #[test]
     fn executable_routes_require_matching_capabilities_and_unique_identities() {
-        assert!(
+        assert_eq!(
             WorkExecutableBindingV1::new(
                 reference("codex", '1'),
                 absolute("codex"),
@@ -302,7 +313,9 @@ mod tests {
                     "provider.work.claude-code-cli",
                 )],
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "work executable route provider is not canonical"
         );
 
         let first = WorkExecutableBindingV1::new(
@@ -326,6 +339,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(validate_work_executable_bindings(&[first, second]).is_err());
+        assert_eq!(
+            validate_work_executable_bindings(&[first, second])
+                .unwrap_err()
+                .to_string(),
+            "work executable route identities is not canonical"
+        );
     }
 }

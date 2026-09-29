@@ -1037,6 +1037,11 @@ mod tests {
         let old = Confidence::new(0.5).unwrap();
         let new = Confidence::new(0.6).unwrap();
         assert!(validate_feedback_trust_delta(old, new, 100_000).is_ok());
-        assert!(validate_feedback_trust_delta(old, new, -100_000).is_err());
+        assert_eq!(
+            validate_feedback_trust_delta(old, new, -100_000)
+                .unwrap_err()
+                .to_string(),
+            "fact contract validation failed"
+        );
     }
 }

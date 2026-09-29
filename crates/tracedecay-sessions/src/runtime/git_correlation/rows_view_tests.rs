@@ -384,6 +384,23 @@ async fn a_store_that_never_recorded_evidence_has_no_view() {
             .unwrap()
             .is_none()
     );
+
+    write(
+        &store,
+        GitEvidenceBatch {
+            spans: seeded_projection(1).spans().to_vec(),
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        },
+    )
+    .await;
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .expect("recorded evidence opens a view");
+    let presence = view.presence(None);
+    assert!(presence.spans_present);
+    assert!(!presence.commits_present);
 }
 
 #[tokio::test]

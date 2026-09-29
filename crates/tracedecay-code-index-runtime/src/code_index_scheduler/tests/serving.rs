@@ -253,9 +253,11 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .path()
         .join("code-text-artifact-restore-witnesses-v1")
         .join(artifact_file.replace(".bin", ".json"));
-    assert!(
+    assert_eq!(
         witness_path.is_file(),
-        "the fully verified publication open must persist its bounded restart witness"
+        cfg!(unix),
+        "the fully verified publication open persists its bounded restart witness \
+         only where native file state proves the artifact unchanged"
     );
 
     // Simulated restart: a fresh scheduler over the same store must reopen
@@ -282,33 +284,35 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .find(|entry| entry.generation_id == active_generation)
         .and_then(|entry| entry.text_artifact())
         .expect("restart artifact descriptor");
-    let witness = CodeLexicalArtifactRestoreWitnessV1::decode(
-        &std::fs::read(&witness_path).expect("read bounded restore witness"),
-    )
-    .expect("decode bounded restore witness");
-    let mut authentication_progress = Vec::new();
-    let directly_restored = CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
-        &artifact_path,
-        &descriptor.artifact_digest,
-        descriptor.artifact_size_bytes,
-        &witness,
-        &latest
-            .text_projection_metadata()
-            .expect("restart projection metadata"),
-        &UninterruptibleCodeIndexControlV1,
-        |completed, total| authentication_progress.push((completed, total)),
-    )
-    .expect("bounded content-addressed restore");
-    assert_eq!(
-        authentication_progress,
-        (0..=6).map(|completed| (completed, 6)).collect::<Vec<_>>(),
-        "bounded restore must publish every fixed authentication boundary"
-    );
-    assert_eq!(
-        directly_restored.metadata().generation,
-        latest.metadata().manifest().generation_id
-    );
-    drop(directly_restored);
+    if cfg!(unix) {
+        let witness = CodeLexicalArtifactRestoreWitnessV1::decode(
+            &std::fs::read(&witness_path).expect("read bounded restore witness"),
+        )
+        .expect("decode bounded restore witness");
+        let mut authentication_progress = Vec::new();
+        let directly_restored =
+            CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
+                &artifact_path,
+                &descriptor.artifact_digest,
+                descriptor.artifact_size_bytes,
+                &witness,
+                &latest
+                    .text_projection_metadata()
+                    .expect("restart projection metadata"),
+                &UninterruptibleCodeIndexControlV1,
+                |completed, total| authentication_progress.push((completed, total)),
+            )
+            .expect("bounded content-addressed restore");
+        assert_eq!(
+            authentication_progress,
+            (0..=6).map(|completed| (completed, 6)).collect::<Vec<_>>(),
+            "bounded restore must publish every fixed authentication boundary"
+        );
+        assert_eq!(
+            directly_restored.metadata().generation,
+            latest.metadata().manifest().generation_id
+        );
+    }
     assert!(
         latest
             .advance_text_serving(1)
@@ -916,7 +920,7 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
         "positional fingerprints cover both eligible bodies at the first seal"
     );
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
-    let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+    let revision: u32 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
         .expect("open sealed artifact")
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
@@ -924,7 +928,11 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
             |row| row.get(0),
         )
         .expect("read sealed revision");
-    assert_eq!(revision, 30);
+    assert_eq!(
+        observation.artifact_format_revision,
+        Some(revision),
+        "clone readiness reports the revision the first seal wrote"
+    );
     let staging = std::fs::read_dir(code_text_artifact_staging_root(store.path()))
         .expect("artifacts root")
         .map(|entry| entry.expect("artifact entry").file_name())

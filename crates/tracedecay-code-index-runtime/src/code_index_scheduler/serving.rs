@@ -1799,9 +1799,10 @@ impl LatestCodeTextGenerationV1 {
                     control,
                 )
                 .map(|(reader, witness)| {
-                    if let Err(error) = self
-                        .text_artifact_store
-                        .publish_restore_witness(descriptor, &witness)
+                    if let Some(witness) = witness
+                        && let Err(error) = self
+                            .text_artifact_store
+                            .publish_restore_witness(descriptor, &witness)
                     {
                         tracing::warn!(
                             event = "code_text_artifact_restore_witness_publish_failed",

@@ -396,7 +396,12 @@ mod tests {
             "payload": "must never be accepted"
         });
 
-        assert!(serde_json::from_value::<FrozenWatermarkResolutionV1>(value).is_err());
+        assert!(
+            serde_json::from_value::<FrozenWatermarkResolutionV1>(value)
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown field `payload`")
+        );
     }
 
     fn authorization() -> ResolutionAuthorizationV1 {
@@ -455,7 +460,12 @@ mod tests {
         .unwrap();
         wire["payload_access"] = json!("eligible");
 
-        assert!(serde_json::from_value::<AuthorizedAnchorResolution>(wire).is_err());
+        assert_eq!(
+            serde_json::from_value::<AuthorizedAnchorResolution>(wire)
+                .unwrap_err()
+                .to_string(),
+            "anchor resolution state is not pinned to the required snapshot"
+        );
     }
 
     #[test]

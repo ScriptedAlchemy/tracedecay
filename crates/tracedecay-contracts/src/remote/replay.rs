@@ -1345,12 +1345,14 @@ mod tests {
 
     #[test]
     fn replay_selector_rejects_noncanonical_event_identity() {
-        assert!(
+        assert_eq!(
             RemoteReplayRequestV1 {
                 event_id: "short".into()
             }
             .validate()
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "remote replay event id must be non-empty, trimmed, bounded, and control-character free"
         );
         assert!(
             RemoteReplayRequestV1 {

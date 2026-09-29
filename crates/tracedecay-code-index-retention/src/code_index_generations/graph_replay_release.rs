@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -124,6 +124,33 @@ pub(super) fn remove_events(
         sync_directory(&root)?;
     }
     Ok(())
+}
+
+/// The receipt digest every queued release names. Each queued release is
+/// validated against its receipt when the graph consumes it, so this is the
+/// set of generation receipts the queue still reads.
+pub(super) fn queued_release_receipt_digests(
+    store_root: &Path,
+) -> Result<BTreeSet<String>, CodeGenerationRetentionErrorV1> {
+    let root = store_root.join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY);
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(storage(error)),
+    };
+    let mut digests = BTreeSet::new();
+    for entry in entries {
+        let path = entry.map_err(storage)?.path();
+        let bytes = read_bounded_regular_file(&path, "graph replay release")?;
+        let release: CodeGenerationGraphReplayReleaseV1 =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "graph replay release is unreadable: {error}"
+                ))
+            })?;
+        digests.insert(release.receipt_digest);
+    }
+    Ok(digests)
 }
 
 #[hotpath::measure(label = "usecases.retention.replay_release_page")]

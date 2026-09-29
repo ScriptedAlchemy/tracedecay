@@ -15,7 +15,6 @@ use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::{ProjectId, UtcMicros};
 #[cfg(test)]
 use tracedecay_hooks::HookImmediateAdmissionStateV1;
-use tracedecay_hooks::config::HookConfigurationReadStoreV1;
 use tracedecay_hooks::{
     AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
     HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,

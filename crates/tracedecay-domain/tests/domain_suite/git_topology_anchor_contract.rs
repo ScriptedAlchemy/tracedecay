@@ -571,16 +571,21 @@ fn github_stack_snapshot_rejects_non_enabled_capability_and_broken_topology() {
         GitHubStackCapabilityStateV1::PrivatePreviewDisabled,
         GitHubStackCapabilityStateV1::Degraded,
     ] {
-        assert!(
+        assert_eq!(
             github_stack_snapshot(github_stack_capability(state), linear_github_stack_layers())
-                .is_err(),
+                .unwrap_err()
+                .to_string(),
+            "GitHub stack snapshot capability is not canonical",
             "only an enabled capability may publish a stack snapshot: {state:?}"
         );
     }
 
     let enabled = || github_stack_capability(GitHubStackCapabilityStateV1::Enabled);
-    assert!(
-        github_stack_snapshot(enabled(), Vec::new()).is_err(),
+    assert_eq!(
+        github_stack_snapshot(enabled(), Vec::new())
+            .unwrap_err()
+            .to_string(),
+        "GitHub stack layers is not canonical",
         "an enabled capability still needs at least one observed layer"
     );
 
@@ -593,16 +598,22 @@ fn github_stack_snapshot_rejects_non_enabled_capability_and_broken_topology() {
         ("commit.other", "commit.upper"),
         "anchor.pr.42",
     );
-    assert!(
-        github_stack_snapshot(enabled(), detached_base).is_err(),
+    assert_eq!(
+        github_stack_snapshot(enabled(), detached_base)
+            .unwrap_err()
+            .to_string(),
+        "GitHub stack linear topology is not pinned to the required snapshot",
         "a layer whose base leaves the stack breaks strict linearity"
     );
 
     let mut swapped_positions = linear_github_stack_layers();
     swapped_positions[0].provider_position = 1;
     swapped_positions[1].provider_position = 0;
-    assert!(
-        github_stack_snapshot(enabled(), swapped_positions).is_err(),
+    assert_eq!(
+        github_stack_snapshot(enabled(), swapped_positions)
+            .unwrap_err()
+            .to_string(),
+        "GitHub stack layer authority is not pinned to the required snapshot",
         "provider position must equal the observed stack ordinal"
     );
 
@@ -615,15 +626,21 @@ fn github_stack_snapshot_rejects_non_enabled_capability_and_broken_topology() {
         ("commit.lower", "commit.upper"),
         "anchor.pr.42",
     );
-    assert!(
-        github_stack_snapshot(enabled(), foreign_repository).is_err(),
+    assert_eq!(
+        github_stack_snapshot(enabled(), foreign_repository)
+            .unwrap_err()
+            .to_string(),
+        "GitHub stack layer authority is not pinned to the required snapshot",
         "an enabled stack stays inside one repository"
     );
 
     let mut foreign_final_target = linear_github_stack_layers();
     foreign_final_target[0].base_ref_id = id("refs/heads/release");
-    assert!(
-        github_stack_snapshot(enabled(), foreign_final_target).is_err(),
+    assert_eq!(
+        github_stack_snapshot(enabled(), foreign_final_target)
+            .unwrap_err()
+            .to_string(),
+        "GitHub stack final target is not pinned to the required snapshot",
         "the lowest layer must sit on the declared final target"
     );
 }

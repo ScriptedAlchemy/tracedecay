@@ -673,7 +673,19 @@ mod aggregation_tests {
             for row in &rows {
                 evidence.absorb_leak("trace.leak.alpha", row, 0);
             }
-            assert!(evidence.leaks["trace.leak.alpha"].0.is_none());
+            assert_eq!(evidence.leaks["trace.leak.alpha"].0, None);
         }
+
+        let mut agreeing = ExecutionTopologyEvidenceV1::default();
+        let recovered = leak(WorkExecutionLeakRecoveryV1::Recovered);
+        agreeing.absorb_leak("trace.leak.alpha", &recovered, 0);
+        agreeing.absorb_leak("trace.leak.alpha", &recovered, 0);
+        assert_eq!(
+            agreeing.leaks["trace.leak.alpha"]
+                .0
+                .as_ref()
+                .map(|row| row.recovery),
+            Some(WorkExecutionLeakRecoveryV1::Recovered)
+        );
     }
 }

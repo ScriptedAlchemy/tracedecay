@@ -212,8 +212,11 @@ fn doctor_report_wire_rejects_contradictory_coverage() {
     let report = block_on(DoctorReportComposerV1::new().compose(&context())).expect("compose");
     let mut encoded = serde_json::to_value(&report).expect("serialize report");
     encoded["coverage"]["completeness"] = serde_json::json!("complete");
-    assert!(
-        serde_json::from_value::<tracedecay_contracts::DoctorReportV1>(encoded).is_err(),
+    assert_eq!(
+        serde_json::from_value::<tracedecay_contracts::DoctorReportV1>(encoded)
+            .unwrap_err()
+            .to_string(),
+        "Doctor report coverage contradicted its findings or consultations",
         "wire decode must not accept coverage that contradicts its consultations"
     );
 }
@@ -226,8 +229,11 @@ fn doctor_report_wire_rejects_a_missing_required_family() {
         .as_array_mut()
         .expect("coverage families")
         .pop();
-    assert!(
-        serde_json::from_value::<tracedecay_contracts::DoctorReportV1>(encoded).is_err(),
+    assert_eq!(
+        serde_json::from_value::<tracedecay_contracts::DoctorReportV1>(encoded)
+            .unwrap_err()
+            .to_string(),
+        "Doctor report omitted, duplicated, or reordered a required family",
         "wire decode must not accept an incomplete family set"
     );
 }

@@ -172,12 +172,27 @@ fn cancellation_after_effect_or_during_reconciliation_is_not_a_no_effect_termina
         CancellationStage::Reconciling,
         CancellationStage::AfterCommit,
     ] {
-        assert!(ApplicationProblem::cancelled(stage).is_err());
-        assert!(ApplicationProblem::timed_out(stage).is_err());
+        assert_eq!(
+            ApplicationProblem::cancelled(stage)
+                .unwrap_err()
+                .to_string(),
+            "application problem cancellation stage is inconsistent with the application contract"
+        );
+        assert_eq!(
+            ApplicationProblem::timed_out(stage)
+                .unwrap_err()
+                .to_string(),
+            "application problem cancellation stage is inconsistent with the application contract"
+        );
         let wire = serde_json::json!({
             "kind": "cancelled", "stage": stage, "retry": "never", "legal_actions": []
         });
-        assert!(serde_json::from_value::<ApplicationProblem>(wire).is_err());
+        assert_eq!(
+            serde_json::from_value::<ApplicationProblem>(wire)
+                .unwrap_err()
+                .to_string(),
+            "application problem cancellation stage is inconsistent with the application contract"
+        );
     }
 }
 
@@ -271,5 +286,8 @@ fn direct_serialization_rejects_an_invalid_terminal() {
         legal_actions: vec![LegalAction::Retry],
         detail: None,
     };
-    assert!(serde_json::to_value(invalid).is_err());
+    assert_eq!(
+        serde_json::to_value(invalid).unwrap_err().to_string(),
+        "reset-required terminal is inconsistent with the application contract"
+    );
 }

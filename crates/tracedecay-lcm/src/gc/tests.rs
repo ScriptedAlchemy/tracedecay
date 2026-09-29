@@ -376,9 +376,10 @@ async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), Str
     )
     .await
     .map_err(|err| err.to_string())?;
-    assert!(
-        prepared.pending_removal_bytes.is_some(),
-        "the transaction should stage deletion"
+    assert_eq!(
+        prepared.pending_removal_bytes,
+        Some("body to preserve".len() as u64),
+        "the transaction should stage deletion of the payload's bytes"
     );
     assert!(
         payload_path(&store, &payload_ref).is_file(),
@@ -390,16 +391,18 @@ async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), Str
         .map_err(|err| err.to_string())?;
 
     assert!(payload_path(&store, &payload_ref).is_file());
-    assert!(
-        payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok()
+    let metadata = payload::load_payload_metadata(&store.conn, &payload_ref)
+        .await
+        .map_err(|err| err.to_string())?;
+    assert_eq!(
+        (metadata.message_id.as_str(), metadata.byte_count),
+        ("message-1", "body to preserve".len() as u64)
     );
-    assert!(
+    assert_eq!(
         gc_mark(&store.conn, &payload_ref)
             .await
-            .map_err(|err| err.to_string())?
-            .is_some(),
+            .map_err(|err| err.to_string())?,
+        Some(("unreferenced".to_owned(), 1)),
         "rollback must restore the payload's GC mark"
     );
     assert!(
