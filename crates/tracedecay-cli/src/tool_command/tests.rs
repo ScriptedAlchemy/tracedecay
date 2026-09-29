@@ -1051,12 +1051,10 @@ fn application_error_tool_result_exits_nonzero() {
 
     let error = tool_result_process_outcome(&failed, "tracedecay_str_replace")
         .expect_err("an application failure must fail the CLI process");
-    let message = error.to_string();
-    assert!(message.contains("tracedecay_str_replace"), "{message}");
-    assert!(message.contains("application failure"), "{message}");
-    assert!(
-        !message.contains("old_str not found in README.md"),
-        "stderr must not scrape a payload that is already on stdout: {message}"
+    // stderr names the refusal without scraping the payload already on stdout.
+    assert_eq!(
+        error.to_string(),
+        "tracedecay_str_replace refused the request"
     );
 }
 
@@ -1128,15 +1126,9 @@ fn application_error_without_a_json_message_still_exits_nonzero() {
 
     let error = tool_result_process_outcome(&failed, "tracedecay_run_affected_tests")
         .expect_err("an application failure must fail the CLI process");
-    let message = error.to_string();
-    assert!(
-        message.contains("tracedecay_run_affected_tests"),
-        "{message}"
-    );
-    assert!(message.contains("application failure"), "{message}");
-    assert!(
-        !message.contains("**success:** false"),
-        "stderr must not scrape a payload that is already on stdout: {message}"
+    assert_eq!(
+        error.to_string(),
+        "tracedecay_run_affected_tests refused the request"
     );
 }
 
@@ -1165,11 +1157,10 @@ fn application_problem_makes_the_tool_command_fail() {
 
     let error = print_cli_application_surface(profile, None, result, true)
         .expect_err("a canonical application problem must fail the CLI process");
-    assert!(
-        error
-            .to_string()
-            .contains("configuration_revision_conflict"),
-        "{error}"
+    assert_eq!(
+        error.to_string(),
+        "tracedecay_configuration_set refused the request (configuration_revision_conflict): \
+         The expected configuration revision is stale"
     );
 }
 
@@ -1584,31 +1575,23 @@ fn tool_status_exit_follows_the_wait_outcome() {
         })
     };
     let refusal = |wait: Value| {
-        let error = tool_result_process_outcome(&status(wait), "tracedecay_status")
-            .expect_err("an unreached wait exits non-zero");
-        error
-            .project_route_context()
-            .map(|(code, retryable, detail)| (code.to_owned(), retryable, detail.to_owned()))
-            .unwrap_or_else(|| panic!("the wait refusal is a typed route error: {error}"))
+        tool_result_process_outcome(&status(wait), "tracedecay_status")
+            .expect_err("an unreached wait exits non-zero")
+            .to_string()
     };
 
     assert_eq!(
         refusal(json!({"outcome": "timed_out", "last_state": "warming"})),
-        (
-            CODE_INDEX_READINESS_WAIT_TIMED_OUT.to_owned(),
-            true,
-            "tracedecay_status wait_for timed out before the index reached the requested \
-             state; last state: warming"
-                .to_owned(),
+        format!(
+            "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_TIMED_OUT}): \
+             wait_for timed out before the index reached the requested state; last state: warming"
         )
     );
     assert_eq!(
         refusal(json!({"outcome": "unavailable", "reason": "scheduler_not_mounted"})),
-        (
-            CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned(),
-            false,
-            "tracedecay_status wait_for cannot reach the requested state: scheduler_not_mounted"
-                .to_owned(),
+        format!(
+            "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_UNAVAILABLE}): \
+             wait_for cannot reach the requested state: scheduler_not_mounted"
         )
     );
     tool_result_process_outcome(&status(json!({"outcome": "reached"})), "tracedecay_status")

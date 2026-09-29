@@ -214,6 +214,12 @@ async fn type_hierarchy_reports_literal_trees_and_typed_refusals() {
     for (arguments, context) in [
         (json!({}), "a missing node_id"),
         (json!({"node_id": "   "}), "a blank node_id"),
+        // Inside the request's 4 KiB text bound, past the 512-byte occurrence
+        // id bound: the port, not the contract, must refuse it.
+        (
+            json!({"node_id": "x".repeat(600)}),
+            "a node_id that is not an occurrence id",
+        ),
         (
             json!({"node_id": named, "maximum_depth": 0}),
             "maximum_depth 0",

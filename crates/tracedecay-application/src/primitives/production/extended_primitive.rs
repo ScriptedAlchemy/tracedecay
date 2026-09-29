@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::{CodeGraphReadCostMeter, CodeGraphSymbolSummaryV1};
 use tracedecay_contracts::retrieval::{
-    HealthDeltaRequest, HealthDeltaResult, RetrievalPortContext, SymbolPrimitiveRecord,
+    HealthDeltaRequest, HealthDeltaResult, PrimitiveFailureKind, RetrievalPortContext,
+    SymbolPrimitiveRecord,
 };
 use tracedecay_contracts::{
     ApplicationProblem, EvidenceDomain, OmissionReason, RetrievalPortOutcome,
@@ -36,7 +37,7 @@ use super::{
     AuthenticatedDiagnosticCursorAuthorityV1, DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
     all_code_graph_symbols, completed, completed_unsupported, diagnostics_result,
     diagnostics_unavailable, evidence_unavailable, failed, graph_query_outcome, graph_read_outcome,
-    now_observed, omitted_evidence, open_code_graph,
+    now_observed, omitted_evidence, open_code_graph, refused,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
@@ -426,11 +427,23 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 let Ok(from) =
                     tracedecay_domain::SymbolOccurrenceId::new(request.from_node_id.clone())
                 else {
-                    return failed(EvidenceDomain::Graph, now_observed());
+                    return refused(
+                        PrimitiveFailureKind::InvalidRequest,
+                        "application.call-chain.from-node-id-invalid",
+                        "from_node_id is not a symbol occurrence id",
+                        EvidenceDomain::Graph,
+                        now_observed(),
+                    );
                 };
                 let Ok(to) = tracedecay_domain::SymbolOccurrenceId::new(request.to_node_id.clone())
                 else {
-                    return failed(EvidenceDomain::Graph, now_observed());
+                    return refused(
+                        PrimitiveFailureKind::InvalidRequest,
+                        "application.call-chain.to-node-id-invalid",
+                        "to_node_id is not a symbol occurrence id",
+                        EvidenceDomain::Graph,
+                        now_observed(),
+                    );
                 };
                 let path = match reader.shortest_path(
                     &from,
@@ -562,11 +575,25 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 let Ok(occurrence) =
                     tracedecay_domain::SymbolOccurrenceId::new(request.node_id.clone())
                 else {
-                    return failed(EvidenceDomain::Source, now_observed());
+                    return refused(
+                        PrimitiveFailureKind::InvalidRequest,
+                        "application.source-body.node-id-invalid",
+                        "node_id is not a symbol occurrence id",
+                        EvidenceDomain::Source,
+                        now_observed(),
+                    );
                 };
                 let node = match reader.symbol_summary(&occurrence, cancellation) {
                     Ok(Some(node)) => node,
-                    Ok(None) => return failed(EvidenceDomain::Source, now_observed()),
+                    Ok(None) => {
+                        return refused(
+                            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+                            "application.source-body.node-not-found",
+                            "node_id is not in the admitted graph",
+                            EvidenceDomain::Source,
+                            now_observed(),
+                        );
+                    }
                     Err(error) => {
                         return graph_read_outcome(
                             &map_projection_error(error),

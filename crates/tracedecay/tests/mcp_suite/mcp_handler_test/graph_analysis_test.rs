@@ -4694,7 +4694,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         not_object
             .expect_err("non-object arguments must be refused")
             .to_string(),
-        "config error: tracedecay_diff_context failed over production MCP: tool execution failed: config error: invalid arguments: tracedecay_diff_context expects a JSON object"
+        "config error: tracedecay_diff_context failed over production MCP: tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: invalid arguments: tracedecay_diff_context expects a JSON object"
     );
 
     let zero_depth = handle_tool_call(

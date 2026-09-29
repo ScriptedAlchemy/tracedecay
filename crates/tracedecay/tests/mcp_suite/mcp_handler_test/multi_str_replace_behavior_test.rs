@@ -15,9 +15,6 @@ use std::sync::Arc;
 use tracedecay::mcp::McpServer;
 
 const TOOL: &str = "tracedecay_multi_str_replace";
-const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool multi_str_replace ...` \
-(`tracedecay tool multi_str_replace --help` for parameters). If MCP calls keep failing or timing out, fall \
-back to that CLI instead of querying .tracedecay databases directly.";
 
 const STALE_STATE: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -446,17 +443,21 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
         }),
     )
     .await;
-    assert_eq!(malformed["code"], -32603, "{malformed}");
+    assert_eq!(malformed["code"], -32602, "{malformed}");
     assert_eq!(
         malformed["message"],
-        "tool execution failed: config error: each replacement must be an array of exactly 2 strings",
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: each replacement must be an array of exactly 2 strings",
         "{malformed}"
     );
     assert_eq!(
         malformed["data"],
         json!({
             "tool": TOOL,
-            "cli_fallback": CLI_FALLBACK
+            "code": "application_surface_invalid_request",
+            "reason_code": "application_surface_invalid_request",
+            "kind": "invalid_request",
+            "retryable": false,
+            "detail": "each replacement must be an array of exactly 2 strings"
         }),
         "{malformed}"
     );
@@ -472,14 +473,17 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
     .await;
     assert_eq!(missing_path["code"], -32602, "{missing_path}");
     assert_eq!(
-        missing_path["message"], "missing required parameter: path",
+        missing_path["message"],
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: missing required parameter: path",
         "{missing_path}"
     );
     assert_eq!(
         missing_path["data"],
         json!({
             "tool": TOOL,
-            "reason_code": "missing_required_parameter",
+            "code": "application_surface_invalid_request",
+            "reason_code": "application_surface_invalid_request",
+            "kind": "invalid_request",
             "retryable": false,
             "detail": "missing required parameter: path"
         }),
@@ -495,17 +499,21 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
         }),
     )
     .await;
-    assert_eq!(missing_apply_keys["code"], -32603, "{missing_apply_keys}");
+    assert_eq!(missing_apply_keys["code"], -32602, "{missing_apply_keys}");
     assert_eq!(
         missing_apply_keys["message"],
-        "tool execution failed: config error: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
         "{missing_apply_keys}"
     );
     assert_eq!(
         missing_apply_keys["data"],
         json!({
             "tool": TOOL,
-            "cli_fallback": CLI_FALLBACK
+            "code": "application_surface_invalid_request",
+            "reason_code": "application_surface_invalid_request",
+            "kind": "invalid_request",
+            "retryable": false,
+            "detail": "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
         }),
         "{missing_apply_keys}"
     );

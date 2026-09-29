@@ -3095,9 +3095,14 @@ fn tool_returns_a_completed_authority_result_without_resending() {
     );
     assert_eq!(printed["problem"]["retry"], "after_delay");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("reported an application failure"),
-        "the process must fail typed, got:\n{stderr}"
+    assert_eq!(
+        stderr.lines().last(),
+        Some(
+            "Error: tracedecay_fact_store_add refused the request \
+             (application.retained.authority-unavailable): The retained operation authority is \
+             unavailable: history is not available"
+        ),
+        "the process must name the typed refusal, got:\n{stderr}"
     );
     let attempts = std::iter::from_fn(|| daemon.requests.try_recv().ok()).count();
     assert_eq!(

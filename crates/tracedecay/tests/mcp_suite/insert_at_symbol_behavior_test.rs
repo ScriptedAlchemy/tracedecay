@@ -532,10 +532,14 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
     assert_rpc_error(
         &missing_content,
         -32602,
-        MISSING_CONTENT,
+        format!(
+            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {MISSING_CONTENT}"
+        ),
         json!({
             "tool": "tracedecay_insert_at_symbol",
-            "reason_code": "missing_required_parameter",
+            "code": "application_surface_invalid_request",
+            "reason_code": "application_surface_invalid_request",
+            "kind": "invalid_request",
             "retryable": false,
             "detail": MISSING_CONTENT,
         }),
@@ -565,11 +569,17 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
     .await;
     assert_rpc_error(
         &unpreviewed,
-        -32603,
-        format!("tool execution failed: config error: {MISSING_PREVIEW}"),
+        -32602,
+        format!(
+            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {MISSING_PREVIEW}"
+        ),
         json!({
             "tool": "tracedecay_insert_at_symbol",
-            "cli_fallback": "This tool is also available from the shell: `tracedecay tool insert_at_symbol ...` (`tracedecay tool insert_at_symbol --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
+            "code": "application_surface_invalid_request",
+            "reason_code": "application_surface_invalid_request",
+            "kind": "invalid_request",
+            "retryable": false,
+            "detail": MISSING_PREVIEW,
         }),
     );
 

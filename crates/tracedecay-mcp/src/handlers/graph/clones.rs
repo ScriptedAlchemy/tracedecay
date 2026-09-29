@@ -82,12 +82,11 @@ pub async fn compute_similar(
     {
         tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Complete(similar) => *similar,
         tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::NotFound => {
-            return Err(TraceDecayError::ProjectRoute {
-                reason_code: "similar-source-not-found".to_owned(),
-                retryable: false,
-                detail: "the selected source has no body in the verified clone index".to_owned(),
-                typed_detail: None,
-            });
+            return Err(TraceDecayError::project_route(
+                "application_surface_not_found_or_not_authorized",
+                false,
+                "the selected source has no body in the verified clone index",
+            ));
         }
         tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason) => {
             return Err(clone_lane_unavailable_error("similarity", reason));
@@ -96,12 +95,11 @@ pub async fn compute_similar(
     if similar.source.occurrence.project_id != project_id
         || similar.source.occurrence.repository_id != repository_id
     {
-        return Err(TraceDecayError::ProjectRoute {
-            reason_code: "similar-source-not-found".to_owned(),
-            retryable: false,
-            detail: "the selected source is outside the authorized repository scope".to_owned(),
-            typed_detail: None,
-        });
+        return Err(TraceDecayError::project_route(
+            "application_surface_not_found_or_not_authorized",
+            false,
+            "the selected source is outside the authorized repository scope",
+        ));
     }
     let source = similar_occurrence(&similar.source.occurrence);
     let mut touched_files = vec![source.path.clone()];
@@ -200,6 +198,13 @@ fn clone_lane_unavailable_error(
     lane: &str,
     reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
 ) -> TraceDecayError {
+    if reason == tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest {
+        return TraceDecayError::project_route(
+            "application_surface_invalid_request",
+            false,
+            format!("the maintained clone {lane} lane refused the request as invalid"),
+        );
+    }
     TraceDecayError::ProjectRoute {
         reason_code: reason.as_str().to_owned(),
         retryable: reason.is_retryable(),
@@ -237,12 +242,11 @@ pub async fn compute_redundancy(
     if request.project_id != ctx.admitted_scope().project_id
         || request.repository_id != ctx.admitted_scope().repository_id
     {
-        return Err(TraceDecayError::ProjectRoute {
-            reason_code: "redundancy-repository-not-authorized".to_owned(),
-            retryable: false,
-            detail: "the selected repository is outside the authorized repository scope".to_owned(),
-            typed_detail: None,
-        });
+        return Err(TraceDecayError::project_route(
+            "application_surface_not_found_or_not_authorized",
+            false,
+            "the selected repository is outside the authorized repository scope",
+        ));
     }
     let match_classes = request
         .match_classes
@@ -379,7 +383,6 @@ mod tests {
                 true,
             ),
             (Reason::GenerationUnverified, "generation_unverified", true),
-            (Reason::InvalidRequest, "invalid_request", false),
             (
                 Reason::CorruptionResetRequired,
                 "index_corruption_reset_required",
@@ -401,6 +404,17 @@ mod tests {
                 );
             }
         }
+        // A request the executor refuses is the caller's to correct, not an
+        // unavailable lane.
+        assert_eq!(
+            clone_lane_unavailable_error("similarity", Reason::InvalidRequest)
+                .project_route_context(),
+            Some((
+                "application_surface_invalid_request",
+                false,
+                "the maintained clone similarity lane refused the request as invalid",
+            ))
+        );
     }
 
     #[tokio::test]

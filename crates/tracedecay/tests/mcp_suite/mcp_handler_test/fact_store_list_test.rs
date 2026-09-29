@@ -10,7 +10,9 @@
 use super::memory_facts_test::{
     close_test_graph, fact_store_server, invoke_production_tool, setup_project,
 };
-use crate::support::{extract_real_server_text, handle_real_server_tool_call_raw};
+use crate::support::{
+    application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -509,12 +511,8 @@ async fn fact_store_list_rejects_malformed_selectors_and_out_of_range_limits() {
     )
     .await;
     assert_eq!(
-        unknown_field["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_list: unknown field `query`"
-    );
-    assert_eq!(
-        unknown_field["error"]["data"]["tool"],
-        "tracedecay_fact_store_list"
+        unknown_field["error"],
+        application_invalid_request_error("tracedecay_fact_store_list", "unknown field `query`")
     );
 
     let unknown_scope = handle_real_server_tool_call_raw(
@@ -524,8 +522,11 @@ async fn fact_store_list_rejects_malformed_selectors_and_out_of_range_limits() {
     )
     .await;
     assert_eq!(
-        unknown_scope["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_list: unknown variant `session`, expected `project` or `user`"
+        unknown_scope["error"],
+        application_invalid_request_error(
+            "tracedecay_fact_store_list",
+            "unknown variant `session`, expected `project` or `user`"
+        )
     );
 
     for arguments in [

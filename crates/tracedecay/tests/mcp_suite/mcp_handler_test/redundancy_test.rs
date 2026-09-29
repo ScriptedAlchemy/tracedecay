@@ -876,14 +876,16 @@ async fn redundancy_reports_renames_only_under_the_rename_class_and_refuses_fore
     )
     .await;
     let unauthorized = refusal_problem(&unauthorized["result"]);
-    assert_eq!(unauthorized["kind"], "unavailable", "{unauthorized}");
     assert_eq!(
-        unauthorized["code"], "redundancy-repository-not-authorized",
+        unauthorized["kind"], "not_found_or_not_authorized",
         "{unauthorized}"
     );
     assert_eq!(
-        unauthorized["message"],
-        "the selected repository is outside the authorized repository scope",
+        unauthorized["code"], "not_found_or_not_authorized",
+        "{unauthorized}"
+    );
+    assert_eq!(
+        unauthorized["message"], "The requested resource was not found or is not authorized",
         "{unauthorized}"
     );
     assert_eq!(unauthorized["retryable"], false, "{unauthorized}");

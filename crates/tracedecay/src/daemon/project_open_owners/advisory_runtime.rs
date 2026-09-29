@@ -461,6 +461,15 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
                 )
                 .await
                 .map_err(|failure| {
+                    if failure.is_invalid_request() {
+                        return ApplicationProblem::invalid_request(
+                            "feedback.advisory-cycle.invalid-request",
+                            format!(
+                                "The advisory feedback cycle request is invalid ({})",
+                                failure.class()
+                            ),
+                        );
+                    }
                     ApplicationProblem::unavailable(SafeDiagnostic {
                         code: "feedback.advisory-cycle.execution".to_owned(),
                         message: format!(

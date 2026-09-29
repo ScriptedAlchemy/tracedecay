@@ -366,9 +366,11 @@ fn stage_release_in(
     verify_sha256(&hex::encode(actual), &expected, &download.asset_name)?;
     eprintln!("  Checksum verified");
     let signer = verify_release_attestation(&download.provenance, actual).map_err(|refusal| {
-        TraceDecayError::Config {
-            message: refusal.to_string(),
-        }
+        TraceDecayError::tool_refused(
+            "tracedecay upgrade",
+            Some(refusal.code().to_owned()),
+            Some(refusal.to_string()),
+        )
     })?;
     eprintln!("  Build provenance verified: {signer}");
     eprint!("  Extracting...");
@@ -2113,8 +2115,9 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "config error: GitHub has no build-provenance attestation for \
-                     sha256:{digest}; refusing an unattested release archive"
+                    "tracedecay upgrade refused the request (release_attestation_missing): \
+                     GitHub has no build-provenance attestation for sha256:{digest}; \
+                     refusing an unattested release archive"
                 )
             );
             assert_eq!(
@@ -2160,8 +2163,8 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "config error: no build-provenance attestation for sha256:{digest} \
-                     proves a release workflow build: attestation 1: failed verification \
+                    "tracedecay upgrade refused the request (release_attestation_rejected): \
+                     no build-provenance attestation for sha256:{digest} proves a release workflow build: attestation 1: failed verification \
                      (Verification error: artifact hash does not match any subject in \
                      attestation)"
                 )

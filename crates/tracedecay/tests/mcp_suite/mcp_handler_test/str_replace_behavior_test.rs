@@ -358,14 +358,21 @@ async fn str_replace_apply_without_preview_state_is_refused() {
     )
     .await;
 
-    assert_eq!(error.code, -32603);
+    assert_eq!(error.code, -32602);
     assert_eq!(
         error.message,
-        "tool execution failed: config error: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
     );
     assert_eq!(
-        error.data.as_ref().and_then(|data| data["tool"].as_str()),
-        Some("tracedecay_str_replace")
+        error.data,
+        Some(json!({
+            "tool": "tracedecay_str_replace",
+            "code": "application_surface_invalid_request",
+            "reason_code": "application_surface_invalid_request",
+            "kind": "invalid_request",
+            "retryable": false,
+            "detail": "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
+        }))
     );
     assert_eq!(fs::read(&file).unwrap(), initial);
 }
@@ -669,12 +676,17 @@ async fn str_replace_missing_old_str_is_a_parameter_error() {
     .await;
 
     assert_eq!(error.code, -32602);
-    assert_eq!(error.message, "missing required parameter: old_str");
+    assert_eq!(
+        error.message,
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: missing required parameter: old_str"
+    );
     assert_eq!(
         error.data,
         Some(json!({
             "tool": "tracedecay_str_replace",
-            "reason_code": "missing_required_parameter",
+            "code": "application_surface_invalid_request",
+            "reason_code": "application_surface_invalid_request",
+            "kind": "invalid_request",
             "retryable": false,
             "detail": "missing required parameter: old_str"
         }))

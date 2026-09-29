@@ -5,8 +5,8 @@
 //! JSON-RPC error, not an empty success.
 
 use crate::support::{
-    extract_real_server_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
-    production_composition_fixture,
+    application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call,
+    handle_real_server_tool_call_raw, production_composition_fixture,
 };
 use serde_json::{Value, json};
 
@@ -110,27 +110,20 @@ async fn session_refresh_begin_starts_then_joins_the_same_profile_operation() {
         }),
     )
     .await;
-    assert_eq!(unknown_scope["error"]["code"], -32603, "{unknown_scope}");
     assert_eq!(
-        unknown_scope["error"]["data"]["tool"], TOOL,
-        "{unknown_scope}"
-    );
-    assert_eq!(
-        unknown_scope["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_session_refresh_begin: scope.kind: unknown variant `user`, expected `project` or `profile`",
+        unknown_scope["error"],
+        application_invalid_request_error(
+            TOOL,
+            "scope.kind: unknown variant `user`, expected `project` or `profile`"
+        ),
         "{unknown_scope}"
     );
 
     let missing_scope =
         handle_real_server_tool_call_raw(&server, TOOL, json!({"format": "json"})).await;
-    assert_eq!(missing_scope["error"]["code"], -32603, "{missing_scope}");
     assert_eq!(
-        missing_scope["error"]["data"]["tool"], TOOL,
-        "{missing_scope}"
-    );
-    assert_eq!(
-        missing_scope["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_session_refresh_begin: missing field `scope`",
+        missing_scope["error"],
+        application_invalid_request_error(TOOL, "missing field `scope`"),
         "{missing_scope}"
     );
 
