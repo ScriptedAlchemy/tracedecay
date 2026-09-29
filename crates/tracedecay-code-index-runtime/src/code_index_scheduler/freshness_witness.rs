@@ -34,6 +34,7 @@ use tracedecay_domain::{
     ContentDigest, IndexPathPolicyV1, LanguageId, SanitizedCodeSnapshotV1,
     SnapshotFileDispositionV1, validate_code_logical_path,
 };
+use tracedecay_private_fs::RewriteWitness;
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
 use super::{CodeIndexSchedulerErrorV1, classification, ignored_dependencies, privacy};
@@ -278,7 +279,7 @@ impl StatKeyV1 {
     /// Whether this key, sampled at `sampled_at`, is old enough that any
     /// later write must produce a different one.
     fn settled(&self, sampled_at: SystemTime) -> bool {
-        cfg!(unix)
+        RewriteWitness::NATIVE.proves_unchanged_bytes()
             && sampled_at
                 .checked_sub(RACY_STAT_WINDOW)
                 .and_then(|horizon| horizon.duration_since(UNIX_EPOCH).ok())

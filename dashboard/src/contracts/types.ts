@@ -3079,18 +3079,35 @@ export type LoomEditedFileV1 = {
   session_id: string;
 };
 
-export type LoomEventKindV1 = "pull_request" | "tool_call";
-
-export type LoomEventV1 = {
-  kind: LoomEventKindV1;
-  label?: string | null | undefined;
-  message_id: string;
-  ordinal: number;
-  provider: string;
-  recorded_at: number;
-  session_id: string;
-  tool_use_id?: string | null | undefined;
-};
+export type LoomEventV1 = 
+  | {
+    kind: "pull_request";
+    label?: string | null | undefined;
+    message_id: string;
+    ordinal: number;
+    provider: string;
+    recorded_at: number;
+    session_id: string;
+  }
+  | {
+    kind: "test_run";
+    operation_id: string;
+    outcome?: LoomTestRunOutcomeV1 | null | undefined;
+    provider: string;
+    recorded_at: number;
+    session_id: string;
+    started_at_micros: number;
+  }
+  | {
+    kind: "tool_call";
+    label?: string | null | undefined;
+    message_id: string;
+    ordinal: number;
+    provider: string;
+    recorded_at: number;
+    session_id: string;
+    tool_use_id?: string | null | undefined;
+  };
 
 export type LoomFileSessionProjectionV1 = {
   authority: string;
@@ -3160,6 +3177,15 @@ export type LoomTemporalRefreshV1 = {
   authority: string;
   latest_activated_at_micros: number | null;
   state: DashboardDomainStateV1;
+};
+
+export type LoomTestRunOutcomeV1 = {
+  exit_code?: number | null | undefined;
+  failed: number;
+  finished_at_micros: number;
+  ignored: number;
+  passed: number;
+  termination: string;
 };
 
 export type ManagedSkill = {

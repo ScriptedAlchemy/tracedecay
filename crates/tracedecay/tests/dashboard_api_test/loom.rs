@@ -203,7 +203,8 @@ fn loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities() {
         assert_eq!(source("subagent_spawn")["state"], "ready");
         assert_eq!(source("subagent_spawn")["coverage"]["matched"], 1);
         assert_eq!(source("session_tool")["state"], "ready");
-        assert_eq!(source("session_test")["state"], "unsupported");
+        assert_eq!(source("session_test")["state"], "ready");
+        assert_eq!(source("session_test")["item_count"], 0);
         assert_eq!(statuses.len(), 7);
     });
 }
@@ -344,12 +345,10 @@ fn loom_temporal_serves_recorded_tool_and_pull_request_events_in_recorded_time_o
         assert_eq!(pull_requests["coverage"]["eligible"], 2);
         assert_eq!(pull_requests["coverage"]["omitted"], 0);
         let tests = loom_source(&envelope, "session_test");
-        assert_eq!(tests["state"], "unsupported");
-        assert_eq!(tests["item_count"], Value::Null);
-        assert_eq!(
-            tests["required_authority"],
-            "a session-attributed test-run recording authority"
-        );
+        assert_eq!(tests["state"], "ready", "{tests}");
+        assert_eq!(tests["item_count"], 0);
+        assert_eq!(tests["coverage"]["eligible"], 0);
+        assert_eq!(tests["required_authority"], Value::Null);
     });
 }
 

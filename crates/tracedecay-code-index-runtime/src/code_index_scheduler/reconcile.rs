@@ -4386,11 +4386,19 @@ mod retained_empty_seat_tests {
     }
 }
 
+/// Logical CPUs a fixture scheduler's own automatic runtime is sized for.
+/// Fixtures run many owners in one process, so a host-sized pool per owner
+/// oversubscribes the machine and makes a test's timing follow its core count.
+/// A test that exercises a wider plan binds that runtime explicitly.
+#[cfg(any(test, feature = "test-helpers"))]
+const FIXTURE_WORKER_LOGICAL_CPUS: usize = 2;
+
 /// The worker runtime one scheduler and every text generation it binds run
 /// under. Production enters nothing: the composition root's process plan
 /// applies. A scheduler without a process plan (in-process test fixtures, each
-/// a separate owner) builds and enters its own runtime, so no owner meters its
-/// work against another's plan.
+/// a separate owner) builds and enters its own runtime for
+/// [`FIXTURE_WORKER_LOGICAL_CPUS`], so no owner meters its work against
+/// another's plan.
 #[derive(Clone, Default)]
 pub(super) struct SchedulerWorkerRuntimeV1 {
     owned: Arc<std::sync::OnceLock<tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1>>,
@@ -4419,6 +4427,7 @@ impl SchedulerWorkerRuntimeV1 {
             let snapshot = resident_memory.snapshot();
             let runtime = tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1::build(
                 tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
+                FIXTURE_WORKER_LOGICAL_CPUS,
                 snapshot.limit_bytes.saturating_sub(snapshot.used_bytes),
             )?;
             Ok(Some(self.owned.get_or_init(|| runtime).enter()))

@@ -318,7 +318,11 @@ dependencies, and affected tests; use `tracedecay_complexity`,
 focused quality checks; `tracedecay_test_risk` for
 untested hot spots; `tracedecay_diagnostics` for structured compiler/type
 feedback; and `tracedecay_run_affected_tests` for the focused test set when test
-execution is appropriate.
+execution is appropriate. Each managed run is recorded in the project session
+store against the session its request names (`session_id`), with its start and
+finish times, exit status, and passed/failed/ignored counts; `tracedecay_test_results`
+reads that record back, and the dashboard's Loom view draws it on the session's
+lane. A run whose request names no session is recorded unattributed.
 
 For LCM/session issues, pair `tracedecay_lcm_status` with the read-only LCM
 diagnostics (`tracedecay_lcm_doctor`, or the native Hermes `lcm_doctor` wrapper).

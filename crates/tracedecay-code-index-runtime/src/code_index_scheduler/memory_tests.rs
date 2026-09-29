@@ -53,14 +53,17 @@ fn fixture() -> TempDir {
     root
 }
 
-/// The automatic plan a scheduler builds against the default authority,
+/// The automatic plan for `logical_cpus` against `available_memory_bytes`,
 /// bound to `scheduler` so its reservations use exactly this plan.
-fn bind_default_worker_runtime(
+fn bind_automatic_worker_runtime(
     scheduler: &CodeIndexWorktreeSchedulerV1,
+    logical_cpus: usize,
+    available_memory_bytes: u64,
 ) -> CodeIndexWorkerRuntimeV1 {
     let runtime = CodeIndexWorkerRuntimeV1::build(
         CodeIndexWorkerSelectionV1::Automatic {},
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+        logical_cpus,
+        available_memory_bytes,
     )
     .expect("build automatic worker runtime");
     scheduler.bind_worker_runtime(runtime.clone());
@@ -254,6 +257,34 @@ fn latest_complete_reuses_the_immutable_generation_allocation() {
     );
 }
 
+/// A fixture scheduler's own runtime has the fixed fixture width on any host,
+/// so concurrent fixture owners never size their pools from the machine.
+#[test]
+fn fixture_scheduler_builds_on_the_fixture_width_not_the_host() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-fixture-width").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let _entered = scheduler
+        .ensure_worker_plan()
+        .expect("fixture worker runtime")
+        .expect("a fixture scheduler enters its own runtime");
+    let pool_threads =
+        tracedecay_code_index::parallelism::install(rayon::current_num_threads).expect("pool");
+    assert_eq!(
+        (
+            tracedecay_code_index::parallelism::indexing_workers(),
+            pool_threads
+        ),
+        (2, 2)
+    );
+}
+
 #[test]
 fn worker_memory_reservation_is_charged_and_released_by_raii() {
     let project = fixture();
@@ -266,7 +297,11 @@ fn worker_memory_reservation_is_charged_and_released_by_raii() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let runtime = bind_default_worker_runtime(&scheduler);
+    let runtime = bind_automatic_worker_runtime(
+        &scheduler,
+        2,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
     let authority = Arc::new(ProcessResidentMemoryV1::new(
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     ));
@@ -298,7 +333,7 @@ fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let runtime = bind_default_worker_runtime(&scheduler);
+    let runtime = bind_automatic_worker_runtime(&scheduler, 128, 128 * 1024 * 1024 * 1024);
     let authority = Arc::new(ProcessResidentMemoryV1::new(
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     ));
@@ -340,7 +375,11 @@ fn worker_memory_reservation_refusal_is_typed() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    bind_default_worker_runtime(&scheduler);
+    bind_automatic_worker_runtime(
+        &scheduler,
+        2,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
     let authority = Arc::new(ProcessResidentMemoryV1::new(
         NonZeroU64::new(
             tracedecay_code_index::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1 - 1,
@@ -409,7 +448,11 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
 
     // A limit with ample room for the worker plan, so the only thing that can
     // refuse admission below is the injected measurement.
-    let runtime = bind_default_worker_runtime(&scheduler);
+    let runtime = bind_automatic_worker_runtime(
+        &scheduler,
+        2,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
     let limit = NonZeroU64::new(worker_reservation_bytes(&runtime).saturating_mul(4))
         .expect("positive test limit");
     let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
@@ -487,7 +530,11 @@ fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let runtime = bind_default_worker_runtime(&scheduler);
+    let runtime = bind_automatic_worker_runtime(
+        &scheduler,
+        8,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
     let planned = u64::from(runtime.status().effective_workers);
     assert!(
         planned >= 2,

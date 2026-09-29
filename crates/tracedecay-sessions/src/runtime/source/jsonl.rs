@@ -9,11 +9,10 @@ use std::sync::Mutex;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_private_fs::RewriteWitness;
 
 use super::{
     StoredCursor, TranscriptIngestError, TranscriptIngestResult, file_mtime_secs,
@@ -154,28 +153,36 @@ pub(in crate::runtime) fn jsonl_native_file_identity(
     Some(JsonlNativeFileIdentity { created_nanos })
 }
 
-#[cfg(unix)]
+/// One stat observation of a file's modification and rewrite-witness times.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(in crate::runtime) struct JsonlFileChangeToken {
-    mtime_seconds: i64,
-    mtime_nanos: i64,
-    ctime_seconds: i64,
-    ctime_nanos: i64,
+    modified_nanos: Option<u128>,
+    /// The platform [`RewriteWitness`]'s change time; `None` where no stat
+    /// field witnesses a rewrite, so the token can disprove one but never
+    /// prove the bytes unchanged.
+    changed_nanos: Option<i128>,
 }
 
-#[cfg(unix)]
 pub(in crate::runtime) fn jsonl_file_change_token(
     metadata: &std::fs::Metadata,
 ) -> JsonlFileChangeToken {
+    jsonl_file_change_token_under(metadata, RewriteWitness::NATIVE)
+}
+
+pub(in crate::runtime) fn jsonl_file_change_token_under(
+    metadata: &std::fs::Metadata,
+    witness: RewriteWitness,
+) -> JsonlFileChangeToken {
     JsonlFileChangeToken {
-        mtime_seconds: metadata.mtime(),
-        mtime_nanos: metadata.mtime_nsec(),
-        ctime_seconds: metadata.ctime(),
-        ctime_nanos: metadata.ctime_nsec(),
+        modified_nanos: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos()),
+        changed_nanos: witness.change_time_nanos(metadata),
     }
 }
 
-#[cfg(unix)]
 impl JsonlFileChangeToken {
     /// The data-modification half of the token.
     ///
@@ -184,60 +191,13 @@ impl JsonlFileChangeToken {
     /// answers "were this file's contents written", so the two halves are
     /// asked separately, ctime is enough to suspect a change, mtime is what
     /// proves one.
-    fn data_stamp(self) -> (i64, i64) {
-        (self.mtime_seconds, self.mtime_nanos)
-    }
-}
-
-#[cfg(windows)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(in crate::runtime) struct JsonlFileChangeToken {
-    last_write_time: u64,
-}
-
-#[cfg(windows)]
-pub(in crate::runtime) fn jsonl_file_change_token(
-    metadata: &std::fs::Metadata,
-) -> JsonlFileChangeToken {
-    JsonlFileChangeToken {
-        last_write_time: metadata.last_write_time(),
-    }
-}
-
-#[cfg(windows)]
-impl JsonlFileChangeToken {
-    /// See the Unix definition: this platform's token is already
-    /// data-modification only, so the whole token is the data stamp.
-    fn data_stamp(self) -> u64 {
-        self.last_write_time
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(in crate::runtime) struct JsonlFileChangeToken {
-    modified_nanos: Option<u128>,
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(in crate::runtime) fn jsonl_file_change_token(
-    metadata: &std::fs::Metadata,
-) -> JsonlFileChangeToken {
-    JsonlFileChangeToken {
-        modified_nanos: metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_nanos()),
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-impl JsonlFileChangeToken {
-    /// See the Unix definition: this platform's token is already
-    /// data-modification only, so the whole token is the data stamp.
     fn data_stamp(self) -> Option<u128> {
         self.modified_nanos
+    }
+
+    /// Whether an equal later token proves the file's bytes unchanged.
+    pub(in crate::runtime) fn witnesses_rewrites(self) -> bool {
+        self.changed_nanos.is_some()
     }
 }
 
@@ -246,23 +206,12 @@ impl JsonlFileChangeToken {
 /// Linux inode timestamps come from the coarse realtime clock. A token still
 /// inside that quantum can be shared with a same-length rewrite, so it is not
 /// proof the bytes are unchanged. Callers that would skip a content check
-/// must refuse the skip until the token falls behind the clock.
-#[cfg(unix)]
+/// must refuse the skip until the token falls behind the clock. A token
+/// without a rewrite witness never is: no later write has to move it.
 pub(in crate::runtime) fn jsonl_change_token_settled(token: JsonlFileChangeToken) -> bool {
-    tracedecay_private_fs::change_time_settled(change_time_nanos(token))
-}
-
-#[cfg(unix)]
-fn change_time_nanos(token: JsonlFileChangeToken) -> i128 {
-    i128::from(token.ctime_seconds)
-        .saturating_mul(1_000_000_000)
-        .saturating_add(i128::from(token.ctime_nanos))
-}
-
-#[cfg(not(unix))]
-pub(in crate::runtime) fn jsonl_change_token_settled(token: JsonlFileChangeToken) -> bool {
-    let _ = token;
-    true
+    token
+        .changed_nanos
+        .is_some_and(tracedecay_private_fs::change_time_settled)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -437,7 +386,8 @@ pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) {
             std::thread::yield_now();
             continue;
         };
-        if jsonl_change_token_settled(jsonl_file_change_token(&metadata)) {
+        let token = jsonl_file_change_token(&metadata);
+        if !token.witnesses_rewrites() || jsonl_change_token_settled(token) {
             return;
         }
         std::thread::yield_now();
@@ -477,9 +427,12 @@ fn remember_unchanged_generation_if_settled(key: UnchangedGenerationCacheKey) {
     }
 }
 
+/// A cache entry needs a change token whose equality proves the bytes
+/// unchanged; without a rewrite witness callers re-verify content instead.
 fn unchanged_generation_cache_key(
     file: &std::fs::File,
     metadata: &std::fs::Metadata,
+    change: JsonlFileChangeToken,
     previous: StoredCursor,
     resume: JsonlResumeState,
 ) -> Option<UnchangedGenerationCacheKey> {
@@ -492,23 +445,12 @@ fn unchanged_generation_cache_key(
     Some(UnchangedGenerationCacheKey {
         native_identity: jsonl_native_file_identity(file, metadata)?,
         size: metadata.len(),
-        change: trusted_jsonl_cache_change_token(metadata)?,
+        change: Some(change).filter(|change| change.witnesses_rewrites())?,
         position: previous.position,
         generation: resume.generation,
         stable_file_identity: resume.file_identity,
         fingerprint: resume.fingerprint,
     })
-}
-
-/// Whether an unchanged [`JsonlFileChangeToken`] proves the file's bytes
-/// unchanged. Unix ctime advances on every write and cannot be set back.
-/// Windows exposes no such witness: NTFS `ChangeTime` stays put when a writer
-/// restores `LastWriteTime` through its handle, so there an unchanged token
-/// only fails to disprove a rewrite and callers must re-verify content.
-pub(in crate::runtime) const JSONL_CHANGE_TOKEN_WITNESSES_REWRITES: bool = cfg!(unix);
-
-fn trusted_jsonl_cache_change_token(metadata: &std::fs::Metadata) -> Option<JsonlFileChangeToken> {
-    JSONL_CHANGE_TOKEN_WITNESSES_REWRITES.then(|| jsonl_file_change_token(metadata))
 }
 
 #[cfg(any(test, feature = "hotpath"))]
@@ -935,6 +877,7 @@ struct RawJsonlScanRequest {
     oversized_policy: MalformedJsonlPolicy,
     max_record_bytes: usize,
     resume_state: Option<JsonlResumeState>,
+    witness: RewriteWitness,
 }
 
 /// **`ByteOffset`** reader for append-only JSONL.
@@ -1209,6 +1152,7 @@ fn try_stream_new_jsonl_raw_with_policy_and_frame_limit(
             oversized_policy,
             max_record_bytes,
             resume_state,
+            witness: RewriteWitness::NATIVE,
         },
         || {},
     )
@@ -1223,6 +1167,7 @@ struct JsonlScanGeneration {
     /// cannot hide an in-place rewrite. A metadata-only change may cause one
     /// conservative retry; admitting mixed bytes is the worse outcome.
     change: JsonlFileChangeToken,
+    witness: RewriteWitness,
     file_id: u64,
     file_identity: u64,
     /// `None` only when the scan proved it would read nothing, so no batch,
@@ -1249,6 +1194,7 @@ impl<'a> PreparedJsonlScan<'a> {
         mut file: MeasuredJsonlFile<'a>,
         previous: StoredCursor,
         resume_state: Option<JsonlResumeState>,
+        witness: RewriteWitness,
         after_generation_capture: impl FnOnce(),
         io: &mut JsonlIoAccounting,
     ) -> TranscriptIngestResult<Self> {
@@ -1258,9 +1204,10 @@ impl<'a> PreparedJsonlScan<'a> {
             .map_err(|error| TranscriptIngestError::scan_io("fstat", path, error))?;
         let file_size = metadata.len();
         let mtime = file_mtime_secs(&metadata);
+        let change = jsonl_file_change_token_under(&metadata, witness);
         let cached_unchanged = resume_state
             .and_then(|resume| {
-                unchanged_generation_cache_key(file.inner(), &metadata, previous, resume)
+                unchanged_generation_cache_key(file.inner(), &metadata, change, previous, resume)
             })
             .filter(|key| {
                 unchanged_generation_cache_hit(*key) && jsonl_change_token_settled(key.change)
@@ -1360,10 +1307,13 @@ impl<'a> PreparedJsonlScan<'a> {
         // timestamp quantum is not that proof: the rewrite can land before
         // this scan reads and leave inode, length, and both timestamps alone.
         // Seal the fingerprint before `after_generation_capture` so that
-        // rewrite cannot hash as its own witness.
+        // rewrite cannot hash as its own witness. A token with no rewrite
+        // witness never rules that rewrite out; `revalidate` proves the
+        // consumed prefix on every such scan instead.
         if snapshot_fingerprint.is_none()
             && file_size > 0
-            && !jsonl_change_token_settled(jsonl_file_change_token(&metadata))
+            && change.witnesses_rewrites()
+            && !jsonl_change_token_settled(change)
         {
             memoized_jsonl_snapshot_fingerprint(
                 &mut snapshot_fingerprint,
@@ -1393,7 +1343,8 @@ impl<'a> PreparedJsonlScan<'a> {
             generation: JsonlScanGeneration {
                 file_size,
                 mtime,
-                change: jsonl_file_change_token(&metadata),
+                change,
+                witness,
                 file_id,
                 file_identity,
                 snapshot_fingerprint,
@@ -1423,7 +1374,8 @@ impl<'a> PreparedJsonlScan<'a> {
             let observed_native = jsonl_native_file_identity(self.file.inner(), &metadata);
             if observed_native != Some(expected.native_identity)
                 || metadata.len() != expected.size
-                || jsonl_file_change_token(&metadata) != expected.change
+                || jsonl_file_change_token_under(&metadata, self.generation.witness)
+                    != expected.change
             {
                 crate::runtime::pipeline_metrics::record_scan_generation_changed();
                 return Err(TranscriptIngestError::ScanGenerationChanged {
@@ -1439,7 +1391,8 @@ impl<'a> PreparedJsonlScan<'a> {
                 .saturating_add(identity_window_bytes);
             if final_file_identity != self.generation.file_identity
                 || metadata.len() != self.generation.file_size
-                || jsonl_file_change_token(&metadata) != self.generation.change
+                || jsonl_file_change_token_under(&metadata, self.generation.witness)
+                    != self.generation.change
             {
                 crate::runtime::pipeline_metrics::record_scan_generation_changed();
                 return Err(TranscriptIngestError::ScanGenerationChanged {
@@ -1474,9 +1427,13 @@ impl<'a> PreparedJsonlScan<'a> {
                     file_identity: self.generation.file_identity,
                     fingerprint: digest.fingerprint(extent),
                 };
-                if let Some(key) =
-                    unchanged_generation_cache_key(self.file.inner(), &metadata, cursor, resume)
-                {
+                if let Some(key) = unchanged_generation_cache_key(
+                    self.file.inner(),
+                    &metadata,
+                    jsonl_file_change_token_under(&metadata, self.generation.witness),
+                    cursor,
+                    resume,
+                ) {
                     remember_unchanged_generation_if_settled(key);
                 }
             }
@@ -1860,9 +1817,11 @@ impl<'a> RawJsonlBatchScanner<'a> {
         //
         // The common unchanged cold scan performs no extra extent hash. The
         // one-pass proof is paid only when the token moved while the file was
-        // open, and covers only the consumed prefix, never the whole extent.
-        let final_change = jsonl_file_change_token(&final_metadata);
-        let generation_changed = final_change != self.generation.change;
+        // open, or when it has no rewrite witness and so cannot show a move,
+        // and covers only the consumed prefix, never the whole extent.
+        let final_change = jsonl_file_change_token_under(&final_metadata, self.generation.witness);
+        let generation_changed =
+            final_change != self.generation.change || !final_change.witnesses_rewrites();
         // Data was written and the file did not grow, so the bytes this scan
         // consumed were replaced. Rejected without the proof below, which
         // cannot see a rewrite that landed before the read began.
@@ -1902,9 +1861,13 @@ impl<'a> RawJsonlBatchScanner<'a> {
                 mtime: file_mtime_secs(&final_metadata),
                 file_id: self.generation.file_id,
             };
-            if let Some(key) =
-                unchanged_generation_cache_key(file.inner(), &final_metadata, cursor, resume)
-            {
+            if let Some(key) = unchanged_generation_cache_key(
+                file.inner(),
+                &final_metadata,
+                final_change,
+                cursor,
+                resume,
+            ) {
                 remember_unchanged_generation_if_settled(key);
             }
         }
@@ -1939,6 +1902,7 @@ fn try_stream_new_jsonl_raw_from_file(
         oversized_policy,
         max_record_bytes,
         resume_state,
+        witness,
     } = request;
     let scan_payload_reads = ScanPayloadMeter::new();
     let file = MeasuredJsonlFile::new(file, &scan_payload_reads);
@@ -1950,6 +1914,7 @@ fn try_stream_new_jsonl_raw_from_file(
             file,
             previous,
             resume_state,
+            witness,
             after_generation_capture,
             &mut io,
         )?;
@@ -2061,6 +2026,7 @@ mod tests {
                 oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
+                witness: RewriteWitness::NATIVE,
             },
             || {
                 std::fs::rename(&path, &moved).unwrap();
@@ -2102,6 +2068,7 @@ mod tests {
                 oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
+                witness: RewriteWitness::NATIVE,
             },
             || std::fs::write(&path, replacement).unwrap(),
         )
@@ -2141,6 +2108,7 @@ mod tests {
                 oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
+                witness: RewriteWitness::NATIVE,
             },
             || {
                 std::fs::OpenOptions::new()
@@ -2364,6 +2332,7 @@ mod tests {
                 oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: Some(checkpoint),
+                witness: RewriteWitness::NATIVE,
             },
             || std::fs::write(&path, replacement).unwrap(),
         );
@@ -2373,6 +2342,80 @@ mod tests {
             Err(TranscriptIngestError::ScanGenerationChanged { path: changed })
                 if changed == path
         ));
+    }
+
+    /// Where no stat field witnesses a rewrite (NTFS leaves `ChangeTime` put
+    /// when a writer restores `LastWriteTime`), a same-length rewrite of an
+    /// already-ingested line that restores the exact mtime leaves identity,
+    /// length and change token equal. A resumed scan racing it must still
+    /// refuse the generation instead of appending onto a prefix the file no
+    /// longer holds, so only the content digest can decide.
+    #[test]
+    fn without_a_rewrite_witness_an_mtime_restored_prefix_rewrite_refuses_the_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restored.jsonl");
+        let head = b"{\"v\":\"head\"}\n";
+        let ingested = b"{\"v\":\"old\"}\n";
+        let rewritten = b"{\"v\":\"new\"}\n";
+        assert_eq!(ingested.len(), rewritten.len());
+        std::fs::write(&path, [&head[..], &ingested[..]].concat()).unwrap();
+        let scan = |previous, resume_state, after_capture: &dyn Fn()| {
+            try_stream_new_jsonl_raw_from_file(
+                &path,
+                std::fs::File::open(&path).unwrap(),
+                RawJsonlScanRequest {
+                    previous,
+                    max_new_bytes: None,
+                    max_frames: MAX_JSONL_FRAMES_PER_BATCH,
+                    oversized_policy: MalformedJsonlPolicy::Defer,
+                    max_record_bytes: MAX_JSONL_RECORD_BYTES,
+                    resume_state,
+                    witness: RewriteWitness::Absent,
+                },
+                after_capture,
+            )
+        };
+        let first = scan(StoredCursor::default(), None, &|| {}).unwrap();
+        assert_eq!(first.frames.len(), 2);
+        let checkpoint = JsonlResumeState {
+            generation: first.new_cursor.file_id,
+            file_identity: first.file_identity,
+            fingerprint: first.frames.last().unwrap().resume_fingerprint,
+        };
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"v\":\"tail\"}\n")
+            .unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let appended_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let outcome = scan(first.new_cursor, Some(checkpoint), &|| {
+            let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(head.len() as u64)).unwrap();
+            file.write_all(rewritten).unwrap();
+            file.set_modified(appended_mtime).unwrap();
+        });
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            appended_mtime,
+            "the rewrite fixture must restore the exact modification time"
+        );
+        assert!(
+            matches!(
+                &outcome,
+                Err(TranscriptIngestError::ScanGenerationChanged { path: changed })
+                    if *changed == path
+            ),
+            "a resumed scan over a rewritten prefix must be refused, got frames {:?}",
+            outcome.as_ref().map(|scan| scan
+                .frames
+                .iter()
+                .map(|frame| String::from_utf8_lossy(&frame.bytes).into_owned())
+                .collect::<Vec<_>>())
+        );
     }
 
     #[test]
