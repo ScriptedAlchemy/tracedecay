@@ -11,9 +11,8 @@ each PR's result as soon as its work finishes.
 Automatic admission is off unless repository variable `HAULER_CI_ENABLED` is
 `true`. Run **Hauler CI** manually from `master`, selecting PR numbers and a
 bounded lane lifetime (at most 300 minutes). The Action validates these inputs.
-Use a small snapshot limit for the pilot. Its sanitized artifacts contain timing
-and verdict evidence; raw test logs and arbitrary PR-produced files are not
-uploaded.
+Use a small snapshot limit for the pilot. Its artifacts contain controller timing metadata and bounded XML/JSON test
+reports. Raw worker logs are excluded; report text is PR-produced, not sanitized.
 
 Compare complete PR verdict latency and total runner minutes with ordinary CI.
 The pilot does not replace existing CI. Before enabling automatic admission,

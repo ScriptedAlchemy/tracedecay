@@ -66,9 +66,9 @@ jobs:
           pull-requests: ${{ inputs.pull_requests || '' }}
           max-minutes: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_minutes) || '300' }}
           max-snapshots: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_snapshots) || '2' }}
-      - name: Preserve sanitized timing and verdict evidence
+      - name: Preserve timing and bounded test reports
         if: always() && steps.hauler.outputs.evidence != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hauler-ci-${{ matrix.lane }}
           path: ${{ steps.hauler.outputs.evidence }}
