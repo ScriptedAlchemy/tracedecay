@@ -115,16 +115,13 @@ fn captured_source_bytes_are_charged_until_the_snapshot_drops() {
     assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
-/// Capture became proportional to the change set: a reconcile over an
-/// unchanged checkout reuses the active generation's rows instead of
-/// re-reading them, so it retains no source Arcs and holds no charge for
-/// bytes it is not keeping resident. This pins the invariant that survived
-/// that change, the charge always equals what the scheduler still retains,
-/// on the build path and on the no-build path alike, rather than the
-/// pre-proportional behaviour where every reconcile re-captured, and so
-/// re-charged, the whole snapshot.
+/// Captured source lives for the build that reads it. Once the generation is
+/// sealed nothing reads those bytes (the sealed artifacts serve every later
+/// read), so neither a publishing reconcile nor a no-build reconcile over the
+/// unchanged checkout leaves source resident or charged: holding them had
+/// kept about 16 KB of anonymous heap per indexed file after every build.
 #[test]
-fn reconcile_charges_exactly_the_snapshot_sources_it_retains() {
+fn reconcile_leaves_no_captured_source_charged_after_the_build() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
@@ -138,15 +135,33 @@ fn reconcile_charges_exactly_the_snapshot_sources_it_retains() {
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     ));
     scheduler.bind_resident_memory(Arc::clone(&authority));
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture source snapshot");
+    assert_eq!(
+        authority.snapshot().used_bytes,
+        u64::try_from("pub fn retained_generation() -> u32 { 1 }\n".len()).expect("fits"),
+        "captured source is charged while a build holds it"
+    );
+    drop(captured);
 
-    scheduler.reconcile_now().expect("publish generation");
-    let retained_bytes = scheduler
-        .retained_snapshot_bytes
-        .iter()
-        .map(|bytes| bytes.len() as u64)
-        .sum::<u64>();
-    assert!(retained_bytes > 0);
-    assert_eq!(authority.snapshot().used_bytes, retained_bytes);
+    assert!(matches!(
+        scheduler.reconcile_now().expect("publish generation"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    assert_eq!(authority.snapshot().used_bytes, 0);
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("published generation")
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs::retained_generation"]
+    );
 
     assert!(matches!(
         scheduler
@@ -154,22 +169,7 @@ fn reconcile_charges_exactly_the_snapshot_sources_it_retains() {
             .expect("reconcile unchanged source"),
         CodeIndexReconcileOutcomeV1::Noop(_)
     ));
-    let retained_after_no_build = scheduler
-        .retained_snapshot_bytes
-        .iter()
-        .map(|bytes| bytes.len() as u64)
-        .sum::<u64>();
-    assert!(
-        retained_after_no_build <= retained_bytes,
-        "a reuse-only capture never retains more source than the snapshot it reused"
-    );
-    assert_eq!(
-        authority.snapshot().used_bytes,
-        retained_after_no_build,
-        "the no-build path charges exactly the Arc sources it still retains, so a \
-         reuse-only pass neither strands the previous charge nor holds one for bytes \
-         it released"
-    );
+    assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
 #[test]
@@ -796,11 +796,7 @@ fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
     );
     assert_eq!(
         authority.snapshot().used_bytes,
-        scheduler
-            .retained_snapshot_bytes
-            .iter()
-            .map(|bytes| bytes.len() as u64)
-            .sum::<u64>(),
+        0,
         "the decode's charge is released once it completes"
     );
 }

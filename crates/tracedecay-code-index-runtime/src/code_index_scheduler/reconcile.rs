@@ -909,12 +909,6 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// handle from the mounted map and never wait for scheduler build state.
     freshness_fence: SourceFreshnessFenceV1,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
-    /// Keeps the current snapshot's interned bytes alive in the shared pool.
-    pub(super) retained_snapshot_bytes: Vec<Arc<[u8]>>,
-    /// Holds the measured source-byte charges for
-    /// `retained_snapshot_bytes`; worker scratch is admitted separately only
-    /// after capture has completed.
-    pub(super) _retained_snapshot_memory: Vec<ResidentMemoryReservationV1>,
     /// Deterministic reconcile fault used only by the worker-loop isolation
     /// tests; production never installs one.
     #[cfg(test)]
@@ -1290,8 +1284,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             policy,
             freshness_fence,
             byte_pool,
-            retained_snapshot_bytes: Vec::new(),
-            _retained_snapshot_memory: Vec::new(),
             #[cfg(test)]
             reconcile_fault: None,
             resident_memory: Arc::new(ProcessResidentMemoryV1::new(
@@ -1545,12 +1537,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             )
             .map(Some)
             .map_err(CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission)
-    }
-
-    pub(super) fn finish_snapshot_build_memory(
-        _reservations: &mut [ResidentMemoryReservationV1],
-    ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        Ok(())
     }
 
     /// One reconcile attempt's fence, bound to the process RSS cell.
@@ -2013,7 +1999,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         };
         let RetainedReconcileCaptureV1 {
-            mut captured,
+            captured,
             drained_hints,
             control,
             git_metadata,
@@ -2033,9 +2019,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         publication
             .publish_atomically(&scope, None, Arc::clone(&pending))
             .map_err(CodeIndexProductionErrorV1::Publication)?;
-        Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-        self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-        self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
         let snapshot_content_identity = pending.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
         self.mark_reconciled_state(
@@ -2409,9 +2392,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .to_owned(),
                 ));
             }
-            Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-            self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled_retained_generation_state(
                 git_metadata.clone(),
@@ -2475,9 +2455,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(Some(outcome));
         }
         drop(std::mem::take(&mut captured.captured_files));
-        Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-        self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-        self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
         let source_witness = stat_signature
             .clone()
             .map(|signature| ReconciledSourceWitnessV1::new(signature, &captured.snapshot));
@@ -2825,8 +2802,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             .reset_corrupt_store()
             .map_err(CodeIndexProductionErrorV1::Publication)?;
         self.latest_content_identity = None;
-        self.retained_snapshot_bytes.clear();
-        self._retained_snapshot_memory.clear();
         *self
             .active_snapshot_changed_paths
             .lock()
@@ -2989,10 +2964,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                     return Err(cancelled_code_index_reconcile());
                 }
                 drop(std::mem::take(&mut captured.captured_files));
-                Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-                self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-                self._retained_snapshot_memory =
-                    std::mem::take(&mut captured.retained_reservations);
                 self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
                 self.mark_reconciled(SourceContentManifestV1::for_snapshot(&captured.snapshot));
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -3067,10 +3038,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(CodeIndexProductionErrorV1::Input(
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 )) => {
-                    Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-                    self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-                    self._retained_snapshot_memory =
-                        std::mem::take(&mut captured.retained_reservations);
                     self.latest_content_identity = Some(snapshot_content_identity.clone());
                     self.mark_reconciled(source_manifest);
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -3087,9 +3054,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .to_owned(),
                 ));
             }
-            Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-            self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled(source_manifest);
 

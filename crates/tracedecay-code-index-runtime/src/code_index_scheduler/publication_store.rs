@@ -65,8 +65,6 @@ static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CodeIndexBytePoolStatsV1 {
-    pub inserted: u64,
-    pub reused: u64,
     pub parse_chunk_inserted: u64,
     pub parse_chunk_reused: u64,
 }
@@ -77,8 +75,6 @@ pub struct SharedCodeIndexBytePoolV1 {
     /// Decoded generation pages by content, so linked worktrees that sealed
     /// identical trees hold one decode between them.
     pub(super) decoded_content: SharedDecodedContentPoolV1,
-    inserted: AtomicU64,
-    reused: AtomicU64,
     /// Map length recorded after the last dead-entry prune. Weak entries whose
     /// `Arc` dropped are never removed by lookups, so `intern` prunes them once
     /// the map doubles past this baseline, bounding growth over the daemon
@@ -95,8 +91,6 @@ impl Default for SharedCodeIndexBytePoolV1 {
             ),
             physical_artifacts: SharedPhysicalCodeArtifactPoolV1::default(),
             decoded_content: SharedDecodedContentPoolV1::default(),
-            inserted: AtomicU64::new(0),
-            reused: AtomicU64::new(0),
             last_prune_len: AtomicUsize::new(0),
         }
     }
@@ -116,12 +110,10 @@ impl SharedCodeIndexBytePoolV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(shared) = pool.get(&digest).and_then(Weak::upgrade) {
-            self.reused.fetch_add(1, Ordering::Relaxed);
             return (digest, shared);
         }
         let shared: Arc<[u8]> = Arc::from(bytes);
         pool.insert(digest.clone(), Arc::downgrade(&shared));
-        self.inserted.fetch_add(1, Ordering::Relaxed);
         if pool.len()
             > self
                 .last_prune_len
@@ -139,8 +131,6 @@ impl SharedCodeIndexBytePoolV1 {
     pub(super) fn stats(&self) -> CodeIndexBytePoolStatsV1 {
         let physical_artifacts = self.physical_artifacts.stats();
         CodeIndexBytePoolStatsV1 {
-            inserted: self.inserted.load(Ordering::Relaxed),
-            reused: self.reused.load(Ordering::Relaxed),
             parse_chunk_inserted: physical_artifacts.inserted,
             parse_chunk_reused: physical_artifacts.reused,
         }
