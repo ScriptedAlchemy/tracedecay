@@ -37,19 +37,31 @@
   ],
   "lanes": [
     {
-      "id": "linux-a",
-      "checkName": "Hauler / Linux A",
+      "id": "linux-journeys",
+      "checkName": "Hauler / Linux journeys",
       "tasks": [
         {
           "id": "journeys",
           "run": "status=0; python3 scripts/linux-test-partitions.py run-linux-group root-journeys || status=$?; if [ -f target/nextest/linux/timings.json ]; then cp target/nextest/linux/timings.json target/nextest/linux/timings-root-journeys.json || exit 1; fi; exit \"$status\"",
           "timeoutSeconds": 4500
-        },
+        }
+      ]
+    },
+    {
+      "id": "linux-transport",
+      "checkName": "Hauler / Linux transport",
+      "tasks": [
         {
           "id": "transport",
           "run": "status=0; python3 scripts/linux-test-partitions.py run-linux-group root-transport || status=$?; if [ -f target/nextest/linux/timings.json ]; then cp target/nextest/linux/timings.json target/nextest/linux/timings-root-transport.json || exit 1; fi; exit \"$status\"",
           "timeoutSeconds": 9600
-        },
+        }
+      ]
+    },
+    {
+      "id": "linux-storage",
+      "checkName": "Hauler / Linux storage",
+      "tasks": [
         {
           "id": "storage",
           "run": "status=0; python3 scripts/linux-test-partitions.py run-linux-group core-storage || status=$?; if [ -f target/nextest/linux/timings.json ]; then cp target/nextest/linux/timings.json target/nextest/linux/timings-core-storage.json || exit 1; fi; exit \"$status\"",
@@ -58,19 +70,31 @@
       ]
     },
     {
-      "id": "linux-b",
-      "checkName": "Hauler / Linux B",
+      "id": "linux-sessions",
+      "checkName": "Hauler / Linux sessions",
       "tasks": [
         {
           "id": "sessions",
           "run": "status=0; python3 scripts/linux-test-partitions.py run-linux-group root-lib-sessions || status=$?; if [ -f target/nextest/linux/timings.json ]; then cp target/nextest/linux/timings.json target/nextest/linux/timings-root-lib-sessions.json || exit 1; fi; exit \"$status\"",
           "timeoutSeconds": 7200
-        },
+        }
+      ]
+    },
+    {
+      "id": "linux-runtime",
+      "checkName": "Hauler / Linux runtime",
+      "tasks": [
         {
           "id": "runtime",
           "run": "status=0; python3 scripts/linux-test-partitions.py run-linux-group runtime || status=$?; if [ -f target/nextest/linux/timings.json ]; then cp target/nextest/linux/timings.json target/nextest/linux/timings-runtime.json || exit 1; fi; exit \"$status\"",
           "timeoutSeconds": 3900
-        },
+        }
+      ]
+    },
+    {
+      "id": "linux-contracts",
+      "checkName": "Hauler / Linux contracts",
+      "tasks": [
         {
           "id": "contracts",
           "run": "status=0; python3 scripts/linux-test-partitions.py run-linux-group core-contracts || status=$?; if [ -f target/nextest/linux/timings.json ]; then cp target/nextest/linux/timings.json target/nextest/linux/timings-core-contracts.json || exit 1; fi; exit \"$status\"",

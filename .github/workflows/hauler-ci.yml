@@ -69,9 +69,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - lane: linux-a
+          - lane: linux-journeys
             runner: ubuntu-24.04-arm
-          - lane: linux-b
+          - lane: linux-transport
+            runner: ubuntu-24.04-arm
+          - lane: linux-storage
+            runner: ubuntu-24.04-arm
+          - lane: linux-sessions
+            runner: ubuntu-24.04-arm
+          - lane: linux-runtime
+            runner: ubuntu-24.04-arm
+          - lane: linux-contracts
             runner: ubuntu-24.04-arm
           - lane: checks
             runner: ubuntu-24.04-arm
