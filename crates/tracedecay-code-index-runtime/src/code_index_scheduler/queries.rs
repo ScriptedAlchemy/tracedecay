@@ -354,7 +354,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // longer held, so no later retry can serve it either.
                 .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
-                self.latest_complete_fresh_for_scope(request.scope())
+                self.latest_complete_fresh_for_scope_awaiting_seat(request.scope())
                     .await
                     .ok_or(CallableCodeCursorError::Unavailable)
             } else {

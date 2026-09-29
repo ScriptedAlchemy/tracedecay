@@ -216,11 +216,16 @@ impl IsolatedHome {
 
     /// Reuses the installed toolchain in a child whose `HOME` is this
     /// isolated home: rustup and cargo would otherwise resolve their state
-    /// under the empty throwaway home.
+    /// under the empty throwaway home. The child's hermetic `PATH` gains only
+    /// the toolchain's own `$CARGO_HOME/bin`, where rustup installs `cargo`
+    /// and the `rust-analyzer` proxy the daemon resolves through `PATH`.
     pub fn apply_toolchain_env(&self, command: &mut Command) {
         for (key, value) in &self.toolchain_environment {
             match value {
                 Some(value) => {
+                    if *key == "CARGO_HOME" {
+                        command.env("PATH", hermetic_path(&[Path::new(value).join("bin")]));
+                    }
                     command.env(key, value);
                 }
                 None => {

@@ -93,6 +93,14 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         )
         .await
         .unwrap();
+    assert!(
+        registry
+            .for_repository_root(&project_root)
+            .await
+            .unwrap()
+            .is_none(),
+        "an owner whose authority project open has not installed yet is still mounting"
+    );
     registry
         .install_authority(
             &project_root,

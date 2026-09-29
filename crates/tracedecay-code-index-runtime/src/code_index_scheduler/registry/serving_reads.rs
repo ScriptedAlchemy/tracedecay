@@ -18,10 +18,10 @@ use super::super::{
 use super::graph_cursor_retention::GraphCursorRetentionV1;
 use super::scope_identity::{latest_matches_scope_identity, text_matches_scope_identity};
 use super::{
-    CodeIndexMountedScopeV1, CodeIndexSchedulerRegistryV1, CodeIndexServingScopeV1,
-    MountedCodeIndexWorktreeV1, PendingWakeClaimV1, ReadyProbeServingPartsV1,
-    dashboard_code_graph_serving, dashboard_freshness_identity, dashboard_terminal_status,
-    dashboard_text_freshness_identity, unique_mounted_for_scope,
+    CodeIndexMountedScopeV1, CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexServingScopeV1, MountedCodeIndexWorktreeV1, PendingWakeClaimV1,
+    ReadyProbeServingPartsV1, dashboard_code_graph_serving, dashboard_freshness_identity,
+    dashboard_terminal_status, dashboard_text_freshness_identity, unique_mounted_for_scope,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -822,6 +822,60 @@ impl CodeIndexSchedulerRegistryV1 {
         // [`latest_matches_scope_identity`]), and the ladder has already
         // scheduled the rebuild that will replace this generation.
         latest_matches_scope_identity(&latest, scope).then_some(latest)
+    }
+
+    /// [`Self::latest_complete_fresh_for_scope`] for a read that needs the
+    /// whole decoded generation. A publication seats only its text owner and
+    /// defers the decode until a reader needs it, so this read's own demand
+    /// is what starts that decode: it waits for the seat rather than answering
+    /// the demanding request unavailable. It stops waiting once no decode is
+    /// pending (seated, memory-refused, shutting down, or unmounted); the
+    /// caller's resolution deadline bounds the rest.
+    pub(crate) async fn latest_complete_fresh_for_scope_awaiting_seat(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let root = {
+            let mounted = self.mounted.lock().await;
+            unique_mounted_for_scope(&mounted, scope)
+                .unique()?
+                .0
+                .clone()
+        };
+        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, &root).await;
+        loop {
+            if let Some(latest) = self.latest_complete_fresh_for_scope(scope).await {
+                return Some(latest);
+            }
+            if !self.complete_seat_pending(&root).await {
+                return None;
+            }
+            signals.changed().await.ok()?;
+        }
+    }
+
+    /// Whether demand has asked the worker to seat the complete generation
+    /// of a published text owner and nothing yet stops it from doing so.
+    async fn complete_seat_pending(&self, project_root: &Path) -> bool {
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(project_root) else {
+            return false;
+        };
+        worktree
+            .complete_generation_requested
+            .load(Ordering::Acquire)
+            && !worktree.memory_retry.waiting()
+            && !worktree.shutting_down.load(Ordering::Acquire)
+            && worktree
+                .serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            && worktree
+                .text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
     }
 
     /// Resolve one exact scope and admit only an already-current generation.
