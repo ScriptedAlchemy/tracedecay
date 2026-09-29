@@ -64,8 +64,12 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .unwrap_or_else(|| panic!("missing profile worker revision: {settings}"))
             .to_owned();
         assert_eq!(
+            user_revision, worker_revision,
+            "every profile setting shares the profile store's revision"
+        );
+        assert_ne!(
             user_revision, revision,
-            "project and profile values must share one configuration revision"
+            "profile settings never share the project's configuration revision"
         );
         let user_legacy_config_path = tracedecay_session_memory::user_config::config_path(
             fixture.host_runtime.profile_root(),
@@ -476,10 +480,10 @@ fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_pa
             .as_str()
             .unwrap_or_else(|| panic!("worker patch omitted profile worker revision: {patched_envelope}"));
         assert_ne!(patched_revision, worker_revision);
+        assert_eq!(user_revision, worker_revision);
         assert_eq!(
-            patched_envelope["payload"]["user"]["configuration_revision_id"],
-            user_revision,
-            "a profile worker write must not advance the ordinary user revision"
+            patched_envelope["payload"]["user"]["configuration_revision_id"], patched_revision,
+            "a profile worker write advances the one profile revision user settings share"
         );
 
         let worker_status = &patched_envelope["payload"]["user"]["code_index_worker_status"];
@@ -512,8 +516,8 @@ fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_pa
         );
         assert_eq!(
             refreshed_envelope["payload"]["user"]["configuration_revision_id"],
-            user_revision,
-            "refresh must retain the unrelated user configuration revision"
+            patched_revision,
+            "refresh must show the profile revision the worker write committed"
         );
     });
 }
