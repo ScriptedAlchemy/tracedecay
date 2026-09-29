@@ -426,12 +426,10 @@ impl CodeIndexSchedulerErrorV1 {
     /// real RSS falls back to the low watermark. Retrying is the only way the
     /// pass ever runs, because falling pressure emits no wake either.
     pub fn is_transient_capacity_failure(&self) -> bool {
+        if self.is_resident_memory_refusal() {
+            return true;
+        }
         match self {
-            Self::WorkerMemoryAdmission(failure) | Self::SnapshotMemoryAdmission(failure) => {
-                failure.is_observed_over_budget()
-                    || failure.requested_bytes() <= failure.limit_bytes()
-            }
-            Self::SnapshotMemoryCapacityUnavailable => true,
             Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. }) => true,
             // The code-generation store lock is bounded shared capacity: a
             // concurrent publication in the same store root already holds it,
@@ -441,6 +439,19 @@ impl CodeIndexSchedulerErrorV1 {
             Self::Production(CodeIndexProductionErrorV1::Publication(
                 CodeIndexPublicationStoreErrorV1::Unavailable(detail),
             )) => detail == super::publication_store::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1,
+            _ => false,
+        }
+    }
+
+    /// The transient refusals that resident memory given back lifts, as
+    /// opposed to a held store lock or a graph operation budget.
+    pub(crate) fn is_resident_memory_refusal(&self) -> bool {
+        match self {
+            Self::WorkerMemoryAdmission(failure) | Self::SnapshotMemoryAdmission(failure) => {
+                failure.is_observed_over_budget()
+                    || failure.requested_bytes() <= failure.limit_bytes()
+            }
+            Self::SnapshotMemoryCapacityUnavailable => true,
             // A whole-generation decode that does not fit yet: other holders
             // give the memory back, not anything about this input.
             Self::Production(CodeIndexProductionErrorV1::Publication(

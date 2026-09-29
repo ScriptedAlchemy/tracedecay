@@ -217,6 +217,7 @@ pub use registry::{
     feedback_document_identity_from_generation,
     feedback_language_document_identity_from_generation,
 };
+pub(crate) use residency::ServingReadLeaseV1;
 pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 
 // The scheduler body is split by seam: `publication_store` (durable sealed
