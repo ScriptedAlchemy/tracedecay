@@ -516,27 +516,13 @@ fn typescript_graph_keeps_its_bindings() {
     assert_eq!(graph.calls(), bindable_calls());
 }
 
-/// `main.rs` reaches the library's modules through a grouped crate-name
-/// `use fixture::{compat, legacy, report, shapes}`, whose `report::summary`
-/// calls the Rust resolver does not bind yet; every other call binds and no
-/// call binds a wrong target.
+/// `main.rs` calls through a grouped crate-name
+/// `use fixture::{compat, legacy, report, shapes}` inside `println!`
+/// arguments, which bind like the same calls outside a macro.
 #[test]
 fn rust_graph_keeps_its_bindings() {
     let graph = CallGraphV1::new("rust", rust());
-    let crate_name_module_calls = [
-        ("main", "summary"),
-        ("main", "upgrade"),
-        ("main", "area"),
-        ("main", "perimeter"),
-        ("main", "old_format"),
-    ];
-    assert_eq!(
-        graph.calls(),
-        bindable_calls()
-            .into_iter()
-            .filter(|call| !crate_name_module_calls.contains(call))
-            .collect()
-    );
+    assert_eq!(graph.calls(), bindable_calls());
 }
 
 /// The retained call sites the seal discloses as gaps inside `file`.
