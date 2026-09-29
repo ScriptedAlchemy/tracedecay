@@ -1820,6 +1820,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // A decode refused by a store-lock holder outside this pass is
                 // not progress, so the capacity retry keeps its bound.
                 let mut graph_store_busy = false;
+                let mut graph_publication_budget_spent = false;
                 let text_projection_running = published_text_projection.is_some();
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
@@ -1833,7 +1834,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         let mut graph_head_published = false;
                         // An owner that already serves this generation's graph
                         // needs no second build: only the decode is demanded.
-                        if let Some(text) = graph_text.as_ref().filter(|_| !graph_already_serves) {
+                        // Neither does one whose build already spent its budget.
+                        if let Some(text) = graph_text.as_ref().filter(|text| {
+                            !graph_already_serves && !text.graph_publication_budget_spent()
+                        }) {
                             let generation_id = text.metadata().manifest().generation_id.clone();
                             let binding_scheduler = Arc::clone(&worker_scheduler);
                             let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1889,6 +1893,16 @@ impl CodeIndexSchedulerRegistryV1 {
                                         Ok(published) => graph_head_published = published,
                                         Err(error) if error.is_resident_memory_graph_refusal() => {
                                             graph_publish_refusal = Some(error.to_string());
+                                        }
+                                        Err(error) if error.is_graph_publication_deadline() => {
+                                            graph_publication_budget_spent = true;
+                                            tracing::warn!(
+                                                event = "code_index_graph_publication_budget_spent",
+                                                error = %error,
+                                                "sealed graph publication spent its background \
+                                                 budget; the generation serves exact and lexical \
+                                                 with a typed graph refusal and is not replayed"
+                                            );
                                         }
                                         Err(error) => tracing::warn!(
                                             event = "code_index_graph_publish_before_decode_failed",
@@ -2211,6 +2225,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 // below refuses only the native graph call, and the serving
                 // swap still installs the prepared generation.
                 let activate_graph = match &result {
+                    Ok((Ok(_), Some(latest), Some(_)))
+                        if graph_publication_budget_spent
+                            || latest.graph_publication_budget_spent() =>
+                    {
+                        false
+                    }
                     Ok((Ok(_), Some(latest), Some(_))) => GraphActivationGateV1::decide(
                         graph_already_serves
                             || latest.code_graph_serving_readiness()
