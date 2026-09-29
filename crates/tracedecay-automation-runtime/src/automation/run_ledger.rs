@@ -1664,10 +1664,26 @@ mod tests {
     #[test]
     fn run_id_path_validation_accepts_canonical_dashboard_ids_only_as_normal_components() {
         validate_run_id_component("request.dashboard.http.123.4").unwrap();
-        assert!(validate_run_id_component(".").is_err());
-        assert!(validate_run_id_component("..").is_err());
-        assert!(validate_run_id_component("request/dashboard").is_err());
-        assert!(validate_run_id_component("request\\dashboard").is_err());
+        assert_eq!(
+            validate_run_id_component(".").unwrap_err().to_string(),
+            "config error: automation run_id '.' is not safe for artifact paths"
+        );
+        assert_eq!(
+            validate_run_id_component("..").unwrap_err().to_string(),
+            "config error: automation run_id '..' is not safe for artifact paths"
+        );
+        assert_eq!(
+            validate_run_id_component("request/dashboard")
+                .unwrap_err()
+                .to_string(),
+            "config error: automation run_id 'request/dashboard' is not safe for artifact paths"
+        );
+        assert_eq!(
+            validate_run_id_component("request\\dashboard")
+                .unwrap_err()
+                .to_string(),
+            "config error: automation run_id 'request\\dashboard' is not safe for artifact paths"
+        );
     }
 
     /// A minimal valid ledger line for `run_id`, ordered by `completed_at`.
@@ -1992,15 +2008,28 @@ mod tests {
         let path = temp.path().join(RUN_LEDGER_FILENAME);
         std::fs::write(&path, ledger_line("unterminated", 100)).unwrap();
 
-        assert!(read_run_records_tail_page_with_window(&path, 1, 8).is_err());
-        assert!(
+        assert_eq!(
+            read_run_records_tail_page_with_window(&path, 1, 8)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' has an incomplete durable tail",
+                path.display()
+            )
+        );
+        assert_eq!(
             read_run_records_tail_with_filter(
                 &path,
                 1,
                 8,
                 &RunRecordFilter::TaskKey("memory_curator".to_owned()),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            format!(
+                "config error: automation run ledger '{}' has an incomplete durable tail",
+                path.display()
+            )
         );
     }
 
@@ -2027,7 +2056,13 @@ mod tests {
         );
         let page = read_run_records_tail_page_with_window(&path, 2, 8).unwrap();
 
-        assert!(task.is_err());
+        assert_eq!(
+            task.unwrap_err().to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 446: invalid JSON number",
+                path.display()
+            )
+        );
         assert_eq!(page.records.len(), 1);
         assert_eq!(page.records[0].run_id, "same-run");
         assert_eq!(page.malformed_row_count, 1);
@@ -2042,14 +2077,19 @@ mod tests {
         );
         let (_temp, path) = write_ledger(&[target.clone(), "{\"unrelated\":".to_owned()]);
 
-        assert!(
+        assert_eq!(
             read_run_records_tail_with_filter(
                 &path,
                 1,
                 8,
                 &RunRecordFilter::TaskKey("user_job:nightly".to_owned()),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 282: unexpected EOF while reading JSON value",
+                path.display()
+            )
         );
         let unrelated_schema_invalid = ledger_line("unrelated", 200)
             .replace("\"accepted_count\":0", "\"accepted_count\":false");
@@ -2058,14 +2098,19 @@ mod tests {
             unrelated_schema_invalid,
             ledger_line("newest-unrelated", 300),
         ]);
-        assert!(
+        assert_eq!(
             read_run_records_tail_with_filter(
                 &path,
                 1,
                 8,
                 &RunRecordFilter::TaskKey("user_job:nightly".to_owned()),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 423: invalid JSON number",
+                path.display()
+            )
         );
     }
 
@@ -2135,15 +2180,28 @@ mod tests {
         let running = ledger_line("same-run", 200).replace("\"succeeded\"", "\"running\"");
         let (_temp, path) = write_ledger(&[terminal, running]);
 
-        assert!(read_run_records_tail_page_with_window(&path, 1, 8).is_err());
-        assert!(
+        assert_eq!(
+            read_run_records_tail_page_with_window(&path, 1, 8)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains an invalid lifecycle for run 'same-run'",
+                path.display()
+            )
+        );
+        assert_eq!(
             read_run_records_tail_with_filter(
                 &path,
                 1,
                 8,
                 &RunRecordFilter::TaskKey("memory_curator".to_owned()),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains an invalid lifecycle for run 'same-run'",
+                path.display()
+            )
         );
     }
 
@@ -2204,14 +2262,27 @@ mod tests {
         let running = ledger_line("regressed", 100).replace("\"succeeded\"", "\"running\"");
         let (_temp, path) = write_ledger(&[queued.clone(), running.clone()]);
 
-        assert!(
+        assert_eq!(
             read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' regresses completion time for run 'regressed'",
+                path.display()
+            )
         );
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join(RUN_LEDGER_FILENAME);
         append_jsonl_line_locked(&path, &queued).unwrap();
-        assert!(append_jsonl_line_locked(&path, &running).is_err());
+        assert_eq!(
+            append_jsonl_line_locked(&path, &running)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' regresses completion time for run 'regressed'",
+                path.display()
+            )
+        );
     }
 
     /// Reads a summary and reports whether the memo answered it.
@@ -2316,9 +2387,11 @@ mod tests {
             .replace("\"started_at\":\"100\"", "\"started_at\":\"corrupt\"");
         let (_temp, path) = write_ledger(&[corrupt]);
 
-        assert!(
+        assert_eq!(
             read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "config error: automation ledger row started_at 'corrupt' is not nonnegative Unix seconds: invalid digit found in string"
         );
     }
 
@@ -2328,21 +2401,29 @@ mod tests {
         let unrelated = ledger_line("unrelated", 200)
             .replace("\"task\":\"memory_curator\"", "\"task\":\"skill_writer\"");
         let invalid_rows = [
-            unrelated.clone().replace(
-                "\"completed_at\":\"200\"",
-                "\"completed_at\":\"9223372036854775807\"",
+            (
+                unrelated.clone().replace(
+                    "\"completed_at\":\"200\"",
+                    "\"completed_at\":\"9223372036854775807\"",
+                ),
+                "config error: automation completion timestamp overflows signed microseconds",
             ),
-            unrelated.replace(
-                "\"completed_at_micros\":200000000",
-                "\"completed_at_micros\":199000000",
+            (
+                unrelated.replace(
+                    "\"completed_at_micros\":200000000",
+                    "\"completed_at_micros\":199000000",
+                ),
+                "config error: automation completion timestamp seconds and microseconds disagree",
             ),
         ];
 
-        for invalid in invalid_rows {
+        for (invalid, expected) in invalid_rows {
             let (_temp, path) = write_ledger(&[valid.clone(), invalid]);
-            assert!(
+            assert_eq!(
                 read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
-                    .is_err()
+                    .unwrap_err()
+                    .to_string(),
+                expected
             );
         }
     }
@@ -2384,7 +2465,15 @@ mod tests {
         let path = temp.path().join(RUN_LEDGER_FILENAME);
         std::fs::write(&path, ledger_line("unterminated", 100)).unwrap();
 
-        assert!(read_run_records_tail_page_with_window(&path, 0, 8).is_err());
+        assert_eq!(
+            read_run_records_tail_page_with_window(&path, 0, 8)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' has an incomplete durable tail",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -2402,6 +2491,16 @@ mod tests {
             read_run_records_tail_with_window(&missing, 10, 64)
                 .unwrap()
                 .is_empty()
+        );
+
+        std::fs::write(&missing, format!("{}\n", ledger_line("present", 100))).unwrap();
+        assert_eq!(
+            read_run_records_tail_with_window(&missing, 10, 64)
+                .unwrap()
+                .iter()
+                .map(|record| record.run_id.as_str())
+                .collect::<Vec<_>>(),
+            ["present"]
         );
     }
 
@@ -2435,7 +2534,15 @@ mod tests {
 
         append_jsonl_line_locked(&path, &first).unwrap();
 
-        assert!(append_jsonl_line_locked(&path, &conflict).is_err());
+        assert_eq!(
+            append_jsonl_line_locked(&path, &conflict)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' repeats a conflicting lifecycle state for run 'same-run'",
+                path.display()
+            )
+        );
         assert_eq!(std::fs::read_to_string(path).unwrap(), format!("{first}\n"));
     }
 

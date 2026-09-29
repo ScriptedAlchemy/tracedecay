@@ -236,7 +236,15 @@ mod tests {
         .replace("\"accepted_count\":0,", "\"accepted_count\":false,");
         std::fs::write(&path, format!("{older}\n{malformed}\n")).unwrap();
 
-        assert!(read_latest_task_validation_pointer(&path, "memory_curator", POINTER).is_err());
+        assert_eq!(
+            read_latest_task_validation_pointer(&path, "memory_curator", POINTER)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 358: invalid JSON number",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -254,7 +262,15 @@ mod tests {
             .replace("\"accepted_count\":0", "\"accepted_count\":false");
         std::fs::write(&path, format!("{cursor}\n{unrelated}\n")).unwrap();
 
-        assert!(read_latest_task_validation_pointer(&path, "memory_curator", POINTER).is_err());
+        assert_eq!(
+            read_latest_task_validation_pointer(&path, "memory_curator", POINTER)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 360: invalid JSON number",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -273,7 +289,12 @@ mod tests {
         );
         std::fs::write(&path, format!("{cursor}\n{invalid}\n")).unwrap();
 
-        assert!(read_latest_task_validation_pointer(&path, "memory_curator", POINTER).is_err());
+        assert_eq!(
+            read_latest_task_validation_pointer(&path, "memory_curator", POINTER)
+                .unwrap_err()
+                .to_string(),
+            "config error: automation completion timestamp overflows signed microseconds"
+        );
     }
 
     #[test]
@@ -302,7 +323,15 @@ mod tests {
         );
         std::fs::write(&path, format!("{older}\n{newer}\n")).unwrap();
 
-        assert!(read_latest_task_validation_pointer(&path, "memory_curator", POINTER).is_err());
+        assert_eq!(
+            read_latest_task_validation_pointer(&path, "memory_curator", POINTER)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' mutates immutable identity for run 'same-run'",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -325,7 +354,12 @@ mod tests {
         );
         std::fs::write(&path, format!("{older}\n{newer}\n")).unwrap();
 
-        assert!(read_latest_task_validation_pointer(&path, "memory_curator", POINTER).is_err());
+        assert_eq!(
+            read_latest_task_validation_pointer(&path, "memory_curator", POINTER)
+                .unwrap_err()
+                .to_string(),
+            "config error: automation cursor logical lifecycle changed its completion order"
+        );
     }
 
     #[test]
@@ -424,7 +458,15 @@ mod tests {
         .replace("\"succeeded\"", "\"running\"");
         std::fs::write(&path, format!("{terminal}\n{running}\n")).unwrap();
 
-        assert!(read_latest_task_validation_pointer(&path, "memory_curator", POINTER).is_err());
+        assert_eq!(
+            read_latest_task_validation_pointer(&path, "memory_curator", POINTER)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains an invalid lifecycle for run 'same-run'",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -453,7 +495,15 @@ mod tests {
         );
         std::fs::write(&path, format!("{queued}\n{running}\n")).unwrap();
 
-        assert!(read_latest_task_validation_pointer(&path, "memory_curator", POINTER).is_err());
+        assert_eq!(
+            read_latest_task_validation_pointer(&path, "memory_curator", POINTER)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' regresses completion time for run 'same-run'",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -493,7 +543,15 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_latest_task_validation_pointer(&path, "memory_curator", POINTER).is_err());
+        assert_eq!(
+            read_latest_task_validation_pointer(&path, "memory_curator", POINTER)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 334: automation ledger row must be a JSON object",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -515,7 +573,12 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(read_latest_task_validation_pointer(&path, "memory_curator", POINTER).is_err());
+        assert_eq!(
+            read_latest_task_validation_pointer(&path, "memory_curator", POINTER)
+                .unwrap_err()
+                .to_string(),
+            "config error: automation cursor value exceeds its 4096-byte wire bound"
+        );
     }
 
     #[test]

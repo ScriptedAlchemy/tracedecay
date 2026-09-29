@@ -13,6 +13,15 @@ fn benign_git_narration_does_not_fire_the_unexpected_change_hint() {
         Some(HintCategory::UnexpectedChanges),
         "ordinary commit narration must not trigger the unexpected-change hint"
     );
+    let foreign = ToolHintInput {
+        prompt: Some("There is a commit I didn't make on this branch.".to_string()),
+        session_id: Some("session-1".to_string()),
+        ..ToolHintInput::default()
+    };
+    assert_eq!(
+        classify_hint(&foreign),
+        Some(HintCategory::UnexpectedChanges)
+    );
 }
 
 #[test]
@@ -300,6 +309,8 @@ fn tracedecay_tool_invocations_do_not_recommend_the_same_tool_family() {
             "{command} already selected TraceDecay and must stay silent"
         );
     }
+    let search = decide_hint(&shell_input("rg -n needle src")).expect("a raw search is hinted");
+    assert_eq!(search.category, HintCategory::Search);
 }
 
 fn edit_input(tool_name: &str, file_path: &str) -> ToolHintInput {
