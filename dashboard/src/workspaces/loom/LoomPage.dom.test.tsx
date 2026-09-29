@@ -844,7 +844,9 @@ describe('LoomPage', () => {
     // Cursor at NOW-7100: the later commit and the later session start are unrevealed, not dimmed.
     expect(document.querySelectorAll('[data-event][data-kind="commit"]')).toHaveLength(0);
     expect(document.querySelector(`[data-event="start:${LANE('codex', 'sess-hollow').replace(/"/g, '\\"')}"]`)).toBeNull();
-    expect(document.querySelector('[data-scene-counts]')!.textContent).toMatch(/[1-9]\d* withheld/);
+    expect(document.querySelector('[data-scene-counts]')!.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      '4 drawn · 0 filtered · 5 withheld · 0 outside window · 0 folded',
+    );
   });
 
   it('follows appended admitted page members but retains or discloses an inspected identity on refetch', async () => {
